@@ -331,8 +331,21 @@ prompt groups (several prompts per group, averaged). Prompt groups live in `anal
 
 Decision order for an item (user overrides win: `*_source='user'` is never changed by the worker):
 1. `kind in (pdf, document)` -> `documents`.
-2. NSFW: `nsfw_score = classifier p(nsfw)`; `nsfw = 1` when `nsfw_score >= NSFW_THRESHOLD` (0.7), or when
-   `nsfw_score >= 0.4` and the zero-shot nude/explicit group `>= 0.5`. NSFW items get `category='nsfw'`.
+2. NSFW (`categories.vault_decision`): the classifier score `nsfw_score` and three SigLIP zero-shot signals
+   (`explicit_p`, `suggestive_p` for lingerie, shirtless and intimate selfies, `safe_p` for beach, sport, baby,
+   medical and museum skin), all stored in `category_scores`. In the vault when the classifier is very sure
+   (`>= 0.90`) and the photo is not ordinary skin (`safe_p < 0.60`), when the classifier (`>= 0.60`) agrees with
+   explicit (`>= 0.30`) or suggestive (`>= 0.40`), when explicit is `>= 0.60` on its own (unless no person was
+   found and the classifier is under `0.10`: a skin-coloured pattern), or when suggestive is `>= 0.70` on its
+   own in a photo with a person; ordinary skin blocks the classifier-only and suggestive-only paths. `VAULT_SENSITIVITY` (env) and the kv flag `vault_sensitivity` (Settings > Learning) shift every cut by
+   0.10: `low` puts fewer photos in the vault, `high` more. The vault learner (section 18) replaces the rule
+   with weights fitted over the four signals once the owner has corrected enough decisions; the sensitivity
+   shifts its cut too (0.35/0.50/0.65 on the learned probability, plus or minus 0.10 on the calibrated
+   classifier cut), never a labelled look-alike's own answer. A sensitivity change re-sorts the automatically
+   decided items at once from the stored signals (`analysis/vault.resort`: the reply's `vault_moved` counts
+   `checked`, `moved_in`, `moved_out` and `stale`, the items analysed before the signals existed, which need
+   the "apply to existing items" re-analysis). NSFW items get `category='nsfw'`. Without the zero-shot
+   signals (SigLIP missing) the old rule applies: `nsfw_score >= 0.7`, or `>= 0.4` with explicit `>= 0.5`.
 3. Screenshot: PNG or WebP without camera EXIF whose dimensions match a phone or desktop screen, or screenshot
    zero-shot `>= 0.6` -> `screenshots`.
 4. `doc_likeness` = max(document zero-shot, text-density heuristic from edges); `>= DOC_LIKENESS_MIN` (0.55) -> `documents`.

@@ -570,7 +570,8 @@ class TagOut(BaseModel):
     auto_items: int = 0
 
 
-class TagIn(BaseModel):
+class TagNameIn(BaseModel):
+    """A free-form tag's name (section 19); TagIn above is the person tag of section 10."""
     name: str = Field(min_length=1, max_length=80)
 
 
@@ -593,10 +594,15 @@ class LearningStatus(BaseModel):
     learners: dict[str, Any]
     events: dict[str, int] = {}
     errors: dict[str, str] = {}
+    vault_sensitivity: Literal["low", "normal", "high"] = "normal"
+    # Set on the reply to a sensitivity change only: what the re-sort of the automatically decided
+    # items did (checked, moved_in, moved_out, stale = analysed before the signals existed).
+    vault_moved: dict[str, int] | None = None
 
 
 class LearningEnabledIn(BaseModel):
-    enabled: bool
+    enabled: bool | None = None
+    vault_sensitivity: Literal["low", "normal", "high"] | None = None
 
 
 class LearningApplyOut(BaseModel):

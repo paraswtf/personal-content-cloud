@@ -22,6 +22,9 @@ VOTE_MIN = 0.6         # the winner's share of the neighbours' weight
 TOP_K = 5
 NSFW_MIN_LABELS = 8
 NSFW_MIN_SIDE = 3
+SIGNALS = ("cls", "explicit", "suggestive", "safe")
+WEIGHT_CUT = {"low": 0.65, "normal": 0.5, "high": 0.35}   # probability from the learned weights
+THRESHOLD_SHIFT = {"low": 0.10, "normal": 0.0, "high": -0.10}   # on the calibrated classifier cut
 
 
 def _embeddings(conn: sqlite3.Connection, item_ids: list[int]) -> dict[int, np.ndarray]:
@@ -74,7 +77,7 @@ def train(conn: sqlite3.Connection) -> dict[str, Any]:
         "AND kind IN ('image', 'video') ORDER BY id"
     ).fetchall()
     nsfw_rows = conn.execute(
-        "SELECT id, nsfw, nsfw_score FROM items WHERE nsfw_source = 'user' AND deleted_at IS NULL "
+        "SELECT id, nsfw, nsfw_score, category_scores FROM items WHERE nsfw_source = 'user' AND deleted_at IS NULL "
         "AND kind IN ('image', 'video') ORDER BY id"
     ).fetchall()
     embs = _embeddings(conn, sorted({int(r["id"]) for r in [*cat_rows, *nsfw_rows]}))
@@ -84,6 +87,7 @@ def train(conn: sqlite3.Connection) -> dict[str, Any]:
     nsfw_label = {int(r["id"]): int(r["nsfw"]) for r in nsfw_rows}
     pairs = [(float(r["nsfw_score"]), int(r["nsfw"])) for r in nsfw_rows if r["nsfw_score"] is not None]
     threshold = calibrate_nsfw(pairs)
+    weights = fit_vault_weights(nsfw_rows)
     if cat_ids:
         store.save_array(CAT_ARRAY, cat_x)
     else:
@@ -96,11 +100,43 @@ def train(conn: sqlite3.Connection) -> dict[str, Any]:
     model = {
         "category": {"ids": cat_ids, "labels": labels, "examples": len(cat_ids), "names": sorted(set(labels))},
         "vault": {"ids": nsfw_ids, "labels": [nsfw_label[i] for i in nsfw_ids], "examples": len(nsfw_rows),
-                  "threshold": threshold, "scored": len(pairs)},
+                  "threshold": threshold, "scored": len(pairs), "weights": weights},
         "trained_at": now_iso(),
     }
     store.save(MODEL, model)
     return status()
+
+
+def signal_vector(signals: dict[str, Any] | float | None) -> list[float] | None:
+    """[cls, explicit, suggestive, safe] from the pipeline's signals (a bare float is the classifier)."""
+    if signals is None:
+        return None
+    if isinstance(signals, (int, float)):
+        return [float(signals), 0.0, 0.0, 0.0]
+    try:
+        return [float(signals.get(k) or 0.0) for k in SIGNALS]
+    except (TypeError, ValueError, AttributeError):
+        return None
+
+
+def fit_vault_weights(rows: list[sqlite3.Row]) -> dict[str, Any] | None:
+    """A logistic model over the vault signals from the owner's labels (needs NSFW_MIN_LABELS with
+    both sides), or None."""
+    from app.learning.people import fit_logistic
+    from app.util import json_loads
+
+    xs, ys = [], []
+    for r in rows:
+        if r["nsfw_score"] is None:
+            continue
+        scores = json_loads(r["category_scores"], {}) or {}
+        xs.append([float(r["nsfw_score"]), float(scores.get("explicit_p") or 0.0),
+                   float(scores.get("suggestive_p") or 0.0), float(scores.get("safe_p") or 0.0)])
+        ys.append(int(r["nsfw"]))
+    if len(ys) < NSFW_MIN_LABELS or sum(ys) < NSFW_MIN_SIDE or len(ys) - sum(ys) < NSFW_MIN_SIDE:
+        return None
+    w, b = fit_logistic(np.asarray(xs, dtype=np.float64), np.asarray(ys, dtype=np.float64), steps=800, lr=0.8, l2=0.005)
+    return {"w": dict(zip(SIGNALS, w)), "b": b, "examples": len(ys)}
 
 
 def _neighbours(arr_name: str, emb: np.ndarray) -> np.ndarray | None:
@@ -138,8 +174,12 @@ def predict_category(emb: np.ndarray | None) -> tuple[str, float] | None:
     return winner, round(close[0][1], 4)
 
 
-def predict_nsfw(emb: np.ndarray | None, nsfw_score: float | None) -> bool | None:
-    """True/False from a very close labelled neighbour, else from the calibrated threshold, else None."""
+def predict_nsfw(emb: np.ndarray | None, signals: dict[str, Any] | float | None, *,
+                 sensitivity: str = "normal") -> bool | None:
+    """True/False from a very close labelled neighbour, else from the weights learned over the vault
+    signals (classifier, explicit, suggestive, safe), else from the calibrated classifier threshold,
+    else None. `signals` is the pipeline's dict or the bare classifier score. The sensitivity shifts
+    the learned cuts (low: fewer in the vault, high: more), never a neighbour's own label."""
     if not store.enabled():
         return None
     model = store.load(MODEL)
@@ -152,9 +192,15 @@ def predict_nsfw(emb: np.ndarray | None, nsfw_score: float | None) -> bool | Non
             i = int(np.argmax(sims))
             if sims[i] >= BEST_MIN:
                 return bool(vault["labels"][i])
+    vec = signal_vector(signals)
+    weights = vault.get("weights")
+    if weights and vec is not None and (isinstance(signals, dict)):
+        w = np.asarray([float(weights["w"].get(k, 0.0)) for k in SIGNALS], dtype=np.float64)
+        z = float(np.asarray(vec, dtype=np.float64) @ w + float(weights.get("b", 0.0)))
+        return bool(1.0 / (1.0 + np.exp(-z)) >= WEIGHT_CUT.get(sensitivity, 0.5))
     t = vault.get("threshold")
-    if t is not None and nsfw_score is not None:
-        return float(nsfw_score) >= float(t)
+    if t is not None and vec is not None and (isinstance(signals, (int, float)) or signals.get("cls") is not None):
+        return vec[0] >= float(t) + THRESHOLD_SHIFT.get(sensitivity, 0.0)
     return None
 
 
@@ -164,5 +210,6 @@ def status() -> dict[str, Any]:
     vault = model.get("vault", {})
     return {
         "category": {"examples": int(cat.get("examples", 0)), "labels": list(cat.get("names", []))},
-        "vault": {"examples": int(vault.get("examples", 0)), "threshold": vault.get("threshold")},
+        "vault": {"examples": int(vault.get("examples", 0)), "threshold": vault.get("threshold"),
+                  "weights": ((vault.get("weights") or {}).get("w") if vault.get("weights") else None)},
     }

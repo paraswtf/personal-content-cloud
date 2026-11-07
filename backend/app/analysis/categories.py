@@ -144,6 +144,45 @@ NOT_EXPLICIT_PROMPTS = [
     "a photo of a person wearing clothes",
     "a photo of a landscape",
     "a photo of an object",
+    "a document or a screenshot",
+    "an abstract pattern or test image",
+    "a photo of an animal",
+    "a photo of food",
+    "a photo of a building or a street",
+]
+# Suggestive but not explicit: what the classifier misses (section 9).
+SUGGESTIVE_PROMPTS = [
+    "a person in lingerie or underwear",
+    "a shirtless selfie",
+    "a sexy pose showing a lot of skin",
+    "a close-up selfie showing cleavage",
+    "a person in a towel or half undressed",
+    "an intimate photo in a bedroom",
+]
+NOT_SUGGESTIVE_PROMPTS = [
+    "a person fully dressed",
+    "a family photo",
+    "a portrait in everyday clothes",
+    "a photo of a landscape",
+    "a document or a screenshot",
+    "a photo of an animal",
+    "a photo of food",
+    "an abstract pattern or test image",
+]
+# Ordinary skin: swimming, sport, babies, medical: the classifier's usual false alarms.
+SAFE_SKIN_PROMPTS = [
+    "people swimming at a beach or pool",
+    "an athlete playing sport",
+    "a baby or small child",
+    "a medical or hospital photo",
+    "a wrestling or boxing match",
+    "a statue or painting in a museum",
+]
+NOT_SAFE_SKIN_PROMPTS = [
+    "a nude photo",
+    "a person in lingerie or underwear",
+    "an explicit sexual photo",
+    "an intimate photo in a bedroom",
 ]
 
 LABELS: tuple[str, ...] = (
@@ -283,6 +322,61 @@ class Decision:
     details: dict[str, Any] = field(default_factory=dict)
 
 
+# The vault rule (section 9). Thresholds at normal sensitivity; low adds SENSITIVITY_STEP to each
+# (fewer photos in the vault), high takes it off (more, including the suggestive ones).
+VAULT_RULES = {
+    "cls_sure": 0.90,        # the classifier alone, unless the picture looks like ordinary skin
+    "cls_agree": 0.60,       # the classifier with a second opinion
+    "explicit_agree": 0.30,
+    "suggestive_agree": 0.40,
+    "explicit_alone": 0.60,  # the zero-shot explicit signal on its own ...
+    "cls_hint": 0.10,        # ... unless no person was found and the classifier saw nothing at all
+    "suggestive_alone": 0.70,  # the zero-shot suggestive signal on its own (needs a person in the photo)
+    "safe_veto": 0.60,       # ordinary skin blocks the classifier-only and suggestive-only paths
+}
+SENSITIVITY_STEP = 0.10
+SENSITIVITIES = ("low", "normal", "high")
+
+
+def vault_rules(sensitivity: str = "normal") -> dict[str, float]:
+    shift = {"low": SENSITIVITY_STEP, "high": -SENSITIVITY_STEP}.get(sensitivity, 0.0)
+    out = {}
+    for k, v in VAULT_RULES.items():
+        if k == "cls_hint":
+            out[k] = v  # a sanity floor, not a sensitivity cut
+        elif k == "safe_veto":
+            out[k] = round(min(0.95, max(0.3, v - shift)), 3)  # a stricter veto when fewer photos should go in
+        else:
+            out[k] = round(min(0.99, max(0.05, v + shift)), 3)
+    return out
+
+
+def vault_decision(cls: float | None, explicit: float | None, suggestive: float | None, safe: float | None, *,
+                   has_person: bool = True, sensitivity: str = "normal") -> tuple[bool, dict[str, Any]]:
+    """The vault decision from the classifier and the zero-shot signals (section 9): the classifier
+    needs agreement unless it is very sure, explicit content counts on its own (unless no person was
+    found and the classifier saw nothing at all: a skin-coloured pattern, not a photo of anyone),
+    suggestive content counts on its own when the photo shows a person, and ordinary skin (beach, sport,
+    baby, medical) blocks the weak paths. Returns (in the vault, the reasons that fired)."""
+    t = vault_rules(sensitivity)
+    c = float(cls or 0.0)
+    e = float(explicit or 0.0)
+    s = float(suggestive or 0.0)
+    f = float(safe or 0.0)
+    reasons: dict[str, Any] = {}
+    if c >= t["cls_sure"] and f < t["safe_veto"]:
+        reasons["classifier"] = round(c, 3)
+    if c >= t["cls_agree"] and (e >= t["explicit_agree"] or s >= t["suggestive_agree"]):
+        reasons["classifier_agreed"] = round(c, 3)
+    if e >= t["explicit_alone"] and (has_person or c >= t["cls_hint"]):
+        reasons["explicit"] = round(e, 3)
+    if s >= t["suggestive_alone"] and has_person and f < t["safe_veto"]:
+        reasons["suggestive"] = round(s, 3)
+    if f >= t["safe_veto"] and not reasons.get("explicit") and not reasons.get("classifier_agreed"):
+        reasons = {}
+    return bool(reasons), reasons
+
+
 def nsfw_decision(nsfw_score: float | None, explicit_p: float | None) -> bool:
     """nsfw_score >= settings.nsfw_threshold, or >= 0.4 with the explicit zero-shot >= 0.5."""
     if nsfw_score is None:
@@ -296,7 +390,8 @@ def decide(kind: str, *, nsfw_score: float | None = None, explicit_p: float | No
            nsfw_override: bool | None = None, screenshot_heur: bool = False, screenshot_p: float | None = None,
            doc_like: float | None = None, has_person: bool = False,
            scores: dict[str, float] | None = None, learned: tuple[str, float] | None = None,
-           nsfw_learned: bool | None = None) -> Decision:
+           nsfw_learned: bool | None = None, suggestive_p: float | None = None, safe_p: float | None = None,
+           sensitivity: str = "normal") -> Decision:
     """Section 9 order: documents by kind, nsfw, screenshots, document-like images, people, then the
     best scene group (places, food, pets, objects; probability from the joint CATEGORY_PROMPTS softmax)
     when >= SCENE_MIN, else misc.
@@ -305,14 +400,19 @@ def decide(kind: str, *, nsfw_score: float | None = None, explicit_p: float | No
     owner's labelled look-alikes wins over the rules below, except documents by kind and the vault."""
     if kind in ("pdf", "document"):
         return Decision("documents", bool(nsfw_override) if nsfw_override is not None else False, "kind")
+    why: dict[str, Any] = {}
     if nsfw_override is not None:
         nsfw = nsfw_override
     elif nsfw_learned is not None:
         nsfw = nsfw_learned
+        why = {"learned": True}
+    elif suggestive_p is not None or safe_p is not None:
+        nsfw, why = vault_decision(nsfw_score, explicit_p, suggestive_p, safe_p, has_person=has_person,
+                                   sensitivity=sensitivity)
     else:
         nsfw = nsfw_decision(nsfw_score, explicit_p)
     if nsfw:
-        return Decision("nsfw", True, "nsfw")
+        return Decision("nsfw", True, "nsfw", why)
     if kind == "other":
         return Decision("misc", False, "kind")
     if learned is not None and learned[0] in LEARNABLE_CATEGORIES:

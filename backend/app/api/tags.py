@@ -19,7 +19,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from app.api.deps import get_db, require_user
 from app.auth.sessions import SessionInfo
 from app.db import tx
-from app.schemas import ItemTagOut, Ok, TagIn, TagOut, UserTagIn
+from app.schemas import ItemTagOut, Ok, TagNameIn, TagOut, UserTagIn
 from app.util import name_key, now_iso
 
 log = logging.getLogger(__name__)
@@ -151,7 +151,7 @@ def list_tags(q: str | None = Query(default=None, max_length=40), session: Sessi
 
 
 @router.post("/api/tags", response_model=TagOut)
-def create_tag(body: TagIn, session: SessionInfo = Depends(require_user),
+def create_tag(body: TagNameIn, session: SessionInfo = Depends(require_user),
                conn: sqlite3.Connection = Depends(get_db)) -> TagOut:
     name = clean_tag_name(body.name)
     with tx(conn):
@@ -160,7 +160,7 @@ def create_tag(body: TagIn, session: SessionInfo = Depends(require_user),
 
 
 @router.patch("/api/tags/{tag_id}", response_model=TagOut)
-def rename_tag(tag_id: int, body: TagIn, session: SessionInfo = Depends(require_user),
+def rename_tag(tag_id: int, body: TagNameIn, session: SessionInfo = Depends(require_user),
                conn: sqlite3.Connection = Depends(get_db)) -> TagOut:
     name = clean_tag_name(body.name)
     key = name_key(name)

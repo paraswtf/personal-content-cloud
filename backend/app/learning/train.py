@@ -105,7 +105,23 @@ def status(conn: sqlite3.Connection) -> dict[str, Any]:
         },
         "events": _event_counts(conn),
         "errors": st.get("errors") or {},
+        "vault_sensitivity": vault_sensitivity(conn),
     }
+
+
+def vault_sensitivity(conn: sqlite3.Connection) -> str:
+    from app.config import settings
+    from app.db import kv_get
+
+    value = (kv_get(conn, "vault_sensitivity", settings.vault_sensitivity) or "normal").lower()
+    return value if value in ("low", "normal", "high") else "normal"
+
+
+def set_vault_sensitivity(conn: sqlite3.Connection, value: str) -> None:
+    from app.db import kv_set, tx
+
+    with tx(conn):
+        kv_set(conn, "vault_sensitivity", value)
 
 
 def _event_counts(conn: sqlite3.Connection) -> dict[str, int]:

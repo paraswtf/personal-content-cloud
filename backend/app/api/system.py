@@ -170,8 +170,16 @@ def learning_enabled(body: LearningEnabledIn, conn: sqlite3.Connection = Depends
     from app.learning import store as learning_store
     from app.learning import train as learning_train
 
-    learning_store.set_enabled(conn, body.enabled)
-    return LearningStatus(**learning_train.status(conn))
+    if body.enabled is not None:
+        learning_store.set_enabled(conn, body.enabled)
+    moved = None
+    if body.vault_sensitivity is not None:
+        from app.analysis import vault
+
+        learning_train.set_vault_sensitivity(conn, body.vault_sensitivity)
+        moved = vault.resort(conn, body.vault_sensitivity)
+        log.info("vault sensitivity %s: %s", body.vault_sensitivity, vault.describe(moved))
+    return LearningStatus(**learning_train.status(conn), vault_moved=moved)
 
 
 @router.post("/learning/train", response_model=LearningStatus)

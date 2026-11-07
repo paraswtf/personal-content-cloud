@@ -536,14 +536,22 @@ export interface SystemOut {
 // learning (section 18): what the small models learned from the owner's corrections
 export type LearningEventKind = 'category' | 'vault' | 'misclick' | 'doc_type' | 'guess' | 'tag'
 export type MisclickThresholdKey = 'blur_var_min' | 'dark_mean' | 'clipped_frac' | 'accident_min'
+/** How readily photos go to the vault: low sends fewer, high also sends suggestive but not explicit ones. */
+export type VaultSensitivity = 'low' | 'normal' | 'high'
 export interface LearningStatus {
   enabled: boolean
+  /** The owner's vault setting, changed with PATCH /api/system/learning {vault_sensitivity}. */
+  vault_sensitivity: VaultSensitivity
+  /** On the reply to a sensitivity change only: what the immediate re-sort of automatically decided
+   *  items did. `stale` items were analysed before the signals existed and need "apply to existing items". */
+  vault_moved?: { checked: number; moved_in: number; moved_out: number; stale: number } | null
   trained_at: string | null
   pending: number
   learners: {
     doc_type: { examples: number; labels: string[] }
     category: { examples: number; labels: string[] }
-    vault: { examples: number; threshold: number | null }
+    /** `weights` is set once enough vault decisions were corrected to learn them; null before that. */
+    vault: { examples: number; threshold: number | null; weights: Record<string, number> | null }
     misclick: { examples: number; thresholds: Partial<Record<MisclickThresholdKey, number>> }
     people: { persons: number; events: number; weights: Record<string, number> | null }
     /** Section 19: tags learned, items tagged by the owner, suggestions removed. Optional: older servers lack it. */

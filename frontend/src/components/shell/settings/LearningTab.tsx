@@ -2,14 +2,15 @@
 // docs/ARCHITECTURE.md), from GET /api/system/learning. The switch turns learning on and off; Train
 // now fits the models at once instead of waiting for housekeeping; Apply queues a fresh look at
 // items and documents that were decided automatically; Reset deletes the learned models (never the
-// choices themselves).
+// choices themselves). The Vault card also holds the vault sensitivity (low, normal, high).
 import { useState, type ReactNode } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import clsx from 'clsx'
 import { EyeOff, FileText, GraduationCap, ImageOff, RotateCcw, ScanSearch, Shapes, Tags, UsersRound, Wand2 } from 'lucide-react'
 import { api } from '../../../lib/api'
 import { formatCount, formatDate, formatRelative } from '../../../lib/format'
-import { CATEGORY_LABELS, type Category, type LearningEventKind, type LearningStatus, type MisclickThresholdKey } from '../../../lib/types'
+import { useRefreshLibrary } from '../../../lib/hooks'
+import { CATEGORY_LABELS, type Category, type LearningEventKind, type LearningStatus, type MisclickThresholdKey, type VaultSensitivity } from '../../../lib/types'
 import { docTypeLabel } from '../../documents/docMeta'
 import { Badge, Button, ConfirmModal, ErrorState } from '../../ui'
 import { useToast } from '../../Toast'
@@ -37,6 +38,30 @@ const MISCLICK_NAMES: Record<MisclickThresholdKey, string> = {
 const MIN_GUESS_EVENTS = 30
 // Vault: a calibrated cut needs this many labels (images.py, section 18).
 const MIN_VAULT_LABELS = 8
+
+const SENSITIVITY_OPTIONS: { value: VaultSensitivity; label: string }[] = [
+  { value: 'low', label: 'Low' },
+  { value: 'normal', label: 'Normal' },
+  { value: 'high', label: 'High' },
+]
+
+/** The toast line after a sensitivity change: what the immediate re-sort did. */
+function movedText(moved: LearningStatus['vault_moved']): string {
+  if (!moved) return ''
+  const parts: string[] = []
+  if (moved.moved_in) parts.push(`${moved.moved_in} moved into the vault`)
+  if (moved.moved_out) parts.push(`${moved.moved_out} moved out`)
+  const head = parts.length ? parts.join(', ') + '.' : 'Nothing moved.'
+  const stale = moved.stale
+    ? ` ${moved.stale} older item${moved.stale === 1 ? '' : 's'} need "Apply to existing items" to be checked with the new signals.`
+    : ''
+  return head + stale
+}
+const SENSITIVITY_HINTS: Record<VaultSensitivity, string> = {
+  low: 'Low puts fewer photos in the vault: only clearly explicit ones.',
+  normal: 'Normal puts explicit photos in the vault. Low puts in fewer, High puts in more.',
+  high: 'High puts more photos in the vault, including suggestive but not explicit ones.',
+}
 
 const EVENT_LABELS: Record<LearningEventKind, string> = {
   doc_type: 'Document type changes',
@@ -77,6 +102,7 @@ function nothingLearned(s: LearningStatus): boolean {
     (l.doc_type?.examples ?? 0) === 0 &&
     (l.category?.examples ?? 0) === 0 &&
     (l.vault?.examples ?? 0) === 0 &&
+    !l.vault?.weights &&
     (l.misclick?.examples ?? 0) === 0 &&
     (l.people?.persons ?? 0) === 0 &&
     !l.people?.weights &&
@@ -152,11 +178,77 @@ function LearnerCard({
   )
 }
 
-function Learners({ s }: { s: LearningStatus }) {
-  const { doc_type, category, vault, misclick, people, tags } = s.learners
+function SensitivityControl({
+  value,
+  onChange,
+  disabled,
+}: {
+  value: VaultSensitivity | undefined
+  onChange: (v: VaultSensitivity) => void
+  disabled?: boolean
+}) {
+  return (
+    <div className="mt-3">
+      <div
+        role="radiogroup"
+        aria-label="Vault sensitivity"
+        className="grid w-full grid-cols-3 rounded-full border border-line bg-surface-2 p-0.5 sm:inline-grid sm:w-auto"
+      >
+        {SENSITIVITY_OPTIONS.map((o) => (
+          <button
+            key={o.value}
+            type="button"
+            role="radio"
+            aria-checked={value === o.value}
+            disabled={disabled}
+            onClick={() => value !== o.value && onChange(o.value)}
+            className={clsx(
+              'h-9 min-w-0 rounded-full px-3.5 text-sm font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-60',
+              value === o.value ? 'bg-ink text-paper' : 'text-ink-soft hover:bg-ink/5',
+            )}
+          >
+            {o.label}
+          </button>
+        ))}
+      </div>
+      <p className="mt-2">{SENSITIVITY_HINTS[value ?? 'normal']}</p>
+    </div>
+  )
+}
+
+type SensitivityProps = { onSensitivity: (v: VaultSensitivity) => void; savingSensitivity: boolean }
+
+function VaultCard({ s, onSensitivity, savingSensitivity }: { s: LearningStatus } & SensitivityProps) {
+  const vault = s.learners.vault
+  const vaultN = vault?.examples ?? 0
+  return (
+    <LearnerCard icon={<EyeOff className="size-5" />} title="Vault" learned={vaultN > 0 || !!vault?.weights}>
+      <p>
+        {vaultN > 0 ? (
+          vault?.threshold != null ? (
+            <>
+              {formatCount(vaultN, 'example')}, threshold {vault.threshold.toFixed(2)}.
+            </>
+          ) : (
+            <>
+              {formatCount(vaultN, 'example')}. Close look-alikes follow your choice. A threshold of its own needs at least{' '}
+              {MIN_VAULT_LABELS} examples, with 3 or more on each side.
+            </>
+          )
+        ) : (
+          'Nothing yet. Move a photo into or out of the vault to teach it.'
+        )}
+        {vault?.weights && ' Weights learned from your corrections.'}
+      </p>
+      <SensitivityControl value={s.vault_sensitivity} onChange={onSensitivity} disabled={savingSensitivity} />
+    </LearnerCard>
+  )
+}
+
+function Learners({ s, ...sensitivity }: { s: LearningStatus } & SensitivityProps) {
+  const { doc_type, category, misclick, people, tags } = s.learners
   const docN = doc_type?.examples ?? 0
   const catN = category?.examples ?? 0
-  const vaultN = vault?.examples ?? 0
   const missN = misclick?.examples ?? 0
   const persons = people?.persons ?? 0
   const guessN = people?.events ?? 0
@@ -188,22 +280,7 @@ function Learners({ s }: { s: LearningStatus }) {
         )}
       </LearnerCard>
 
-      <LearnerCard icon={<EyeOff className="size-5" />} title="Vault" learned={vaultN > 0}>
-        {vaultN > 0 ? (
-          vault?.threshold != null ? (
-            <>
-              {formatCount(vaultN, 'example')}, threshold {vault.threshold.toFixed(2)}.
-            </>
-          ) : (
-            <>
-              {formatCount(vaultN, 'example')}. Close look-alikes follow your choice. A threshold of its own needs at least{' '}
-              {MIN_VAULT_LABELS} examples, with 3 or more on each side.
-            </>
-          )
-        ) : (
-          'Nothing yet. Move a photo into or out of the vault to teach it.'
-        )}
-      </LearnerCard>
+      <VaultCard s={s} {...sensitivity} />
 
       <LearnerCard icon={<ImageOff className="size-5" />} title="Mis-clicks" learned={changes.length > 0}>
         {changes.length > 0 ? (
@@ -261,9 +338,11 @@ function Learners({ s }: { s: LearningStatus }) {
 
 export default function LearningTab() {
   const qc = useQueryClient()
+  const refreshLibrary = useRefreshLibrary()
   const toast = useToast()
   const q = useQuery({ queryKey: LEARNING_KEY, queryFn: () => api.system.learning() })
   const [switching, setSwitching] = useState(false)
+  const [savingSensitivity, setSavingSensitivity] = useState(false)
   const [training, setTraining] = useState(false)
   const [confirmApply, setConfirmApply] = useState(false)
   const [applying, setApplying] = useState(false)
@@ -286,6 +365,24 @@ export default function LearningTab() {
       toast.error(errorText(e, 'Could not change the setting.'))
     } finally {
       setSwitching(false)
+    }
+  }
+
+  const setSensitivity = async (vault_sensitivity: VaultSensitivity) => {
+    const prev = qc.getQueryData<LearningStatus>(LEARNING_KEY)
+    if (prev) qc.setQueryData<LearningStatus>(LEARNING_KEY, { ...prev, vault_sensitivity })
+    setSavingSensitivity(true)
+    try {
+      const status = await api.system.setVaultSensitivity(vault_sensitivity)
+      qc.setQueryData(LEARNING_KEY, { ...status, vault_moved: null })
+      if (status.vault_moved?.moved_in || status.vault_moved?.moved_out) void refreshLibrary()
+      const label = SENSITIVITY_OPTIONS.find((o) => o.value === vault_sensitivity)?.label ?? vault_sensitivity
+      toast.success(`Vault sensitivity set to ${label}. ${movedText(status.vault_moved)}`)
+    } catch (e) {
+      if (prev) qc.setQueryData(LEARNING_KEY, prev)
+      toast.error(errorText(e, 'Could not change the vault sensitivity.'))
+    } finally {
+      setSavingSensitivity(false)
     }
   }
 
@@ -404,7 +501,12 @@ export default function LearningTab() {
             </p>
           </div>
         ) : (
-          <Learners s={s} />
+          <Learners s={s} onSensitivity={(v) => void setSensitivity(v)} savingSensitivity={savingSensitivity} />
+        )}
+        {empty && (
+          <div className="mt-2 md:w-1/2 md:pr-1.5">
+            <VaultCard s={s} onSensitivity={(v) => void setSensitivity(v)} savingSensitivity={savingSensitivity} />
+          </div>
         )}
       </Section>
 

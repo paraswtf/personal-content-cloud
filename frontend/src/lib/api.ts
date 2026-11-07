@@ -51,6 +51,7 @@ import type {
   UploadCreate,
   UploadList,
   UploadOut,
+  VaultSensitivity,
 } from './types'
 
 export const CSRF_HEADER = 'X-Requested-With'
@@ -298,6 +299,10 @@ export const api = {
     learning: () => get<LearningStatus>('/api/system/learning'),
     /** The Settings switch (kv flag learning_enabled). The reply body is not used: refetch the status. */
     setLearningEnabled: (enabled: boolean) => patch<OkOut>('/api/system/learning', { enabled }),
+    /** The vault sensitivity (same route as the switch). The reply is the status with `vault_moved`
+     *  set: the server re-sorted the automatically decided items straight away. */
+    setVaultSensitivity: (level: VaultSensitivity) =>
+      patch<LearningStatus>('/api/system/learning', { vault_sensitivity: level }),
     /** Trains every learner now and returns the new status. */
     trainLearning: () => post<LearningStatus>('/api/system/learning/train'),
     /** Queues a fresh analysis of automatically decided items and documents; returns the queued counts. */

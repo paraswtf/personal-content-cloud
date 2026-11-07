@@ -118,3 +118,14 @@ def fixture_file():
         return p
 
     return get
+
+
+@pytest.fixture(autouse=True)
+def _reset_learning_flag_cache():
+    """The learning switch is remembered for 30 s in the process (store._flag); a test that turned it
+    off must not reach into the next test's fresh database."""
+    from app.learning import store
+
+    store._flag = None
+    yield
+    store._flag = None

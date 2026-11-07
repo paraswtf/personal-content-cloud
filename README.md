@@ -28,7 +28,9 @@ What it does with each file:
 - **Search.** One box searches by meaning ("beach at sunset", "person in a red shirt") and by text
   (OCR, file names, people, document fields), with filters for category, kind, people and dates.
 - **Vault.** NSFW items never appear in the library, search, people pages or previews. The vault
-  asks for the password or a passkey again and stays open for 15 minutes.
+  asks for the password or a passkey again and stays open for 15 minutes. A sensitivity setting in
+  Settings, Learning (low, normal or high) decides how readily photos go there, and moving photos
+  into or out of the vault tunes it further.
 - **Ways in.** Drag and drop in the browser, the camera inside the app, and the phone's Share menu
   (install the app from the browser menu first).
 - **Learning from your choices.** Corrections to categories, the vault, mis-clicks, document types
@@ -85,7 +87,8 @@ Environment variables (all optional):
 | `GPU_ENABLED` | `auto` | `auto`, `true` or `false`. |
 | `GPU_ARENA_SHRINK` | `true` | Give unused GPU memory back after every model run (keeps the server from growing to the card's size). |
 | `MAX_UPLOAD_MB`, `CHUNK_SIZE_MB`, `MIN_FREE_DISK_MB` | `16384`, `8`, `2048` | Upload limits and the free-space floor. |
-| `NSFW_THRESHOLD` | `0.7` | Classifier probability at which an item goes to the vault. |
+| `NSFW_THRESHOLD` | `0.7` | Classifier cut of the fallback rule (used only without the SigLIP signals). |
+| `VAULT_SENSITIVITY` | `normal` | `low`, `normal` or `high`: how readily photos go to the vault (also set in Settings > Learning). |
 | `DOC_LIKENESS_MIN` | `0.55` | Images at or above this are sent to OCR. |
 | `BLUR_VAR_MIN`, `BURST_WINDOW_S` | `40`, `3` | Mis-click thresholds. |
 | `GUESS_WINDOW_H`, `GUESS_SCENE_SIM`, `GUESS_CLOTHES_SIM`, `GUESS_GPS_M` | `12`, `0.80`, `0.85`, `250` | Person guessing. |

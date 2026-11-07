@@ -46,7 +46,7 @@ from app.analysis import categories, cluster, quality
 from app.analysis import faces as faces_mod
 from app.analysis.index import get_index
 from app.config import settings
-from app.db import bump_faces_version, bump_search_version, faces_version, tx
+from app.db import bump_faces_version, bump_search_version, faces_version, tx, kv_get
 from app.util import json_dumps, json_loads, now_iso
 
 log = logging.getLogger(__name__)
@@ -83,6 +83,8 @@ class Result:
     quality_scores: dict[str, Any] = field(default_factory=dict)
     nsfw_score: float | None = None
     explicit_p: float | None = None
+    suggestive_p: float | None = None
+    safe_p: float | None = None
     screenshot_p: float | None = None
     doc_p: float | None = None
     density: float | None = None
@@ -283,6 +285,12 @@ def _run_models(item: sqlite3.Row, v: Visual, siglip: ModuleType | None, nsfw: M
             r.explicit_p = categories.binary_p(engine, scene, categories.EXPLICIT_PROMPTS,
                                                categories.NOT_EXPLICIT_PROMPTS, reduce="max")
             r.category_scores["explicit_p"] = round(r.explicit_p, 4)
+            r.suggestive_p = categories.binary_p(engine, scene, categories.SUGGESTIVE_PROMPTS,
+                                                 categories.NOT_SUGGESTIVE_PROMPTS, reduce="max")
+            r.safe_p = categories.binary_p(engine, scene, categories.SAFE_SKIN_PROMPTS,
+                                           categories.NOT_SAFE_SKIN_PROMPTS, reduce="mean")
+            r.category_scores["suggestive_p"] = round(r.suggestive_p, 4)
+            r.category_scores["safe_p"] = round(r.safe_p, 4)
         if kind == "image":
             r.doc_p = categories.binary_p(engine, frame0, categories.DOCUMENT_PROMPTS, categories.NOT_DOCUMENT_PROMPTS)
             r.screenshot_p = categories.binary_p(engine, frame0, categories.SCREENSHOT_PROMPTS,
@@ -571,19 +579,23 @@ def analyze_item(conn: sqlite3.Connection, item_id: int, version: int) -> None:
                 r.category_scores = {**{k: v for k, v in old_scores.items() if k != "skipped"}, **r.category_scores}
             # Section 18: the owner's labelled look-alikes decide before the rules do.
             emb0 = next((e for fi, _t, e in r.embeddings if fi == 0), None)
+            sensitivity = kv_get(conn, "vault_sensitivity", settings.vault_sensitivity) or "normal"
             learned_cat = learned_nsfw = None
             if emb0 is not None and kind in ("image", "video"):
                 try:
                     from app.learning import images as learned_images
 
                     learned_cat = learned_images.predict_category(emb0)
-                    learned_nsfw = learned_images.predict_nsfw(emb0, nsfw_score)
+                    learned_nsfw = learned_images.predict_nsfw(
+                        emb0, {"cls": nsfw_score, "explicit": r.explicit_p, "suggestive": r.suggestive_p, "safe": r.safe_p},
+                        sensitivity=sensitivity)
                 except Exception:  # noqa: BLE001 - learning never blocks analysis
                     log.exception("learning: image learner failed")
             dec = categories.decide(
                 kind, nsfw_score=nsfw_score, explicit_p=r.explicit_p, nsfw_override=nsfw_override,
                 screenshot_heur=screen_heur, screenshot_p=r.screenshot_p, doc_like=doc_like,
                 has_person=has_person, scores=r.category_scores, learned=learned_cat, nsfw_learned=learned_nsfw,
+                suggestive_p=r.suggestive_p, safe_p=r.safe_p, sensitivity=sensitivity,
             )
             if cur["category_source"] == "user":
                 category = cur["category"]
