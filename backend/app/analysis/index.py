@@ -280,7 +280,7 @@ class FaceIndex:
             out: list[list[tuple[int, float]]] = []
             for start in range(0, embs.shape[0], _SCORE_BATCH):
                 sims = self._emb @ embs[start:start + _SCORE_BATCH].T  # (N, b)
-                out.extend(_topk_means(self._person, base, sims[:, b], topk) for b in range(sims.shape[1]))
+                out.extend(_topk_means(self._person, base, sims[:, b], topk, self._user) for b in range(sims.shape[1]))
             return out
 
     def centroids(self, person_ids: list[int] | None = None) -> tuple[np.ndarray, np.ndarray]:
@@ -307,7 +307,14 @@ class FaceIndex:
             return self._emb[rows].copy() if rows else np.zeros((0, DIM), dtype=np.float32)
 
 
-def _topk_means(person: np.ndarray, base: np.ndarray, sims: np.ndarray, topk: int) -> list[tuple[int, float]]:
+USER_WEIGHT = 1.5  # a face the owner assigned counts this much in the top-k mean (an automatic one 1.0)
+
+
+def _topk_means(person: np.ndarray, base: np.ndarray, sims: np.ndarray, topk: int,
+                user: np.ndarray | None = None) -> list[tuple[int, float]]:
+    """Per candidate person: the weighted mean of the top-k similarities to that person's faces.
+    The reference for a person is every face they have, so it sharpens as faces are added; the
+    owner's own assignments weigh USER_WEIGHT, automatic ones 1.0."""
     cand = np.unique(person[base & (sims >= MIN_SIM)])
     if cand.size == 0:
         return []
@@ -315,15 +322,16 @@ def _topk_means(person: np.ndarray, base: np.ndarray, sims: np.ndarray, topk: in
     # the top-k mean into "best single face".
     sel = np.nonzero(base & np.isin(person, cand))[0]
     p, s = person[sel], sims[sel]
+    w = np.where(user[sel], USER_WEIGHT, 1.0) if user is not None and user.shape[0] == person.shape[0] else np.ones(sel.size)
     order = np.lexsort((-s, p))
-    p, s = p[order], s[order]
+    p, s, w = p[order], s[order], w[order]
     starts = np.r_[0, np.nonzero(np.diff(p))[0] + 1]
     group = np.repeat(np.arange(starts.size), np.diff(np.r_[starts, p.size]))
     rank = np.arange(p.size) - starts[group]
     keep = rank < max(int(topk), 1)
-    totals = np.bincount(group[keep], weights=s[keep], minlength=starts.size)
-    counts = np.bincount(group[keep], minlength=starts.size)
-    means = totals / np.maximum(counts, 1)
+    totals = np.bincount(group[keep], weights=(s * w)[keep], minlength=starts.size)
+    counts = np.bincount(group[keep], weights=w[keep], minlength=starts.size)
+    means = totals / np.maximum(counts, 1e-9)
     pids = p[starts]
     out = sorted(zip(pids.tolist(), means.tolist()), key=lambda t: (-t[1], t[0]))
     return [(int(a), float(b)) for a, b in out]

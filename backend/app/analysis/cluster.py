@@ -214,9 +214,11 @@ def _threshold(row: sqlite3.Row) -> float:
     return settings.cluster_match_threshold_low
 
 
-def _score(idx: FaceIndex, faces: list[sqlite3.Row], exclude: frozenset[int]) -> list[list[tuple[int, float]]]:
-    """For each face: the people it may join, best first (score >= the face's threshold).
-    Call with idx.lock held, after idx.sync."""
+def _score(idx: FaceIndex, faces: list[sqlite3.Row], exclude: frozenset[int],
+           conn: sqlite3.Connection | None = None) -> list[list[tuple[int, float]]]:
+    """For each face: the people it may join, best first (score >= the face's threshold). A person
+    whose rejected examples (faces the owner took away from them, section 18) look more like the
+    face than the person's own faces do is left out. Call with idx.lock held, after idx.sync."""
     if not faces:
         return []
     embs = idx.embeddings_of([r["id"] for r in faces])
@@ -224,7 +226,95 @@ def _score(idx: FaceIndex, faces: list[sqlite3.Row], exclude: frozenset[int]) ->
     for r, scores in zip(faces, idx.person_scores_many(embs, settings.cluster_topk, exclude)):
         thr = _threshold(r)
         out.append([(pid, score) for pid, score in scores if score >= max(thr, learned_threshold(pid, thr))])
+    if conn is not None:
+        out = _drop_rejected_lookalikes(conn, embs, out)
     return out
+
+
+def rejected_examples(conn: sqlite3.Connection, person_ids: list[int] | set[int]) -> dict[int, np.ndarray]:
+    """{person_id: (n, 512) embeddings of the faces the owner rejected for that person}."""
+    ids = sorted({int(p) for p in person_ids})
+    out: dict[int, list[np.ndarray]] = {}
+    for chunk in _chunks(ids):
+        marks = ",".join("?" * len(chunk))
+        for r in conn.execute(
+            f"SELECT g.person_id, f.embedding FROM guess_rejections g JOIN faces f ON f.id = g.ref_id "
+            f"WHERE g.kind = 'face' AND g.person_id IN ({marks})", chunk,
+        ):
+            v = np.frombuffer(r["embedding"], dtype=np.float32)
+            if v.shape[0]:
+                out.setdefault(int(r["person_id"]), []).append(v)
+    return {pid: np.stack(vs) for pid, vs in out.items()}
+
+
+def _drop_rejected_lookalikes(conn: sqlite3.Connection, embs: np.ndarray,
+                              options: list[list[tuple[int, float]]]) -> list[list[tuple[int, float]]]:
+    pids = {pid for opts in options for pid, _ in opts}
+    if not pids:
+        return options
+    examples = rejected_examples(conn, pids)
+    if not examples:
+        return options
+    out: list[list[tuple[int, float]]] = []
+    for emb, opts in zip(embs, options):
+        kept = []
+        for pid, score in opts:
+            ex = examples.get(pid)
+            if ex is not None and float(np.max(ex @ emb)) >= score:
+                continue  # looks more like someone the owner said is not this person
+            kept.append((pid, score))
+        out.append(kept)
+    return out
+
+
+def followers(conn: sqlite3.Connection, seed_ids: list[int], person_id: int) -> list[int]:
+    """The automatically assigned faces of `person_id` that look like the seed faces the owner just
+    took away from that person: closer to a seed (cosine >= FOLLOW_SIM) than to the person's other
+    faces (top-k mean, the seeds left out). The owner's own assignments never follow."""
+    seeds = [int(s) for s in seed_ids]
+    if not seeds:
+        return []
+    marks = ",".join("?" * len(seeds))
+    seed_rows = conn.execute(f"SELECT id, embedding FROM faces WHERE id IN ({marks})", seeds).fetchall()
+    if not seed_rows:
+        return []
+    s = np.stack([np.frombuffer(r["embedding"], dtype=np.float32) for r in seed_rows])
+    rows = conn.execute(
+        f"SELECT id, assigned_by, embedding FROM faces WHERE person_id = ? AND id NOT IN ({marks}) ORDER BY id",
+        [int(person_id), *seeds],
+    ).fetchall()
+    if not rows:
+        return []
+    e = np.stack([np.frombuffer(r["embedding"], dtype=np.float32) for r in rows])
+    to_seed = (e @ s.T).max(axis=1)
+    among = e @ e.T
+    np.fill_diagonal(among, -1.0)
+    k = max(1, int(settings.cluster_topk))
+    if among.shape[1] > 1:
+        top = -np.sort(-among, axis=1)[:, :k]
+        rest = np.where(top > -1.0, top, np.nan)
+        rest_score = np.nan_to_num(np.nanmean(rest, axis=1), nan=-1.0)
+    else:
+        rest_score = np.full(e.shape[0], -1.0)
+    out = []
+    for r, near_seed, own in zip(rows, to_seed, rest_score):
+        if r["assigned_by"] == "user":
+            continue
+        if float(near_seed) >= FOLLOW_SIM and float(near_seed) > float(own):
+            out.append(int(r["id"]))
+    return out
+
+
+def record_rejections(conn: sqlite3.Connection, face_ids: list[int], person_id: int) -> None:
+    """Remember that these faces are not `person_id` (guess_rejections): guesses skip them and
+    matching keeps their look-alikes away from that person. Call inside a tx."""
+    now = now_iso()
+    for fid in sorted({int(f) for f in face_ids}):
+        conn.execute("INSERT OR IGNORE INTO guess_rejections(kind, ref_id, person_id, created_at) VALUES ('face', ?, ?, ?)",
+                     (fid, int(person_id), now))
+
+
+FOLLOW_SIM = 0.55  # a face this close to a face the owner took away looks like the same wrong person
 
 
 def learned_threshold(person_id: int, default: float) -> float:
@@ -323,7 +413,7 @@ def _auto_assign(
             for item_id in item_order:
                 # Scored item by item: faces assigned (or people started) for earlier items count.
                 faces = by_item[item_id]
-                options = _score(idx, faces, exclude)
+                options = _score(idx, faces, exclude, conn)
                 changed += _apply_item(conn, idx, faces, options, used[item_id], create_people, result)
             if changed:
                 bump_faces_version(conn)
@@ -465,7 +555,7 @@ def _recluster_chunk(conn: sqlite3.Connection, face_ids: list[int]) -> tuple[int
         eligible = _eligible(_face_rows(conn, face_ids), empty)
         if not eligible:
             return 0, touched
-        options = dict(zip((r["id"] for r in eligible), _score(idx, eligible, empty)))
+        options = dict(zip((r["id"] for r in eligible), _score(idx, eligible, empty, conn)))
     pids = sorted({pid for opts in options.values() for pid, _ in opts})
     if not pids:
         return 0, touched

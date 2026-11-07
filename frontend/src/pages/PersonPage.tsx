@@ -140,7 +140,8 @@ function FacesTab({ id, name, coverId }: { id: number; name: string; coverId: nu
   const assign = useMutation({
     mutationFn: (choice: PersonChoice | null) => api.people.assignFaces({ face_ids: [...sel.selected], ...choiceBody(choice) }),
     onSuccess: (r, choice) => {
-      toast.success(choice ? `${formatCount(r.updated, 'face')} moved${r.person ? ` to ${personName(r.person)}` : ''}.` : `${formatCount(r.updated, 'face')} removed from ${name}.`)
+      const tail = r.followed ? ` ${formatCount(r.followed, 'look-alike face')} went the same way.` : ''
+      toast.success((choice ? `${formatCount(r.updated, 'face')} moved${r.person ? ` to ${personName(r.person)}` : ''}.` : `${formatCount(r.updated, 'face')} removed from ${name}.`) + tail)
       setMoving(false)
       sel.clear()
       void refresh()
@@ -480,6 +481,7 @@ function PersonView({ id }: { id: number }) {
           ) : (
             <p className="mt-1 text-sm text-ink-soft">
               {formatCount(p.item_count, 'item')}, {formatCount(p.face_count, 'face')}
+              {(p.confirmed_faces ?? 0) > 0 && `, ${p.confirmed_faces} confirmed by you`}
               {p.guess_count > 0 && `, ${formatCount(p.guess_count, 'guess', 'guesses')} to review`}
             </p>
           )}

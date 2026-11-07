@@ -37,6 +37,8 @@ What it does with each file:
   (install the app from the browser menu first).
 - **Learning from your choices.** Corrections to categories, the vault, mis-clicks, document types
   and people teach small local models, so the next automatic decision of the same kind follows them.
+  Taking a face away from a person takes the faces that look like it along, and they never come back
+  to that person; a person is matched against every face they have, your own assignments counting more.
 - **Your own tags.** Add free-form tags such as "wedding" or "Goa trip" to any item, and the same
   tags are suggested on look-alike photos, videos and similar documents for you to accept or remove.
 

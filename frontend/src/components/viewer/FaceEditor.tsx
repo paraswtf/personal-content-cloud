@@ -74,8 +74,9 @@ export default function FaceEditor({ uid, target, anchor, onClose, onDone }: Pro
       isFace ? api.people.assignFaces({ face_ids: [box.id], ...choiceBody(choice) }) : api.people.assignBodies({ body_ids: [box.id], ...choiceBody(choice) }),
     onSuccess: (res, choice) => {
       invalidate()
-      if (!choice) onDone(box.person ? `Removed from ${personName(box.person)}` : 'Unassigned')
-      else onDone(res.person ? `Tagged as ${personName(res.person)}` : 'Saved')
+      const tail = res.followed ? `, with ${formatCount(res.followed, 'look-alike face')}` : ''
+      if (!choice) onDone(box.person ? `Removed from ${personName(box.person)}${tail}` : 'Unassigned')
+      else onDone(res.person ? `Tagged as ${personName(res.person)}${tail}` : 'Saved')
     },
   })
   const nameGroup = useMutation({

@@ -152,6 +152,8 @@ export interface PersonOut {
   item_count: number
   guess_count: number
   created_at: string
+  /** Faces (or crops) the owner assigned: the anchors of the person's reference. */
+  confirmed_faces?: number
 }
 export interface PersonPage {
   items: PersonOut[]
@@ -226,6 +228,8 @@ export interface AssignAnimalsIn {
 export interface AssignOut {
   updated: number
   person: PersonOut | null
+  /** Faces that looked like the ones taken away from a person and went the same way (section 10). */
+  followed?: number
 }
 export interface Suggestion {
   a: PersonOut

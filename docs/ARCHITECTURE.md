@@ -371,6 +371,23 @@ Faces follow the hub (`buffalo_l`, clustering thresholds 0.45 good / 0.52 other,
 locked `user` assignments, merge suggestions). Bodies come from YOLOX-S person boxes (score `>= 0.5`,
 NMS 0.45); a body whose box contains a face centre takes `face_id` and shares its person.
 
+The reference for a person is every face they have, never one picture: a new face scores a person by
+the weighted mean of its top-3 cosine similarities to that person's faces (`index._topk_means`), the
+owner's own assignments weighing 1.5 and automatic ones 1.0, so the reference sharpens as faces are added
+and confirmed; each person also learns their own threshold from confirmations and rejections (section 18).
+`PersonOut.confirmed_faces` says how many anchors the owner has given.
+
+Corrections propagate (`people._follow_lookalikes`). When the owner takes faces away from a person
+(`POST /api/faces/assign` to another person or to nobody), the faces that left are written to
+`guess_rejections` for that person, and the person's automatic faces that look like them follow: closer to
+a removed face (cosine `>= FOLLOW_SIM` 0.55) than to the person's other faces (top-3 mean, removed faces
+left out), the owner's own assignments never. Followers go to the same target (assigned `auto`) or, when
+the faces were just unassigned, are regrouped at once (`cluster.assign_new_faces`) into another or a new
+unnamed person; bodies around them follow. `AssignOut.followed` counts them for the toast. Matching
+(`cluster._score`) then leaves out any person whose rejected examples look more like a face than the
+person's own faces do, so look-alikes of a rejected face never return to that person, in new photos or in a
+recluster.
+
 Guessing (`analysis/guess.py`). For an unassigned face or body D in item I:
 - Candidates: faces (and bodies) of named or unnamed persons with `assigned_by in ('user','auto')` in items J
   with `|taken_at(I) - taken_at(J)| <= GUESS_WINDOW_H` (12 h) or the same local calendar date (`LOCAL_TIMEZONE`),

@@ -164,9 +164,10 @@ def _visible_person_row(conn: sqlite3.Connection, session: SessionInfo, person_i
     return row
 
 
-def _stats(conn: sqlite3.Connection, ids: list[int]) -> dict[int, tuple[int, int, int, int]]:
-    """{person_id: (face_count, item_count, guess_count, animal_count)} over live, non-NSFW items."""
-    out: dict[int, list[int]] = {i: [0, 0, 0, 0] for i in ids}
+def _stats(conn: sqlite3.Connection, ids: list[int]) -> dict[int, tuple[int, int, int, int, int]]:
+    """{person_id: (face_count, item_count, guess_count, animal_count, confirmed)} over live,
+    non-NSFW items; confirmed = faces and crops the owner assigned."""
+    out: dict[int, list[int]] = {i: [0, 0, 0, 0, 0] for i in ids}
     for start in range(0, len(ids), 500):
         chunk = ids[start:start + 500]
         ph = _ids_sql(chunk)
@@ -193,7 +194,15 @@ def _stats(conn: sqlite3.Connection, ids: list[int]) -> dict[int, tuple[int, int
             f"WHERE a.person_id IN ({ph}) GROUP BY a.person_id", chunk,
         ):
             out[int(r[0])][3] = int(r[1])
-    return {k: (v[0], v[1], v[2], v[3]) for k, v in out.items()}
+        for r in conn.execute(
+            "SELECT pid, COUNT(*) FROM ("
+            f"SELECT f.person_id AS pid FROM faces f JOIN items i ON i.id = f.item_id AND {LIVE} "
+            f"WHERE f.person_id IN ({ph}) AND f.assigned_by = 'user' UNION ALL "
+            f"SELECT a.person_id AS pid FROM animals a JOIN items i ON i.id = a.item_id AND {LIVE} "
+            f"WHERE a.person_id IN ({ph}) AND a.assigned_by = 'user') GROUP BY pid", [*chunk, *chunk],
+        ):
+            out[int(r[0])][4] = int(r[1])
+    return {k: (v[0], v[1], v[2], v[3], v[4]) for k, v in out.items()}
 
 
 def _covers(conn: sqlite3.Connection, rows: list[sqlite3.Row]) -> dict[int, str | None]:
@@ -234,12 +243,13 @@ def person_outs(conn: sqlite3.Connection, rows: list[sqlite3.Row]) -> list[Perso
     covers = _covers(conn, rows) if rows else {}
     out = []
     for r in rows:
-        fc, ic, gc, ac = st.get(int(r["id"]), (0, 0, 0, 0))
+        fc, ic, gc, ac, cf = st.get(int(r["id"]), (0, 0, 0, 0, 0))
         pet = r["kind"] == "pet"
         out.append(PersonOut(id=int(r["id"]), name=r["name"], cover_url=covers.get(int(r["id"])),
                              cover_face_id=None if pet else r["cover_face_id"],
                              face_count=fc, item_count=ic, guess_count=gc, created_at=r["created_at"],
-                             kind=r["kind"] or "person", species=r["species"] if pet else None, animal_count=ac))
+                             kind=r["kind"] or "person", species=r["species"] if pet else None, animal_count=ac,
+                             confirmed_faces=cf))
     return out
 
 
@@ -631,12 +641,68 @@ def unassigned_faces(
 def _assign(conn: sqlite3.Connection, table: str, ids: list[int], person_id: int | None, new_name: str | None,
             name_given: bool, session: SessionInfo) -> AssignOut:
     _check_boxes_vault(conn, session, table, ids)
+    followed: list[int] = []
     with tx(conn):
         target = _target_person(conn, person_id, new_name, name_given, session)
+        leaving = _leaving(conn, table, ids, target) if table == "faces" else {}
         updated, items = _move_boxes(conn, table, ids, target)
+        if leaving:
+            followed, more_items = _follow_lookalikes(conn, leaving, target)
+            items |= more_items
     guesses = {(target, i) for i in items} if target is not None else set()
     _after_people_change(conn, items, guesses)  # type: ignore[arg-type]
-    return AssignOut(updated=updated, person=_person_out(conn, target) if target is not None else None)
+    if followed and target is None:
+        # The look-alikes are loose now: let them find or start another person together (never the
+        # one they just left: its rejected examples keep them away).
+        try:
+            cluster.assign_new_faces(conn, followed)
+        except Exception:  # noqa: BLE001 - the owner's correction already happened
+            log.exception("could not regroup %d look-alike faces", len(followed))
+        guess.refresh_fts(conn, items)
+    return AssignOut(updated=updated, person=_person_out(conn, target) if target is not None else None,
+                     followed=len(followed))
+
+
+def _leaving(conn: sqlite3.Connection, table: str, ids: list[int], target: int | None) -> dict[int, list[int]]:
+    """{person_id: faces among `ids` that are leaving that person} (a move to the same person is no leave)."""
+    ids = sorted({int(i) for i in ids})
+    out: dict[int, list[int]] = {}
+    for r in conn.execute(f"SELECT id, person_id FROM {table} WHERE id IN ({_ids_sql(ids)}) AND person_id IS NOT NULL", ids):
+        if target is None or int(r["person_id"]) != int(target):
+            out.setdefault(int(r["person_id"]), []).append(int(r["id"]))
+    return out
+
+
+def _follow_lookalikes(conn: sqlite3.Connection, leaving: dict[int, list[int]],
+                       target: int | None) -> tuple[list[int], set[int]]:
+    """When faces leave a person, the person's automatic faces that look like them go the same way
+    (to the target person, or loose), and every face that left is remembered as not that person.
+    Returns (the faces that followed, their items). Call inside a tx."""
+    followed: list[int] = []
+    items: set[int] = set()
+    for pid, seeds in leaving.items():
+        cluster.record_rejections(conn, seeds, pid)
+        more = cluster.followers(conn, seeds, pid)
+        if not more:
+            continue
+        cluster.record_rejections(conn, more, pid)
+        marks = _ids_sql(more)
+        rows = conn.execute(f"SELECT id, item_id FROM faces WHERE id IN ({marks})", more).fetchall()
+        items |= {int(r["item_id"]) for r in rows}
+        conn.execute(
+            f"UPDATE faces SET person_id = ?, assigned_by = 'auto', guess_person_id = NULL, guess_score = NULL, "
+            f"guess_evidence = NULL WHERE id IN ({marks})", [target, *more])
+        conn.execute(
+            f"UPDATE bodies SET person_id = ?, assigned_by = 'auto', guess_person_id = NULL, guess_score = NULL, "
+            f"guess_evidence = NULL WHERE face_id IN ({marks}) AND assigned_by != 'user'", [target, *more])
+        conn.execute(f"UPDATE persons SET cover_face_id = NULL, updated_at = ? WHERE cover_face_id IN ({marks})",
+                     [now_iso(), *more])
+        followed.extend(more)
+        log.info("%d look-alike faces followed %d faces away from person %d", len(more), len(seeds), pid)
+    if followed:
+        cluster.prune_empty_persons(conn, set(leaving))
+        bump_faces_version(conn)
+    return followed, items
 
 
 @router.post("/faces/assign", response_model=AssignOut)

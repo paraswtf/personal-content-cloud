@@ -165,7 +165,7 @@ def test_unassigned_assign_and_delete_faces(api, conn):
     assert api.post("/api/faces/assign", json={"face_ids": [f2], "person_id": pid, "new_person_name": "X"}).status_code == 400
     assert api.post("/api/faces/assign", json={"face_ids": [12345], "person_id": pid}).status_code == 404
     r = api.post("/api/faces/assign", json={"face_ids": [f1]})
-    assert r.json() == {"updated": 1, "person": None}
+    assert r.json() == {"updated": 1, "person": None, "followed": 0}
     # Meera had nothing else: still there (named people are kept).
     assert api.get(f"/api/people/{pid}").status_code == 200
 

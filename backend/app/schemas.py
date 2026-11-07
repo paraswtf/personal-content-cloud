@@ -390,6 +390,7 @@ class PersonOut(BaseModel):
     kind: PersonKind = "person"
     species: str | None = None    # pets only
     animal_count: int = 0         # pets: crops in visible items
+    confirmed_faces: int = 0      # faces (or crops) the owner assigned: the anchors of the reference
 
 
 class PersonPage(BaseModel):
@@ -476,6 +477,7 @@ class AssignAnimalsIn(BaseModel):
 class AssignOut(BaseModel):
     updated: int
     person: PersonOut | None = None
+    followed: int = 0   # faces that looked like the ones taken away from a person and went with them
 
 
 class Suggestion(BaseModel):
