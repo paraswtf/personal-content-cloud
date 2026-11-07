@@ -1,11 +1,23 @@
-"""Grouping faces into people, and person maintenance (merge, suggestions).
+"""Grouping faces into people, and person maintenance (merge, suggestions, pruning).
 
-CONTRACT (implemented by the faces agent). Rules are in docs/SPEC.md section "Clustering".
-Every function that changes faces/persons runs inside `with tx(conn):` (nesting is fine) and
-calls app.db.bump_faces_version(conn) when it changed anything.
+Adapted from the hub's faces/cluster.py (docs/ARCHITECTURE.md section 10).
 
-Admin decisions are locked: faces with assigned_by='admin' (including admin-unassigned faces,
-person_id NULL) are never touched by automatic assignment or reclustering.
+CONTRACT.
+- assign_new_faces(conn, face_ids, exclude_face_ids=None) -> {face_id: person_id | None}
+- carry_over(conn, old_faces, new_face_ids) -> int (reprocess keeps names and user locks)
+- recluster_unassigned(conn) -> int (never creates people)
+- merge_persons(conn, target_id, source_ids): moves faces, bodies, item_tags, guesses,
+  guess_rejections, merge_dismissals and the cover; deletes the sources. ValueError on bad ids.
+- merge_suggestions(conn, limit) -> [(a, b, similarity)] with a < b
+- new_person(conn, name) / find_person_by_name(conn, name) / prune_empty_persons(conn, ids) /
+  clear_guesses_for(conn, person_ids): person helpers for the pipeline and the people API.
+
+Every function that changes faces, bodies or persons runs inside `with tx(conn):` (nesting is
+fine) and calls app.db.bump_faces_version(conn) when it changed anything.
+
+User decisions are locked: faces with assigned_by='user' (including user-unassigned faces,
+person_id NULL) are never touched by automatic assignment or reclustering. 'guess' faces have no
+person yet and stay eligible for automatic assignment.
 """
 from __future__ import annotations
 
@@ -16,24 +28,103 @@ from collections import defaultdict
 
 import numpy as np
 
-from app.changelog.capture import claim
 from app.config import settings
 from app.db import bump_faces_version, tx
-from app.faces.index import FaceIndex, get_index
-from app.util import now_iso
+from app.analysis.index import FaceIndex, get_index
+from app.util import clean_name, now_iso
 
 log = logging.getLogger(__name__)
 
+NAME_MAX = 120
 CARRY_IOU = 0.3
 CARRY_IOU_MIN_SIM = 0.3  # an IoU match must also look alike (same person ~0.7+, others <= ~0.3)
 CARRY_SIM = 0.6
-CARRY_ADMIN_SIM = 0.4  # looser last pass, only for admin-locked old faces
-CARRY_ADMIN_IOU = 0.1
+CARRY_USER_SIM = 0.4  # looser last pass, only for user-locked old faces
+CARRY_USER_IOU = 0.1
 _IN_CHUNK = 500
 _RECLUSTER_CHUNK = 200  # faces scored per recluster step (whole items, so a photo is never split)
 _SUGGEST_CHUNK = 1024  # rows of the centroid similarity matrix computed at a time
+AUTO_STATES = ("auto", "guess")  # assigned_by values automatic assignment may change
 
 
+# ------------------------------------------------------------------ person helpers
+def clean_person_name(value: str | None) -> str | None:
+    if value is None:
+        return None
+    name = clean_name(value, max_len=NAME_MAX)
+    return name or None
+
+
+def new_person(conn: sqlite3.Connection, name: str | None = None) -> int:
+    """Insert a person (unnamed when name is None). Call inside the caller's transaction."""
+    now = now_iso()
+    name = clean_person_name(name)
+    return int(conn.execute(
+        "INSERT INTO persons(name, name_key, created_at, updated_at) VALUES (?, ?, ?, ?)",
+        (name, name.casefold() if name else None, now, now),
+    ).lastrowid)
+
+
+def find_person_by_name(conn: sqlite3.Connection, name: str | None, exclude_id: int | None = None) -> int | None:
+    """The person whose name matches (case-insensitive), most faces first, then lowest id."""
+    clean = clean_person_name(name)
+    if not clean:
+        return None
+    row = conn.execute(
+        "SELECT p.id FROM persons p WHERE p.name_key = ? AND p.id IS NOT ? "
+        "ORDER BY (SELECT COUNT(*) FROM faces f WHERE f.person_id = p.id) DESC, p.id LIMIT 1",
+        (clean.casefold(), exclude_id),
+    ).fetchone()
+    return int(row[0]) if row else None
+
+
+def find_or_create_person(conn: sqlite3.Connection, name: str | None) -> int | None:
+    clean = clean_person_name(name)
+    if not clean:
+        return None
+    found = find_person_by_name(conn, clean)
+    return found if found is not None else new_person(conn, clean)
+
+
+def clear_guesses_for(conn: sqlite3.Connection, person_ids: list[int] | set[int]) -> int:
+    """Drop open guesses that point at these people (call before deleting them). Returns rows changed."""
+    ids = sorted({int(p) for p in person_ids})
+    n = 0
+    for chunk in _chunks(ids):
+        marks = ",".join("?" * len(chunk))
+        for table in ("faces", "bodies"):
+            n += conn.execute(
+                f"UPDATE {table} SET guess_person_id = NULL, guess_score = NULL, guess_evidence = NULL, "
+                f"assigned_by = CASE WHEN assigned_by = 'guess' THEN 'auto' ELSE assigned_by END "
+                f"WHERE guess_person_id IN ({marks})",
+                chunk,
+            ).rowcount
+    return n
+
+
+def prune_empty_persons(conn: sqlite3.Connection, person_ids: set[int] | list[int]) -> int:
+    """Delete unnamed people left with no faces, bodies or tags (call inside a tx)."""
+    ids = sorted({int(p) for p in person_ids if p is not None})
+    if not ids:
+        return 0
+    marks = ",".join("?" * len(ids))
+    empty = [int(r[0]) for r in conn.execute(
+        f"SELECT id FROM persons WHERE id IN ({marks}) AND name IS NULL "
+        "AND NOT EXISTS (SELECT 1 FROM faces f WHERE f.person_id = persons.id) "
+        "AND NOT EXISTS (SELECT 1 FROM bodies b WHERE b.person_id = persons.id) "
+        "AND NOT EXISTS (SELECT 1 FROM item_tags t WHERE t.person_id = persons.id)",
+        ids,
+    )]
+    if not empty:
+        return 0
+    clear_guesses_for(conn, empty)
+    emarks = ",".join("?" * len(empty))
+    conn.execute(f"DELETE FROM persons WHERE id IN ({emarks})", empty)
+    bump_faces_version(conn)
+    return len(empty)
+
+
+# ------------------------------------------------------------------ assignment
 def is_good_face(det_score: float, size_px: int) -> bool:
     """Good enough to start a new person: size >= settings.face_good_min_size_px and
     det_score >= settings.face_good_det_score."""
@@ -50,38 +141,31 @@ def _face_rows(conn: sqlite3.Connection, face_ids: list[int]) -> list[sqlite3.Ro
     for chunk in _chunks(sorted(set(int(f) for f in face_ids))):
         marks = ",".join("?" * len(chunk))
         rows.extend(conn.execute(
-            "SELECT f.id, f.media_id, f.person_id, f.assigned_by, f.det_score, f.size_px, f.quality, m.kind "
-            f"FROM faces f JOIN media m ON m.id = f.media_id WHERE f.id IN ({marks})",
+            "SELECT f.id, f.item_id, f.person_id, f.assigned_by, f.det_score, f.size_px, f.quality, i.kind "
+            f"FROM faces f JOIN items i ON i.id = f.item_id WHERE f.id IN ({marks})",
             chunk,
         ).fetchall())
     return rows
 
 
-def _used_people(conn: sqlite3.Connection, media_ids: list[int], skip_face_ids: set[int]) -> dict[int, set[int]]:
-    """People already present (via a face) in each of the given media."""
+def _used_people(conn: sqlite3.Connection, item_ids: list[int], skip_face_ids: set[int]) -> dict[int, set[int]]:
+    """People already present (via a face) in each of the given items."""
     used: dict[int, set[int]] = defaultdict(set)
-    for chunk in _chunks(media_ids):
+    for chunk in _chunks(item_ids):
         marks = ",".join("?" * len(chunk))
         for r in conn.execute(
-            f"SELECT id, media_id, person_id FROM faces WHERE media_id IN ({marks}) AND person_id IS NOT NULL",
+            f"SELECT id, item_id, person_id FROM faces WHERE item_id IN ({marks}) AND person_id IS NOT NULL",
             chunk,
         ):
             if r["id"] not in skip_face_ids:
-                used[r["media_id"]].add(r["person_id"])
+                used[r["item_id"]].add(r["person_id"])
     return used
-
-
-def _new_person(conn: sqlite3.Connection) -> int:
-    now = now_iso()
-    return int(conn.execute(
-        "INSERT INTO persons(name, name_key, hidden, created_at, updated_at) VALUES (NULL, NULL, 0, ?, ?)",
-        (now, now),
-    ).lastrowid)
 
 
 def _set_person(conn: sqlite3.Connection, idx: FaceIndex | None, face_id: int, person_id: int) -> bool:
     cur = conn.execute(
-        "UPDATE faces SET person_id = ? WHERE id = ? AND person_id IS NULL AND assigned_by = 'auto'",
+        "UPDATE faces SET person_id = ?, assigned_by = 'auto', guess_person_id = NULL, guess_score = NULL, "
+        "guess_evidence = NULL WHERE id = ? AND person_id IS NULL AND assigned_by IN ('auto', 'guess')",
         (person_id, face_id),
     )
     if cur.rowcount:
@@ -110,30 +194,30 @@ def _score(idx: FaceIndex, faces: list[sqlite3.Row], exclude: frozenset[int]) ->
     return out
 
 
-def _group_by_media(rows: list[sqlite3.Row]) -> tuple[dict[int, list[sqlite3.Row]], list[int]]:
+def _group_by_item(rows: list[sqlite3.Row]) -> tuple[dict[int, list[sqlite3.Row]], list[int]]:
     """Faces per item (best quality first) and the items, best face first."""
-    by_media: dict[int, list[sqlite3.Row]] = defaultdict(list)
+    by_item: dict[int, list[sqlite3.Row]] = defaultdict(list)
     for r in rows:
-        by_media[r["media_id"]].append(r)
-    for faces in by_media.values():
+        by_item[r["item_id"]].append(r)
+    for faces in by_item.values():
         faces.sort(key=lambda r: (-r["quality"], r["id"]))
-    media_order = sorted(by_media, key=lambda m: (-by_media[m][0]["quality"], m))
-    return by_media, media_order
+    item_order = sorted(by_item, key=lambda m: (-by_item[m][0]["quality"], m))
+    return by_item, item_order
 
 
 def _eligible(rows: list[sqlite3.Row], exclude: frozenset[int]) -> list[sqlite3.Row]:
-    return [r for r in rows if r["person_id"] is None and r["assigned_by"] == "auto" and r["id"] not in exclude]
+    return [r for r in rows
+            if r["person_id"] is None and r["assigned_by"] in AUTO_STATES and r["id"] not in exclude]
 
 
-def _apply_media(
+def _apply_item(
     conn: sqlite3.Connection, idx: FaceIndex | None, faces: list[sqlite3.Row],
     options: list[list[tuple[int, float]]], taken: set[int], create_people: bool, result: dict[int, int | None],
 ) -> int:
     """Assign the faces of one item from their options. Returns how many got a person."""
     changed = 0
-    if faces[0]["kind"] == "image":
-        # One person per photo: best-scoring (face, person) pairs win, the rest take their
-        # next option.
+    if faces[0]["kind"] != "video":
+        # One person per photo: best-scoring (face, person) pairs win, the rest take their next option.
         cands: list[tuple[float, int, int]] = []
         for i, opts in enumerate(options):
             for pid, score in opts:
@@ -153,7 +237,7 @@ def _apply_media(
             for i, r in enumerate(faces):
                 if i in done or not is_good_face(r["det_score"], r["size_px"]):
                     continue
-                pid = _new_person(conn)
+                pid = new_person(conn)
                 if _set_person(conn, idx, r["id"], pid):
                     result[r["id"]] = pid
                     taken.add(pid)
@@ -165,7 +249,7 @@ def _apply_media(
             if pid is None:
                 if not (create_people and is_good_face(r["det_score"], r["size_px"])):
                     continue
-                pid = _new_person(conn)
+                pid = new_person(conn)
             if _set_person(conn, idx, r["id"], pid):
                 result[r["id"]] = pid
                 changed += 1
@@ -188,14 +272,14 @@ def _auto_assign(
             if not eligible:
                 return result
             eligible_ids = {r["id"] for r in eligible}
-            by_media, media_order = _group_by_media(eligible)
-            used = _used_people(conn, media_order, eligible_ids | exclude)
+            by_item, item_order = _group_by_item(eligible)
+            used = _used_people(conn, item_order, eligible_ids | exclude)
             changed = 0
-            for media_id in media_order:
+            for item_id in item_order:
                 # Scored item by item: faces assigned (or people started) for earlier items count.
-                faces = by_media[media_id]
+                faces = by_item[item_id]
                 options = _score(idx, faces, exclude)
-                changed += _apply_media(conn, idx, faces, options, used[media_id], create_people, result)
+                changed += _apply_item(conn, idx, faces, options, used[item_id], create_people, result)
             if changed:
                 bump_faces_version(conn)
             log.debug("auto-assigned %d of %d faces", changed, len(eligible))
@@ -206,17 +290,16 @@ def _auto_assign(
     return result
 
 
-def assign_new_faces(conn: sqlite3.Connection, face_ids: list[int], exclude_face_ids: set[int] | None = None) -> dict[int, int | None]:
+def assign_new_faces(conn: sqlite3.Connection, face_ids: list[int],
+                     exclude_face_ids: set[int] | None = None) -> dict[int, int | None]:
     """Assign freshly inserted auto faces (person_id NULL, assigned_by 'auto') to people.
 
     For each face (best quality first): score = FaceIndex.person_scores(emb, settings.cluster_topk,
     exclude_face_ids); join the best person if score >= settings.cluster_match_threshold (good face)
-    or settings.cluster_match_threshold_low (other faces). In a PHOTO one person appears at most once:
-    skip people already used by another face of the same media (take the next best). Otherwise a good
-    face starts a new unnamed person; other faces stay unassigned. Returns {face_id: person_id|None}.
-    The new faces must be visible to the index (call index.sync(conn) inside the same transaction after
-    inserting them, or pass embeddings directly).
-    """
+    or settings.cluster_match_threshold_low (other faces). In a photo one person appears at most once.
+    Otherwise a good face starts a new unnamed person; other faces stay unassigned.
+    Returns {face_id: person_id | None}. The faces must be in the database already (the index syncs
+    inside the same transaction)."""
     return _auto_assign(conn, face_ids, exclude_face_ids, create_people=True)
 
 
@@ -229,14 +312,18 @@ def _iou(a: tuple[float, float, float, float], b: tuple[float, float, float, flo
     return inter / union if union > 0 else 0.0
 
 
+def iou(a: tuple[float, float, float, float], b: tuple[float, float, float, float]) -> float:
+    """IoU of two normalised (x, y, w, h) boxes."""
+    return _iou(a, b)
+
+
 def carry_over(conn: sqlite3.Connection, old_faces: list[sqlite3.Row], new_face_ids: list[int]) -> int:
-    """After re-detecting faces on a replaced/reprocessed item, copy person_id + assigned_by from old
-    faces to the matching new faces (same item): match by normalised-box IoU >= 0.3 with embedding
-    similarity >= 0.3, then by embedding similarity >= 0.6, then (admin-locked old faces only) by
-    similarity >= 0.4 or IoU >= 0.1 with similarity >= 0.3. Each old/new face is used once, best
-    pairs first within each pass. Only old faces that had a person or were admin-locked are carried.
-    Returns the number carried."""
-    olds = [o for o in old_faces if o["person_id"] is not None or o["assigned_by"] == "admin"]
+    """After re-detecting faces on a reprocessed item, copy person_id + assigned_by from old faces to
+    the matching new faces (same item): match by normalised-box IoU >= 0.3 with embedding similarity
+    >= 0.3, then by similarity >= 0.6, then (user-locked old faces only) by similarity >= 0.4 or
+    IoU >= 0.1 with similarity >= 0.3. Each old/new face is used once, best pairs first within each
+    pass. Only old faces that had a person or were user-locked are carried. Returns the number carried."""
+    olds = [o for o in old_faces if o["person_id"] is not None or o["assigned_by"] == "user"]
     if not olds or not new_face_ids:
         return 0
     news: list[sqlite3.Row] = []
@@ -249,23 +336,19 @@ def carry_over(conn: sqlite3.Connection, old_faces: list[sqlite3.Row], new_face_
         return 0
     old_boxes = [(o["x"], o["y"], o["w"], o["h"]) for o in olds]
     new_boxes = [(n["x"], n["y"], n["w"], n["h"]) for n in news]
-    iou = np.array([[_iou(a, b) for b in new_boxes] for a in old_boxes], dtype=np.float64)
+    ious = np.array([[_iou(a, b) for b in new_boxes] for a in old_boxes], dtype=np.float64)
     old_e = np.stack([np.frombuffer(o["embedding"], dtype=np.float32) for o in olds])
     new_e = np.stack([np.frombuffer(n["embedding"], dtype=np.float32) for n in news])
     sim = old_e @ new_e.T
 
-    # 1. Box overlap, but only between faces that also look alike: boxes of overlapping people, or
-    #    of a video track whose best frame moved, must not hand a name or a lock to someone else.
-    # 2. Embedding alone. 3. Admin-locked old faces only, looser, so an admin decision is not lost
-    #    and the face auto-assigned against it.
-    admin = np.array([o["assigned_by"] == "admin" for o in olds], dtype=bool)[:, None]
-    iou_gated = np.where(sim >= CARRY_IOU_MIN_SIM, iou, 0.0)
-    loose = (sim >= CARRY_ADMIN_SIM) | ((iou >= CARRY_ADMIN_IOU) & (sim >= CARRY_IOU_MIN_SIM))
-    admin_pass = np.where(admin & loose, sim, -1.0)
+    user = np.array([o["assigned_by"] == "user" for o in olds], dtype=bool)[:, None]
+    iou_gated = np.where(sim >= CARRY_IOU_MIN_SIM, ious, 0.0)
+    loose = (sim >= CARRY_USER_SIM) | ((ious >= CARRY_USER_IOU) & (sim >= CARRY_IOU_MIN_SIM))
+    user_pass = np.where(user & loose, sim, -1.0)
     pairs: list[tuple[int, int]] = []
     used_old: set[int] = set()
     used_new: set[int] = set()
-    for matrix, thr in ((iou_gated, CARRY_IOU), (sim, CARRY_SIM), (admin_pass, CARRY_IOU_MIN_SIM)):
+    for matrix, thr in ((iou_gated, CARRY_IOU), (sim, CARRY_SIM), (user_pass, CARRY_IOU_MIN_SIM)):
         cand = np.argwhere(matrix >= thr)
         order = np.argsort(-matrix[cand[:, 0], cand[:, 1]], kind="stable") if len(cand) else []
         for k in order:
@@ -293,19 +376,18 @@ def recluster_unassigned(conn: sqlite3.Connection) -> int:
 
     Works in steps of about _RECLUSTER_CHUNK faces (whole items). Each step scores its faces with no
     write transaction open (holding only the index lock), then applies the result in one short
-    transaction that skips faces no longer unassigned/auto and people that no longer exist, so
-    uploads and admin actions are never blocked for long."""
+    transaction that skips faces no longer unassigned and people that no longer exist."""
     rows = conn.execute(
-        "SELECT id, media_id, quality FROM faces WHERE person_id IS NULL AND assigned_by = 'auto'"
+        "SELECT id, item_id, quality FROM faces WHERE person_id IS NULL AND assigned_by IN ('auto', 'guess')"
     ).fetchall()
     if not rows:
         return 0
-    by_media, media_order = _group_by_media(rows)
+    by_item, item_order = _group_by_item(rows)
     total = 0
     chunk: list[int] = []
-    for i, media_id in enumerate(media_order):
-        chunk.extend(r["id"] for r in by_media[media_id])
-        if len(chunk) >= _RECLUSTER_CHUNK or i == len(media_order) - 1:
+    for i, item_id in enumerate(item_order):
+        chunk.extend(r["id"] for r in by_item[item_id])
+        if len(chunk) >= _RECLUSTER_CHUNK or i == len(item_order) - 1:
             total += _recluster_chunk(conn, chunk)
             chunk = []
     log.info("recluster: %d of %d unassigned faces got a person", total, len(rows))
@@ -315,7 +397,6 @@ def recluster_unassigned(conn: sqlite3.Connection) -> int:
 def _recluster_chunk(conn: sqlite3.Connection, face_ids: list[int]) -> int:
     idx = get_index()
     empty: frozenset[int] = frozenset()
-    # 1. Score, outside any write transaction.
     with idx.lock:
         idx.sync(conn)
         eligible = _eligible(_face_rows(conn, face_ids), empty)
@@ -325,7 +406,6 @@ def _recluster_chunk(conn: sqlite3.Connection, face_ids: list[int]) -> int:
     pids = sorted({pid for opts in options.values() for pid, _ in opts})
     if not pids:
         return 0
-    # 2. Apply in a short transaction, re-checking what may have changed meanwhile.
     result: dict[int, int | None] = {}
     with tx(conn):
         alive: set[int] = set()
@@ -335,25 +415,40 @@ def _recluster_chunk(conn: sqlite3.Connection, face_ids: list[int]) -> int:
         still = _eligible(_face_rows(conn, list(options)), empty)
         if not still:
             return 0
-        by_media, media_order = _group_by_media(still)
-        used = _used_people(conn, media_order, {r["id"] for r in still})
+        by_item, item_order = _group_by_item(still)
+        used = _used_people(conn, item_order, {r["id"] for r in still})
         changed = 0
-        for media_id in media_order:
-            faces = by_media[media_id]
+        for item_id in item_order:
+            faces = by_item[item_id]
             opts = [[(pid, sc) for pid, sc in options[r["id"]] if pid in alive] for r in faces]
             # The index is not touched here: the next sync reloads it from the bumped version.
-            changed += _apply_media(conn, None, faces, opts, used[media_id], False, result)
+            changed += _apply_item(conn, None, faces, opts, used[item_id], False, result)
         if changed:
+            sync_bodies_to_faces(conn, list(by_item))
             bump_faces_version(conn)
     return changed
 
 
+def sync_bodies_to_faces(conn: sqlite3.Connection, item_ids: list[int]) -> int:
+    """Bodies that contain a face follow that face's person (unless the body is user-locked)."""
+    n = 0
+    for chunk in _chunks(sorted({int(i) for i in item_ids})):
+        marks = ",".join("?" * len(chunk))
+        n += conn.execute(
+            "UPDATE bodies SET person_id = (SELECT f.person_id FROM faces f WHERE f.id = bodies.face_id), "
+            "assigned_by = 'auto', guess_person_id = NULL, guess_score = NULL, guess_evidence = NULL "
+            f"WHERE item_id IN ({marks}) AND face_id IS NOT NULL AND assigned_by != 'user' "
+            "AND person_id IS NOT (SELECT f.person_id FROM faces f WHERE f.id = bodies.face_id)",
+            chunk,
+        ).rowcount
+    return n
+
+
+# ------------------------------------------------------------------ merge
 def merge_persons(conn: sqlite3.Connection, target_id: int, source_ids: list[int]) -> None:
-    """Move all faces and manual tags of source people to target, keep each face's assigned_by,
-    give target the first source name if target has none, delete the sources.
-    Linked profiles (person_links) move to the target after its own, in source order; a link the
-    target already has is skipped. No per-person limit here: a merge never drops links.
-    Raises ValueError if target is in sources or any id does not exist."""
+    """Move all faces, bodies, tags, open guesses and rejections of source people to target, keep each
+    face's assigned_by, give target the first source name (and cover) if it has none, delete the
+    sources. Raises ValueError if target is in sources or any id does not exist."""
     sources = list(dict.fromkeys(int(s) for s in source_ids))
     target_id = int(target_id)
     if not sources:
@@ -363,105 +458,83 @@ def merge_persons(conn: sqlite3.Connection, target_id: int, source_ids: list[int
     with tx(conn):
         marks = ",".join("?" * (len(sources) + 1))
         found = {r["id"]: r for r in conn.execute(
-            f"SELECT id, name, name_key FROM persons WHERE id IN ({marks})", [target_id, *sources]
+            f"SELECT id, name, name_key, cover_face_id FROM persons WHERE id IN ({marks})", [target_id, *sources]
         )}
         missing = [i for i in [target_id, *sources] if i not in found]
         if missing:
             raise ValueError(f"Unknown person id(s): {', '.join(map(str, missing))}")
-        smarks = ",".join("?" * len(sources))
-        conn.execute(f"UPDATE faces SET person_id = ? WHERE person_id IN ({smarks})", [target_id, *sources])
-        # Tags and "different people" decisions the target already has are claimed by the merge, so
-        # undoing the target's own tag or decision later keeps what the merge relies on.
-        for r in conn.execute(
-            f"SELECT media_id FROM media_tags WHERE person_id = ? AND media_id IN "
-            f"(SELECT media_id FROM media_tags WHERE person_id IN ({smarks}))", [target_id, *sources],
-        ).fetchall():
-            claim(conn, "media_tags", {"media_id": int(r[0]), "person_id": target_id}, int(r[0]))
-        for r in conn.execute(
-            "SELECT DISTINCT CASE WHEN person_a IN ({s}) THEN person_b ELSE person_a END AS other "
-            "FROM merge_dismissals WHERE person_a IN ({s}) OR person_b IN ({s})".format(s=smarks),
-            [*sources, *sources, *sources],
-        ).fetchall():
-            other = int(r[0])
-            if other == target_id or other in sources:
-                continue
-            lo, hi = min(target_id, other), max(target_id, other)
-            if conn.execute("SELECT 1 FROM merge_dismissals WHERE person_a = ? AND person_b = ?", (lo, hi)).fetchone():
-                claim(conn, "merge_dismissals", {"person_a": lo, "person_b": hi})
+        s = ",".join("?" * len(sources))
+        conn.execute(f"UPDATE faces SET person_id = ? WHERE person_id IN ({s})", [target_id, *sources])
+        conn.execute(f"UPDATE bodies SET person_id = ? WHERE person_id IN ({s})", [target_id, *sources])
+        for table in ("faces", "bodies"):
+            conn.execute(f"UPDATE {table} SET guess_person_id = ? WHERE guess_person_id IN ({s})",
+                         [target_id, *sources])
+            # A guess for someone who now already is the box's person is moot.
+            conn.execute(
+                f"UPDATE {table} SET guess_person_id = NULL, guess_score = NULL, guess_evidence = NULL, "
+                "assigned_by = CASE WHEN assigned_by = 'guess' THEN 'auto' ELSE assigned_by END "
+                "WHERE guess_person_id = ? AND person_id IS NOT NULL",
+                (target_id,),
+            )
         conn.execute(
-            "INSERT OR IGNORE INTO media_tags(media_id, person_id, created_at) "
-            f"SELECT media_id, ?, MIN(created_at) FROM media_tags WHERE person_id IN ({smarks}) GROUP BY media_id",
+            "INSERT OR IGNORE INTO item_tags(item_id, person_id, source, created_at) "
+            f"SELECT item_id, ?, MIN(source), MIN(created_at) FROM item_tags WHERE person_id IN ({s}) GROUP BY item_id",
             [target_id, *sources],
         )
-        # "Different people" decisions against a source now apply to the merged person.
+        conn.execute(
+            "INSERT OR IGNORE INTO guess_rejections(kind, ref_id, person_id, created_at) "
+            f"SELECT kind, ref_id, ?, MIN(created_at) FROM guess_rejections WHERE person_id IN ({s}) "
+            "GROUP BY kind, ref_id",
+            [target_id, *sources],
+        )
         conn.execute(
             "INSERT OR IGNORE INTO merge_dismissals(person_a, person_b, created_at) "
             "SELECT MIN(?, other), MAX(?, other), MIN(created_at) FROM ("
             "  SELECT CASE WHEN person_a IN ({s}) THEN person_b ELSE person_a END AS other, created_at "
             "  FROM merge_dismissals WHERE person_a IN ({s}) OR person_b IN ({s})"
-            ") WHERE other != ? AND other NOT IN ({s}) GROUP BY other".format(s=smarks),
+            ") WHERE other != ? AND other NOT IN ({s}) GROUP BY other".format(s=s),
             [target_id, target_id, *sources, *sources, *sources, target_id, *sources],
         )
         target = found[target_id]
         now = now_iso()
         if target["name"] is None:
-            named = next((found[s] for s in sources if found[s]["name"] is not None), None)
+            named = next((found[x] for x in sources if found[x]["name"] is not None), None)
             if named is not None:
                 conn.execute(
-                    "UPDATE persons SET name = ?, name_key = ?, updated_at = ? WHERE id = ?",
-                    (named["name"], named["name_key"], now, target_id),
+                    "UPDATE persons SET name = ?, name_key = ? WHERE id = ?",
+                    (named["name"], named["name_key"], target_id),
                 )
-        _move_links(conn, target_id, sources, now)
+        if target["cover_face_id"] is None:
+            cover = next((found[x]["cover_face_id"] for x in sources if found[x]["cover_face_id"] is not None), None)
+            if cover is not None:
+                conn.execute("UPDATE persons SET cover_face_id = ? WHERE id = ?", (cover, target_id))
         conn.execute("UPDATE persons SET updated_at = ? WHERE id = ?", (now, target_id))
-        conn.execute(f"DELETE FROM persons WHERE id IN ({smarks})", sources)
+        conn.execute(f"DELETE FROM persons WHERE id IN ({s})", sources)
         bump_faces_version(conn)
     log.info("merged people %s into %d", sources, target_id)
 
 
-def _move_links(conn: sqlite3.Connection, target_id: int, sources: list[int], now: str) -> None:
-    """Copy the sources' linked profiles to target (call inside a tx, before the sources are
-    deleted; their own rows go with them by ON DELETE CASCADE)."""
-    pos = int(conn.execute(
-        "SELECT COALESCE(MAX(position), -1) FROM person_links WHERE person_id = ?", (target_id,)
-    ).fetchone()[0])
-    for sid in sources:
-        for r in conn.execute(
-            "SELECT kind, value, label, created_at FROM person_links WHERE person_id = ? ORDER BY position, id",
-            (sid,),
-        ).fetchall():
-            cur = conn.execute(
-                "INSERT OR IGNORE INTO person_links(person_id, kind, value, label, position, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (target_id, r["kind"], r["value"], r["label"], pos + 1, r["created_at"], now),
-            )
-            if cur.rowcount:
-                pos += 1
-            else:
-                have = conn.execute(
-                    "SELECT id FROM person_links WHERE person_id = ? AND kind = ? AND value = ?",
-                    (target_id, r["kind"], r["value"]),
-                ).fetchone()
-                if have is not None:
-                    claim(conn, "person_links", {"id": int(have[0])})
-
-
+# ------------------------------------------------------------------ suggestions
 def _co_occurring(conn: sqlite3.Connection) -> set[tuple[int, int]]:
-    """Pairs (a < b) of people who both have a face in the same photo."""
+    """Pairs (a < b) of people who are both in the same photo or document (faces, bodies or tags)."""
     return {
         (r[0], r[1])
         for r in conn.execute(
-            "SELECT DISTINCT a.person_id, b.person_id FROM faces a "
-            "JOIN faces b ON b.media_id = a.media_id AND b.person_id > a.person_id "
-            "JOIN media m ON m.id = a.media_id AND m.kind = 'image' "
-            "WHERE a.person_id IS NOT NULL"
+            "WITH present AS ("
+            "  SELECT item_id, person_id FROM faces WHERE person_id IS NOT NULL UNION "
+            "  SELECT item_id, person_id FROM bodies WHERE person_id IS NOT NULL UNION "
+            "  SELECT item_id, person_id FROM item_tags) "
+            "SELECT DISTINCT a.person_id, b.person_id FROM present a "
+            "JOIN present b ON b.item_id = a.item_id AND b.person_id > a.person_id "
+            "JOIN items i ON i.id = a.item_id AND i.kind != 'video'"
         )
     }
 
 
 def merge_suggestions(conn: sqlite3.Connection, limit: int = 30) -> list[tuple[int, int, float]]:
     """Pairs (a_id, b_id, similarity) with a_id < b_id, sorted by centroid cosine similarity desc,
-    similarity >= settings.suggest_threshold. Excludes hidden people, dismissed pairs
-    (merge_dismissals), and pairs that appear together in the same photo (they are different people)."""
+    similarity >= settings.suggest_threshold. Excludes dismissed pairs (merge_dismissals) and pairs
+    that appear together in one photo (they are different people)."""
     if limit <= 0:
         return []
     idx = get_index()
@@ -472,17 +545,9 @@ def merge_suggestions(conn: sqlite3.Connection, limit: int = 30) -> list[tuple[i
         if cached is None:
             pids, C = idx.centroids()
     if cached is None:
-        # Centroids and co-occurring pairs only change with faces/persons, so they are kept until
-        # the index changes (a new faces_version or an assignment).
         cached = (pids, C, _co_occurring(conn))
         idx.cache_put("suggestions", generation, cached)
     pids, C, co_occurring = cached  # type: ignore[misc]
-    if pids.size < 2:
-        return []
-    hidden = {r[0] for r in conn.execute("SELECT id FROM persons WHERE hidden != 0")}
-    if hidden:
-        keep = ~np.isin(pids, np.fromiter(hidden, dtype=np.int64))
-        pids, C = pids[keep], C[keep]
     if pids.size < 2:
         return []
     order = np.argsort(pids)
@@ -502,16 +567,16 @@ def merge_suggestions(conn: sqlite3.Connection, limit: int = 30) -> list[tuple[i
             continue
         sims = block[rows, cols]
         for k in np.argsort(-sims, kind="stable"):
-            s = float(sims[k])
-            if len(heap) >= limit and s <= heap[0][0]:
+            sv = float(sims[k])
+            if len(heap) >= limit and sv <= heap[0][0]:
                 break  # sorted desc: nothing later in this block can enter the heap
             a, b = int(pids[abs_rows[k]]), int(pids[cols[k]])
             if (a, b) in excluded:
                 continue
-            item = (s, -a, -b)
+            item = (sv, -a, -b)
             if len(heap) < limit:
                 heapq.heappush(heap, item)
             else:
                 heapq.heapreplace(heap, item)
     best = sorted(heap, key=lambda t: (-t[0], -t[1], -t[2]))
-    return [(-a, -b, float(s)) for s, a, b in best]
+    return [(-a, -b, float(sv)) for sv, a, b in best]

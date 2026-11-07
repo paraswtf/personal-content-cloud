@@ -1,9 +1,18 @@
-"""Near-duplicate detection and quality comparison.
+"""Near-duplicate detection and duplicate groups.
 
-CONTRACT (implemented by the ingest agent). Rules are in docs/SPEC.md section "Dedup".
-Exact duplicates (same sha256) never reach this module: they are caught by known_hashes.
+CONTRACT.
+- Exact duplicates (same sha256) never reach this module: ingest answers them from items.sha256.
+- find_similar(conn, info, fp, size_bytes) -> DedupDecision(action 'new' | 'link', target_id,
+  target_uid, detail): the closest live (not trashed) image or video that is the same picture or
+  recording. Nothing is ever replaced: everything uploaded is kept.
+- Groups: items.dup_group_id is the id of the group's best item (the best points at itself with
+  dup_role 'best'; the others have dup_role 'copy'). link_into_group(conn, new_id, target_id)
+  adds an item to the target's group and re-chooses the best by the quality ranking below;
+  regroup(conn, member_ids) re-chooses the best of a member set (after a delete, restore or purge)
+  and dissolves groups of one; set_best(conn, item_id) is the owner's manual choice. All of them
+  run inside the caller's transaction and bump search_version (copies are hidden from listings).
 
-Summary:
+Matching rules (thresholds below):
   images  candidates: kind='image', aspect ratio within 2%, hamming(phash) <= PHASH_MAX and
           hamming(dhash) <= DHASH_MAX; EXIF guard (both have DateTimeOriginal and they differ,
           or same second but both have SubSecTimeOriginal and it differs -> different shots);
@@ -13,7 +22,9 @@ Summary:
           median <= 10 and >= 75% of frames <= 14; capture-time guard (both have a creation
           time and they differ by more than max(2 s, duration) -> different recordings).
   Missing EXIF on either side is NOT evidence of a different shot (messaging apps strip it).
-  Hidden media are candidates too (a hidden item must not come back through a re-upload).
+Quality ranking (the best of a group): images by resolution (beyond 5%), then camera EXIF, then
+file size (beyond 10%) within a format family; videos by resolution, bitrate (15%), size (15%);
+ties keep the current best.
 """
 from __future__ import annotations
 
@@ -22,8 +33,9 @@ import logging
 import sqlite3
 import statistics
 from dataclasses import dataclass
-from typing import Literal
+from typing import Iterable, Literal
 
+from app.db import bump_search_version
 from app.media.hashing import Fingerprint, hamming, sig_diff
 from app.media.probe import MediaInfo, parse_taken_at
 
@@ -88,10 +100,10 @@ class QualityKey:
 
 @dataclass
 class DedupDecision:
-    action: Literal["new", "replace", "lower_quality"]
-    target_id: int | None = None  # media.id of the matched existing item
+    action: Literal["new", "link"]
+    target_id: int | None = None  # items.id of the matched existing item
     target_uid: str | None = None
-    detail: str = ""  # human-readable evidence, stored in superseded.detail and logs
+    detail: str = ""  # human-readable evidence, stored in items.dup_detail and logs
 
 
 def quality_key(info: MediaInfo, size_bytes: int) -> QualityKey:
@@ -106,7 +118,7 @@ def quality_key(info: MediaInfo, size_bytes: int) -> QualityKey:
 
 
 def quality_key_from_row(row: sqlite3.Row) -> QualityKey:
-    """Build a QualityKey from a media row (uses kind, width, height, size_bytes, ext, bitrate,
+    """Build a QualityKey from an items row (uses kind, width, height, size_bytes, ext, bitrate,
     camera, exif_datetime)."""
     return QualityKey(
         kind=row["kind"],
@@ -128,7 +140,7 @@ def _beyond(a: float, b: float, margin: float) -> int:
 
 
 def _compare(new: QualityKey, old: QualityKey) -> tuple[int, str]:
-    """compare_quality plus the deciding criterion, for logs and superseded.detail."""
+    """compare_quality plus the deciding criterion, for logs and items.dup_detail."""
     res = _beyond(new.pixels, old.pixels, RES_MARGIN)
     if res:
         return res, "resolution"
@@ -200,20 +212,19 @@ def _describe(key: QualityKey, width: int, height: int) -> str:
     return f"{width}x{height} {key.size_bytes} B{' camera EXIF' if key.has_camera_exif else ''}"
 
 
-def _decide(info: MediaInfo, size_bytes: int, row: sqlite3.Row, evidence: str) -> DedupDecision:
+def _link(info: MediaInfo, size_bytes: int, row: sqlite3.Row, evidence: str) -> DedupDecision:
     new_key = quality_key(info, size_bytes)
     old_key = quality_key_from_row(row)
     verdict, why = _compare(new_key, old_key)
-    action: Literal["replace", "lower_quality"] = "replace" if verdict > 0 else "lower_quality"
     if verdict > 0:
         outcome = f"incoming is better ({why})"
     elif verdict < 0:
-        outcome = f"kept copy is better ({why})"
+        outcome = f"existing copy is better ({why})"
     else:
-        outcome = "equivalent quality, kept the existing copy"
-    detail = (f"{evidence}; incoming {_describe(new_key, info.width, info.height)} vs kept "
-              f"{_describe(old_key, row['width'], row['height'])}: {outcome}")
-    return DedupDecision(action=action, target_id=int(row["id"]), target_uid=row["uid"], detail=detail)
+        outcome = "equivalent quality"
+    detail = (f"{evidence}; incoming {_describe(new_key, info.width or 0, info.height or 0)} vs "
+              f"{_describe(old_key, row['width'] or 0, row['height'] or 0)}: {outcome}")
+    return DedupDecision(action="link", target_id=int(row["id"]), target_uid=row["uid"], detail=detail[:500])
 
 
 def _rows_by_id(conn: sqlite3.Connection, ids: list[int], columns: str) -> list[sqlite3.Row]:
@@ -221,24 +232,24 @@ def _rows_by_id(conn: sqlite3.Connection, ids: list[int], columns: str) -> list[
     for i in range(0, len(ids), 500):
         chunk = ids[i:i + 500]
         marks = ",".join("?" * len(chunk))
-        out.extend(conn.execute(f"SELECT {columns} FROM media WHERE id IN ({marks})", chunk).fetchall())
+        out.extend(conn.execute(f"SELECT {columns} FROM items WHERE id IN ({marks})", chunk).fetchall())
     return out
 
 
 _ROW_COLUMNS = ("id, uid, kind, width, height, size_bytes, ext, bitrate, camera, exif_datetime, exif_subsec, "
-                "phash, dhash, sig, frames, duration_s")
+                "phash, dhash, sig, frames, duration_s, taken_at")
 
 
 def _find_image(conn: sqlite3.Connection, info: MediaInfo, fp: Fingerprint, size_bytes: int) -> DedupDecision:
-    aspect = _aspect(info.width, info.height)
+    aspect = _aspect(info.width or 0, info.height or 0)
     if aspect <= 0 or not fp.phash:
         return DedupDecision(action="new", detail="no usable fingerprint")
     lo, hi = aspect / (1 + IMAGE_ASPECT_TOL) * 0.999, aspect * (1 + IMAGE_ASPECT_TOL) * 1.001
     # Cheap pass: aspect in SQL, hashes in Python; only survivors load the signature.
     gated: dict[int, tuple[int, int]] = {}
     for r in conn.execute(
-        "SELECT id, width, height, phash, dhash FROM media WHERE kind = 'image' AND phash IS NOT NULL "
-        "AND height > 0 AND CAST(width AS REAL) / height BETWEEN ? AND ?",
+        "SELECT id, width, height, phash, dhash FROM items WHERE kind = 'image' AND deleted_at IS NULL "
+        "AND phash IS NOT NULL AND height > 0 AND CAST(width AS REAL) / height BETWEEN ? AND ?",
         (lo, hi),
     ):
         if not _aspect_close(aspect, _aspect(r["width"], r["height"]), IMAGE_ASPECT_TOL):
@@ -258,11 +269,11 @@ def _find_image(conn: sqlite3.Connection, info: MediaInfo, fp: Fingerprint, size
         dp, dd = gated[int(row["id"])]
         why_not = _different_shot(info, row)
         if why_not:
-            log.info("dedup: media %s passes the hash gate but %s", row["uid"], why_not)
+            log.info("dedup: item %s passes the hash gate but %s", row["uid"], why_not)
             continue
         mean, block = sig_diff(fp.sig, row["sig"] or b"")
         if mean > SIG_MEAN_MAX or block > SIG_BLOCK_MAX:
-            log.info("dedup: media %s passes the hash gate (phash %d, dhash %d) but pixels differ "
+            log.info("dedup: item %s passes the hash gate (phash %d, dhash %d) but pixels differ "
                      "(mean %.1f, block %.1f)", row["uid"], dp, dd, mean, block)
             continue
         evidence = f"phash {dp}, dhash {dd}, pixel diff mean {mean:.1f} block {block:.1f}"
@@ -270,7 +281,7 @@ def _find_image(conn: sqlite3.Connection, info: MediaInfo, fp: Fingerprint, size
             best = (block, dp, row, evidence)
     if best is None:
         return DedupDecision(action="new", detail="similar photos are different shots")
-    return _decide(info, size_bytes, best[2], best[3])
+    return _link(info, size_bytes, best[2], best[3])
 
 
 def _frame_distances(a: list[str], b: list[str]) -> list[int]:
@@ -279,14 +290,14 @@ def _frame_distances(a: list[str], b: list[str]) -> list[int]:
 
 def _find_video(conn: sqlite3.Connection, info: MediaInfo, fp: Fingerprint, size_bytes: int) -> DedupDecision:
     duration = info.duration_s or 0.0
-    aspect = _aspect(info.width, info.height)
+    aspect = _aspect(info.width or 0, info.height or 0)
     frames = fp.frames or []
     if duration <= 0 or aspect <= 0 or sum(1 for f in frames if f) < VIDEO_MIN_FRAMES:
         return DedupDecision(action="new", detail="no usable fingerprint")
     best: tuple[float, float, sqlite3.Row, str] | None = None
     for row in conn.execute(
-        "SELECT id, uid, duration_s, width, height, frames, taken_at FROM media WHERE kind = 'video' "
-        "AND frames IS NOT NULL AND duration_s > 0"
+        "SELECT id, uid, duration_s, width, height, frames, taken_at FROM items WHERE kind = 'video' "
+        "AND deleted_at IS NULL AND frames IS NOT NULL AND duration_s > 0"
     ):
         other = float(row["duration_s"])
         if abs(other - duration) > max(VIDEO_DURATION_ABS_S, VIDEO_DURATION_REL * max(other, duration)):
@@ -319,15 +330,89 @@ def _find_video(conn: sqlite3.Connection, info: MediaInfo, fp: Fingerprint, size
     full = _rows_by_id(conn, [int(best[2]["id"])], _ROW_COLUMNS)
     if not full:
         return DedupDecision(action="new", detail="match disappeared")
-    return _decide(info, size_bytes, full[0], best[3])
+    return _link(info, size_bytes, full[0], best[3])
 
 
-def find_duplicate(conn: sqlite3.Connection, info: MediaInfo, fp: Fingerprint, size_bytes: int) -> DedupDecision:
-    """Search stored media for a near-duplicate of the incoming file and decide what to do.
-
-    action 'new' (no match), 'replace' (match, incoming is better) or 'lower_quality'
-    (match, existing is better or equal). If several candidates pass, use the closest one.
-    """
+def find_similar(conn: sqlite3.Connection, info: MediaInfo, fp: Fingerprint | None, size_bytes: int) -> DedupDecision:
+    """Search live items for a near-duplicate of the incoming file. 'link' with the closest match,
+    or 'new'. Only images and videos are compared (documents and other files are never linked)."""
+    if fp is None or info.kind not in ("image", "video"):
+        return DedupDecision(action="new", detail="not compared")
     if info.kind == "image":
         return _find_image(conn, info, fp, size_bytes)
     return _find_video(conn, info, fp, size_bytes)
+
+
+# ------------------------------------------------------------------ groups
+_GROUP_COLUMNS = ("id, uid, kind, width, height, size_bytes, ext, bitrate, camera, exif_datetime, deleted_at, "
+                  "dup_group_id, dup_role")
+
+
+def group_member_ids(conn: sqlite3.Connection, item_id: int) -> list[int]:
+    """Ids of every item in the item's duplicate group (the item itself included; trashed ones too)."""
+    row = conn.execute("SELECT dup_group_id FROM items WHERE id = ?", (item_id,)).fetchone()
+    if row is None:
+        return []
+    if row["dup_group_id"] is None:
+        return [int(item_id)]
+    ids = {int(r[0]) for r in conn.execute("SELECT id FROM items WHERE dup_group_id = ?", (row["dup_group_id"],))}
+    ids.add(int(item_id))
+    return sorted(ids)
+
+
+def _apply(conn: sqlite3.Connection, ids: list[int], best_id: int | None) -> None:
+    for i in range(0, len(ids), 500):
+        chunk = ids[i:i + 500]
+        marks = ",".join("?" * len(chunk))
+        if best_id is None:
+            conn.execute(f"UPDATE items SET dup_group_id = NULL, dup_role = NULL WHERE id IN ({marks})", chunk)
+        else:
+            conn.execute(
+                f"UPDATE items SET dup_group_id = ?, dup_role = CASE WHEN id = ? THEN 'best' ELSE 'copy' END "
+                f"WHERE id IN ({marks})",
+                [best_id, best_id, *chunk],
+            )
+
+
+def regroup(conn: sqlite3.Connection, member_ids: Iterable[int]) -> int | None:
+    """Re-choose the best item of a duplicate group made of member_ids (call inside a tx). The
+    best is chosen among live members (all members when every one is in the trash): the current
+    best stays unless another is clearly better. A group of fewer than two items is dissolved.
+    Returns the best id, or None when there is no group."""
+    ids = sorted({int(i) for i in member_ids})
+    rows = _rows_by_id(conn, ids, _GROUP_COLUMNS) if ids else []
+    ids = [int(r["id"]) for r in rows]
+    if len(rows) < 2:
+        if ids:
+            _apply(conn, ids, None)
+            bump_search_version(conn)
+        return None
+    live = [r for r in rows if r["deleted_at"] is None] or rows
+    best = next((r for r in live if r["dup_role"] == "best" and r["dup_group_id"] == r["id"]), None)
+    if best is None:
+        best = min(live, key=lambda r: int(r["id"]))
+    for r in live:
+        if r is not best and compare_quality(quality_key_from_row(r), quality_key_from_row(best)) > 0:
+            best = r
+    _apply(conn, ids, int(best["id"]))
+    bump_search_version(conn)
+    return int(best["id"])
+
+
+def link_into_group(conn: sqlite3.Connection, new_id: int, target_id: int, detail: str = "") -> int | None:
+    """Put new_id into target_id's duplicate group (creating it) and re-choose the best."""
+    members = set(group_member_ids(conn, target_id))
+    members.add(int(new_id))
+    if detail:
+        conn.execute("UPDATE items SET dup_detail = ? WHERE id = ?", (detail[:500], new_id))
+    return regroup(conn, members)
+
+
+def set_best(conn: sqlite3.Connection, item_id: int) -> bool:
+    """The owner's choice of the group's best item. False when the item is in no group."""
+    members = group_member_ids(conn, item_id)
+    if len(members) < 2:
+        return False
+    _apply(conn, members, int(item_id))
+    bump_search_version(conn)
+    return True

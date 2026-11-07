@@ -1,8 +1,16 @@
 """Identify uploaded files and read their metadata.
 
-CONTRACT (implemented by the media agent). Only real photos/videos are accepted, judged
-by content (magic bytes + a successful decode/probe), never by file name or browser MIME.
-SVG, HTML, PDF, archives etc. are rejected.
+CONTRACT. Every non-empty file is accepted and kept byte for byte; probing only decides how it is
+processed. Kinds, judged by content (magic bytes plus a successful decode or probe), with the
+original file name used only where content cannot tell (plain text, some camera RAW formats):
+  image     JPEG, PNG, GIF, WebP, HEIC/HEIF, AVIF, TIFF, BMP, camera RAW (app.media.raw)
+  video     MP4/M4V/3GP/MOV, WebM/MKV, AVI, MPEG-TS/M2TS
+  pdf       PDF (app.media.documents)
+  document  DOCX, XLSX, PPTX, plain text / Markdown / CSV (app.media.documents)
+  other     anything else, and photos/videos/documents that do not decode: stored, no preview.
+probe(path, filename=None) -> MediaInfo | None: None only for an empty or unreadable file.
+Raises ToolFailure when ffprobe/ffmpeg could not run (no verdict on the file: retry later).
+ValueError inside the probe_* helpers means a bad file (probe() then falls back to 'other').
 """
 from __future__ import annotations
 
@@ -22,11 +30,16 @@ from PIL import Image
 from app.config import settings
 # Importing images registers the HEIF opener and sets the decompression-bomb limit.
 from app.media import images as _images
+from app.media import raw as _raw
 
 log = logging.getLogger(__name__)
 
-# Value for the upload page's <input accept>. Browsers often report HEIC/MOV oddly, so list extensions too.
-ACCEPT_ATTR = "image/*,video/*,.heic,.heif,.avif,.mov,.m4v,.mkv,.3gp,.mts,.m2ts"
+# Value for the upload page's <input accept>. Any file is accepted; the list helps pickers show the
+# usual ones. Browsers often report HEIC/MOV oddly, so list extensions too.
+ACCEPT_ATTR = ("image/*,video/*,application/pdf,.heic,.heif,.avif,.mov,.m4v,.mkv,.3gp,.mts,.m2ts,"
+               ".dng,.cr2,.cr3,.nef,.arw,.raf,.orf,.rw2,.pef,.srw,.pdf,.docx,.xlsx,.pptx,.txt,.md,.csv")
+OTHER_MIME = "application/octet-stream"
+_SAFE_EXT = re.compile(r"^\.[a-z0-9]{1,8}$")
 
 FFPROBE_TIMEOUT_S = 60
 DECODE_CHECK_TIMEOUT_S = 60
@@ -43,12 +56,14 @@ class ToolFailure(RuntimeError):
 
 @dataclass
 class MediaInfo:
-    kind: Literal["image", "video"]
-    mime: str  # canonical MIME from sniffing, e.g. 'image/jpeg', 'image/heic', 'video/mp4', 'video/quicktime'
+    kind: Literal["image", "video", "pdf", "document", "other"]
+    mime: str  # canonical MIME from sniffing, e.g. 'image/jpeg', 'video/mp4', 'application/pdf';
+    #            'application/octet-stream' for 'other' files of unknown type
     ext: str  # canonical storage extension, lowercase with dot: .jpg .png .webp .gif .heic .avif .tif .bmp
-    #           .mp4 .mov .m4v .webm .mkv .avi .3gp .mts
-    width: int  # display orientation (EXIF orientation / video rotation applied)
-    height: int
+    #           .dng .cr2 ... .mp4 .mov .m4v .webm .mkv .avi .3gp .mts .pdf .docx .xlsx .pptx .txt .md .csv;
+    #           for 'other' the uploaded name's suffix when it is safe, else .bin
+    width: int | None  # display orientation (EXIF orientation / video rotation applied); for documents
+    height: int | None  # the page 1 render size; None for 'other'
     duration_s: float | None = None
     bitrate: int | None = None  # bits/s; video: format bit_rate or size*8/duration
     video_codec: str | None = None  # ffprobe codec_name: h264, hevc, vp9, av1, ...
@@ -59,7 +74,7 @@ class MediaInfo:
     # ffmpeg's `-display_rotation 90` (counter-clockwise) therefore probes as 270
     taken_at: str | None = None  # UTC, same format as util.now_iso ('YYYY-MM-DDTHH:MM:SS.000Z'): EXIF
     #           DateTimeOriginal [+OffsetTimeOriginal] or video creation time; naive times are read in
-    #           settings.event_timezone
+    #           settings.local_timezone
     exif_datetime: str | None = None  # raw 'YYYY:MM:DD HH:MM:SS' (images)
     exif_subsec: str | None = None  # raw SubSecTimeOriginal (images)
     camera: str | None = None  # 'Make Model' trimmed (just Model when it starts with the make), None if absent
@@ -68,10 +83,23 @@ class MediaInfo:
     gps_lat: float | None = None  # capture position, decimal degrees (EXIF GPS IFD / ISO 6709 video tags)
     gps_lon: float | None = None
     gps_alt: float | None = None  # metres above sea level (negative below)
+    page_count: int | None = None  # pdf / document: pages (logical pages for office files)
+    raw: bool = False  # camera RAW (decoded through app.media.raw)
+    reason: str | None = None  # 'other' files that sniffed as a known type but did not decode: why
 
     @property
     def pixels(self) -> int:
-        return int(self.width) * int(self.height)
+        return int(self.width or 0) * int(self.height or 0)
+
+    @property
+    def text_capable(self) -> bool:
+        """The file itself carries text to extract (PDF text layer, office or plain text)."""
+        return self.kind in ("pdf", "document")
+
+    @property
+    def visual(self) -> bool:
+        """Has pixels to preview and analyse (images and videos)."""
+        return self.kind in ("image", "video")
 
 
 # ------------------------------------------------------------------ sniffing
@@ -182,8 +210,11 @@ def _is_ts(data: bytes) -> bool:
     return len(data) >= 389 and data[4] == data[196] == data[388] == 0x47
 
 
-def sniff(path: Path) -> tuple[str, str, str] | None:
-    """Return (kind, mime, ext) from the file's leading bytes, or None if unsupported.
+def sniff(path: Path, filename: str | None = None) -> tuple[str, str, str] | None:
+    """Return (kind, mime, ext) from the file's leading bytes, or None if not a known type.
+
+    Order: camera RAW (before TIFF and ftyp, which RAW formats reuse), images and videos, then
+    documents (PDF, office zip, plain text by the file name's extension).
 
     Must recognise: JPEG, PNG, GIF, WebP, HEIC/HEIF (ftyp heic/heix/hevc/heim/heis/hevm/hevs/mif1/msf1),
     AVIF (ftyp avif/avis), TIFF, BMP; MP4/M4V/3GP/MOV (ftyp brands, or QuickTime 'moov'/'mdat'/'wide'
@@ -196,8 +227,20 @@ def sniff(path: Path) -> tuple[str, str, str] | None:
             data = f.read(SNIFF_BYTES)
     except OSError:
         return None
-    if len(data) < 12:
+    if not data:
         return None
+    raw = _raw.sniff_raw(data, filename)
+    if raw is not None:
+        return raw
+    media = _sniff_media(data) if len(data) >= 12 else None
+    if media is not None:
+        return media
+    from app.media import documents
+
+    return documents.sniff_document(data, Path(path), filename)
+
+
+def _sniff_media(data: bytes) -> tuple[str, str, str] | None:
     if data[:3] == b"\xff\xd8\xff":
         return _JPEG
     if data[:8] == b"\x89PNG\r\n\x1a\n":
@@ -369,7 +412,7 @@ def read_gps(path: Path) -> Gps | None:
     positions were read): image headers / EXIF only, or one ffprobe run without a decode check.
     None if the file has none or cannot be read; ToolFailure when ffprobe could not run."""
     kme = sniff(path)
-    if kme is None:
+    if kme is None or kme[0] not in ("image", "video") or kme[2] in _raw.RAW_EXTS:
         return None
     if kme[0] == "image":
         _images.register_heif()
@@ -410,15 +453,15 @@ _TAKEN = re.compile(r"^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2}):(\d{2})(?:\.\d
 
 def _event_tz() -> Any:
     try:
-        return ZoneInfo(settings.event_timezone or "UTC")
+        return ZoneInfo(settings.local_timezone or "UTC")
     except (ZoneInfoNotFoundError, ValueError):
-        log.warning("unknown EVENT_TIMEZONE %r, reading naive capture times as UTC", settings.event_timezone)
+        log.warning("unknown LOCAL_TIMEZONE %r, reading naive capture times as UTC", settings.local_timezone)
         return timezone.utc
 
 
 def parse_taken_at(value: str | None) -> datetime | None:
     """Aware datetime from a stored or probed capture time ('Z', '+05:30' or naive, which is read in
-    settings.event_timezone). None if missing or malformed."""
+    settings.local_timezone). None if missing or malformed."""
     if not value:
         return None
     m = _TAKEN.match(value.strip())
@@ -464,6 +507,48 @@ def _parse_exif_datetime(raw: str | None) -> str | None:
     return dt.strftime("%Y-%m-%dT%H:%M:%S")
 
 
+def _exif_fields(exif: Any) -> dict[str, Any]:
+    """camera, capture time and GPS from a Pillow Exif mapping."""
+    make = _text(exif.get(0x010F))
+    model = _text(exif.get(0x0110))
+    if make and model and model.casefold().startswith(make.split()[0].casefold()):
+        make = None  # "Canon" + "Canon EOS R6", "NIKON CORPORATION" + "NIKON D750": the model says it
+    camera = " ".join(x for x in (make, model) if x) or None
+    try:
+        sub = exif.get_ifd(0x8769)
+    except Exception:  # malformed EXIF sub-IFD
+        sub = {}
+    exif_datetime = _text(sub.get(0x9003))
+    taken_at = _parse_exif_datetime(exif_datetime)
+    if taken_at is None:
+        exif_datetime = None
+        taken_at = _parse_exif_datetime(_text(sub.get(0x9004)))  # DateTimeDigitized
+    if taken_at is None:
+        taken_at = _parse_exif_datetime(_text(exif.get(0x0132)))  # DateTime (RAW and edited files)
+    subsec = _text(sub.get(0x9291))
+    if subsec is not None and not subsec.isdigit():
+        subsec = None
+    offset = _text(sub.get(0x9011))
+    if taken_at and offset and _OFFSET.match(offset):
+        taken_at += offset
+    gps = _exif_gps_of(exif)
+    return dict(
+        camera=camera, taken_at=normalize_taken_at(taken_at), exif_datetime=exif_datetime,
+        exif_subsec=subsec if exif_datetime else None,
+        gps_lat=gps[0] if gps else None, gps_lon=gps[1] if gps else None, gps_alt=gps[2] if gps else None,
+    )
+
+
+def probe_raw(path: Path, kind_mime_ext: tuple[str, str, str]) -> MediaInfo:
+    """Camera RAW through LibRaw (dimensions with the camera's flip applied) plus EXIF when the
+    container or its embedded preview carries it. ValueError if LibRaw cannot read the file."""
+    kind, mime, ext = kind_mime_ext
+    width, height, exif = _raw.probe_raw(path, kind_mime_ext)
+    if width * height > _images.MAX_PIXELS:
+        raise ValueError(f"image too large ({width}x{height})")
+    return MediaInfo(kind="image", mime=mime, ext=ext, width=width, height=height, raw=True, **_exif_fields(exif))
+
+
 def probe_image(path: Path, kind_mime_ext: tuple[str, str, str]) -> MediaInfo:
     """Decode headers with Pillow (+ pillow-heif) and read EXIF. Raises ValueError if undecodable.
 
@@ -471,6 +556,8 @@ def probe_image(path: Path, kind_mime_ext: tuple[str, str, str]) -> MediaInfo:
     """
     _images.register_heif()
     kind, mime, ext = kind_mime_ext
+    if ext in _raw.RAW_EXTS:
+        return probe_raw(path, kind_mime_ext)
     try:
         with Image.open(path) as im:
             width, height = im.size
@@ -499,35 +586,9 @@ def probe_image(path: Path, kind_mime_ext: tuple[str, str, str]) -> MediaInfo:
     if orientation >= 5:
         width, height = height, width
 
-    make = _text(exif.get(0x010F))
-    model = _text(exif.get(0x0110))
-    if make and model and model.casefold().startswith(make.split()[0].casefold()):
-        make = None  # "Canon" + "Canon EOS R6", "NIKON CORPORATION" + "NIKON D750": the model says it
-    camera = " ".join(x for x in (make, model) if x) or None
-
-    try:
-        sub = exif.get_ifd(0x8769)
-    except Exception:  # malformed EXIF sub-IFD
-        sub = {}
-    exif_datetime = _text(sub.get(0x9003))
-    taken_at = _parse_exif_datetime(exif_datetime)
-    if taken_at is None:
-        exif_datetime = None
-        taken_at = _parse_exif_datetime(_text(sub.get(0x9004)))  # DateTimeDigitized
-    subsec = _text(sub.get(0x9291))
-    if subsec is not None and not subsec.isdigit():
-        subsec = None
-    offset = _text(sub.get(0x9011))
-    if taken_at and offset and _OFFSET.match(offset):
-        taken_at += offset
-    taken_at = normalize_taken_at(taken_at)
-    gps = _exif_gps_of(exif)
-
     return MediaInfo(
-        kind="image", mime=mime, ext=ext, width=width, height=height, taken_at=taken_at,
-        exif_datetime=exif_datetime, exif_subsec=subsec if exif_datetime else None, camera=camera,
-        orientation=orientation, animated=animated,
-        gps_lat=gps[0] if gps else None, gps_lon=gps[1] if gps else None, gps_alt=gps[2] if gps else None,
+        kind="image", mime=mime, ext=ext, width=width, height=height, orientation=orientation,
+        animated=animated, **_exif_fields(exif),
     )
 
 
@@ -706,18 +767,54 @@ def probe_video(path: Path, kind_mime_ext: tuple[str, str, str]) -> MediaInfo:
     )
 
 
-def probe(path: Path) -> MediaInfo | None:
-    """sniff + probe_image/probe_video. None if unsupported or undecodable (never raises for bad input).
+def probe_document(path: Path, kind_mime_ext: tuple[str, str, str]) -> MediaInfo:
+    """PDF / office / plain text: page count and page 1 render size. ValueError if unreadable."""
+    from app.media import documents
+
+    kind, mime, ext = kind_mime_ext
+    pages, width, height = documents.probe_document(path, kind, ext)
+    return MediaInfo(kind=kind, mime=mime, ext=ext, width=width, height=height, page_count=pages)  # type: ignore[arg-type]
+
+
+def other_ext(filename: str | None) -> str:
+    """Storage extension for an 'other' file: the uploaded name's suffix when it is short and plain
+    (letters and digits), else '.bin'."""
+    name = (filename or "").replace("\\", "/").rsplit("/", 1)[-1]
+    if "." in name:
+        ext = "." + name.rsplit(".", 1)[-1].lower()
+        if _SAFE_EXT.match(ext):
+            return ext
+    return ".bin"
+
+
+def other_info(filename: str | None, kme: tuple[str, str, str] | None = None, reason: str | None = None) -> MediaInfo:
+    """MediaInfo for a file kept without previews. A file that sniffed as a known type keeps that
+    type's MIME and extension (it is what the bytes claim to be); unknown files are octet-stream."""
+    if kme is not None:
+        return MediaInfo(kind="other", mime=kme[1], ext=kme[2], width=None, height=None, reason=reason)
+    return MediaInfo(kind="other", mime=OTHER_MIME, ext=other_ext(filename), width=None, height=None, reason=reason)
+
+
+def probe(path: Path, filename: str | None = None) -> MediaInfo | None:
+    """sniff + the matching probe. None only for an empty or unreadable file. A file of a known
+    type that does not decode, and any file of an unknown type, comes back as kind 'other'.
     Raises ToolFailure when ffprobe/ffmpeg could not run: that is no verdict on the file."""
     try:
-        kme = sniff(path)
-        if kme is None:
+        if Path(path).stat().st_size <= 0:
             return None
+    except OSError:
+        return None
+    kme = sniff(path, filename)
+    if kme is None:
+        return other_info(filename)
+    try:
         if kme[0] == "image":
             return probe_image(path, kme)
-        return probe_video(path, kme)
+        if kme[0] == "video":
+            return probe_video(path, kme)
+        return probe_document(path, kme)
     except ToolFailure:
         raise
-    except Exception as e:  # bad input must never raise
-        log.info("probe rejected %s: %s", path, e)
-        return None
+    except Exception as e:  # a damaged file is still kept, just without previews
+        log.info("probe: %s sniffed as %s but did not decode (%s); keeping it as 'other'", path, kme[1], e)
+        return other_info(filename, kme, reason=str(e)[:200])

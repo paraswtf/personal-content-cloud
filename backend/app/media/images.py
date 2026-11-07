@@ -1,7 +1,11 @@
 """Photo decoding and derivative images (thumbnails, large and small previews).
 
-CONTRACT (implemented by the media agent). Originals are never modified; everything here
-reads them and writes WebP derivatives atomically (temp file in the same dir + os.replace).
+CONTRACT. Originals are never modified; everything here reads them and writes WebP derivatives
+atomically (temp file in the same dir + os.replace).
+- load_oriented(path, max_side=None, *, raw=None) -> RGB PIL image, EXIF orientation applied.
+  Camera RAW files (by extension, or raw=True for files without one) go through app.media.raw.
+- make_image_derivatives(img, thumb_path, preview_path, preview_small_path)
+- save_webp(img, path, max_side, quality); to_bgr(img) -> contiguous HxWx3 uint8 BGR array.
 """
 from __future__ import annotations
 
@@ -63,13 +67,17 @@ def _flatten_rgb(im: Image.Image) -> Image.Image:
     return im.convert("RGB")
 
 
-def load_oriented(path: Path, max_side: int | None = None) -> Image.Image:
+def load_oriented(path: Path, max_side: int | None = None, *, raw: bool | None = None) -> Image.Image:
     """Open a photo as RGB with EXIF orientation applied (ImageOps.exif_transpose).
 
     Animated images: first frame. Transparency is flattened onto white. If max_side is given,
     downscale (use JPEG draft mode when possible) so the longer side <= max_side.
-    Raises ValueError if the file cannot be decoded.
+    Raises ValueError if the file cannot be decoded. RAW files are demosaiced at half size.
     """
+    from app.media import raw as raw_media
+
+    if raw or (raw is None and raw_media.is_raw_path(Path(path))):
+        return raw_media.load_raw(Path(path), max_side)
     register_heif()
     try:
         with Image.open(path) as im:

@@ -1,0 +1,656 @@
+// Full-screen viewer overlay for photos, videos and documents: face and body boxes with person
+// guesses, prev/next (keys, buttons, swipe), the info panel, downloads of the original, and a
+// document mode with the page viewer. `vault` shows vault items (every request carries vault=1).
+import { useCallback, useEffect, useMemo, useRef, useState, type TouchEvent } from 'react'
+import { createPortal } from 'react-dom'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import clsx from 'clsx'
+import { ChevronLeft, ChevronRight, Info, Loader2, Pencil, ScanFace, Star, X } from 'lucide-react'
+import { api, ApiError } from '../lib/api'
+import type { ItemDetail } from '../lib/types'
+import { formatDuration, personName } from '../lib/format'
+import { useConfig } from '../lib/hooks'
+import { vaultify, withVault } from '../lib/preview'
+import { ConfirmModal, lockScroll } from './ui'
+import { errorMessage } from './admin/adminHooks'
+import DocumentStage, { FileCard } from './viewer/DocumentStage'
+import DownloadMenu from './viewer/DownloadMenu'
+import FaceEditor from './viewer/FaceEditor'
+import InfoPanel from './viewer/InfoPanel'
+import PhotoStage from './viewer/PhotoStage'
+import VideoPreparing from './viewer/VideoPreparing'
+import VideoStage, { currentFrameTime, posterTime } from './viewer/VideoStage'
+import { boxKey, findBox, videoBoxes, type BoxKind, type BoxTarget } from './viewer/boxes'
+import { useGuessActions } from './viewer/useGuessActions'
+import { useOnScreenFaces } from './viewer/useOnScreenFaces'
+import { seekToFrame } from './viewer/videoSeek'
+import { darkButton, findCachedItem, iconButton, useInvalidateItem } from './viewer/shared'
+
+export interface ViewerProps {
+  uid: string
+  onClose: () => void
+  onPrev?: () => void
+  onNext?: () => void
+  /** `index` is zero-based (shown as index + 1); `total` is the size of the whole list. */
+  position?: { index: number; total: number }
+  /** Video only: open the player paused at this second (a search hit's best-matching moment). */
+  startAt?: number | null
+  /** The item lives in the vault: detail, files and text are requested with vault=1. */
+  vault?: boolean
+  /** 'document' opens the info panel with the document card first (from the documents page). */
+  mode?: 'document' | null
+}
+
+// Remembered for the rest of the visit so prev/next and reopening keep the choice.
+let rememberFaces = true
+let rememberInfo: boolean | null = null
+
+function isTyping(el: EventTarget | null): boolean {
+  if (!(el instanceof HTMLElement)) return false
+  return el.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(el.tagName)
+}
+
+function VideoChips({
+  targets,
+  editingKey,
+  activeKey,
+  onSeek,
+  onEdit,
+}: {
+  targets: BoxTarget[]
+  editingKey: string | null
+  activeKey: string | null
+  onSeek: (t: BoxTarget) => void
+  onEdit: (t: BoxTarget, anchor: HTMLElement) => void
+}) {
+  if (!targets.length) return null
+  return (
+    <div className="shrink-0 border-t border-white/10 px-2 py-2">
+      <ul className="flex gap-2 overflow-x-auto overscroll-x-contain px-1 pb-1" aria-label="People in this video" data-no-swipe>
+        {targets.map((t) => {
+          const key = boxKey(t)
+          const b = t.box
+          const name = b.person ? personName(b.person) : b.guess ? `${personName(b.guess.person)}?` : 'Not tagged'
+          return (
+            <li
+              key={key}
+              className={clsx(
+                'flex shrink-0 items-center rounded-full',
+                activeKey === key ? 'bg-white/25' : 'bg-white/10',
+                editingKey === key ? 'ring-2 ring-accent' : activeKey === key && 'ring-2 ring-white/80',
+                !b.person && (b.guess ? 'outline outline-1 outline-amber-300' : 'outline outline-1 outline-dashed outline-amber-300/70'),
+              )}
+            >
+              <button
+                type="button"
+                onClick={() => onSeek(t)}
+                aria-pressed={activeKey === key}
+                className="flex h-10 items-center gap-2 rounded-full pl-1 pr-3 text-sm text-white hover:bg-white/10"
+                aria-label={`Show the frame at ${formatDuration(b.frame_time_s)}, ${name}`}
+              >
+                <img src={b.url} alt="" className="size-8 rounded-full object-cover" />
+                <span className={clsx('max-w-[9rem] truncate', b.guess && !b.person && 'text-amber-200')}>{name}</span>
+                <span className="text-xs tabular-nums text-white/55">{formatDuration(b.frame_time_s)}</span>
+              </button>
+              <button
+                type="button"
+                onClick={(e) => onEdit(t, e.currentTarget)}
+                className="-ml-1 flex size-10 items-center justify-center rounded-full text-white/60 hover:bg-white/10 hover:text-white"
+                aria-label={b.person ? `Edit, tagged as ${name}` : 'Tag this person'}
+              >
+                <Pencil className="size-4" aria-hidden />
+              </button>
+            </li>
+          )
+        })}
+      </ul>
+    </div>
+  )
+}
+
+export default function Viewer({ uid, onClose, onPrev, onNext, position, startAt = null, vault = false, mode = null }: ViewerProps) {
+  const qc = useQueryClient()
+  const config = useConfig()
+  const rootRef = useRef<HTMLDivElement>(null)
+  const videoRef = useRef<HTMLVideoElement>(null)
+  const frameTimeRef = useRef<number | null>(null)
+  const seekCtl = useRef<AbortController | null>(null)
+  const touch = useRef<{ x: number; y: number; multi: boolean; ignore: boolean } | null>(null)
+
+  const [showFaces, setShowFaces] = useState(rememberFaces)
+  const [showInfo, setShowInfo] = useState<boolean>(
+    () => mode === 'document' || (rememberInfo ?? (typeof window !== 'undefined' && window.matchMedia('(min-width: 1024px)').matches)),
+  )
+  const [editing, setEditing] = useState<{ kind: BoxKind; id: number; anchor: HTMLElement } | null>(null)
+  const [tagging, setTagging] = useState(false)
+  const [confirmDelete, setConfirmDelete] = useState(false)
+  const [exitAfter, setExitAfter] = useState<'next' | 'close' | null>(null)
+  const [toast, setToast] = useState<string | null>(null)
+  const [seekFace, setSeekFace] = useState<{ key: string; shown: boolean } | null>(null)
+  const [page, setPage] = useState(0)
+
+  const placeholder = useMemo(() => findCachedItem(qc, uid), [qc, uid])
+  const detailQ = useQuery({
+    queryKey: ['item', uid, vault],
+    queryFn: () => api.items.detail(uid, vault),
+    select: (d: ItemDetail) => vaultify(d, vault),
+    refetchInterval: (q) => {
+      const d = q.state.data as ItemDetail | undefined
+      if (!d) return false
+      if (d.analysis_status === 'pending' || d.text_status === 'pending') return 4000
+      return d.kind === 'video' && d.preview_status === 'pending' ? 5000 : false
+    },
+  })
+  const detail = detailQ.data
+  const invalidate = useInvalidateItem(uid)
+
+  useEffect(() => {
+    setEditing(null)
+    setTagging(false)
+    setPage(0)
+  }, [uid])
+
+  const detailVersion = detail?.version
+  useEffect(() => {
+    return () => {
+      seekCtl.current?.abort()
+      seekCtl.current = null
+      setSeekFace(null)
+    }
+  }, [uid, detailVersion])
+
+  const showToast = useCallback((msg: string) => setToast(msg), [])
+  useEffect(() => {
+    if (!toast) return
+    const t = setTimeout(() => setToast(null), 2800)
+    return () => clearTimeout(t)
+  }, [toast])
+
+  const guessActions = useGuessActions(uid, showToast)
+  const guesses = useMemo(
+    () => ({
+      confirm: (t: BoxTarget) => t.box.guess && guessActions.confirm(t.kind, t.box.id, t.box.guess),
+      reject: (t: BoxTarget) => t.box.guess && guessActions.reject(t.kind, t.box.id, t.box.guess),
+      pendingKey: guessActions.pendingKey,
+    }),
+    [guessActions],
+  )
+
+  const fps = detail?.fps ?? null
+  const seekTo = useCallback(
+    (t: BoxTarget) => {
+      const video = videoRef.current
+      if (!video || t.box.frame_time_s === null) return
+      seekCtl.current?.abort()
+      const ctl = new AbortController()
+      seekCtl.current = ctl
+      const key = boxKey(t)
+      setSeekFace({ key, shown: false })
+      seekToFrame(video, t.box.frame_time_s, fps, ctl.signal).then(
+        () => {
+          if (ctl.signal.aborted) return
+          setSeekFace(video.paused ? { key, shown: true } : null)
+        },
+        () => {
+          if (!ctl.signal.aborted) setSeekFace(null)
+        },
+      )
+    },
+    [fps],
+  )
+  const videoUrl = detail?.kind === 'video' ? detail.urls.video : null
+  const onScreen = useOnScreenFaces(videoRef, detail?.kind === 'video' ? detail.faces : null, videoUrl ? `${uid}:${detailVersion}:${videoUrl}` : null)
+  useEffect(() => {
+    const video = videoRef.current
+    if (startAt === null || !videoUrl || !video) return
+    const ctl = new AbortController()
+    seekToFrame(video, startAt, fps, ctl.signal).catch(() => {})
+    return () => ctl.abort()
+  }, [uid, detailVersion, videoUrl, startAt, fps])
+  const dismissSeekFace = useCallback(() => {
+    seekCtl.current?.abort()
+    seekCtl.current = null
+    setSeekFace(null)
+  }, [])
+  useEffect(() => {
+    if (!showFaces) dismissSeekFace()
+  }, [showFaces, dismissSeekFace])
+
+  const editingTarget = editing && detail ? findBox(detail, editing.kind, editing.id) : null
+  useEffect(() => {
+    if (editing && detail && !editingTarget) setEditing(null)
+  }, [editing, detail, editingTarget])
+
+  const poster = posterTime(detail?.duration_s)
+  const frameTime = useCallback(() => currentFrameTime(videoRef.current, frameTimeRef.current, poster), [poster])
+
+  const toggleFaces = useCallback(() => {
+    setShowFaces((v) => {
+      rememberFaces = !v
+      return !v
+    })
+  }, [])
+  const toggleInfo = useCallback(() => {
+    setShowInfo((v) => {
+      rememberInfo = !v
+      return !v
+    })
+  }, [])
+  const closeEditor = useCallback(() => {
+    setEditing((cur) => {
+      if (cur?.anchor.isConnected) setTimeout(() => cur.anchor.focus({ preventScroll: true }), 0)
+      return null
+    })
+  }, [])
+  const editBox = useCallback(
+    (t: BoxTarget, anchor: HTMLElement) =>
+      setEditing((cur) => (cur && cur.kind === t.kind && cur.id === t.box.id ? null : { kind: t.kind, id: t.box.id, anchor })),
+    [],
+  )
+
+  useEffect(() => {
+    const prevFocus = document.activeElement as HTMLElement | null
+    const unlock = lockScroll()
+    rootRef.current?.focus({ preventScroll: true })
+    return () => {
+      unlock()
+      if (prevFocus?.isConnected) prevFocus.focus({ preventScroll: true })
+    }
+  }, [])
+
+  const favorite = useMutation({
+    mutationFn: (value: boolean) => api.items.update(uid, { favorite: value }),
+    onSuccess: (_d, value) => {
+      invalidate()
+      showToast(value ? 'Added to favourites' : 'Removed from favourites')
+    },
+    onError: (e) => showToast(errorMessage(e, 'Could not save the change')),
+  })
+
+  const isDocKind = detail?.kind === 'pdf' || detail?.kind === 'document'
+  const pageCount = detail?.urls.pages.length ?? 0
+
+  // Keyboard: Esc, arrows, i (info), f (faces), s (favourite), [ and ] for pages, and a focus trap.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (confirmDelete) return
+      if (editing) {
+        if (e.key === 'Escape') {
+          e.preventDefault()
+          closeEditor()
+        }
+        return
+      }
+      if (e.key === 'Tab') {
+        const root = rootRef.current
+        if (!root) return
+        const nodes = Array.from(
+          root.querySelectorAll<HTMLElement>('a[href], button:not([disabled]), input, video[controls], [tabindex]:not([tabindex="-1"])'),
+        ).filter((n) => n.offsetParent !== null || n === document.activeElement)
+        if (!nodes.length) return
+        const first = nodes[0]
+        const last = nodes[nodes.length - 1]
+        const active = document.activeElement
+        if (!root.contains(active)) {
+          e.preventDefault()
+          first.focus()
+        } else if (e.shiftKey && (active === first || active === root)) {
+          e.preventDefault()
+          last.focus()
+        } else if (!e.shiftKey && active === last) {
+          e.preventDefault()
+          first.focus()
+        }
+        return
+      }
+      if (e.key === 'Escape') {
+        if (e.defaultPrevented) return
+        e.preventDefault()
+        if (tagging) setTagging(false)
+        else onClose()
+        return
+      }
+      if (isTyping(e.target) || e.altKey || e.ctrlKey || e.metaKey) return
+      const onVideo = e.target instanceof HTMLVideoElement
+      if (e.key === 'ArrowLeft' && onPrev && !onVideo) {
+        e.preventDefault()
+        onPrev()
+      } else if (e.key === 'ArrowRight' && onNext && !onVideo) {
+        e.preventDefault()
+        onNext()
+      } else if (e.key === 'i') {
+        toggleInfo()
+      } else if (e.key === 'f') {
+        toggleFaces()
+      } else if (e.key === 's' && detail && !favorite.isPending) {
+        favorite.mutate(!detail.favorite)
+      } else if (isDocKind && (e.key === '[' || e.key === 'PageUp')) {
+        e.preventDefault()
+        setPage((p) => Math.max(0, p - 1))
+      } else if (isDocKind && (e.key === ']' || e.key === 'PageDown')) {
+        e.preventDefault()
+        setPage((p) => Math.min(Math.max(pageCount - 1, 0), p + 1))
+      }
+    }
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+  }, [confirmDelete, editing, tagging, onClose, onPrev, onNext, closeEditor, toggleInfo, toggleFaces, detail, favorite, isDocKind, pageCount])
+
+  const onTouchStart = (e: TouchEvent) => {
+    const t = e.touches[0]
+    const target = e.target as HTMLElement
+    let ignore = (window.visualViewport?.scale ?? 1) > 1.01 || !!target.closest('[data-no-swipe]')
+    const video = target.closest('video')
+    if (video) {
+      const r = video.getBoundingClientRect()
+      if (t.clientY > r.top + r.height * 0.7) ignore = true
+    }
+    touch.current = { x: t.clientX, y: t.clientY, multi: e.touches.length > 1, ignore }
+  }
+  const onTouchMove = (e: TouchEvent) => {
+    if (touch.current && e.touches.length > 1) touch.current.multi = true
+  }
+  const onTouchEnd = (e: TouchEvent) => {
+    const s = touch.current
+    touch.current = null
+    if (!s || s.multi || s.ignore) return
+    const t = e.changedTouches[0]
+    const dx = t.clientX - s.x
+    const dy = t.clientY - s.y
+    if (Math.abs(dx) < 50 || Math.abs(dx) < Math.abs(dy) * 1.5) return
+    if (dx < 0) onNext?.()
+    else onPrev?.()
+  }
+
+  const del = useMutation({
+    mutationFn: () => api.items.remove(uid),
+    onSuccess: () => {
+      setConfirmDelete(false)
+      setExitAfter(onNext ? 'next' : 'close')
+    },
+  })
+  const leave = useCallback(() => setExitAfter(onNext ? 'next' : 'close'), [onNext])
+  // Leave only after the confirm dialog has unmounted, so its scroll lock is released first.
+  useEffect(() => {
+    if (confirmDelete || !exitAfter) return
+    const how = exitAfter
+    setExitAfter(null)
+    if (how === 'next' && onNext) onNext()
+    else onClose()
+    qc.removeQueries({ queryKey: ['item', uid], exact: false })
+    invalidate()
+  }, [confirmDelete, exitAfter, onNext, onClose, qc, uid, invalidate])
+
+  const kind = detail?.kind ?? placeholder?.kind
+  const isVideo = kind === 'video'
+  const boxCount = detail ? detail.faces.length + detail.bodies.filter((b) => b.face_id === null).length : 0
+  const errCode = detailQ.error instanceof ApiError ? detailQ.error : null
+  const notFound = errCode?.status === 404
+  const locked = errCode?.code === 'vault_locked'
+
+  const stage = (() => {
+    if (detail) {
+      if (detail.kind === 'video') {
+        if (!detail.urls.video) return <VideoPreparing detail={detail} />
+        const shown =
+          seekFace?.shown && showFaces ? (videoBoxes(detail).find((t) => boxKey(t) === seekFace.key) ?? null) : null
+        return (
+          <VideoStage
+            key={detail.uid + ':' + detail.version}
+            detail={detail}
+            src={detail.urls.video}
+            videoRef={videoRef}
+            face={shown}
+            onDismissFace={dismissSeekFace}
+            frameTimeRef={frameTimeRef}
+          />
+        )
+      }
+      if (detail.kind === 'pdf' || detail.kind === 'document') {
+        return <DocumentStage key={detail.uid + ':' + detail.version} detail={detail} page={page} setPage={setPage} />
+      }
+      if (detail.kind === 'other') return <FileCard detail={detail} />
+      return (
+        <PhotoStage
+          key={detail.uid + ':' + detail.version}
+          detail={detail}
+          showFaces={showFaces}
+          editingKey={editing ? `${editing.kind}:${editing.id}` : null}
+          onEditBox={editBox}
+          guessPendingKey={guesses.pendingKey}
+          onConfirmGuess={guesses.confirm}
+          onRejectGuess={guesses.reject}
+        />
+      )
+    }
+    if (detailQ.isError) {
+      return (
+        <div className="flex max-w-sm flex-col items-center gap-4 px-4 text-center text-white">
+          <p className="text-base font-semibold">
+            {locked ? 'The vault is locked' : notFound ? 'This item is no longer available' : 'Could not load this item'}
+          </p>
+          <p className="text-sm text-white/65">
+            {locked
+              ? 'Unlock the vault again to see private items.'
+              : notFound
+                ? 'It may have been moved to the trash or into the vault.'
+                : errorMessage(detailQ.error)}
+          </p>
+          <div className="flex gap-2">
+            {!notFound && !locked && (
+              <button type="button" className={darkButton('primary')} onClick={() => void detailQ.refetch()}>
+                Try again
+              </button>
+            )}
+            <button type="button" className={darkButton()} onClick={onClose}>
+              Close
+            </button>
+          </div>
+        </div>
+      )
+    }
+    const pw = placeholder?.width || 4
+    const ph = placeholder?.height || 3
+    return (
+      <div
+        className="relative flex items-center justify-center bg-contain bg-center bg-no-repeat"
+        style={
+          placeholder
+            ? {
+                aspectRatio: `${pw} / ${ph}`,
+                width: `min(100cqw, calc(100cqh * ${pw / ph}))`,
+                backgroundImage: `url("${withVault(placeholder.urls.thumb, vault)}")`,
+              }
+            : undefined
+        }
+        role="status"
+      >
+        <Loader2 className="size-8 animate-spin text-white/80" aria-hidden />
+        <span className="sr-only">Loading</span>
+      </div>
+    )
+  })()
+
+  const navButton =
+    'absolute top-1/2 z-10 flex size-11 -translate-y-1/2 items-center justify-center rounded-full bg-black/45 text-white backdrop-blur-sm transition-colors hover:bg-black/70 sm:size-12'
+  const trashDays = config.data?.trash_days ?? 30
+  const noun = isVideo ? 'video' : kind === 'image' ? 'photo' : 'file'
+
+  return createPortal(
+    <div
+      ref={rootRef}
+      role="dialog"
+      aria-modal="true"
+      aria-label={isVideo ? 'Video viewer' : isDocKind ? 'Document viewer' : 'Photo viewer'}
+      tabIndex={-1}
+      className="fixed inset-0 z-40 flex flex-col bg-[#111] text-white outline-none"
+    >
+      <div className="flex h-14 shrink-0 items-center gap-1 px-1.5 sm:px-3">
+        <button type="button" onClick={onClose} className={iconButton} aria-label="Close viewer" title="Close (Esc)">
+          <X className="size-5" aria-hidden />
+        </button>
+        {position && position.total > 0 && (
+          <span className="ml-1 text-sm tabular-nums text-white/75" aria-label={`Item ${position.index + 1} of ${position.total}`}>
+            {(position.index + 1).toLocaleString()} / {position.total.toLocaleString()}
+          </span>
+        )}
+        {detail && (
+          <span className="ml-2 hidden min-w-0 truncate text-sm text-white/60 md:inline" title={detail.filename}>
+            {detail.filename}
+          </span>
+        )}
+        <div className="ml-auto flex items-center gap-0.5 sm:gap-1">
+          {detail && (
+            <button
+              type="button"
+              onClick={() => favorite.mutate(!detail.favorite)}
+              disabled={favorite.isPending}
+              aria-pressed={detail.favorite}
+              className={iconButton}
+              aria-label={detail.favorite ? 'Remove from favourites' : 'Add to favourites'}
+              title="Favourite (S)"
+            >
+              <Star className={clsx('size-5', detail.favorite && 'fill-amber-300 text-amber-300')} aria-hidden />
+            </button>
+          )}
+          {boxCount > 0 && (
+            <button
+              type="button"
+              onClick={toggleFaces}
+              aria-pressed={showFaces}
+              className={iconButton}
+              aria-label={isVideo ? 'Show people in this video' : 'Show face and person boxes'}
+              title="Faces (F)"
+            >
+              <ScanFace className="size-5" aria-hidden />
+            </button>
+          )}
+          <button type="button" onClick={toggleInfo} aria-pressed={showInfo} className={iconButton} aria-label="Show details" title="Details (I)">
+            <Info className="size-5" aria-hidden />
+          </button>
+          {detail && (
+            <DownloadMenu
+              detail={detail}
+              vault={vault}
+              frameTime={detail.kind === 'video' ? frameTime : undefined}
+              pageUrl={isDocKind && pageCount ? detail.urls.pages[Math.min(page, pageCount - 1)] : null}
+            />
+          )}
+        </div>
+      </div>
+
+      <div className="relative flex min-h-0 flex-1">
+        <div className="relative flex min-w-0 flex-1 flex-col">
+          <div
+            className="relative flex min-h-0 flex-1 items-center justify-center p-2 sm:p-4"
+            style={{ containerType: 'size' }}
+            onTouchStart={onTouchStart}
+            onTouchMove={onTouchMove}
+            onTouchEnd={onTouchEnd}
+          >
+            {stage}
+          </div>
+          {onPrev && (
+            <button type="button" onClick={onPrev} className={clsx(navButton, 'left-2 sm:left-4')} aria-label="Previous" title="Previous">
+              <ChevronLeft className="size-6" aria-hidden />
+            </button>
+          )}
+          {onNext && (
+            <button type="button" onClick={onNext} className={clsx(navButton, 'right-2 sm:right-4')} aria-label="Next" title="Next">
+              <ChevronRight className="size-6" aria-hidden />
+            </button>
+          )}
+          {detail?.kind === 'video' && showFaces && (
+            <VideoChips
+              targets={videoBoxes(detail)}
+              editingKey={editing ? `${editing.kind}:${editing.id}` : null}
+              activeKey={seekFace?.key ?? null}
+              onSeek={seekTo}
+              onEdit={editBox}
+            />
+          )}
+        </div>
+
+        {showInfo && detail && (
+          <>
+            <button
+              type="button"
+              aria-label="Close details"
+              tabIndex={-1}
+              onClick={toggleInfo}
+              className="absolute inset-0 z-10 bg-black/30 lg:hidden"
+            />
+            <aside
+              data-no-swipe
+              aria-label="Details"
+              className={clsx(
+                'absolute inset-x-0 bottom-0 z-20 max-h-[70dvh] overflow-y-auto overscroll-contain rounded-t-2xl bg-[#1b1b1b] shadow-2xl',
+                'pb-[env(safe-area-inset-bottom)]',
+                'lg:static lg:z-auto lg:max-h-none lg:w-[24rem] lg:shrink-0 lg:rounded-none lg:border-l lg:border-white/10 lg:bg-[#171717] lg:shadow-none',
+              )}
+            >
+              <div className="mx-auto mt-2 h-1 w-10 rounded-full bg-white/20 lg:hidden" aria-hidden />
+              <InfoPanel
+                detail={detail}
+                vault={vault}
+                onScreen={onScreen}
+                onClose={toggleInfo}
+                onToast={showToast}
+                onRequestDelete={() => setConfirmDelete(true)}
+                onLeave={leave}
+                tagging={tagging}
+                setTagging={setTagging}
+                guesses={guesses}
+                onEditBox={editBox}
+                documentFirst={mode === 'document'}
+              />
+            </aside>
+          </>
+        )}
+      </div>
+
+      {editing && editingTarget && (
+        <FaceEditor
+          uid={uid}
+          target={editingTarget}
+          anchor={editing.anchor}
+          onClose={closeEditor}
+          onDone={(msg) => {
+            showToast(msg)
+            closeEditor()
+          }}
+        />
+      )}
+
+      <div aria-live="polite" className="pointer-events-none absolute inset-x-0 bottom-6 z-50 flex justify-center px-4">
+        {toast && <span className="rounded-full bg-white px-4 py-2 text-sm font-semibold text-[#111] shadow-lg">{toast}</span>}
+      </div>
+
+      <ConfirmModal
+        open={confirmDelete}
+        title={`Move this ${noun} to the trash?`}
+        body={
+          <>
+            <p>
+              It leaves the library now and is deleted for good after {trashDays} days. Until then you can restore it from Trash with
+              its tags and document details.
+            </p>
+            {del.error && (
+              <p className="mt-3 text-danger" role="alert">
+                {errorMessage(del.error, 'Could not move it to the trash. Try again.')}
+              </p>
+            )}
+          </>
+        }
+        confirmLabel="Move to trash"
+        danger
+        loading={del.isPending}
+        onConfirm={() => del.mutate()}
+        onClose={() => {
+          if (!del.isPending) setConfirmDelete(false)
+        }}
+      />
+    </div>,
+    document.body,
+  )
+}

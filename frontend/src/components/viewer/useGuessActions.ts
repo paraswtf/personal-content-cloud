@@ -1,0 +1,36 @@
+// Confirm or reject a person guess on a face or body, then refresh what depends on it.
+import { useMutation } from '@tanstack/react-query'
+import { api } from '../../lib/api'
+import { personName } from '../../lib/format'
+import type { GuessOut } from '../../lib/types'
+import { errorMessage } from '../admin/adminHooks'
+import type { BoxKind } from './boxes'
+import { useInvalidateItem } from './shared'
+
+interface Vars {
+  kind: BoxKind
+  id: number
+  guess: GuessOut
+  action: 'confirm' | 'reject'
+}
+
+export function useGuessActions(uid: string, onToast: (msg: string) => void) {
+  const invalidate = useInvalidateItem(uid)
+  const m = useMutation({
+    mutationFn: (v: Vars) => {
+      const body = v.kind === 'face' ? { faces: [v.id] } : { bodies: [v.id] }
+      return v.action === 'confirm' ? api.people.confirmGuesses(body) : api.people.rejectGuesses(body)
+    },
+    onSuccess: (_r, v) => {
+      invalidate()
+      onToast(v.action === 'confirm' ? `Tagged as ${personName(v.guess.person)}` : `Not ${personName(v.guess.person)}`)
+    },
+    onError: (e) => onToast(errorMessage(e, 'That did not work. Try again.')),
+  })
+  const pendingKey = m.isPending && m.variables ? `${m.variables.kind}:${m.variables.id}` : null
+  return {
+    confirm: (kind: BoxKind, id: number, guess: GuessOut) => m.mutate({ kind, id, guess, action: 'confirm' }),
+    reject: (kind: BoxKind, id: number, guess: GuessOut) => m.mutate({ kind, id, guess, action: 'reject' }),
+    pendingKey,
+  }
+}

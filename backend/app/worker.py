@@ -1,40 +1,47 @@
 """Background worker threads for the durable job queue (app.jobs).
 
-CONTRACT (implemented by the ingest agent).
-- Thread 'main' runs ingest/restore/faces/recluster jobs one at a time (serialised ingest means
-  dedup decisions never race). Thread 'video' runs video_preview jobs.
-- Each thread owns its own DB connection, loops: claim_next -> run_job -> complete / fail,
-  waits on app.jobs.wake[queue] with a 1 s timeout when idle.
-- After the main queue drains, enqueue one 'recluster' job (unique) if any faces were added
-  since the last recluster. Every 10 minutes the main thread runs ingest.cleanup_stale_uploads.
-- A handler exception: log it with traceback, app.jobs.fail(...). A full disk (ENOSPC/EDQUOT or
-  SQLite 'disk is full' anywhere in the exception chain) re-queues the job after
-  DISK_FULL_DELAY_S without using up an attempt (app.jobs.defer); when an ingest job finally
-  fails, set the upload to status 'error' with a short message and move its file to
-  data_dir/failed (ingest.mark_upload_failed) so an admin can retry it.
-- jobs.complete/jobs.fail are retried a few times (a lock timeout must not strand the job). If
-  they still fail, the job stays 'running'; the main thread's periodic sweep re-queues 'running'
-  jobs older than STALE_RUNNING_S that no live thread of this process holds.
+CONTRACT (docs/ARCHITECTURE.md section 7).
+- One thread per queue in app.jobs.QUEUES: 'main' (ingest, analyze, guess, recluster: serial, so
+  dedup decisions never race and two GPU models never contend), 'text' (OCR and document parsing),
+  'video' (transcodes). Each thread owns its DB connection and loops claim_next -> run_job ->
+  complete / fail, waiting on app.jobs.wake[queue] (1 s timeout) when idle.
+- run_job dispatches through HANDLERS: ingest -> app.ingest.process_upload(upload_id); analyze ->
+  app.analysis.pipeline.analyze_item(item_id, version); text -> app.documents.extract.extract_item
+  (item_id, version); video_preview -> app.ingest.process_video_preview(item_id, version); guess ->
+  app.analysis.guess.propagate(person_id, item_id); recluster -> app.analysis.cluster
+  .recluster_unassigned(). Handler modules are imported lazily. A handler whose module (or
+  function) cannot be imported raises HandlerMissing: the job is marked failed at once, without
+  retries, and the item's status is left as it is (recover_on_startup queues it again once the
+  module exists).
+- A handler exception is logged with its traceback and the job retried with backoff
+  (app.jobs.fail). A full disk (ENOSPC/EDQUOT or SQLite 'disk is full' anywhere in the exception
+  chain) re-queues the job after DISK_FULL_DELAY_S without using up an attempt. When a job fails
+  for good, _final_failure marks the item's analysis_status / text_status / preview_status 'error'
+  or the upload 'error' (its bytes kept in data_dir/failed).
+- jobs.complete / jobs.fail are retried a few times; a job left 'running' is re-queued by the
+  main thread's periodic sweep when no live thread holds it (STALE_RUNNING_S).
+- Housekeeping every CLEANUP_INTERVAL_S on the main thread: stale running jobs, abandoned uploads
+  and orphaned files (ingest.cleanup_stale_uploads), the trash (ingest.expire_trash) and expired
+  sessions (app.auth.sessions.purge_expired).
+- After the main queue drains, one unique 'recluster' job is queued when faces were added since
+  the last run and some automatic faces are still unassigned.
 - start()/stop() are called from the FastAPI lifespan; nothing starts when
-  settings.workers_enabled is False (tests call drain() instead).
-- While items stored before capture positions were read are waiting (ingest.gps_backfill_pending),
-  a third thread 'gps-backfill' reads their positions in small batches (ingest.backfill_gps_batch)
-  after a short delay, pausing between batches, and exits when the backfill is done.
+  settings.workers_enabled is False. drain() runs jobs synchronously for tests: main first, then
+  text, then video.
 """
 from __future__ import annotations
 
 import errno
+import importlib
 import json
 import logging
 import sqlite3
 import threading
 import time
 import traceback
+from typing import Any, Callable
 
-from app.changelog import actors
-from app.changelog import context as changelog_context
-from app.changelog import retention
-from app import ingest, jobs
+from app import jobs
 from app.config import settings
 from app.db import connect, kv_get, kv_set, tx
 
@@ -46,9 +53,22 @@ RECLUSTER_MARK = "recluster_max_face_id"  # kv: highest face id when the last re
 BOOKKEEPING_DELAYS_S = (2.0, 4.0, 8.0, 16.0)  # waits between tries of jobs.complete / jobs.fail
 STALE_RUNNING_S = 3600.0  # 'running' jobs older than this, not held by a live thread, are re-queued
 DISK_FULL_DELAY_S = 120.0  # a job that failed because the disk is full waits this long, attempt not counted
-GPS_BACKFILL_START_DELAY_S = 15.0  # let startup and the first queued jobs go first
-GPS_BACKFILL_PAUSE_S = 0.5  # between batches, so file reads never crowd out serving and ingest
-GPS_BACKFILL_RETRY_S = 300.0  # after ffprobe could not run, or an unexpected error
+
+
+def _item_args(p: dict[str, Any]) -> tuple:
+    return int(p["item_id"]), int(p["version"])
+
+
+# job type -> (module, function, payload -> positional args after conn)
+HANDLERS: dict[str, tuple[str, str, Callable[[dict[str, Any]], tuple]]] = {
+    "ingest": ("app.ingest", "process_upload", lambda p: (int(p["upload_id"]),)),
+    "analyze": ("app.analysis.pipeline", "analyze_item", _item_args),
+    "text": ("app.documents.extract", "extract_item", _item_args),
+    "video_preview": ("app.ingest", "process_video_preview", _item_args),
+    "guess": ("app.analysis.guess", "propagate",
+              lambda p: (int(p["person_id"]), int(p["item_id"]) if p.get("item_id") is not None else None)),
+    "recluster": ("app.worker", "_recluster", lambda p: ()),
+}
 
 _threads: list[threading.Thread] = []
 _stop = threading.Event()
@@ -57,44 +77,53 @@ _held: dict[int, int] = {}  # thread ident -> id of the job that thread is runni
 _held_lock = threading.Lock()
 
 
+class HandlerMissing(RuntimeError):
+    """The module or function that handles a job type cannot be imported (not installed yet)."""
+
+
 def held_job_ids() -> set[int]:
     with _held_lock:
         return set(_held.values())
 
 
-def run_job(conn: sqlite3.Connection, job: sqlite3.Row) -> None:
-    """Dispatch one claimed job to its handler (payload JSON: ingest {upload_id}, faces
-    {media_id, version, people?: 1 for a newly stored item}, video_preview {media_id, version},
-    restore {superseded_id}, recluster {})."""
-    payload = json.loads(job["payload"] or "{}")
-    kind = job["type"]
-    if kind == "ingest":
-        ingest.process_upload(conn, int(payload["upload_id"]))
-    elif kind == "faces":
-        ingest.process_faces(conn, int(payload["media_id"]), int(payload["version"]),
-                             people=bool(payload.get("people")))
-    elif kind == "video_preview":
-        ingest.process_video_preview(conn, int(payload["media_id"]), int(payload["version"]))
-    elif kind == "restore":
-        ingest.restore_superseded(conn, int(payload["superseded_id"]))
-    elif kind == "recluster":
-        _recluster(conn)
-    else:
+def _resolve(kind: str) -> tuple[Callable[..., Any], Callable[[dict[str, Any]], tuple]]:
+    entry = HANDLERS.get(kind)
+    if entry is None:
         raise ValueError(f"unknown job type {kind!r}")
+    module_name, func_name, args = entry
+    try:
+        module = importlib.import_module(module_name)
+    except ImportError as e:
+        raise HandlerMissing(f"handler module {module_name} for {kind!r} jobs is not available: {e}") from e
+    func = getattr(module, func_name, None)
+    if func is None:
+        raise HandlerMissing(f"{module_name}.{func_name} for {kind!r} jobs does not exist")
+    return func, args
 
 
-def _recluster(conn: sqlite3.Connection) -> None:
-    from app.faces import cluster
-
-    max_id = _max_face_id(conn)
-    cluster.recluster_unassigned(conn)
-    with tx(conn):
-        kv_set(conn, RECLUSTER_MARK, max_id)
+def run_job(conn: sqlite3.Connection, job: sqlite3.Row) -> None:
+    """Dispatch one claimed job to its handler. Raises HandlerMissing when the handler cannot be
+    imported, ValueError for an unknown type, and whatever the handler raises."""
+    payload = json.loads(job["payload"] or "{}")
+    func, args = _resolve(job["type"])
+    func(conn, *args(payload))
 
 
 def _max_face_id(conn: sqlite3.Connection) -> int:
     row = conn.execute("SELECT MAX(id) FROM faces").fetchone()
     return int(row[0] or 0)
+
+
+def _recluster(conn: sqlite3.Connection) -> None:
+    try:
+        from app.analysis import cluster
+    except ImportError as e:
+        raise HandlerMissing(f"app.analysis.cluster for 'recluster' jobs is not available: {e}") from e
+
+    max_id = _max_face_id(conn)
+    cluster.recluster_unassigned(conn)
+    with tx(conn):
+        kv_set(conn, RECLUSTER_MARK, max_id)
 
 
 def _maybe_enqueue_recluster(conn: sqlite3.Connection) -> bool:
@@ -116,15 +145,19 @@ def _maybe_enqueue_recluster(conn: sqlite3.Connection) -> bool:
 
 def _final_failure(conn: sqlite3.Connection, job: sqlite3.Row, exc: BaseException) -> None:
     """The job used up its attempts: record the outcome on the affected row."""
+    from app import ingest
+
     try:
         payload = json.loads(job["payload"] or "{}")
         kind = job["type"]
         if kind == "ingest":
             ingest.mark_upload_failed(conn, int(payload["upload_id"]), f"Processing failed: {ingest.short_error(exc)}")
-        elif kind == "faces":
-            ingest.mark_faces_failed(conn, int(payload["media_id"]), int(payload["version"]))
+        elif kind == "analyze":
+            ingest.mark_analysis_failed(conn, *_item_args(payload))
+        elif kind == "text":
+            ingest.mark_text_failed(conn, *_item_args(payload))
         elif kind == "video_preview":
-            ingest.mark_preview_failed(conn, int(payload["media_id"]), int(payload["version"]))
+            ingest.mark_preview_failed(conn, *_item_args(payload))
         elif kind == "recluster":
             with tx(conn):  # do not queue it again for the same faces
                 kv_set(conn, RECLUSTER_MARK, _max_face_id(conn))
@@ -165,26 +198,6 @@ def _is_disk_full(exc: BaseException) -> bool:
     return False
 
 
-def _declare_job_change(conn: sqlite3.Connection, job: sqlite3.Row) -> bool:
-    """The job's writes join the change that queued it (an upload, an admin action), or a change of
-    its own (automatic regrouping, upgrade re-runs). False when that change was undone meanwhile:
-    the job then has nothing left to do."""
-    cid = job["change_id"] if "change_id" in job.keys() else None
-    if cid is not None:
-        row = conn.execute("SELECT state FROM changes WHERE id = ?", (cid,)).fetchone()
-        if row is not None:
-            if row["state"] != "active":
-                return False
-            changelog_context.resume(conn, int(cid), job_id=int(job["id"]))
-            return True
-    kind = job["type"]
-    # A streaming copy nobody asked for (an upgrade backfill) is upkeep, not a change to undo.
-    changelog_context.declare(
-        conn, actors.system_spec(f"job.{kind}", maintenance=kind == "video_preview"), job_id=int(job["id"])
-    )
-    return True
-
-
 def _handle(conn: sqlite3.Connection, job: sqlite3.Row) -> None:
     """Run one claimed job and complete or fail it. Never raises for handler errors."""
     started = time.monotonic()
@@ -192,12 +205,15 @@ def _handle(conn: sqlite3.Connection, job: sqlite3.Row) -> None:
     with _held_lock:
         _held[me] = int(job["id"])
     try:
-        if not _declare_job_change(conn, job):
-            log.info("job %s (%s): its change was undone, skipping", job["id"], job["type"])
-            _bookkeep(conn, f"complete job {job['id']}", jobs.complete, int(job["id"]))
-            return
         try:
             run_job(conn, job)
+        except HandlerMissing as exc:
+            if conn.in_transaction:
+                conn.execute("ROLLBACK")
+            log.error("job %s (%s): %s", job["id"], job["type"], exc)
+            _bookkeep(conn, f"record the failure of job {job['id']}", jobs.fail, int(job["id"]), str(exc),
+                      retry=False)
+            return
         except Exception as exc:
             if conn.in_transaction:  # a handler bug left a transaction open
                 conn.execute("ROLLBACK")
@@ -205,8 +221,6 @@ def _handle(conn: sqlite3.Connection, job: sqlite3.Row) -> None:
                           job["attempts"])
             tb = traceback.format_exc()
             if _is_disk_full(exc):
-                # Transient: wait for space without using up attempts, so a finished upload is never
-                # given up on just because the disk was full for a while.
                 log.warning("job %s waits %.0fs for disk space", job["id"], DISK_FULL_DELAY_S)
                 _bookkeep(conn, f"defer job {job['id']}", jobs.defer, int(job["id"]), tb, DISK_FULL_DELAY_S)
                 return
@@ -218,33 +232,38 @@ def _handle(conn: sqlite3.Connection, job: sqlite3.Row) -> None:
         _bookkeep(conn, f"complete job {job['id']}", jobs.complete, int(job["id"]))
         log.debug("job %s (%s) done in %.2fs", job["id"], job["type"], time.monotonic() - started)
     finally:
-        # Describe the change (or drop it if the job left it empty), then forget it: housekeeping
-        # on this connection must never join the last job's change.
-        changelog_context.finish(conn)
         with _held_lock:
             _held.pop(me, None)
 
 
-def _housekeeping(conn: sqlite3.Connection) -> None:
-    """Every CLEANUP_INTERVAL_S on the main worker: abandoned uploads, orphaned files, the trash.
-    Writes here belong to an upkeep change (listed in History only if it changed content)."""
-    changelog_context.declare(conn, actors.system_spec("maintenance.cleanup", "Cleaned up abandoned uploads",
-                                                       maintenance=True))
+def housekeeping(conn: sqlite3.Connection) -> dict[str, int]:
+    """Abandoned uploads and orphaned files, the trash, expired sessions. Each part is guarded so
+    one failure does not stop the others. Returns counts per part."""
+    from app import ingest
+
+    out = {"cleaned": 0, "purged": 0, "sessions": 0}
     try:
-        ingest.cleanup_stale_uploads(conn)
-    finally:
-        changelog_context.finish(conn)
-    try:
-        retention.expire(conn)
-        retention.purge_for_space(conn)
+        out["cleaned"] = ingest.cleanup_stale_uploads(conn)
     except Exception:
-        log.exception("history: trash housekeeping failed")
+        log.exception("housekeeping: upload cleanup failed")
+    try:
+        out["purged"] = ingest.expire_trash(conn)
+    except Exception:
+        log.exception("housekeeping: trash expiry failed")
+    try:
+        from app.auth.sessions import purge_expired
+
+        out["sessions"] = purge_expired(conn)
+    except Exception:
+        log.exception("housekeeping: session purge failed")
+    return out
+
 
 def drain(queue: str | None = None, max_jobs: int = 10_000) -> int:
     """Run queued jobs synchronously in the calling thread until none are runnable (jobs delayed by
-    a retry backoff are left for later). Both queues when queue is None, main first.
-    Returns the number of jobs run. Used by tests and scripts."""
-    queues = ["main", "video"] if queue is None else [queue]
+    a retry backoff are left for later). All queues when queue is None: main first, then text, then
+    video. Returns the number of jobs run. Used by tests and scripts."""
+    queues = list(jobs.QUEUES) if queue is None else [queue]
     conn = connect()
     ran = 0
     try:
@@ -275,11 +294,11 @@ def _loop(queue: str) -> None:
             try:
                 if queue == "main" and time.monotonic() - last_cleanup >= CLEANUP_INTERVAL_S:
                     last_cleanup = time.monotonic()
-                    for q in ("main", "video"):
+                    for q in jobs.QUEUES:
                         n = jobs.requeue_stale(conn, q, STALE_RUNNING_S, held_job_ids())
                         if n:
                             log.warning("re-queued %d stranded '%s' jobs", n, q)
-                    _housekeeping(conn)
+                    housekeeping(conn)
                 wake.clear()
                 job = jobs.claim_next(conn, queue)
                 if job is None and queue == "main" and busy:
@@ -304,50 +323,6 @@ def _loop(queue: str) -> None:
         log.info("worker %s stopped", queue)
 
 
-def _gps_backfill_loop() -> None:
-    """Background reading of capture positions for items stored before they were read."""
-    if _stop.wait(GPS_BACKFILL_START_DELAY_S):
-        return
-    conn = connect()
-    total = 0
-    try:
-        while not _stop.is_set():
-            changelog_context.declare(conn, actors.system_spec(
-                "maintenance.gps", "Read the capture positions of older items", maintenance=True))
-            try:
-                n = ingest.backfill_gps_batch(conn)
-            except Exception:
-                log.exception("gps backfill batch failed")
-                if conn.in_transaction:
-                    try:
-                        conn.execute("ROLLBACK")
-                    except sqlite3.Error:
-                        pass
-                _stop.wait(GPS_BACKFILL_RETRY_S)
-                continue
-            finally:
-                changelog_context.finish(conn)
-            if n is None:
-                log.info("gps backfill finished (%d items checked in this run)", total)
-                return
-            total += n
-            _stop.wait(GPS_BACKFILL_PAUSE_S if n else GPS_BACKFILL_RETRY_S)
-    finally:
-        conn.close()
-
-
-def _gps_backfill_needed() -> bool:
-    try:
-        conn = connect()
-        try:
-            return ingest.gps_backfill_pending(conn)
-        finally:
-            conn.close()
-    except Exception:
-        log.exception("could not check whether capture positions need a backfill")
-        return False
-
-
 def start() -> None:
     if not settings.workers_enabled:
         return
@@ -356,12 +331,8 @@ def start() -> None:
             return
         _threads.clear()
         _stop.clear()
-        for queue in ("main", "video"):
-            t = threading.Thread(target=_loop, args=(queue,), name=f"hub-worker-{queue}", daemon=True)
-            t.start()
-            _threads.append(t)
-        if _gps_backfill_needed():
-            t = threading.Thread(target=_gps_backfill_loop, name="hub-gps-backfill", daemon=True)
+        for queue in jobs.QUEUES:
+            t = threading.Thread(target=_loop, args=(queue,), name=f"pcc-worker-{queue}", daemon=True)
             t.start()
             _threads.append(t)
     log.info("workers started")

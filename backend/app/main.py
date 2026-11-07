@@ -1,32 +1,29 @@
-"""FastAPI application: API routers, file serving, the built SPA, and the worker lifecycle.
+"""FastAPI application: API routers, file serving, the built SPA and the worker lifecycle.
 
-CONTRACT (implemented by the API agent).
-- lifespan: exclusive flock on DATA_DIR/.instance.lock (refuse to start without it);
-  storage.ensure_dirs(); db.init_db(); images.register_heif(); ingest.recover_on_startup();
-  geotag_video.startup() (forgets renders, deletes DATA_DIR/tmp/geotag-video);
-  worker.start() (skipped when settings.workers_enabled is False); worker.stop() on shutdown.
-  The geotag video worker (app.media.geotag_video) starts on its first render, whatever
-  settings.workers_enabled says, and geotag_video.shutdown() kills a running render on shutdown.
-  The semantic search indexer (app.search.indexer) starts with the workers when search is
-  enabled and its model is present, and stops first on shutdown.
-- Routers: public (/api), uploads (/api/uploads), admin (/api/admin), admin exports (/api/admin/exports),
-  files (/files).
-- Middleware: if a request has ?key=<settings.access_key>, set the access cookie (app.auth) and,
-  for HTML page requests, redirect to the same URL without the key. Security headers on every
-  response: X-Content-Type-Options nosniff, Referrer-Policy same-origin, X-Frame-Options DENY.
-- SPA: serve settings.frontend_dist: /assets/* and /brand/* as static files (immutable cache for
-  /assets), every other GET that is not /api/* or /files/* returns index.html (no-cache). If the
-  dist folder is missing, GET / returns a short plain-text hint to run `npm run build`.
-- Unknown /api/* paths return JSON 404.
-- Compression: JSON under /api is gzipped (>= 1 KB, when the client accepts gzip). /files is never
-  touched, so file streaming and Range/206 stay intact. Compressible /assets/* files are served from
-  precompressed .gz siblings (made at startup) with Content-Encoding: gzip and Vary: Accept-Encoding.
+CONTRACT (docs/ARCHITECTURE.md sections 1, 4 and 13).
+- create_app() -> FastAPI. lifespan: exclusive flock on DATA_DIR/.instance.lock (refuses to start
+  without it); storage.ensure_dirs(); db.init_db(); images.register_heif(); a warning when ffmpeg
+  or ffprobe is missing; precompress_assets(); ingest.recover_on_startup(); worker.start() when
+  settings.workers_enabled; worker.stop() and the lock released on shutdown.
+- Routers (each a plain APIRouter without a prefix; main mounts it): app.api.auth at /api/auth,
+  app.api.library at /api, app.api.people at /api, app.api.documents at /api/documents,
+  app.api.search at /api/search, app.api.uploads at /api/uploads, app.api.files at /files,
+  app.api.system at /api/system. A router whose own paths already carry its prefix is mounted as it
+  is. A router module that is missing or fails to import is logged and skipped.
+- Middleware (pure ASGI, so uploads and file responses stream untouched): security headers on every
+  response (nosniff, Referrer-Policy same-origin, X-Frame-Options DENY unless the response set its
+  own) and Cache-Control "private, no-store" on /api responses that set none. JSON under /api is
+  gzipped (>= 1 KB); /files is never compressed, so Range/206 keeps working.
+- Unknown /api/* paths return a JSON 404. Every other GET serves frontend_dist: /assets/* (immutable,
+  precompressed .gz siblings), real files, and index.html (no-cache) for client routes.
+- POST /share-target (the PWA share target) is handled by the service worker in the browser; a
+  browser without the worker gets a 303 to /upload?shared=1.
 """
 from __future__ import annotations
 
 import fcntl
 import gzip
-import hmac
+import importlib
 import logging
 import mimetypes
 import os
@@ -35,21 +32,15 @@ import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import AsyncIterator
-from urllib.parse import parse_qsl, urlencode
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import APIRouter, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, PlainTextResponse, RedirectResponse, Response
 from starlette.datastructures import MutableHeaders
 from starlette.middleware.gzip import GZipMiddleware
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-from app.changelog import actors, trash
-from app.changelog import context as changelog_context
-from app import auth, db, ingest, storage, worker
-from app.api import admin, exports, files, history, public, uploads
+from app import db, storage
 from app.config import settings
-from app.media import geotag_video, images
-from app.search import indexer as search_indexer
 
 log = logging.getLogger(__name__)
 
@@ -58,18 +49,31 @@ SECURITY_HEADERS = {
     "referrer-policy": "same-origin",
     "x-frame-options": "DENY",
 }
+API_CACHE = "private, no-store"
 ALL_METHODS = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
 IMMUTABLE = "public, max-age=31536000, immutable"
 API_GZIP_MIN_BYTES = 1024
 API_GZIP_LEVEL = 6  # dynamic JSON: level 6 is most of level 9's gain for much less CPU
 # /assets/* types worth precompressing; images, fonts and media are compressed already.
-COMPRESSIBLE_SUFFIXES = frozenset({".js", ".css", ".svg", ".json", ".map", ".html", ".txt"})
+COMPRESSIBLE_SUFFIXES = frozenset({".js", ".css", ".svg", ".json", ".map", ".html", ".txt", ".webmanifest"})
 _MEDIA_TYPES = {".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8",
                 ".svg": "image/svg+xml", ".json": "application/json", ".map": "application/json",
-                ".html": "text/html; charset=utf-8", ".txt": "text/plain; charset=utf-8"}
+                ".html": "text/html; charset=utf-8", ".txt": "text/plain; charset=utf-8",
+                ".webmanifest": "application/manifest+json"}
 BUILD_HINT = (
-    "SICSR Alumni Meet - Content HUB: the web app is not built yet.\n"
+    "Personal Content Cloud: the web app is not built yet.\n"
     "Run `npm install && npm run build` in frontend/ and reload this page.\n"
+)
+# (module, mount prefix). Each module exposes `router`.
+ROUTERS: tuple[tuple[str, str], ...] = (
+    ("app.api.auth", "/api/auth"),
+    ("app.api.library", "/api"),
+    ("app.api.people", "/api"),
+    ("app.api.documents", "/api/documents"),
+    ("app.api.search", "/api/search"),
+    ("app.api.uploads", "/api/uploads"),
+    ("app.api.files", "/files"),
+    ("app.api.system", "/api/system"),
 )
 
 
@@ -103,61 +107,45 @@ def _release_instance_lock(fd: int) -> None:
         os.close(fd)
 
 
+def _startup_recovery() -> None:
+    from app import ingest
+
+    conn = db.connect()
+    try:
+        ingest.recover_on_startup(conn)
+    finally:
+        conn.close()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    from app import worker
+    from app.media import images
+
     lock_fd = _acquire_instance_lock()
     started = False
-    search_started = False
     try:
         storage.ensure_dirs()
         db.init_db()
         try:
             images.register_heif()
         except Exception:
-            log.exception("Could not register the HEIF opener; HEIC photos will be rejected")
+            log.exception("Could not register the HEIF opener; HEIC photos will be kept without previews")
         missing = [tool for tool in ("ffmpeg", "ffprobe") if shutil.which(tool) is None]
         if missing:
-            log.error(
-                "%s not found on PATH: videos cannot be processed and will wait in DATA_DIR/failed "
-                "until it is installed and an admin retries them",
-                " and ".join(missing),
-            )
+            log.error("%s not found on PATH: videos cannot be processed until it is installed",
+                      " and ".join(missing))
         try:
             precompress_assets()
         except Exception:  # never block startup: the plain assets are served then
             log.exception("Could not precompress the frontend assets")
-        conn = db.connect()
-        try:
-            # File moves of transactions a crash interrupted go back first (app/changelog/trash.py).
-            trash.recover(conn)
-            # Not swallowed: without it, queued uploads and pending face/preview jobs would never run.
-            changelog_context.declare(conn, actors.system_spec(
-                "maintenance.startup", "Startup checks and upgrades", maintenance=True))
-            try:
-                ingest.recover_on_startup(conn)
-            finally:
-                changelog_context.finish(conn)
-        finally:
-            conn.close()
-        geotag_video.startup()
+        # Not swallowed: without it, queued uploads and pending jobs would never run.
+        _startup_recovery()
         if settings.workers_enabled:
             worker.start()
             started = True
-            try:
-                search_started = search_indexer.start()
-            except Exception:  # search is optional: never block startup
-                log.exception("Could not start the search indexer")
         yield
     finally:
-        try:
-            geotag_video.shutdown()
-        except Exception:
-            log.exception("Could not stop the geotag video renders")
-        try:
-            if search_started:
-                search_indexer.stop()
-        except Exception:
-            log.exception("Could not stop the search indexer")
         try:
             if started:
                 worker.stop()
@@ -166,20 +154,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 # ---------------------------------------------------------------- middleware
-def _is_page_request(scope: Scope, headers: MutableHeaders) -> bool:
-    path = scope.get("path", "")
-    if scope.get("method") != "GET":
-        return False
-    if path.startswith("/api/") or path == "/api" or path.startswith("/files/"):
-        return False
-    return "text/html" in headers.get("accept", "")
+def _is_api_path(path: str) -> bool:
+    return path == "/api" or path.startswith("/api/")
 
 
-class AccessKeyAndHeadersMiddleware:
-    """Pure ASGI middleware: handles ?key=<access key> and adds security headers.
-
-    Pure ASGI (not BaseHTTPMiddleware) so upload bodies and file responses stream untouched.
-    """
+class SecurityHeadersMiddleware:
+    """Pure ASGI middleware adding the security headers (and no-store on /api) to every response."""
 
     def __init__(self, app: ASGIApp) -> None:
         self.app = app
@@ -188,59 +168,19 @@ class AccessKeyAndHeadersMiddleware:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
+        api = _is_api_path(scope.get("path", ""))
 
-        cookie_headers: list[tuple[bytes, bytes]] = []
-        query = scope.get("query_string", b"").decode("latin-1")
-        expected = settings.access_key
-        if expected and "key=" in query:
-            pairs = parse_qsl(query, keep_blank_values=True)
-            given = next((v for k, v in pairs if k == "key"), None)
-            if given is not None and hmac.compare_digest(given.encode(), expected.encode()):
-                request = Request(scope)
-                cookie_resp = Response()
-                auth.set_access_cookie(cookie_resp, request)
-                cookie_headers = [(k, v) for k, v in cookie_resp.raw_headers if k == b"set-cookie"]
-                if _is_page_request(scope, MutableHeaders(scope=scope)):
-                    rest = urlencode([(k, v) for k, v in pairs if k != "key"])
-                    # scope["path"] is percent-decoded: /%2F%2Fevil.example would become the
-                    # scheme-relative //evil.example. Collapse leading slashes and backslashes.
-                    path = "/" + scope.get("path", "/").lstrip("/\\")
-                    target = scope.get("root_path", "") + path + (f"?{rest}" if rest else "")
-                    redirect = RedirectResponse(target, status_code=303)
-                    redirect.headers["cache-control"] = "no-store"
-                    redirect.raw_headers.extend(cookie_headers)
-                    await redirect(scope, receive, self._wrap_send(send, []))
-                    return
-                scope = self._with_access_cookie(scope)
-
-        await self.app(scope, receive, self._wrap_send(send, cookie_headers))
-
-    @staticmethod
-    def _with_access_cookie(scope: Scope) -> Scope:
-        """The request that carries a valid key is itself treated as unlocked."""
-        crumb = f"{auth.ACCESS_COOKIE}={auth.access_token()}".encode("latin-1")
-        headers = [(k, v) for k, v in scope.get("headers", []) if k != b"cookie"]
-        existing = b"; ".join(v for k, v in scope.get("headers", []) if k == b"cookie")
-        headers.append((b"cookie", existing + b"; " + crumb if existing else crumb))
-        return {**scope, "headers": headers}
-
-    @staticmethod
-    def _wrap_send(send: Send, extra: list[tuple[bytes, bytes]]) -> Send:
         async def wrapped(message: Message) -> None:
             if message["type"] == "http.response.start":
                 headers = MutableHeaders(scope=message)
                 for k, v in SECURITY_HEADERS.items():
                     if k not in headers:
                         headers[k] = v
-                for k, v in extra:
-                    headers.append(k.decode("latin-1"), v.decode("latin-1"))
+                if api and "cache-control" not in headers:
+                    headers["cache-control"] = API_CACHE
             await send(message)
 
-        return wrapped
-
-
-def _is_api_path(path: str) -> bool:
-    return path == "/api" or path.startswith("/api/")
+        await self.app(scope, receive, wrapped)
 
 
 class ApiGZipMiddleware:
@@ -357,6 +297,11 @@ def _dist_file(rel_path: str) -> Path | None:
 
 
 def _register_spa(app: FastAPI) -> None:
+    @app.post("/share-target", include_in_schema=False)
+    def share_target_fallback() -> RedirectResponse:
+        # The service worker answers this in the browser; without it, land on the upload page.
+        return RedirectResponse("/upload?shared=1", status_code=303)
+
     @app.api_route("/api/{rest:path}", methods=ALL_METHODS, include_in_schema=False)
     def api_not_found(rest: str) -> None:
         raise HTTPException(status_code=404, detail="Not found")
@@ -375,14 +320,49 @@ def _register_spa(app: FastAPI) -> None:
         if static is not None:
             if full_path.startswith("assets/"):
                 return _asset_response(static, request)
-            if full_path == "index.html":
-                cache = "no-cache"
-            else:
-                cache = "public, max-age=3600"
-            return FileResponse(static, headers={"cache-control": cache})
-        if full_path.startswith(("assets/", "brand/")):
+            # index.html, the service worker and the manifest must never be cached stale.
+            cache = "no-cache" if full_path in ("index.html", "sw.js", "manifest.webmanifest") else "public, max-age=3600"
+            media_type = _MEDIA_TYPES.get(static.suffix.lower()) or mimetypes.guess_type(static.name)[0]
+            return FileResponse(static, media_type=media_type, headers={"cache-control": cache})
+        if full_path.startswith("assets/"):
             raise HTTPException(status_code=404, detail="Not found")
         return FileResponse(index, media_type="text/html", headers={"cache-control": "no-cache"})
+
+
+# ----------------------------------------------------------------- routers
+def _effective_paths(router: APIRouter) -> list[str]:
+    return [getattr(r, "path", "") for r in router.routes]
+
+
+def mount_prefix(router: APIRouter, prefix: str) -> str:
+    """The prefix to include a router with: '' when its paths already start with /api or /files,
+    '/api' when they already start with the rest of the prefix (for example '/search/...' for
+    '/api/search'), else the given prefix."""
+    paths = [p for p in _effective_paths(router) if p]
+    if paths and all(p.startswith(("/api/", "/files/")) or p in ("/api", "/files") for p in paths):
+        return ""
+    if prefix.startswith("/api/"):
+        tail = prefix[len("/api"):]
+        if paths and all(p == tail or p.startswith(tail + "/") for p in paths):
+            return "/api"
+    return prefix
+
+
+def _include_routers(app: FastAPI) -> list[str]:
+    mounted: list[str] = []
+    for module_name, prefix in ROUTERS:
+        try:
+            module = importlib.import_module(module_name)
+            router = getattr(module, "router")
+        except ImportError as e:
+            log.warning("router %s not available (%s); its routes are skipped", module_name, e)
+            continue
+        except Exception:
+            log.exception("router %s failed to import; its routes are skipped", module_name)
+            continue
+        app.include_router(router, prefix=mount_prefix(router, prefix))
+        mounted.append(module_name)
+    return mounted
 
 
 # ----------------------------------------------------------------------- app
@@ -395,15 +375,7 @@ def create_app() -> FastAPI:
         openapi_url="/api/openapi.json",
     )
     app.add_middleware(ApiGZipMiddleware)
-    app.add_middleware(AccessKeyAndHeadersMiddleware)  # added last = outermost
-    app.include_router(public.router, prefix="/api")
-    app.include_router(uploads.router, prefix="/api/uploads")
-    app.include_router(admin.router, prefix="/api/admin")
-    app.include_router(exports.router, prefix="/api/admin")
-    app.include_router(history.router, prefix="/api/admin")
-    app.include_router(files.router, prefix="/files")
+    app.add_middleware(SecurityHeadersMiddleware)  # added last = outermost
+    app.state.routers = _include_routers(app)
     _register_spa(app)  # catch-alls last
     return app
-
-
-app = create_app()

@@ -1,6 +1,6 @@
 """Content hashes and perceptual fingerprints.
 
-CONTRACT (implemented by the media agent).
+CONTRACT.
 - sha256 identifies byte-identical files (exact duplicates).
 - pHash/dHash (64-bit, 16 hex chars) find visually similar candidates cheaply.
 - The 64x64 grayscale signature lets dedup check pixel-level sameness, which separates a

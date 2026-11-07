@@ -1,0 +1,590 @@
+"""The 'analyze' job: stage 2 of the processing pipeline for one item (docs/ARCHITECTURE.md sections 7, 9, 10).
+
+CONTRACT.
+- analyze_item(conn, item_id, version) -> None. A no-op when the item is gone, its version differs
+  or analysis_status is already 'done' (reprocess resets it to 'pending' first). Otherwise:
+  1. loads the analysis input: the oriented original at most ANALYSIS_SIDE px (images, RAW included,
+     falling back to the large preview), the page 1 render (pdf, document), or sampled frames plus the
+     poster (videos);
+  2. runs every model that is available (each one optional; a missing one is listed under
+     quality_scores['skipped'] and category_scores['skipped']): SigLIP embeddings (frame 0 plus up to
+     settings.search_video_frames video frames) into item_embeddings, zero-shot category scores and
+     the top 5 labels into item_labels, the NSFW classifier, faces (SCRFD + ArcFace, video tracks),
+     person boxes (YOLOX) with torso crops embedded by SigLIP into torso_embedding;
+  3. measures blur and exposure, finds bursts;
+  4. in one short write transaction: embeddings, labels, faces (+ crops, carry-over of names on a
+     reprocess), bodies (+ crops), clustering (cluster.assign_new_faces), category, nsfw and mis-click
+     decisions (never overriding *_source='user'), burst flags of the neighbours, face_count,
+     body_count, analysis_status 'done'; faces_version and search_version are bumped;
+  5. afterwards: guess.guess_item for the open boxes, the FTS row (labels), and the text job for
+     images with doc_likeness >= settings.doc_likeness_min (app.ingest.enqueue_text).
+- mark_failed(conn, item_id, version): analysis_status 'error' (the worker calls it after the last retry).
+Heavy work (decode, inference, ffmpeg) runs outside the write transaction.
+"""
+from __future__ import annotations
+
+import dataclasses
+import importlib
+import io
+import logging
+import os
+import sqlite3
+from dataclasses import dataclass, field
+from pathlib import Path
+from types import ModuleType
+from typing import Any
+
+import cv2
+import numpy as np
+from PIL import Image
+
+from app import storage
+from app.analysis import bodies as bodies_mod
+from app.analysis import categories, cluster, quality
+from app.analysis import faces as faces_mod
+from app.analysis.index import get_index
+from app.config import settings
+from app.db import bump_faces_version, bump_search_version, faces_version, tx
+from app.util import json_dumps, json_loads, now_iso
+
+log = logging.getLogger(__name__)
+
+ANALYSIS_SIDE = 2048
+FRAME_KEEP_SIDE = 448  # video frames kept in memory for SigLIP / NSFW / exposure
+NSFW_VIDEO_FRAMES = 16
+LABEL_COUNT = 5
+
+
+class _Stale(Exception):
+    """The item changed (or vanished) while it was being analysed."""
+
+
+@dataclass
+class Visual:
+    """What the models look at."""
+
+    img: Image.Image | None = None  # oriented RGB analysis image (images, document page 1, video poster)
+    bgr: np.ndarray | None = None  # the same as BGR
+    source_scale: float = 1.0  # original long side / analysis image long side
+    frames: list[tuple[float, np.ndarray]] = field(default_factory=list)  # videos: (time, small BGR)
+    poster_time: float | None = None
+    faces: list[faces_mod.FaceRecord] = field(default_factory=list)
+    faces_done: bool = False  # faces already found while decoding (videos)
+
+
+@dataclass
+class Result:
+    embeddings: list[tuple[int, float | None, np.ndarray]] = field(default_factory=list)  # (frame_index, time, emb)
+    model: str | None = None
+    labels: list[tuple[str, float]] = field(default_factory=list)
+    category_scores: dict[str, Any] = field(default_factory=dict)
+    quality_scores: dict[str, Any] = field(default_factory=dict)
+    nsfw_score: float | None = None
+    explicit_p: float | None = None
+    screenshot_p: float | None = None
+    doc_p: float | None = None
+    density: float | None = None
+    faces: list[faces_mod.FaceRecord] = field(default_factory=list)
+    face_torsos: list[np.ndarray | None] = field(default_factory=list)  # SigLIP vectors per face
+    bodies: list[bodies_mod.BodyRecord] = field(default_factory=list)
+    body_torsos: list[np.ndarray | None] = field(default_factory=list)
+    skipped: list[str] = field(default_factory=list)
+
+
+# ------------------------------------------------------------------ model access
+def models_disabled() -> bool:
+    """PCC_NO_MODELS=1 (tests, parallel agents) turns every model off, as if its files were missing."""
+    return os.environ.get("PCC_NO_MODELS") == "1"
+
+
+def _model(name: str) -> ModuleType | None:
+    """app.ml.<name> when it is importable and its model files are present, else None."""
+    if models_disabled():
+        return None
+    try:
+        mod = importlib.import_module(f"app.ml.{name}")
+    except ImportError as e:
+        log.debug("app.ml.%s not importable: %s", name, e)
+        return None
+    try:
+        return mod if mod.available() else None
+    except Exception as e:  # a broken model install must not fail the item
+        log.warning("app.ml.%s availability check failed: %s", name, e)
+        return None
+
+
+def _resize_max(bgr: np.ndarray, side: int) -> np.ndarray:
+    h, w = bgr.shape[:2]
+    if max(h, w) <= side:
+        return np.ascontiguousarray(bgr)
+    s = side / max(h, w)
+    return cv2.resize(bgr, (max(1, round(w * s)), max(1, round(h * s))), interpolation=cv2.INTER_AREA)
+
+
+def _to_bgr(img: Image.Image) -> np.ndarray:
+    return np.ascontiguousarray(np.asarray(img.convert("RGB"), dtype=np.uint8)[:, :, ::-1])
+
+
+def _open_rgb(path: Path) -> Image.Image | None:
+    try:
+        with Image.open(path) as im:
+            return im.convert("RGB")
+    except Exception:
+        return None
+
+
+def _media_info(item: sqlite3.Row) -> Any:
+    """A MediaInfo for the video helpers built from the item row (fields the class has)."""
+    from app.media.probe import MediaInfo
+
+    values = {
+        "kind": item["kind"], "mime": item["mime"], "ext": item["ext"], "width": int(item["width"] or 0),
+        "height": int(item["height"] or 0), "duration_s": item["duration_s"], "bitrate": item["bitrate"],
+        "video_codec": item["video_codec"], "fps": item["fps"],
+        "has_audio": None if item["has_audio"] is None else bool(item["has_audio"]),
+        "page_count": item["page_count"],
+    }
+    names = {f.name for f in dataclasses.fields(MediaInfo)}
+    return MediaInfo(**{k: v for k, v in values.items() if k in names})
+
+
+# ------------------------------------------------------------------ inputs
+def _load_visual(item: sqlite3.Row, faces_engine: ModuleType | None, need_frames: bool) -> Visual:
+    uid, version, kind = item["uid"], int(item["version"]), item["kind"]
+    v = Visual()
+    if kind == "image":
+        original = storage.original_path(uid, version, item["ext"])
+        img: Image.Image | None = None
+        try:
+            from app.media.images import load_oriented
+
+            img = load_oriented(original, max_side=ANALYSIS_SIDE)
+        except Exception as e:
+            log.warning("analyze: %s: original not decodable (%s), using the preview", uid, e)
+            img = _open_rgb(storage.preview_path(uid, version))
+        if img is not None:
+            v.img = img.convert("RGB")
+            v.bgr = _to_bgr(v.img)
+            longest = max(int(item["width"] or 0), int(item["height"] or 0))
+            v.source_scale = max(1.0, longest / max(v.img.size)) if longest else 1.0
+    elif kind in ("pdf", "document"):
+        img = _open_rgb(storage.page_path(uid, version, 1)) or _open_rgb(storage.preview_path(uid, version))
+        if img is not None:
+            v.img = img
+            v.bgr = _to_bgr(img)
+    elif kind == "video":
+        original = storage.original_path(uid, version, item["ext"])
+        info = _media_info(item)
+        try:
+            from app.media.video import poster_time
+
+            v.poster_time = float(poster_time(info))
+        except Exception:
+            v.poster_time = 0.0
+        poster = _open_rgb(storage.preview_path(uid, version))
+        if poster is None:
+            try:
+                from app.media.video import extract_frame
+
+                arr = extract_frame(original, v.poster_time or 0.0, max_side=1280)
+                if arr is not None:
+                    poster = Image.fromarray(np.ascontiguousarray(arr[:, :, ::-1]))
+            except Exception as e:
+                log.warning("analyze: %s: no poster frame (%s)", uid, e)
+        if poster is not None:
+            v.img = poster
+            v.bgr = _to_bgr(poster)
+
+        def keep(t: float, bgr: np.ndarray) -> None:
+            v.frames.append((float(t), _resize_max(bgr, FRAME_KEEP_SIDE)))
+
+        if faces_engine is not None:
+            v.faces = faces_mod.analyze_video(original, info, on_frame=keep)
+            v.faces_done = True
+        elif need_frames:
+            from app.media.video import iter_frames
+
+            frames = iter_frames(original, info, settings.video_sample_interval_s, settings.video_max_samples,
+                                 faces_mod.VIDEO_MAX_SIDE)
+            try:
+                for t, bgr in frames:
+                    keep(t, bgr)
+            finally:
+                close = getattr(frames, "close", None)
+                if close is not None:
+                    close()
+    return v
+
+
+def _spread(frames: list[tuple[float, np.ndarray]], k: int) -> list[tuple[float, np.ndarray]]:
+    if not frames or k <= 0:
+        return []
+    if len(frames) <= k:
+        return list(frames)
+    idx = sorted({int(round(i)) for i in np.linspace(0, len(frames) - 1, k)})
+    return [frames[i] for i in idx]
+
+
+def _norm(v: np.ndarray) -> np.ndarray:
+    v = np.asarray(v, dtype=np.float32)
+    n = float(np.linalg.norm(v))
+    return (v / n).astype(np.float32) if n > 0 else v
+
+
+# ------------------------------------------------------------------ the models
+def _run_models(item: sqlite3.Row, v: Visual, siglip: ModuleType | None, nsfw: ModuleType | None,
+                faces_engine: ModuleType | None) -> Result:
+    kind = item["kind"]
+    r = Result()
+    visual = v.bgr is not None
+    if not visual and kind != "other":
+        r.skipped.append("image")
+
+    # Faces (images; videos found them while decoding).
+    if kind == "image" and visual:
+        if faces_engine is not None:
+            r.faces = faces_mod.analyze_image(v.img, source_scale=v.source_scale, img_bgr=v.bgr)  # type: ignore[arg-type]
+        else:
+            r.skipped.append("faces")
+    elif kind == "video":
+        if v.faces_done:
+            r.faces = v.faces
+        else:
+            r.skipped.append("faces")
+
+    # Person boxes (images only).
+    if kind == "image" and visual:
+        if bodies_mod.available():
+            r.bodies = bodies_mod.detect_bodies(v.img, v.bgr, r.faces)  # type: ignore[arg-type]
+        else:
+            r.skipped.append("bodies")
+
+    # SigLIP: frame 0, video frames, torso crops, zero-shot scores.
+    if siglip is not None and visual:
+        engine = siglip.get_engine()
+        r.model = str(getattr(siglip, "MODEL_ID", "siglip"))
+        sample = _spread(v.frames, settings.search_video_frames) if kind == "video" else []
+        embs = np.asarray(engine.embed_images([v.bgr, *[f for _, f in sample]]), dtype=np.float32)
+        r.embeddings.append((0, v.poster_time if kind == "video" else None, _norm(embs[0])))
+        for k, ((t, _), e) in enumerate(zip(sample, embs[1:]), start=1):
+            r.embeddings.append((k, float(t), _norm(e)))
+        scene = np.stack([e for _, _, e in r.embeddings])
+        frame0 = scene[:1]
+        r.category_scores = categories.category_scores(engine, scene)
+        r.labels = categories.top_labels(engine, scene, k=LABEL_COUNT)
+        if kind in ("image", "video"):
+            r.explicit_p = categories.binary_p(engine, scene, categories.EXPLICIT_PROMPTS,
+                                               categories.NOT_EXPLICIT_PROMPTS, reduce="max")
+            r.category_scores["explicit_p"] = round(r.explicit_p, 4)
+        if kind == "image":
+            r.doc_p = categories.binary_p(engine, frame0, categories.DOCUMENT_PROMPTS, categories.NOT_DOCUMENT_PROMPTS)
+            r.screenshot_p = categories.binary_p(engine, frame0, categories.SCREENSHOT_PROMPTS,
+                                                 categories.NOT_SCREENSHOT_PROMPTS)
+            r.category_scores["doc_p"] = round(r.doc_p, 4)
+            r.category_scores["screenshot_p"] = round(r.screenshot_p, 4)
+            r.quality_scores["accident_p"] = round(float(quality.accident_probability(engine, frame0)[0]), 4)
+            r.quality_scores["motion_blur_p"] = round(float(quality.motion_blur_probability(engine, frame0)[0]), 4)
+        crops = [f.torso for f in r.faces] + [b.torso for b in r.bodies]
+        valid = [i for i, c in enumerate(crops) if c is not None and c.size]
+        vecs: list[np.ndarray | None] = [None] * len(crops)
+        if valid:
+            out = np.asarray(engine.embed_images([crops[i] for i in valid]), dtype=np.float32)
+            for i, e in zip(valid, out):
+                vecs[i] = _norm(e)
+        r.face_torsos = vecs[:len(r.faces)]
+        r.body_torsos = vecs[len(r.faces):]
+    else:
+        if visual:
+            r.skipped.append("siglip")
+        r.face_torsos = [None] * len(r.faces)
+        r.body_torsos = [None] * len(r.bodies)
+
+    # NSFW classifier (images and videos).
+    if kind in ("image", "video") and visual:
+        if nsfw is not None:
+            imgs = [v.bgr] + [f for _, f in _spread(v.frames, NSFW_VIDEO_FRAMES)]
+            scores = [float(s) for s in nsfw.score(imgs)]
+            r.nsfw_score = round(max(scores), 4) if scores else None
+        else:
+            r.skipped.append("nsfw")
+
+    # Pixel measures.
+    if kind == "image" and visual:
+        r.quality_scores.update(quality.measure(v.bgr))  # type: ignore[arg-type]
+        r.density = categories.text_density(v.bgr)  # type: ignore[arg-type]
+        r.category_scores["text_density"] = r.density
+    elif kind == "video" and (v.frames or visual):
+        frames = [f for _, f in v.frames] or [v.bgr]
+        mean, p95, clipped = quality.exposure_many(frames)  # type: ignore[arg-type]
+        r.quality_scores.update({"mean_lum": round(mean, 3), "p95_lum": round(p95, 3), "clipped_frac": round(clipped, 4)})
+    return r
+
+
+# ------------------------------------------------------------------ writes
+def _encode_face_crop(img: Image.Image) -> bytes:
+    if img.size != (faces_mod.CROP_SIZE, faces_mod.CROP_SIZE):
+        img = img.resize((faces_mod.CROP_SIZE, faces_mod.CROP_SIZE), Image.Resampling.LANCZOS)
+    buf = io.BytesIO()
+    img.convert("RGB").save(buf, "WEBP", quality=faces_mod.CROP_QUALITY, method=4)
+    return buf.getvalue()
+
+
+def _blob(v: np.ndarray | None) -> bytes | None:
+    return None if v is None else np.asarray(v, dtype=np.float32).tobytes()
+
+
+def _repoint_covers(conn: sqlite3.Connection, item_id: int, old_ids: list[int], new_ids: list[int], now: str) -> None:
+    """Covers that point at a re-detected face move to its carried-over successor."""
+    marks = ",".join("?" * len(old_ids))
+    for p in conn.execute(f"SELECT id FROM persons WHERE cover_face_id IN ({marks})", old_ids).fetchall():
+        succ = None
+        if new_ids:
+            nmarks = ",".join("?" * len(new_ids))
+            succ = conn.execute(
+                f"SELECT id FROM faces WHERE item_id = ? AND person_id = ? AND id IN ({nmarks}) "
+                "ORDER BY quality DESC, id LIMIT 1",
+                (item_id, p["id"], *new_ids),
+            ).fetchone()
+        conn.execute("UPDATE persons SET cover_face_id = ?, updated_at = ? WHERE id = ?",
+                     (succ["id"] if succ else None, now, p["id"]))
+
+
+def _carry_bodies(conn: sqlite3.Connection, old_bodies: list[sqlite3.Row], new_ids: list[int]) -> None:
+    """User-assigned faceless bodies keep their person on the best-overlapping new body (IoU >= 0.5)."""
+    olds = [b for b in old_bodies if b["assigned_by"] == "user" and b["face_id"] is None]
+    if not olds or not new_ids:
+        return
+    marks = ",".join("?" * len(new_ids))
+    news = conn.execute(f"SELECT id, x, y, w, h FROM bodies WHERE id IN ({marks}) AND face_id IS NULL", new_ids).fetchall()
+    used: set[int] = set()
+    for o in olds:
+        best: tuple[float, int] | None = None
+        for n in news:
+            if n["id"] in used:
+                continue
+            s = cluster.iou((o["x"], o["y"], o["w"], o["h"]), (n["x"], n["y"], n["w"], n["h"]))
+            if s >= 0.5 and (best is None or s > best[0]):
+                best = (s, int(n["id"]))
+        if best is not None:
+            used.add(best[1])
+            conn.execute("UPDATE bodies SET person_id = ?, assigned_by = 'user' WHERE id = ?", (o["person_id"], best[1]))
+
+
+def _burst_entry(roles: dict[int, str | None], item_id: int, size: int) -> dict[str, Any] | None:
+    if item_id not in roles:
+        return None
+    best_uid = roles[item_id]
+    if best_uid is None:
+        return {"burst_best": {"size": size}}
+    return {"burst": {"best_uid": best_uid, "size": size}}
+
+
+def analyze_item(conn: sqlite3.Connection, item_id: int, version: int) -> None:
+    item = conn.execute("SELECT * FROM items WHERE id = ?", (item_id,)).fetchone()
+    if item is None or int(item["version"]) != int(version):
+        log.info("analyze: item %s version %s is gone or outdated, skipping", item_id, version)
+        return
+    if item["analysis_status"] == "done":
+        return
+    uid, kind = item["uid"], item["kind"]
+
+    siglip = _model("siglip")
+    nsfw = _model("nsfw")
+    faces_engine = _model("faces") if kind in ("image", "video") else None
+    v = _load_visual(item, faces_engine, need_frames=(siglip is not None or nsfw is not None))
+    r = _run_models(item, v, siglip, nsfw, faces_engine)
+    del v
+
+    # Decisions that need only this item.
+    good_face = any(cluster.is_good_face(f.det_score, f.size_px) for f in r.faces)
+    has_person = good_face or bool(r.bodies)
+    doc_like = categories.doc_likeness(r.doc_p, r.density) if kind == "image" else (1.0 if kind in ("pdf", "document") else None)
+    screen_heur = kind == "image" and categories.screenshot_heuristic(
+        item["ext"], item["camera"], item["width"], item["height"], item["exif_datetime"])
+    if r.skipped:
+        r.quality_scores["skipped"] = sorted(set(r.skipped))
+        r.category_scores["skipped"] = sorted(set(r.skipped))
+    face_crops = [_encode_face_crop(f.crop) for f in r.faces]
+    body_crops = [bodies_mod.encode_crop(b.crop) for b in r.bodies]
+
+    idx = get_index()
+    idx.sync(conn)
+    written: list[Path] = []
+    trash: list[Path] = []
+    roles: dict[int, str | None] = {}
+    members: list[quality.BurstMember] = []
+    try:
+        with tx(conn):
+            cur = conn.execute("SELECT * FROM items WHERE id = ?", (item_id,)).fetchone()
+            if cur is None or int(cur["version"]) != int(version) or cur["analysis_status"] == "done":
+                raise _Stale()
+            base_version = faces_version(conn)
+            now = now_iso()
+
+            # Embeddings and labels.
+            conn.execute("DELETE FROM item_embeddings WHERE item_id = ?", (item_id,))
+            for frame_index, t, emb in r.embeddings:
+                conn.execute(
+                    "INSERT INTO item_embeddings(item_id, version, model, frame_index, frame_time_s, embedding, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (item_id, int(version), r.model, frame_index, t, _blob(emb), now),
+                )
+            conn.execute("DELETE FROM item_labels WHERE item_id = ?", (item_id,))
+            for label, score in r.labels:
+                conn.execute("INSERT OR REPLACE INTO item_labels(item_id, label, score) VALUES (?, ?, ?)",
+                             (item_id, label, float(score)))
+
+            # Faces.
+            old_faces = conn.execute("SELECT * FROM faces WHERE item_id = ? ORDER BY id", (item_id,)).fetchall()
+            old_ids = [int(f["id"]) for f in old_faces]
+            old_people = {int(f["person_id"]) for f in old_faces if f["person_id"] is not None}
+            new_face_ids: list[int] = []
+            for rec, crop, torso in zip(r.faces, face_crops, r.face_torsos):
+                fid = int(conn.execute(
+                    "INSERT INTO faces(item_id, person_id, assigned_by, x, y, w, h, det_score, size_px, quality, "
+                    "frame_time_s, spans, embedding, torso_embedding, created_at) "
+                    "VALUES (?, NULL, 'auto', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (item_id, rec.x, rec.y, rec.w, rec.h, rec.det_score, int(rec.size_px), rec.quality,
+                     rec.frame_time_s, json_dumps(rec.spans) if rec.spans is not None else None,
+                     np.asarray(rec.embedding, dtype=np.float32).tobytes(), _blob(torso), now),
+                ).lastrowid)
+                new_face_ids.append(fid)
+                path = storage.face_crop_path(fid)
+                written.append(path)
+                storage.write_bytes_atomic(path, crop)
+            bump_faces_version(conn)
+            if old_faces and new_face_ids:
+                cluster.carry_over(conn, old_faces, new_face_ids)
+
+            # Bodies (after the faces, so face_id can point at the new rows).
+            old_bodies = conn.execute("SELECT * FROM bodies WHERE item_id = ? ORDER BY id", (item_id,)).fetchall()
+            old_body_ids = [int(b["id"]) for b in old_bodies]
+            old_people |= {int(b["person_id"]) for b in old_bodies if b["person_id"] is not None}
+            new_body_ids: list[int] = []
+            for rec, crop, torso in zip(r.bodies, body_crops, r.body_torsos):
+                face_id = new_face_ids[rec.face_index] if rec.face_index is not None else None
+                bid = int(conn.execute(
+                    "INSERT INTO bodies(item_id, face_id, person_id, assigned_by, x, y, w, h, det_score, "
+                    "torso_embedding, frame_time_s, created_at) VALUES (?, ?, NULL, 'auto', ?, ?, ?, ?, ?, ?, NULL, ?)",
+                    (item_id, face_id, rec.x, rec.y, rec.w, rec.h, rec.det_score, _blob(torso), now),
+                ).lastrowid)
+                new_body_ids.append(bid)
+                path = storage.body_crop_path(bid)
+                written.append(path)
+                storage.write_bytes_atomic(path, crop)
+            if old_bodies and new_body_ids:
+                _carry_bodies(conn, old_bodies, new_body_ids)
+            if old_body_ids:
+                marks = ",".join("?" * len(old_body_ids))
+                conn.execute(f"DELETE FROM bodies WHERE id IN ({marks})", old_body_ids)
+                trash.extend(storage.body_crop_path(b) for b in old_body_ids)
+            if old_ids:
+                _repoint_covers(conn, item_id, old_ids, new_face_ids, now)
+                marks = ",".join("?" * len(old_ids))
+                conn.execute(f"DELETE FROM faces WHERE id IN ({marks})", old_ids)
+                trash.extend(storage.face_crop_path(f) for f in old_ids)
+            idx.sync_item(conn, item_id, base_version)
+            if new_face_ids:
+                marks = ",".join("?" * len(new_face_ids))
+                remaining = [int(x[0]) for x in conn.execute(
+                    f"SELECT id FROM faces WHERE id IN ({marks}) AND person_id IS NULL AND assigned_by = 'auto' "
+                    "ORDER BY id", new_face_ids,
+                )]
+                if remaining:
+                    cluster.assign_new_faces(conn, remaining, exclude_face_ids=set(old_ids))
+            cluster.sync_bodies_to_faces(conn, [item_id])
+            if old_people:
+                cluster.prune_empty_persons(conn, old_people)
+
+            # Category and nsfw.
+            nsfw_override = bool(cur["nsfw"]) if cur["nsfw_source"] == "user" else None
+            dec = categories.decide(
+                kind, nsfw_score=r.nsfw_score, explicit_p=r.explicit_p, nsfw_override=nsfw_override,
+                screenshot_heur=screen_heur, screenshot_p=r.screenshot_p, doc_like=doc_like,
+                has_person=has_person, scores=r.category_scores,
+            )
+            category = cur["category"] if cur["category_source"] == "user" else dec.category
+            new_nsfw = int(cur["nsfw"]) if cur["nsfw_source"] == "user" else int(dec.nsfw)
+
+            # Mis-clicks and bursts.
+            if kind == "image" and category not in ("documents", "screenshots") and "blur_var" in r.quality_scores:
+                members = quality.burst_group(conn, cur, float(r.quality_scores["blur_var"]))
+                roles = quality.burst_roles(members)
+            burst = _burst_entry(roles, item_id, len(members))
+            mis, reasons, _ = quality.decide(kind, category, r.quality_scores, good_face=good_face, burst=burst)
+            if cur["misclick_source"] == "user":
+                mis, reasons = bool(cur["misclick"]), json_loads(cur["misclick_reasons"], {}) or {}
+            for m in members:
+                if m.id == item_id or m.misclick_source == "user":
+                    continue
+                row = conn.execute("SELECT misclick_reasons, misclick_source FROM items WHERE id = ?", (m.id,)).fetchone()
+                if row is None or row["misclick_source"] == "user":
+                    continue
+                other = quality.with_burst(json_loads(row["misclick_reasons"], {}) or {},
+                                           _burst_entry(roles, m.id, len(members)))
+                conn.execute(
+                    "UPDATE items SET misclick = ?, misclick_reasons = ?, updated_at = ? WHERE id = ?",
+                    (int(quality.is_misclick(other)), json_dumps(other) if other else None, now, m.id),
+                )
+
+            face_count = conn.execute("SELECT COUNT(*) FROM faces WHERE item_id = ?", (item_id,)).fetchone()[0]
+            body_count = conn.execute("SELECT COUNT(*) FROM bodies WHERE item_id = ?", (item_id,)).fetchone()[0]
+            conn.execute(
+                "UPDATE items SET category = ?, category_scores = ?, doc_likeness = ?, nsfw = ?, nsfw_score = ?, "
+                "misclick = ?, misclick_reasons = ?, quality_scores = ?, face_count = ?, body_count = ?, "
+                "analysis_status = 'done', updated_at = ? WHERE id = ?",
+                (category, json_dumps(r.category_scores) if r.category_scores else None, doc_like, new_nsfw,
+                 r.nsfw_score, int(bool(mis)), json_dumps(reasons) if reasons else None,
+                 json_dumps(r.quality_scores) if r.quality_scores else None, face_count, body_count, now, item_id),
+            )
+            bump_faces_version(conn)
+            bump_search_version(conn)
+    except _Stale:
+        for p in written:
+            storage.safe_unlink(p)
+        log.info("analyze: item %s changed during analysis, skipping", uid)
+        return
+    except BaseException:
+        idx.invalidate()
+        for p in written:
+            storage.safe_unlink(p)
+        raise
+    for p in trash:
+        storage.safe_unlink(p)
+    log.info("analyze: %s %s v%s -> %s, %d faces, %d bodies%s", kind, uid, version, category, len(r.faces),
+             len(r.bodies), f", skipped {sorted(set(r.skipped))}" if r.skipped else "")
+    _after(conn, item_id, int(version), kind, doc_like, bool(r.labels))
+
+
+def _after(conn: sqlite3.Connection, item_id: int, version: int, kind: str, doc_like: float | None,
+           labels_changed: bool) -> None:
+    """Follow-ups outside the analysis transaction; failures are logged, never raised."""
+    from app.analysis import guess
+
+    try:
+        guess.guess_item(conn, item_id)
+    except Exception as e:
+        log.warning("analyze: guessing failed for item %s: %s", item_id, e)
+    if labels_changed:
+        guess.refresh_fts(conn, [item_id])
+    if kind == "image" and doc_like is not None and doc_like >= settings.doc_likeness_min:
+        row = conn.execute("SELECT text_status, version FROM items WHERE id = ?", (item_id,)).fetchone()
+        if row is not None and row["text_status"] == "none" and int(row["version"]) == version:
+            try:
+                from app.ingest import enqueue_text
+            except ImportError:
+                return
+            try:
+                enqueue_text(conn, item_id, version)
+            except Exception as e:
+                log.warning("analyze: could not queue text extraction for item %s: %s", item_id, e)
+
+
+def mark_failed(conn: sqlite3.Connection, item_id: int, version: int) -> None:
+    """After the last retry: analysis_status 'error' when the version still matches."""
+    with tx(conn):
+        conn.execute(
+            "UPDATE items SET analysis_status = 'error', updated_at = ? WHERE id = ? AND version = ? "
+            "AND analysis_status = 'pending'",
+            (now_iso(), item_id, version),
+        )

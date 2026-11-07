@@ -1,4 +1,5 @@
-// Small toast system for admin feedback. Provided by AdminLayout.
+// App-wide toasts (moved from the hub admin). ToastProvider wraps the app shell; useToast() gives
+// success, error and info. At most four toasts show at once; they last 5 s (errors 9 s).
 import { createContext, useCallback, useContext, useMemo, useRef, useState, type ReactNode } from 'react'
 import clsx from 'clsx'
 import { CheckCircle2, Info, TriangleAlert, X } from 'lucide-react'
@@ -51,12 +52,12 @@ export function ToastProvider({ children }: { children: ReactNode }) {
             key={t.id}
             role={t.tone === 'error' ? 'alert' : 'status'}
             className={clsx(
-              'pointer-events-auto flex items-start gap-3 rounded-2xl border bg-paper px-4 py-3 text-sm shadow-lg',
-              t.tone === 'error' ? 'border-brand/40' : 'border-line',
+              'pointer-events-auto flex items-start gap-3 rounded-2xl border bg-surface px-4 py-3 text-sm shadow-lg',
+              t.tone === 'error' ? 'border-danger/40' : 'border-line',
             )}
           >
             {t.tone === 'ok' && <CheckCircle2 className="mt-0.5 size-4 shrink-0 text-ok" aria-hidden />}
-            {t.tone === 'error' && <TriangleAlert className="mt-0.5 size-4 shrink-0 text-brand" aria-hidden />}
+            {t.tone === 'error' && <TriangleAlert className="mt-0.5 size-4 shrink-0 text-danger" aria-hidden />}
             {t.tone === 'info' && <Info className="mt-0.5 size-4 shrink-0 text-ink-soft" aria-hidden />}
             <p className="min-w-0 flex-1 break-words">{t.text}</p>
             <button
@@ -75,6 +76,6 @@ export function ToastProvider({ children }: { children: ReactNode }) {
 
 export function useToast(): ToastApi {
   const ctx = useContext(ToastContext)
-  if (!ctx) throw new Error('useToast must be used inside AdminLayout')
+  if (!ctx) throw new Error('useToast must be used inside ToastProvider')
   return ctx
 }

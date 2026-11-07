@@ -1,6 +1,11 @@
-// Routes (docs/ARCHITECTURE.md section 14). The app shell replaces this file.
+// Routes (docs/ARCHITECTURE.md section 14). /setup and /login stand alone; every other page renders
+// inside AppShell, which guards the session and draws the header and navigation. Pages are lazy
+// chunks; ToastProvider wraps everything so any page or portal can raise a toast.
 import { lazy, Suspense } from 'react'
 import { BrowserRouter, Route, Routes } from 'react-router'
+import { PageSpinner } from './components/ui'
+import { ToastProvider } from './components/Toast'
+import AppShell from './components/shell/AppShell'
 
 const SetupPage = lazy(() => import('./pages/SetupPage'))
 const LoginPage = lazy(() => import('./pages/LoginPage'))
@@ -19,23 +24,27 @@ const NotFoundPage = lazy(() => import('./pages/NotFoundPage'))
 export default function App() {
   return (
     <BrowserRouter>
-      <Suspense fallback={null}>
-        <Routes>
-          <Route path="/setup" element={<SetupPage />} />
-          <Route path="/login" element={<LoginPage />} />
-          <Route path="/" element={<LibraryPage />} />
-          <Route path="/people" element={<PeoplePage />} />
-          <Route path="/people/:id" element={<PersonPage />} />
-          <Route path="/documents" element={<DocumentsPage />} />
-          <Route path="/review" element={<ReviewPage />} />
-          <Route path="/vault" element={<VaultPage />} />
-          <Route path="/upload" element={<UploadPage />} />
-          <Route path="/trash" element={<TrashPage />} />
-          <Route path="/settings" element={<SettingsPage />} />
-          <Route path="/m/:uid" element={<MediaPage />} />
-          <Route path="*" element={<NotFoundPage />} />
-        </Routes>
-      </Suspense>
+      <ToastProvider>
+        <Suspense fallback={<PageSpinner />}>
+          <Routes>
+            <Route path="/setup" element={<SetupPage />} />
+            <Route path="/login" element={<LoginPage />} />
+            <Route element={<AppShell />}>
+              <Route path="/" element={<LibraryPage />} />
+              <Route path="/people" element={<PeoplePage />} />
+              <Route path="/people/:id" element={<PersonPage />} />
+              <Route path="/documents" element={<DocumentsPage />} />
+              <Route path="/review" element={<ReviewPage />} />
+              <Route path="/vault" element={<VaultPage />} />
+              <Route path="/upload" element={<UploadPage />} />
+              <Route path="/trash" element={<TrashPage />} />
+              <Route path="/settings" element={<SettingsPage />} />
+              <Route path="/m/:uid" element={<MediaPage />} />
+              <Route path="*" element={<NotFoundPage />} />
+            </Route>
+          </Routes>
+        </Suspense>
+      </ToastProvider>
     </BrowserRouter>
   )
 }

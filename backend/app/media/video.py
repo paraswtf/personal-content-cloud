@@ -1,8 +1,12 @@
 """Video helpers built on the system ffmpeg/ffprobe binaries (subprocess, no shell).
 
-CONTRACT (implemented by the media agent). ffmpeg applies rotation metadata automatically
-when decoding (autorotate is on by default), so frames come out in display orientation and
-their size matches MediaInfo.width/height.
+CONTRACT. ffmpeg applies rotation metadata automatically when decoding (autorotate is on by
+default), so frames come out in display orientation and their size matches MediaInfo.width/height.
+- iter_frames(path, info, interval_s, max_frames, max_side) -> Iterator[(time_s, BGR ndarray)]
+- extract_frame(path, t, max_side=None) -> BGR uint8 ndarray | None (extract_frame_image: PIL RGB)
+- frames_at(path, info, times, max_side=256) -> [PIL RGB | None] (fingerprints)
+- poster_time(info), stream_friendly(codec, ext, w, h, bitrate), needs_web_preview(info, ext),
+  transcode_preview(src, dst, info, max_height), make_video_derivatives(...)
 
 All subprocess calls need a timeout and must not leave temp files behind on failure.
 """
@@ -65,7 +69,14 @@ def _limit_filter(max_side: int) -> str:
 
 
 def extract_frame(path: Path, t: float, max_side: int | None = None, *, exact_seek: bool = False,
-                  gentle: bool = False) -> Image.Image | None:
+                  gentle: bool = False) -> np.ndarray | None:
+    """extract_frame_image as a contiguous HxWx3 uint8 BGR array (OpenCV / the ML engines)."""
+    img = extract_frame_image(path, t, max_side, exact_seek=exact_seek, gentle=gentle)
+    return images.to_bgr(img) if img is not None else None
+
+
+def extract_frame_image(path: Path, t: float, max_side: int | None = None, *, exact_seek: bool = False,
+                        gentle: bool = False) -> Image.Image | None:
     """One RGB frame at time t (seconds), display-oriented, optionally downscaled: the first frame at
     or after t. None if the file does not decode there; ToolFailure if ffmpeg could not run (timeout,
     spawn error, signal). exact_seek: seek coarsely to 3 s before t, then decode up to t (MPEG-TS input
@@ -144,9 +155,9 @@ def frames_at(path: Path, info: MediaInfo, times: list[float], max_side: int = 2
         t = max(0.0, float(t))
         if d:
             t = min(t, max(0.0, d - margin))
-        frame = extract_frame(path, t, max_side)
+        frame = extract_frame_image(path, t, max_side)
         if frame is None and t > 0:
-            frame = extract_frame(path, max(0.0, t - 1.0), max_side)
+            frame = extract_frame_image(path, max(0.0, t - 1.0), max_side)
         out.append(frame)
     return out
 
@@ -289,7 +300,7 @@ def iter_frames(
             proc.stderr.close()
     if count == 0:
         # A stream that does not decode from the start may still give a frame this way.
-        frame = extract_frame(path, 0.0)
+        frame = extract_frame_image(path, 0.0)
         if frame is not None:
             if frame.size != (w, h):
                 frame = frame.resize((w, h), Image.Resampling.BILINEAR)
@@ -350,9 +361,9 @@ def make_video_derivatives(path: Path, info: MediaInfo, thumb_path: Path, previe
     """Poster frame -> grid thumbnail + large and small preview WebP (same sizes as photos).
     Raises ValueError if no frame can be decoded."""
     t = poster_time(info)
-    frame = extract_frame(path, t, settings.preview_size)
+    frame = extract_frame_image(path, t, settings.preview_size)
     if frame is None and t > 0:
-        frame = extract_frame(path, 0.0, settings.preview_size)
+        frame = extract_frame_image(path, 0.0, settings.preview_size)
     if frame is None:
         raise ValueError("no video frame could be decoded")
     images.make_image_derivatives(frame, thumb_path, preview_path, preview_small_path)

@@ -1,46 +1,102 @@
 @import "tailwindcss";
 
-/* Brand tokens from the SICSR logo set (alumni-sicsr-logos/): red mark, charcoal type, cream ground.
-   Use them as Tailwind utilities: bg-brand, text-ink, bg-cream, border-line, etc. */
-@theme {
+/* Design tokens (docs/ARCHITECTURE.md section 14). Light values live in @theme; the dark values below
+   override the same variables when the system asks for dark (and the user did not force light) or when
+   html[data-theme="dark"] is set by lib/theme.ts. Use them as utilities: bg-bg, bg-surface, bg-surface-2,
+   text-ink, text-ink-soft, text-ink-faint, border-line, bg-accent, bg-accent-soft, text-ok, text-warn,
+   text-danger.
+
+   The names brand, brand-dark, brand-tint, cream, cream-soft and paper are kept as aliases because the
+   shared components (components/ui.tsx, Select.tsx, admin/fields.tsx) were written against them. */
+@theme static {
   --font-sans: "Inter Variable", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
 
-  --color-brand: #c4161c;
-  --color-brand-dark: #9f1116;
-  --color-brand-tint: #f9e3e1;
-  --color-ink: #2c3135;
-  --color-ink-soft: #5b6268;
-  --color-ink-faint: #8a9096;
-  --color-cream: #f3e9dd;
-  --color-cream-soft: #f8f2ea;
-  --color-paper: #fffdfa;
-  --color-line: #e3d6c6;
-  --color-ok: #2f7d4f;
-  --color-warn: #a86411;
+  --color-bg: #f6f6f4;
+  --color-surface: #ffffff;
+  --color-surface-2: #efefeb;
+  --color-ink: #1d2125;
+  --color-ink-soft: #545b62;
+  --color-ink-faint: #858c93;
+  --color-line: #e0e0da;
+  --color-accent: #3656d1;
+  --color-accent-strong: #2a45ad;
+  --color-accent-soft: #e5eafb;
+  --color-ok: #2b7a4b;
+  --color-warn: #a2600f;
+  --color-danger: #c0392b;
+
+  /* aliases for the shared components */
+  --color-brand: var(--color-accent);
+  --color-brand-dark: var(--color-accent-strong);
+  --color-brand-tint: var(--color-accent-soft);
+  --color-cream: var(--color-bg);
+  --color-cream-soft: var(--color-surface-2);
+  --color-paper: var(--color-surface);
 
   --radius-card: 1rem;
-  --shadow-card: 0 1px 2px rgb(44 49 53 / 0.06), 0 4px 16px rgb(44 49 53 / 0.06);
+  --shadow-card: 0 1px 2px rgb(20 24 28 / 0.06), 0 4px 16px rgb(20 24 28 / 0.06);
+}
+
+/* Dark tokens, twice: once for the system preference (unless light is forced), once for a forced dark. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --color-bg: #111315;
+    --color-surface: #1a1d20;
+    --color-surface-2: #23272b;
+    --color-ink: #e7e9ec;
+    --color-ink-soft: #a8aeb5;
+    --color-ink-faint: #757c84;
+    --color-line: #30353a;
+    --color-accent: #4f6ff0;
+    --color-accent-strong: #6d88f5;
+    --color-accent-soft: #1e2847;
+    --color-ok: #5bbf88;
+    --color-warn: #dfa451;
+    --color-danger: #ee6a5f;
+    --shadow-card: 0 1px 2px rgb(0 0 0 / 0.4), 0 4px 16px rgb(0 0 0 / 0.25);
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --color-bg: #111315;
+  --color-surface: #1a1d20;
+  --color-surface-2: #23272b;
+  --color-ink: #e7e9ec;
+  --color-ink-soft: #a8aeb5;
+  --color-ink-faint: #757c84;
+  --color-line: #30353a;
+  --color-accent: #4f6ff0;
+  --color-accent-strong: #6d88f5;
+  --color-accent-soft: #1e2847;
+  --color-ok: #5bbf88;
+  --color-warn: #dfa451;
+  --color-danger: #ee6a5f;
+  --shadow-card: 0 1px 2px rgb(0 0 0 / 0.4), 0 4px 16px rgb(0 0 0 / 0.25);
+}
+:root[data-theme="light"] {
+  color-scheme: light;
 }
 
 @layer base {
   :root {
-    /* Native bits (scrollbars, date pickers, caret) stay light to match the cream and paper surfaces. */
     color-scheme: light;
   }
   html {
     -webkit-text-size-adjust: 100%;
     -webkit-tap-highlight-color: transparent;
+    background-color: var(--color-bg);
   }
   body {
-    @apply bg-cream font-sans text-ink antialiased;
+    @apply bg-bg font-sans text-ink antialiased;
     min-height: 100dvh;
   }
   :focus-visible {
-    outline: 2px solid var(--color-brand);
+    outline: 2px solid var(--color-accent);
     outline-offset: 2px;
   }
   ::selection {
-    background: var(--color-brand-tint);
+    background: var(--color-accent-soft);
   }
 
   /* Form controls. Text inputs carry their own utility classes (height, radius, focus ring); this layer
@@ -77,7 +133,7 @@
     height: 1rem;
     margin: 0;
     border: 1.5px solid var(--color-line);
-    background-color: var(--color-paper);
+    background-color: var(--color-surface);
     background-position: center;
     background-repeat: no-repeat;
     background-size: 100% 100%;
@@ -101,8 +157,8 @@
   input[type="checkbox"]:checked,
   input[type="checkbox"]:indeterminate,
   input[type="radio"]:checked {
-    border-color: var(--color-brand);
-    background-color: var(--color-brand);
+    border-color: var(--color-accent);
+    background-color: var(--color-accent);
   }
   input[type="checkbox"]:checked {
     background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='white' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3.6 8.4l2.9 2.9 6-6.2'/%3E%3C/svg%3E");
@@ -117,25 +173,25 @@
   input[type="radio"]:focus-visible {
     outline: none;
     box-shadow:
-      0 0 0 2px var(--color-paper),
-      0 0 0 4px var(--color-brand);
+      0 0 0 2px var(--color-surface),
+      0 0 0 4px var(--color-accent);
   }
   input[type="checkbox"]:disabled,
   input[type="radio"]:disabled {
     cursor: not-allowed;
     opacity: 0.5;
-    background-color: var(--color-cream-soft);
+    background-color: var(--color-surface-2);
   }
   input[type="checkbox"]:checked:disabled,
   input[type="checkbox"]:indeterminate:disabled,
   input[type="radio"]:checked:disabled {
-    background-color: var(--color-brand);
+    background-color: var(--color-accent);
   }
 }
 
-/* Browser autofill would otherwise paint a blue or yellow fill. This sits outside the layers so it wins
-   over the UA style; the long background transition covers Chrome, the inset shadow covers Safari, and the
-   Tailwind ring and card shadow variables are kept so focus rings still show on autofilled fields. */
+/* Browser autofill would otherwise paint a blue or yellow fill. This sits outside the layers on purpose so it
+   wins over the UA style; the long background transition covers Chrome, the inset shadow covers Safari, and the
+   Tailwind ring and shadow variables are kept so focus rings still show on autofilled fields. */
 input:-webkit-autofill,
 input:-webkit-autofill:hover,
 input:-webkit-autofill:focus,
@@ -146,7 +202,7 @@ textarea:-webkit-autofill:focus {
   -webkit-text-fill-color: var(--color-ink);
   caret-color: var(--color-ink);
   box-shadow:
-    inset 0 0 0 1000px var(--color-paper),
+    inset 0 0 0 1000px var(--color-surface),
     var(--tw-ring-offset-shadow, 0 0 #0000),
     var(--tw-ring-shadow, 0 0 #0000),
     var(--tw-shadow, 0 0 #0000);
@@ -166,6 +222,11 @@ textarea:-webkit-autofill:focus {
 }
 .select-pop {
   animation: select-pop 120ms ease-out;
+}
+
+/* Bottom tab bar height on phones (components/shell/Nav.tsx); main leaves room for it. */
+:root {
+  --tabbar-h: 4rem;
 }
 
 @media (prefers-reduced-motion: reduce) {

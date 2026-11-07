@@ -1,4 +1,8 @@
-// Placeholder: replaced by the real page.
+// Library (/): every photo, video and document outside the vault, with filters and search.
+import Library from '../components/library/Library'
+import { usePageTitle } from '../lib/hooks'
+
 export default function LibraryPage() {
-  return <main className="p-4">Library</main>
+  usePageTitle('Library')
+  return <Library />
 }

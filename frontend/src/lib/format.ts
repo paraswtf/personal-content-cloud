@@ -1,4 +1,4 @@
-// Display formatting helpers.
+// Display formatting helpers. Dates are shown in the browser's local time.
 
 export function formatBytes(n: number | null | undefined): string {
   if (n === null || n === undefined || !Number.isFinite(n)) return '-'
@@ -38,13 +38,14 @@ export function formatCount(n: number, singular: string, plural = `${singular}s`
   return `${n.toLocaleString()} ${n === 1 ? singular : plural}`
 }
 
-/** A person's items: "4 photos", "3 photos · 1 video", "2 videos". */
-export function formatMediaCount(p: { media_count: number; video_count?: number }): string {
+/** A person's items: "4 items". Accepts the hub shape ({media_count, video_count}) too. */
+export function formatMediaCount(p: { item_count?: number; media_count?: number; video_count?: number }): string {
+  if (p.item_count !== undefined) return formatCount(p.item_count, 'item')
   const videos = p.video_count ?? 0
-  const photos = Math.max(0, p.media_count - videos)
+  const photos = Math.max(0, (p.media_count ?? 0) - videos)
   if (!videos) return formatCount(photos, 'photo')
   if (!photos) return formatCount(videos, 'video')
-  return `${formatCount(photos, 'photo')} · ${formatCount(videos, 'video')}`
+  return `${formatCount(photos, 'photo')}, ${formatCount(videos, 'video')}`
 }
 
 export function formatResolution(w: number | null | undefined, h: number | null | undefined): string {
@@ -102,4 +103,43 @@ export function dayKey(iso: string): string {
 export function formatExact(iso: string): string {
   const d = new Date(iso)
   return Number.isNaN(d.getTime()) ? '' : d.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'medium' })
+}
+
+/** A person's display name: their name, or "Unnamed" when they have none yet. */
+export function personName(p: { name: string | null } | null | undefined): string {
+  return p?.name?.trim() ? p.name : 'Unnamed'
+}
+
+/** 0.861 -> "86%". */
+export function formatPercent(v: number | null | undefined, digits = 0): string {
+  if (v === null || v === undefined || !Number.isFinite(v)) return ''
+  return `${(v * 100).toFixed(digits)}%`
+}
+
+/** 0.861 -> "0.86". */
+export function formatScore(v: unknown): string {
+  return typeof v === 'number' && Number.isFinite(v) ? v.toFixed(2) : ''
+}
+
+/** "2026-11-07" (a plain date, no time zone shift) -> "7 Nov 2026". Other strings are returned as they are. */
+export function formatPlainDate(value: string | null | undefined): string {
+  if (!value) return ''
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value)
+  if (!m) return formatDate(value) || value
+  const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]))
+  return d.toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' })
+}
+
+/** Local calendar date of a timestamp as "YYYY-MM-DD" (for date inputs). */
+export function localDateInput(d: Date = new Date()): string {
+  const p = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`
+}
+
+/** "3 min", "1 h 5 min": a span of minutes for countdowns. */
+export function formatMinutes(min: number): string {
+  const m = Math.max(0, Math.ceil(min))
+  if (m < 60) return `${m} min`
+  const h = Math.floor(m / 60)
+  return m % 60 ? `${h} h ${m % 60} min` : `${h} h`
 }

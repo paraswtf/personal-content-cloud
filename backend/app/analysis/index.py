@@ -1,9 +1,9 @@
-"""In-memory face embedding index, kept in sync with the DB.
+"""In-memory face embedding index, kept in sync with the DB (adapted from the hub's faces/index.py).
 
-CONTRACT (implemented by the faces agent). A process-wide singleton (get_index()) shared by
-the worker and API threads, guarded by an RLock. It caches (face id, person id, assigned_by,
-media id, embedding) for every face and refreshes when kv 'faces_version' changes:
-  sync(conn): if the stored version differs, re-read (id, person_id, assigned_by, media_id) for all
+CONTRACT. A process-wide singleton (get_index()) shared by the worker and API threads, guarded by
+an RLock. It caches (face id, person id, user-locked flag, item id, embedding) for every face and
+refreshes when kv 'faces_version' changes:
+  sync(conn): if the stored version differs, re-read (id, person_id, assigned_by, item_id) for all
   faces, drop rows that disappeared, load embeddings only for ids it has not seen, update the
   rest. That keeps refreshes cheap (no full embedding reload) at 100k+ faces.
 
@@ -42,8 +42,8 @@ class FaceIndex:
         self._version: int | None = None
         self._ids = np.zeros(0, dtype=np.int64)
         self._person = np.zeros(0, dtype=np.int64)  # -1 = unassigned
-        self._media = np.zeros(0, dtype=np.int64)
-        self._admin = np.zeros(0, dtype=bool)
+        self._item = np.zeros(0, dtype=np.int64)
+        self._user = np.zeros(0, dtype=bool)
         self._emb = np.zeros((0, DIM), dtype=np.float32)
         self._pos: dict[int, int] = {}
         self._tentative_conn: int | None = None  # id(conn) of a sync made inside a transaction
@@ -98,12 +98,12 @@ class FaceIndex:
         if not force and version == self._version:
             return
         reload_ids = self._tentative_ids
-        rows = conn.execute("SELECT id, person_id, assigned_by, media_id FROM faces ORDER BY id").fetchall()
+        rows = conn.execute("SELECT id, person_id, assigned_by, item_id FROM faces ORDER BY id").fetchall()
         n = len(rows)
         ids = np.fromiter((r[0] for r in rows), dtype=np.int64, count=n)
         person = np.fromiter((r[1] if r[1] is not None else -1 for r in rows), dtype=np.int64, count=n)
-        admin = np.fromiter((r[2] == "admin" for r in rows), dtype=bool, count=n)
-        media = np.fromiter((r[3] for r in rows), dtype=np.int64, count=n)
+        user = np.fromiter((r[2] == "user" for r in rows), dtype=bool, count=n)
+        item = np.fromiter((r[3] for r in rows), dtype=np.int64, count=n)
         emb = np.zeros((n, DIM), dtype=np.float32)
         # Carry cached embeddings over (both id arrays are sorted).
         hit = np.zeros(n, dtype=bool)
@@ -117,12 +117,12 @@ class FaceIndex:
         missing = np.nonzero(~hit)[0].tolist()
         if missing:
             self._load_embeddings(conn, ids, missing, emb)
-        self._set_state(ids, person, admin, media, emb, version)
+        self._set_state(ids, person, user, item, emb, version)
         self._mark(conn, in_tx, {int(ids[i]) for i in missing})
         log.debug("face index synced: %d faces (%d loaded), version %d", n, len(missing), version)
 
-    def _set_state(self, ids, person, admin, media, emb, version: int | None) -> None:
-        self._ids, self._person, self._admin, self._media, self._emb = ids, person, admin, media, emb
+    def _set_state(self, ids, person, user, item, emb, version: int | None) -> None:
+        self._ids, self._person, self._user, self._item, self._emb = ids, person, user, item, emb
         self._pos = {fid: i for i, fid in enumerate(ids.tolist())}
         self._version = version
         self._changed()
@@ -139,8 +139,8 @@ class FaceIndex:
             self._tentative_conn = None
             self._tentative_ids = set()
 
-    def sync_media(self, conn: sqlite3.Connection, media_id: int, base_version: int) -> None:
-        """Inside a write transaction that changed only the faces of `media_id`: refresh just that
+    def sync_item(self, conn: sqlite3.Connection, item_id: int, base_version: int) -> None:
+        """Inside a write transaction that changed only the faces of `item_id`: refresh just that
         item's rows when the index already holds the committed state at `base_version` (the
         version read at the start of this transaction). Otherwise a full sync."""
         with self.lock:
@@ -149,30 +149,30 @@ class FaceIndex:
                 self._sync(conn, False, in_tx=conn.in_transaction)
                 return
             rows = conn.execute(
-                "SELECT id, person_id, assigned_by, media_id FROM faces WHERE media_id = ? ORDER BY id",
-                (int(media_id),),
+                "SELECT id, person_id, assigned_by, item_id FROM faces WHERE item_id = ? ORDER BY id",
+                (int(item_id),),
             ).fetchall()
             n = len(rows)
             r_ids = np.fromiter((r[0] for r in rows), dtype=np.int64, count=n)
             r_person = np.fromiter((r[1] if r[1] is not None else -1 for r in rows), dtype=np.int64, count=n)
-            r_admin = np.fromiter((r[2] == "admin" for r in rows), dtype=bool, count=n)
-            r_media = np.full(n, int(media_id), dtype=np.int64)
+            r_user = np.fromiter((r[2] == "user" for r in rows), dtype=bool, count=n)
+            r_item = np.full(n, int(item_id), dtype=np.int64)
             r_emb = np.zeros((n, DIM), dtype=np.float32)
             if n:
                 self._load_by_id(conn, r_ids, list(range(n)), r_emb)
-            keep = self._media != int(media_id)
+            keep = self._item != int(item_id)
             ids = np.concatenate([self._ids[keep], r_ids])
             order = np.argsort(ids, kind="stable")
             self._set_state(
                 ids[order],
                 np.concatenate([self._person[keep], r_person])[order],
-                np.concatenate([self._admin[keep], r_admin])[order],
-                np.concatenate([self._media[keep], r_media])[order],
+                np.concatenate([self._user[keep], r_user])[order],
+                np.concatenate([self._item[keep], r_item])[order],
                 np.concatenate([self._emb[keep], r_emb])[order],
                 faces_version(conn),
             )
             self._mark(conn, True, {int(f) for f in r_ids.tolist()})
-            log.debug("face index: media %s refreshed (%d faces), version %d", media_id, n, self._version)
+            log.debug("face index: item %s refreshed (%d faces), version %d", item_id, n, self._version)
 
     @staticmethod
     def _load_embeddings(conn: sqlite3.Connection, ids: np.ndarray, rows: list[int], out: np.ndarray) -> None:
@@ -194,6 +194,10 @@ class FaceIndex:
             marks = ",".join("?" * len(pos))
             for fid, blob in conn.execute(f"SELECT id, embedding FROM faces WHERE id IN ({marks})", list(pos)):
                 out[pos[fid]] = _decode(blob)
+
+    def sync_media(self, conn: sqlite3.Connection, item_id: int, base_version: int) -> None:
+        """Old name of sync_item (hub)."""
+        self.sync_item(conn, item_id, base_version)
 
     def invalidate(self) -> None:
         """Force a full refresh (embeddings included) on the next sync. Call it when a transaction

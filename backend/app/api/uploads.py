@@ -1,37 +1,29 @@
-"""Chunked, resumable upload API.
+"""Chunked, resumable upload API (docs/ARCHITECTURE.md section 6).
 
-CONTRACT (implemented by the API agent). Router mounted at prefix /api/uploads, depends on
-require_access. Protocol (docs/SPEC.md section "Upload protocol"):
+CONTRACT. Router without a prefix, mounted at /api/uploads; every route requires a logged-in
+session (Depends(require_user), which also enforces the X-Requested-With CSRF header on writes).
 
 POST   /api/uploads                     UploadCreate -> UploadOut (201)
-    Validate size <= settings.max_upload_bytes (413) and free disk via
-    storage.has_room_for(size + bytes still owed by active 'uploading' rows), checked inside the
-    insert transaction (507 "The server is out of storage space"); clean the uploader name (app.util.clean_name,
-    400 if empty), upsert uploaders by name_key. If sha256 is given and found in known_hashes,
-    create the upload row directly as 'duplicate' (media_id = matched item, contributor added) and
-    return it: the client then skips sending bytes. Otherwise create status 'uploading' with an
-    empty staging file (storage.staging_path(uid)). uploads.admin = 1 when the admin is logged in
-    (app.auth.is_admin): people metadata in such a file is then applied by name even when it was
-    signed by another portal (app.export.people).
-PUT   /api/uploads/{id}/chunk?offset=N raw body (application/octet-stream) -> ChunkOut
-    Only while status 'uploading'. offset must equal received_bytes, else 409 with JSON
+    size <= settings.max_upload_bytes (413) and free disk via storage.has_room_for(size + bytes
+    still owed by active 'uploading' rows), checked inside the insert transaction (507). If sha256
+    is given and an item (live or in the trash) has it, the row is created directly as 'duplicate'
+    pointing at that item and no bytes are sent. Otherwise status 'uploading' with an empty staging
+    file (storage.staging_path(uid)). `source` records the way in (web, share, camera, api).
+PUT    /api/uploads/{id}/chunk?offset=N raw body -> ChunkOut
+    Only while 'uploading'. offset must equal received_bytes, else 409
     {"detail": "offset_mismatch", "received_bytes": n}. Body length <= settings.chunk_size and
-    offset+len <= declared size (413). Stream the request body (request.stream()) into the staging
-    file opened r+b at that offset (no whole-chunk buffering beyond chunk_size), fsync, then
-    update received_bytes. 507 when the disk is (nearly) full, before or during the write
-    (received_bytes unchanged); 503 + Retry-After when too many chunks are in flight. A retried chunk with an offset below received_bytes for the same bytes
-    is answered 409 as above, so the client resyncs.
+    offset+len <= declared size (413). Positioned write + fsync, then received_bytes. 507 when the
+    disk is (nearly) full; 503 + Retry-After when too many chunks are in flight.
 POST   /api/uploads/{id}/complete -> UploadOut
-    received_bytes must equal size (409 otherwise). Compute sha256 of the staged file; if it is in
-    known_hashes -> status 'duplicate' (+ contributor), delete the staged file. Otherwise status
-    'queued', store sha256, enqueue ingest {upload_id}. Idempotent: calling again returns the
-    current state.
-GET    /api/uploads/{id} -> UploadOut
-GET    /api/uploads?ids=a,b,c -> UploadList   (max 200 ids; unknown ids are omitted)
-GET    /api/uploads/mine?client_id=... -> UploadList  (latest 300 uploads of that browser)
-DELETE /api/uploads/{id} -> UploadOut  cancel while 'uploading' (delete staged file); otherwise
-    return the current state unchanged.
-Upload ids are unguessable (14-char random uid) and act as the capability for that upload.
+    received_bytes must equal size (409). The staged file is hashed in this worker thread WITHOUT
+    the per-upload lock; the result is applied under the lock after re-checking the row. A known
+    sha256 -> 'duplicate' (staged file deleted); otherwise 'queued' + an ingest job. Idempotent.
+POST   /api/uploads/simple  multipart: file, source -> UploadOut (201)
+    One request, up to settings.simple_upload_max_bytes (413), for scripts and tests.
+GET    /api/uploads/{id} -> UploadOut;  GET /api/uploads?ids=a,b,c -> UploadList (max 200)
+GET    /api/uploads/mine?client_id=... -> UploadList (latest 300 of that browser)
+DELETE /api/uploads/{id} -> UploadOut (cancel while 'uploading'; otherwise unchanged)
+Upload ids are unguessable 14-character uids.
 """
 from __future__ import annotations
 
@@ -44,25 +36,23 @@ import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import JSONResponse
 from starlette.concurrency import run_in_threadpool
 
-from app.changelog import context as changelog_context
-from app.changelog import retention
-from app.changelog.capture import claim
 from app import jobs, storage
 from app.api.common import UPLOAD_SELECT, upload_out
-from app.api.deps import get_db, require_access, upload_change
-from app.auth import client_ip, is_admin
+from app.api.deps import get_db, require_user
+from app.auth.sessions import client_ip
 from app.config import settings
 from app.db import connect, tx
 from app.schemas import ChunkOut, UploadCreate, UploadList, UploadOut
-from app.util import clean_name, name_key, new_uid, now_iso, safe_filename
+from app.util import new_uid, now_iso, safe_filename
 
 log = logging.getLogger(__name__)
 
-router = APIRouter(dependencies=[Depends(require_access), Depends(upload_change, scope="function")])
+router = APIRouter(dependencies=[Depends(require_user)])
+SOURCES = ("web", "share", "camera", "api")
 
 MAX_IDS = 200
 MINE_LIMIT = 300
@@ -131,73 +121,41 @@ def _reserved_bytes(conn: sqlite3.Connection) -> int:
     ).fetchone()[0])
 
 
+def _known_item(conn: sqlite3.Connection, sha: str | None) -> int | None:
+    if not sha:
+        return None
+    row = conn.execute("SELECT id FROM items WHERE sha256 = ?", (sha,)).fetchone()
+    return int(row["id"]) if row else None
+
+
 @router.post("", response_model=UploadOut, status_code=201)
 def create_upload(body: UploadCreate, request: Request, conn: sqlite3.Connection = Depends(get_db)) -> UploadOut:
     if body.size > settings.max_upload_bytes:
         limit_gb = settings.max_upload_bytes / (1024 ** 3)
         raise HTTPException(status_code=413, detail=f"The file is larger than the {limit_gb:g} GB limit")
-    name = clean_name(body.uploader_name)
-    if not name:
-        raise HTTPException(status_code=400, detail="Please enter your name")
-    changelog_context.set_label(conn, name)
     filename = safe_filename(body.filename)
     client_id = (body.client_id or "").strip() or None
     mime = (body.mime or "").strip()[:128] or None
     now = now_iso()
     uid = new_uid()
-    admin = 1 if is_admin(request) else 0  # before the write transaction: it reads the session epoch
-
-    known = None
-    if body.sha256:
-        known = conn.execute("SELECT media_id FROM known_hashes WHERE sha256 = ?", (body.sha256,)).fetchone()
+    known = _known_item(conn, body.sha256)
     staging = storage.staging_path(uid)
-    if known is None and not storage.has_room_for(body.size):
-        # Deleted files waiting in the trash give way to new uploads (never those under a day old).
-        # Outside the write transaction: purging deletes files, which a rollback could not undo.
-        retention.purge_for_space(conn, need_bytes=body.size)
     if known is None:
         staging.parent.mkdir(parents=True, exist_ok=True)
         staging.touch(exist_ok=False)
     try:
         with tx(conn):
-            conn.execute(
-                "INSERT INTO uploaders(name, name_key, created_at) VALUES (?, ?, ?) "
-                "ON CONFLICT(name_key) DO NOTHING",
-                (name, name_key(name), now),
-            )
-            uploader_id = conn.execute(
-                "SELECT id FROM uploaders WHERE name_key = ?", (name_key(name),)
-            ).fetchone()["id"]
             # Inside the write transaction (BEGIN IMMEDIATE), so concurrent creates see each
             # other's reservations and cannot all pass against the same free space.
             if known is None and not storage.has_room_for(body.size + _reserved_bytes(conn)):
                 raise HTTPException(status_code=507, detail=NO_SPACE)
-            if known is not None:
-                conn.execute(
-                    "INSERT INTO uploads(uid, uploader_id, client_id, original_filename, size_bytes, received_bytes, "
-                    "mime, sha256, status, remote_addr, admin, created_at, updated_at) "
-                    "VALUES (?, ?, ?, ?, ?, 0, ?, ?, 'duplicate', ?, ?, ?, ?)",
-                    (uid, uploader_id, client_id, filename, body.size, mime, body.sha256,
-                     client_ip(request), admin, now, now),
-                )
-                # Linked by an update, which the change history records (an undo of this upload then
-                # marks it removed); the insert of an upload row itself is not recorded.
-                conn.execute("UPDATE uploads SET media_id = ? WHERE uid = ?", (known["media_id"], uid))
-                changelog_context.add_refs(conn, f"u:{uid}")
-                cur = conn.execute(
-                    "INSERT OR IGNORE INTO media_contributors(media_id, uploader_id, first_upload_at) VALUES (?, ?, ?)",
-                    (known["media_id"], uploader_id, now),
-                )
-                if cur.rowcount == 0:
-                    claim(conn, "media_contributors", {"media_id": known["media_id"], "uploader_id": uploader_id},
-                          known["media_id"])
-            else:
-                conn.execute(
-                    "INSERT INTO uploads(uid, uploader_id, client_id, original_filename, size_bytes, received_bytes, "
-                    "mime, status, remote_addr, admin, created_at, updated_at) "
-                    "VALUES (?, ?, ?, ?, ?, 0, ?, 'uploading', ?, ?, ?, ?)",
-                    (uid, uploader_id, client_id, filename, body.size, mime, client_ip(request), admin, now, now),
-                )
+            conn.execute(
+                "INSERT INTO uploads(uid, source, client_id, original_filename, size_bytes, received_bytes, mime, "
+                "sha256, status, item_id, remote_addr, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)",
+                (uid, body.source, client_id, filename, body.size, mime, body.sha256 if known else None,
+                 "duplicate" if known else "uploading", known, client_ip(request), now, now),
+            )
     except BaseException:
         if known is None:
             storage.safe_unlink(staging)
@@ -342,6 +300,29 @@ def _sha256_file(path) -> str:
     return h.hexdigest()
 
 
+def _finish(conn: sqlite3.Connection, row: sqlite3.Row, digest: str) -> bool:
+    """Apply a computed hash: 'duplicate' of a known item, or 'queued' with an ingest job.
+    Returns True when the staged file should be deleted (duplicate)."""
+    now = now_iso()
+    with tx(conn):
+        known = _known_item(conn, digest)
+        if known is not None:
+            cur = conn.execute(
+                "UPDATE uploads SET status = 'duplicate', sha256 = ?, item_id = ?, message = NULL, updated_at = ? "
+                "WHERE id = ? AND status = 'uploading'",
+                (digest, known, now, row["id"]),
+            )
+            return cur.rowcount == 1
+        cur = conn.execute(
+            "UPDATE uploads SET status = 'queued', sha256 = ?, message = NULL, updated_at = ? "
+            "WHERE id = ? AND status = 'uploading'",
+            (digest, now, row["id"]),
+        )
+        if cur.rowcount == 1:
+            jobs.enqueue(conn, "ingest", {"upload_id": int(row["id"])})
+    return False
+
+
 @router.post("/{upload_id}/complete", response_model=UploadOut)
 def complete_upload(upload_id: str, conn: sqlite3.Connection = Depends(get_db)) -> UploadOut:
     with _upload_lock(upload_id):
@@ -357,43 +338,78 @@ def complete_upload(upload_id: str, conn: sqlite3.Connection = Depends(get_db)) 
             raise HTTPException(status_code=409, detail="The uploaded data is missing, please start again")
         if on_disk != row["size_bytes"]:
             raise HTTPException(status_code=409, detail="The uploaded data is incomplete, please start again")
+    # Hash outside the per-upload lock: a status poll or cancel must not wait for a multi-GB read.
+    # No chunk can change the file meanwhile (received_bytes == size refuses every offset).
+    try:
         digest = _sha256_file(path)
-        now = now_iso()
-        duplicate = False
-        who = conn.execute("SELECT name FROM uploaders WHERE id = ?", (row["uploader_id"],)).fetchone()
-        changelog_context.set_label(conn, who["name"] if who else None)
-        changelog_context.add_refs(conn, f"u:{upload_id}")
-        with tx(conn):
-            known = conn.execute("SELECT media_id FROM known_hashes WHERE sha256 = ?", (digest,)).fetchone()
-            if known is not None:
-                duplicate = True
-                cur = conn.execute(
-                    "UPDATE uploads SET status = 'duplicate', sha256 = ?, media_id = ?, message = NULL, updated_at = ? "
-                    "WHERE id = ? AND status = 'uploading'",
-                    (digest, known["media_id"], now, row["id"]),
-                )
-                if cur.rowcount == 1:
-                    cur2 = conn.execute(
-                        "INSERT OR IGNORE INTO media_contributors(media_id, uploader_id, first_upload_at) "
-                        "VALUES (?, ?, ?)",
-                        (known["media_id"], row["uploader_id"], now),
-                    )
-                    if cur2.rowcount == 0:
-                        claim(conn, "media_contributors",
-                              {"media_id": known["media_id"], "uploader_id": row["uploader_id"]}, known["media_id"])
-            else:
-                cur = conn.execute(
-                    "UPDATE uploads SET status = 'queued', sha256 = ?, message = NULL, updated_at = ? "
-                    "WHERE id = ? AND status = 'uploading'",
-                    (digest, now, row["id"]),
-                )
-                if cur.rowcount == 1:
-                    jobs.enqueue(conn, "ingest", {"upload_id": row["id"]})
+    except FileNotFoundError:
+        raise HTTPException(status_code=409, detail="The uploaded data is missing, please start again")
+    with _upload_lock(upload_id):
+        row = _load(conn, upload_id)
+        if row["status"] != "uploading":
+            return upload_out(row)  # cancelled or completed by a concurrent call
+        duplicate = _finish(conn, row, digest)
         if duplicate:
             storage.safe_unlink(path)
         else:
             jobs.wake[jobs.QUEUE_OF["ingest"]].set()  # the job is committed now
         return upload_out(_load(conn, upload_id))
+
+
+@router.post("/simple", response_model=UploadOut, status_code=201)
+def simple_upload(request: Request, file: UploadFile = File(...), source: str = Form("api"),
+                  conn: sqlite3.Connection = Depends(get_db)) -> UploadOut:
+    """Whole file in one multipart request (scripts and tests)."""
+    if source not in SOURCES:
+        raise HTTPException(status_code=422, detail="source must be one of web, share, camera, api")
+    limit = settings.simple_upload_max_bytes
+    uid = new_uid()
+    staging = storage.staging_path(uid)
+    staging.parent.mkdir(parents=True, exist_ok=True)
+    h = hashlib.sha256()
+    size = 0
+    try:
+        with open(staging, "xb") as out:
+            while block := file.file.read(_HASH_BLOCK):
+                size += len(block)
+                if size > limit:
+                    raise HTTPException(status_code=413, detail=f"The file is larger than the "
+                                                                f"{limit // (1024 * 1024)} MB limit of this endpoint")
+                h.update(block)
+                try:
+                    out.write(block)
+                except OSError as e:
+                    if e.errno in (errno.ENOSPC, errno.EDQUOT):
+                        raise HTTPException(status_code=507, detail=NO_SPACE) from None
+                    raise
+            out.flush()
+            os.fsync(out.fileno())
+        if size == 0:
+            raise HTTPException(status_code=400, detail="The file is empty")
+        digest = h.hexdigest()
+        now = now_iso()
+        filename = safe_filename(file.filename or "upload")
+        mime = (file.content_type or "").strip()[:128] or None
+        with tx(conn):
+            known = _known_item(conn, digest)
+            conn.execute(
+                "INSERT INTO uploads(uid, source, client_id, original_filename, size_bytes, received_bytes, mime, "
+                "sha256, status, item_id, remote_addr, created_at, updated_at) "
+                "VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (uid, source, filename, size, size, mime, digest, "duplicate" if known else "queued", known,
+                 client_ip(request), now, now),
+            )
+            if known is None:
+                upload_id = conn.execute("SELECT id FROM uploads WHERE uid = ?", (uid,)).fetchone()["id"]
+                jobs.enqueue(conn, "ingest", {"upload_id": int(upload_id)})
+    except BaseException:
+        storage.safe_unlink(staging)
+        raise
+    if known is not None:
+        storage.safe_unlink(staging)
+    else:
+        jobs.wake[jobs.QUEUE_OF["ingest"]].set()
+    return upload_out(_load(conn, uid))
 
 
 # ---------------------------------------------------------------------- read

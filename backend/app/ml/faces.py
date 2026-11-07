@@ -1,17 +1,26 @@
-"""Face detection and recognition with the InsightFace buffalo_l models (onnxruntime, CPU).
+"""Face detection and recognition with the InsightFace buffalo_l models (docs/ARCHITECTURE.md section 8).
 
-SCRFD-10GF (det_10g.onnx) finds faces and 5 landmarks. ArcFace R50 (w600k_r50.onnx)
-turns each aligned 112x112 face into a 512-d embedding; cosine similarity of two
-L2-normalised embeddings says how alike two faces are.
+Contract:
+  available() -> bool                 det_10g.onnx and w600k_r50.onnx are present (app.ml.models 'faces')
+  get_engine() -> FaceEngine          process-wide engine, loaded on first use; reset() drops it
+  loaded() / provider()               for app.ml.models.statuses()
+  engine.detect(img_bgr, det_size=640, threshold=0.5, nms_thresh=0.4) -> list[DetectedFace] (no embeddings)
+  engine.detect_multiscale(img_bgr, sizes, threshold, nms_thresh) -> list[DetectedFace]
+  engine.embed(img_bgr, faces) -> None  fills face.embedding (512, float32, L2-normalised)
+  engine.analyze(img_bgr, sizes, threshold, min_size) -> list[DetectedFace] detected and embedded
+  DetectedFace(bbox (4,) x1 y1 x2 y2, kps (5, 2), det_score, embedding) with width, height, size_px
+
+SCRFD-10GF (det_10g.onnx) finds faces and 5 landmarks. ArcFace R50 (w600k_r50.onnx) turns each
+aligned 112x112 face into a 512-d embedding; cosine similarity of two L2-normalised embeddings says
+how alike two faces are. Sessions come from app.ml.runtime (CUDA when usable, else CPU).
 
 Pre/post-processing follows insightface's reference code (model_zoo/scrfd.py,
-model_zoo/arcface_onnx.py, utils/face_align.py) without depending on the
-insightface package. This module is the only place that knows about the models:
-swapping engines (for example OpenCV Zoo YuNet + SFace) means replacing this file
-and re-tuning the similarity thresholds in config.
+model_zoo/arcface_onnx.py, utils/face_align.py) without depending on the insightface package.
+Swapping engines means replacing this file and re-tuning the similarity thresholds in config.
 """
 from __future__ import annotations
 
+import logging
 import math
 import threading
 from dataclasses import dataclass
@@ -19,7 +28,8 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-import onnxruntime as ort
+
+log = logging.getLogger(__name__)
 
 DET_MODEL = "buffalo_l/det_10g.onnx"
 REC_MODEL = "buffalo_l/w600k_r50.onnx"
@@ -123,14 +133,11 @@ class FaceEngine:
         for p in (det_path, rec_path):
             if not p.is_file():
                 raise FileNotFoundError(f"face model missing: {p} (run scripts/download_models.py)")
-        opts = ort.SessionOptions()
-        opts.intra_op_num_threads = max(1, int(threads))
-        opts.inter_op_num_threads = 1
-        opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-        opts.log_severity_level = 3
-        providers = ["CPUExecutionProvider"]
-        self._det = ort.InferenceSession(str(det_path), opts, providers=providers)
-        self._rec = ort.InferenceSession(str(rec_path), opts, providers=providers)
+        from app.ml import runtime
+
+        self._det = runtime.session(det_path, threads=threads)
+        self._rec = runtime.session(rec_path, threads=threads)
+        self.provider = runtime.session_provider(self._det)
         self._det_in = self._det.get_inputs()[0].name
         self._det_out = [o.name for o in self._det.get_outputs()]
         if len(self._det_out) != 9:
@@ -281,6 +288,13 @@ _engine: FaceEngine | None = None
 _engine_lock = threading.Lock()
 
 
+def available() -> bool:
+    """True when both model files are present with their pinned sizes."""
+    from app.ml import models
+
+    return models.present("faces")
+
+
 def get_engine() -> FaceEngine:
     """Process-wide engine, created on first use from app settings."""
     global _engine
@@ -290,7 +304,24 @@ def get_engine() -> FaceEngine:
                 from app.config import settings
 
                 _engine = FaceEngine(settings.models_dir, settings.ort_threads)
+                log.info("face models loaded on %s", _engine.provider)
     return _engine
+
+
+def reset() -> None:
+    """Drop the shared engine (tests, or after the model files changed)."""
+    global _engine
+    with _engine_lock:
+        _engine = None
+
+
+def loaded() -> bool:
+    return _engine is not None
+
+
+def provider() -> str | None:
+    e = _engine
+    return e.provider if e is not None else None
 
 
 def cosine(a: np.ndarray, b: np.ndarray) -> float:
