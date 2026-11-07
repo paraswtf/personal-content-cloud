@@ -24,7 +24,10 @@ No shared contract file was edited.
   safe and the text worker, the main worker and request threads all render pages.
 - Office renders and `text_layer` come from one pagination function, so page N's render shows page
   N's text. docx and plain text: about 3000 characters or 60 wrapped lines per page; xlsx: one per
-  sheet; pptx: one per slide. At most 1000 logical pages; plain text is read up to 16 MB.
+  sheet; pptx: one per slide. At most 1000 logical pages for renders and `page_count`; plain text is
+  read up to 16 MB and the text past page 1000 is appended to the last page's text layer entry. PDFs
+  stop at `PDF_MAX_PAGES` (2000); office zips beyond the `ZIP_MAX_*` limits are kept as 'other'; XLSX
+  scanning has row, column and cell caps (ARCHITECTURE section 11).
 - `app.media.images.load_oriented(path, max_side=None, *, raw=None)` routes RAW files (by
   extension, or `raw=True`) through `app.media.raw.load_raw` (half-size demosaic).
 - `app.media.dedup`: `find_similar` plus `link_into_group`, `regroup`, `group_member_ids`, `set_best`.
@@ -33,7 +36,9 @@ No shared contract file was edited.
   enqueue compares the JSON text, so other areas should build payloads the same way.
 - `app.ingest`: also `mark_analysis_failed`, `mark_text_failed`, `mark_preview_failed`,
   `requeue_failed_upload`, `expire_trash`, `sweep_orphan_files`.
-- `app.worker.housekeeping(conn)` is public (used by POST /api/system/housekeeping).
+- `app.worker.housekeeping(conn)` is public (used by POST /api/system/housekeeping); it and the loop share
+  `worker.housekeeping_lock`. The orphan sweep is not part of it: `worker._sweep_loop` runs it on its own
+  thread, first an hour after start and then daily. `ingest.retry_failed` backs POST /api/system/retry-failed.
 - `app.persons.drop_empty_unnamed(conn, person_ids)` (new); persons rows no longer use `hidden`.
 
 ## Pipeline behaviour
@@ -50,12 +55,16 @@ No shared contract file was edited.
 - After the item insert, ingest calls `app.documents.extract.refresh_fts(conn, item_id)` (lazily) so
   every item is findable by file name at once. `purge` calls `remove_fts` inside its transaction and
   falls back to `DELETE FROM items_fts WHERE rowid=?` when the documents module is missing.
-- A re-upload of an exact duplicate that is in the trash answers 'duplicate' with a message saying so;
-  it does not restore the item.
+- A re-upload of an exact duplicate that is in the trash restores the item (`uploads._restore_trashed`,
+  all three paths) and answers 'duplicate' with 'Restored from the trash (identical file).'. The
+  ingest-time 'in the trash' branch is only reachable through a race.
 - Worker: a handler whose module or function cannot be imported raises `HandlerMissing`; the job is
   marked 'error' without retries and the item's status is left 'pending', so `recover_on_startup`
-  queues it again on the next start. Every other exception retries with backoff and then marks the
-  item's status 'error'.
+  queues it again on the next start. A `ToolFailure` defers the job without using an attempt (1, 5, 30
+  minutes, then hourly, giving up after 48 h). Every other exception retries with backoff and then marks
+  the item's status 'error'; a job that reached `MAX_ATTEMPTS` is not claimed again, and startup recovery
+  or the stale sweep gives it the final-failure handling. A clean `worker.stop()` refunds the attempt of
+  jobs still running.
 - `/api/review/guesses` is not in library.py (people.py serves it).
 
 ## HTTP behaviour

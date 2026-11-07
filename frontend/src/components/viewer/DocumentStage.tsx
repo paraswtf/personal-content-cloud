@@ -1,13 +1,32 @@
 // Document mode of the viewer: the current page large, previous and next page buttons, and a strip
-// of all pages below. Without page renders yet it shows the first-page preview; files that cannot be
+// of pages below. The strip shows a window of STRIP_SPAN pages either side of the current one plus
+// the first and last page, so a document with thousands of pages stays responsive. Without page renders yet it shows the first-page preview; files that cannot be
 // previewed show a card with the download.
-import { useEffect, useRef, useState } from 'react'
+import { Fragment, useEffect, useRef, useState } from 'react'
 import clsx from 'clsx'
 import { ChevronLeft, ChevronRight, Download, ExternalLink, FileText, Loader2 } from 'lucide-react'
 import type { ItemDetail } from '../../lib/types'
 import { formatBytes } from '../../lib/format'
 import { docTypeLabel, extLabel } from '../documents/docMeta'
 import { darkButton } from './shared'
+
+/** Thumbnails rendered on each side of the current page in the strip. */
+export const STRIP_SPAN = 30
+
+/**
+ * The page indexes the strip shows for `current` of `count`: the window around the current page,
+ * with the first and last page added when the window does not reach them. `gapBefore` and
+ * `gapAfter` say where pages are left out.
+ */
+export function stripPages(current: number, count: number, span = STRIP_SPAN) {
+  const lo = Math.max(0, current - span)
+  const hi = Math.min(count - 1, current + span)
+  const pages: number[] = []
+  if (lo > 0) pages.push(0)
+  for (let i = lo; i <= hi; i++) pages.push(i)
+  if (hi < count - 1) pages.push(count - 1)
+  return { pages, gapBefore: lo > 1, gapAfter: hi < count - 2 }
+}
 
 interface Props {
   detail: ItemDetail
@@ -46,6 +65,15 @@ function PageImage({ src, label }: { src: string; label: string }) {
         </span>
       )}
     </div>
+  )
+}
+
+/** Marks pages left out of the strip between the first or last page and the window. */
+function Gap() {
+  return (
+    <li aria-hidden className="flex w-4 shrink-0 items-center justify-center text-sm text-white/60">
+      ...
+    </li>
   )
 }
 
@@ -97,6 +125,7 @@ export default function DocumentStage({ detail, page, setPage }: Props) {
     )
   }
 
+  const shown = stripPages(current, count)
   const navBtn =
     'flex size-10 shrink-0 items-center justify-center rounded-full bg-black/45 text-white hover:bg-black/70 disabled:opacity-30 disabled:hover:bg-black/45'
 
@@ -110,23 +139,32 @@ export default function DocumentStage({ detail, page, setPage }: Props) {
           <ChevronLeft className="size-5" aria-hidden />
         </button>
         <ul ref={strip} className="flex min-w-0 flex-1 gap-1.5 overflow-x-auto overscroll-x-contain py-1" aria-label="Pages">
-          {pages.map((src, i) => (
-            <li key={src} data-page={i} className="shrink-0">
-              <button
-                type="button"
-                onClick={() => setPage(i)}
-                aria-current={i === current ? 'page' : undefined}
-                aria-label={`Page ${i + 1}`}
-                className={clsx(
-                  'relative block h-16 w-12 overflow-hidden rounded bg-white ring-2 transition',
-                  i === current ? 'ring-accent' : 'ring-transparent opacity-70 hover:opacity-100',
-                )}
-              >
-                <img src={src} alt="" loading="lazy" className="size-full object-cover object-top" />
-                <span className="absolute inset-x-0 bottom-0 bg-black/55 text-center text-[10px] font-semibold text-white">{i + 1}</span>
-              </button>
-            </li>
-          ))}
+          {shown.pages.map((i, n) => {
+            const jump = (shown.gapBefore && n === 0) || (shown.gapAfter && n === shown.pages.length - 1)
+            return (
+              <Fragment key={i}>
+                {shown.gapAfter && n === shown.pages.length - 1 && <Gap />}
+                <li data-page={i} className="shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => setPage(i)}
+                    aria-current={i === current ? 'page' : undefined}
+                    aria-label={jump ? `${i === 0 ? 'First' : 'Last'} page, page ${i + 1}` : `Page ${i + 1}`}
+                    className={clsx(
+                      'relative block h-16 w-12 overflow-hidden rounded bg-white ring-2 transition',
+                      i === current ? 'ring-accent' : 'ring-transparent opacity-70 hover:opacity-100',
+                    )}
+                  >
+                    <img src={pages[i]} alt="" loading="lazy" className="size-full object-cover object-top" />
+                    <span className="absolute inset-x-0 bottom-0 bg-black/55 text-center text-[10px] font-semibold text-white">
+                      {i + 1}
+                    </span>
+                  </button>
+                </li>
+                {shown.gapBefore && n === 0 && <Gap />}
+              </Fragment>
+            )
+          })}
         </ul>
         <span className="hidden shrink-0 text-sm tabular-nums text-white/70 sm:inline">
           {current + 1} / {count}

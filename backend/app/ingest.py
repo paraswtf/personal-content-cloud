@@ -12,9 +12,13 @@ CONTRACT (docs/ARCHITECTURE.md sections 3, 6 and 7).
   Jobs: analyze {item_id, version}; text {item_id, version} (documents only; images get text from
   the analyze stage); video_preview {item_id, version}.
 - process_video_preview(conn, item_id, version): the 'video_preview' job.
-- soft_delete / restore (trash, 30 days), purge (rows and every file of the item), expire_trash.
-- enqueue_reprocess(conn, item_id, stages), enqueue_text(conn, item_id, version).
-- cleanup_stale_uploads, sweep_orphan_files, recover_on_startup, mark_*_failed (worker).
+- soft_delete / restore (trash, 30 days; restore queues again the stages still pending), purge
+  (rows and every file of the item), expire_trash.
+- enqueue_reprocess(conn, item_id, stages), enqueue_text(conn, item_id, version). A document's
+  'preview' reprocess renders on a worker background thread into a scratch page directory and
+  replaces the page files one by one (os.replace), so a running text job never misses a page.
+- cleanup_stale_uploads, expire_failed, sweep_orphan_files, recover_on_startup, mark_*_failed
+  (worker), requeue_failed_upload and retry_failed (POST /api/system/retry-failed).
 Every handler is idempotent: it checks DB state first (terminal upload -> no-op, version mismatch ->
 no-op), writes files to deterministic paths (a new item reuses the upload uid) and switches the DB
 over in one short transaction; heavy work (decode, ffmpeg) happens before it. The staged file is
@@ -23,6 +27,7 @@ lose the upload's bytes.
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -39,7 +44,7 @@ from app.db import bump_faces_version, bump_search_version, kv_get, kv_set, next
 from app.media import dedup, images, video
 from app.media.hashing import Fingerprint, image_fingerprint, sha256_file, video_fingerprint
 from app.media.probe import MediaInfo, ToolFailure, other_info, probe
-from app.util import json_dumps, now_iso
+from app.util import json_dumps, new_uid, now_iso
 
 log = logging.getLogger(__name__)
 
@@ -157,6 +162,10 @@ def _locate_upload_file(conn: sqlite3.Connection, upload_uid: str) -> Path | Non
     staged = storage.staging_path(upload_uid)
     if staged.is_file():
         return staged
+    kept = storage.failed_path(upload_uid)
+    if kept.is_file():  # mark_upload_failed moved it but did not get to commit the status
+        log.info("upload %s: staged file gone, resuming from %s", upload_uid, kept)
+        return kept
     for cand in _fallback_candidates(upload_uid):
         if not _is_referenced(conn, cand):
             log.info("upload %s: staged file gone, resuming from %s", upload_uid, cand)
@@ -242,9 +251,10 @@ def _decode(info: MediaInfo, path: Path, filename: str | None) -> tuple[MediaInf
 
 
 def _write_derivatives(info: MediaInfo, uid: str, version: int, original: Path,
-                       img: Image.Image | None) -> tuple[list[Path], Fingerprint | None]:
+                       img: Image.Image | None, pages_uid: str | None = None) -> tuple[list[Path], Fingerprint | None]:
     """Thumb and previews; for documents also the page renders (up to settings.page_render_max, so
-    the text stage finds every page it scans on disk). Returns the files written and, for
+    the text stage finds every page it scans on disk), into the page directory of pages_uid when
+    given (a scratch name used by reprocess). Returns the files written and, for
     documents, the fingerprint of page 1. A derivative that cannot be made (a damaged file the
     probe still accepted) is logged and skipped: the item is kept without it. ffmpeg not running and
     a full disk are raised so the job is retried."""
@@ -265,8 +275,8 @@ def _write_derivatives(info: MediaInfo, uid: str, version: int, original: Path,
                 images.make_image_derivatives(page, thumb, preview, small)
                 fp = image_fingerprint(page)
                 del page
-            written.append(storage.pages_dir(uid, version))
-            documents.render_pages(original, info.kind, uid, version, max_side=settings.page_render_size,
+            written.append(storage.pages_dir(pages_uid or uid, version))
+            documents.render_pages(original, info.kind, pages_uid or uid, version, max_side=settings.page_render_size,
                                    max_pages=settings.page_render_max, ext=info.ext)
         else:
             return [], None
@@ -325,8 +335,9 @@ def process_upload(conn: sqlite3.Connection, upload_id: int) -> None:
         return
     uid = up["uid"]
     if up["status"] in TERMINAL:
-        # Done already (maybe a crash after the commit): only the staged name may be left over.
-        if not _is_referenced(conn, storage.staging_path(uid)):
+        # Done already (maybe a crash after the commit): only the staged name may be left over. A
+        # failed upload's staged file may be its only copy (housekeeping moves it to failed/).
+        if up["status"] != "error" and not _is_referenced(conn, storage.staging_path(uid)):
             storage.safe_unlink(storage.staging_path(uid))
         return
     if up["status"] == "uploading":
@@ -415,13 +426,35 @@ def _store_new(conn: sqlite3.Connection, up: sqlite3.Row, src: Path, info: Media
     log.info("ingest: upload %s stored as item %s (%s)", uid, item_id, info.kind)
 
 
+def _keep_failed(src: Path, upload_uid: str) -> Path:
+    """Move a failed upload's bytes to storage.failed_path and date the file now, so the retention
+    of expire_failed counts from the failure. Raises OSError."""
+    dest = storage.failed_path(upload_uid)
+    if not _same_path(src, dest):
+        storage.move_into_place(src, dest)
+    try:
+        os.utime(dest)
+    except OSError:
+        pass
+    return dest
+
+
 def mark_upload_failed(conn: sqlite3.Connection, upload_id: int, message: str) -> None:
     """Final ingest failure (called by the worker): status 'error' with a short message. The
-    upload's bytes move to storage.failed_path (never swept), so requeue_failed_upload can try
-    again; whatever else an interrupted run left for this upload is deleted."""
+    upload's bytes move to storage.failed_path (never swept) before the status is committed, so
+    requeue_failed_upload can try again; whatever else an interrupted run left for this upload is
+    deleted. When the move fails the bytes stay in staging, where housekeeping keeps them and tries
+    the move again."""
     up = conn.execute("SELECT id, uid, status FROM uploads WHERE id = ?", (upload_id,)).fetchone()
     if up is None or up["status"] in TERMINAL:
         return
+    src = _locate_upload_file(conn, up["uid"])
+    kept: Path | None = None
+    if src is not None:
+        try:
+            kept = _keep_failed(src, up["uid"])
+        except OSError as e:
+            log.error("upload %s: could not keep the failed file %s (%s); leaving it in place", up["uid"], src, e)
     with tx(conn):
         cur = conn.execute(
             "UPDATE uploads SET status = 'error', message = ?, updated_at = ? WHERE id = ? AND status IN "
@@ -429,14 +462,14 @@ def mark_upload_failed(conn: sqlite3.Connection, upload_id: int, message: str) -
             (message[:300], now_iso(), upload_id),
         )
     if cur.rowcount != 1:
+        if kept is not None and not _same_path(src, kept):  # changed meanwhile: put the bytes back
+            try:
+                storage.move_into_place(kept, storage.staging_path(up["uid"]))
+            except OSError as e:
+                log.warning("upload %s: could not move %s back to staging (%s)", up["uid"], kept, e)
         return
-    src = _locate_upload_file(conn, up["uid"])
-    if src is not None:
-        try:
-            storage.move_into_place(src, storage.failed_path(up["uid"]))
-        except OSError as e:
-            log.error("upload %s: could not keep the failed file %s (%s); leaving it in place", up["uid"], src, e)
-            return
+    if src is not None and kept is None:
+        return
     for cand in _fallback_candidates(up["uid"]):
         if not _is_referenced(conn, cand):
             storage.safe_unlink(cand)
@@ -450,7 +483,13 @@ def requeue_failed_upload(conn: sqlite3.Connection, upload_id: int) -> bool:
         return False
     kept, staged = storage.failed_path(up["uid"]), storage.staging_path(up["uid"])
     if not kept.is_file():
-        return False
+        if not staged.is_file():
+            return False
+        try:  # the move to failed/ did not happen: keep the bytes there first
+            _keep_failed(staged, up["uid"])
+        except OSError as e:
+            log.warning("upload %s: could not move the staged file to failed/ (%s)", up["uid"], e)
+            return False
     try:
         with tx(conn):
             cur = conn.execute(
@@ -468,6 +507,66 @@ def requeue_failed_upload(conn: sqlite3.Connection, upload_id: int) -> bool:
             storage.move_into_place(staged, kept)
         raise
     return True
+
+
+_STATUS_OF_JOB = {"analyze": "analysis_status", "text": "text_status", "video_preview": "preview_status"}
+
+
+def retry_failed(conn: sqlite3.Connection) -> int:
+    """Retry everything that failed for good: uploads in 'error' whose bytes are kept (in failed/,
+    or still in staging) go back through requeue_failed_upload; errored analyze, text and
+    video_preview jobs are queued again with their item's status set back from 'error' to 'pending'
+    (the handlers only run pending items); other errored jobs (guess, recluster) are queued again.
+    Errored ingest jobs of uploads that cannot be retried are dropped. Returns how many uploads and
+    jobs were queued again."""
+    n = 0
+    for r in conn.execute("SELECT id, uid FROM uploads WHERE status = 'error' ORDER BY id").fetchall():
+        if not (storage.failed_path(r["uid"]).is_file() or storage.staging_path(r["uid"]).is_file()):
+            continue
+        try:
+            n += requeue_failed_upload(conn, int(r["id"]))
+        except Exception:
+            log.exception("retry: could not requeue upload %s", r["uid"])
+    with tx(conn):
+        for job in conn.execute("SELECT id, type, payload FROM jobs WHERE status = 'error'").fetchall():
+            try:
+                payload = json.loads(job["payload"] or "{}")
+            except ValueError:
+                continue
+            if job["type"] == "ingest":
+                up = conn.execute("SELECT status FROM uploads WHERE id = ?", (payload.get("upload_id"),)).fetchone()
+                if up is None or up["status"] in TERMINAL:
+                    conn.execute("DELETE FROM jobs WHERE id = ?", (job["id"],))
+                continue
+            column = _STATUS_OF_JOB.get(job["type"])
+            if column is not None and "item_id" in payload and "version" in payload:
+                conn.execute(
+                    f"UPDATE items SET {column} = 'pending', updated_at = ? WHERE id = ? AND version = ? "
+                    f"AND {column} = 'error'",
+                    (now_iso(), int(payload["item_id"]), int(payload["version"])),
+                )
+        n += jobs.retry_failed(conn)
+    return n
+
+
+def expire_failed(conn: sqlite3.Connection) -> int:
+    """Delete kept failed uploads (failed/*.part) older than settings.trash_days."""
+    base = storage.root() / "failed"
+    if not base.is_dir():
+        return 0
+    cutoff = time.time() - settings.trash_days * 86400
+    removed = 0
+    for p in base.iterdir():
+        try:
+            if not p.is_file() or p.is_symlink() or p.stat().st_mtime > cutoff:
+                continue
+        except FileNotFoundError:
+            continue
+        storage.safe_unlink(p)
+        removed += 1
+    if removed:
+        log.info("failed uploads: deleted %d files older than %d days", removed, settings.trash_days)
+    return removed
 
 
 # ------------------------------------------------------------------ video previews
@@ -533,8 +632,24 @@ def enqueue_text(conn: sqlite3.Connection, item_id: int, version: int) -> None:
             jobs.enqueue(conn, "text", item_payload(item_id, version), unique=True)
 
 
-def _regenerate_derivatives(row: sqlite3.Row) -> None:
-    """Make the thumb and previews again (and drop page renders, which are re-made on request)."""
+def _swap_pages(scratch: Path, final: Path) -> int:
+    """Move the page renders of a scratch directory into the real one, one os.replace per page, so a
+    reader (the text job) always finds every page, old or new. Pages past the new count stay (they
+    are renders of the same file). Returns the number of pages moved."""
+    if not scratch.is_dir():
+        return 0
+    names = sorted((p.name for p in scratch.iterdir() if _PAGE_NAME.match(p.name)), key=lambda n: int(n[:-5]))
+    if names:
+        final.mkdir(parents=True, exist_ok=True)
+    for name in names:
+        os.replace(scratch / name, final / name)
+    return len(names)
+
+
+def _regenerate_derivatives(row: sqlite3.Row, conn: sqlite3.Connection | None = None) -> None:
+    """Make the thumb and previews again. A document's pages are rendered into a scratch directory
+    and swapped in page by page (_swap_pages), and only while the item (with conn) still exists at
+    this version."""
     uid, version = row["uid"], int(row["version"])
     original = storage.original_path(uid, version, row["ext"])
     if not original.is_file():
@@ -547,15 +662,43 @@ def _regenerate_derivatives(row: sqlite3.Row) -> None:
         except ValueError as e:
             log.warning("reprocess: %s does not decode: %s", uid, e)
             return
-    if row["kind"] in TEXT_KINDS:
-        storage.remove_tree(storage.pages_dir(uid, version))
-    _write_derivatives(info, uid, version, original, img)
+    if row["kind"] not in TEXT_KINDS:
+        _write_derivatives(info, uid, version, original, img)
+        return
+    scratch_uid = f"{uid}r{new_uid(8)}"  # same shard as uid, so the renames stay in one directory tree
+    scratch = storage.pages_dir(scratch_uid, version)
+    try:
+        _write_derivatives(info, uid, version, original, None, pages_uid=scratch_uid)
+        if conn is not None and conn.execute(
+            "SELECT 1 FROM items WHERE id = ? AND version = ?", (int(row["id"]), version)
+        ).fetchone() is None:
+            log.info("reprocess: item %s changed during the page render, renders discarded", uid)
+            return
+        n = _swap_pages(scratch, storage.pages_dir(uid, version))
+        log.info("reprocess: %s v%s has %d new page renders", uid, version, n)
+    finally:
+        storage.remove_tree(scratch)
+
+
+def _render_document_again(item_id: int, version: int) -> None:
+    """Background part of a document's 'preview' reprocess (runs on a worker-owned thread)."""
+    from app.db import connect
+
+    conn = connect()
+    try:
+        row = conn.execute("SELECT * FROM items WHERE id = ?", (item_id,)).fetchone()
+        if row is None or int(row["version"]) != int(version) or row["kind"] not in TEXT_KINDS:
+            return
+        _regenerate_derivatives(row, conn)
+    finally:
+        conn.close()
 
 
 def enqueue_reprocess(conn: sqlite3.Connection, item_id: int, stages: list[str]) -> None:
     """Run stages again for an item: 'analyze' (analysis_status back to pending), 'text' (any kind
-    but video and other) and 'preview' (thumb and previews made again now; videos get a new
-    streaming copy job). Unknown stages are ignored."""
+    but video and other) and 'preview' (thumb and previews made again now; for documents on a worker
+    background thread, page renders included; videos get a new streaming copy job). Unknown stages
+    are ignored."""
     row = conn.execute("SELECT * FROM items WHERE id = ?", (item_id,)).fetchone()
     if row is None:
         return
@@ -563,7 +706,12 @@ def enqueue_reprocess(conn: sqlite3.Connection, item_id: int, stages: list[str])
     kind = row["kind"]
     wanted = [s for s in dict.fromkeys(stages) if s in STAGES]
     if "preview" in wanted and kind != "other":
-        _regenerate_derivatives(row)
+        if kind in TEXT_KINDS:
+            from app import worker
+
+            worker.run_in_background(f"pages-{row['uid']}.v{version}", _render_document_again, int(item_id), version)
+        else:
+            _regenerate_derivatives(row)
         if kind == "video" and settings.video_previews:
             with tx(conn):
                 conn.execute("UPDATE items SET preview_status = 'pending', updated_at = ? WHERE id = ?",
@@ -595,7 +743,9 @@ def soft_delete(conn: sqlite3.Connection, item_id: int) -> None:
 
 
 def restore(conn: sqlite3.Connection, item_id: int) -> None:
-    """Take an item out of the trash."""
+    """Take an item out of the trash and queue (unique) the stages still pending: a job that ran
+    while the item was in the trash finished without doing anything (the text stage skips trashed
+    items)."""
     with tx(conn):
         cur = conn.execute(
             "UPDATE items SET deleted_at = NULL, updated_at = ? WHERE id = ? AND deleted_at IS NOT NULL",
@@ -607,6 +757,14 @@ def restore(conn: sqlite3.Connection, item_id: int) -> None:
         if len(members) > 1:
             dedup.regroup(conn, members)
         bump_search_version(conn)
+        row = conn.execute("SELECT kind, version, analysis_status, text_status, preview_status FROM items "
+                           "WHERE id = ?", (item_id,)).fetchone()
+        statuses = {k: row[k] for k in ("analysis_status", "text_status", "preview_status")}
+        if row["kind"] not in ANALYSED_KINDS:
+            statuses["analysis_status"] = "none"
+        if row["kind"] != "video":
+            statuses["preview_status"] = "none"
+        _enqueue_followups(conn, item_id, int(row["version"]), row["kind"], statuses)
 
 
 def _item_files(uid: str) -> tuple[list[Path], list[Path]]:
@@ -682,8 +840,10 @@ def expire_trash(conn: sqlite3.Connection) -> int:
 # ------------------------------------------------------------------ housekeeping
 def cleanup_stale_uploads(conn: sqlite3.Connection) -> int:
     """Cancel 'uploading' rows idle longer than settings.staging_ttl_hours and delete their staged
-    files; delete staged files that have no live upload; then sweep orphaned files. Returns the
-    number of uploads and files cleaned."""
+    files; delete staged files that have no live upload. The staged file of an upload in 'error' is
+    its only copy when mark_upload_failed could not move it: it is moved to failed/ now, never
+    deleted. Returns the number of uploads and files cleaned. The orphan file sweep is separate
+    (sweep_orphan_files, on its own daily thread)."""
     cleaned = 0
     cutoff = now_iso(-settings.staging_ttl_hours * 3600)
     stale = conn.execute(
@@ -714,19 +874,28 @@ def cleanup_stale_uploads(conn: sqlite3.Connection) -> int:
                     continue
             elif row["status"] in ACTIVE:
                 continue
+            elif row["status"] == "error":
+                if not storage.failed_path(p.name[:-5]).exists():
+                    try:
+                        _keep_failed(p, p.name[:-5])
+                        log.info("cleanup: moved the bytes of failed upload %s to failed/", p.name[:-5])
+                    except OSError as e:
+                        log.warning("cleanup: could not move %s to failed/ (%s); keeping it", p.name, e)
+                continue
             storage.safe_unlink(p)
             cleaned += 1
-    cleaned += sweep_orphan_files(conn)
     if cleaned:
         log.info("cleanup: removed %d stale uploads and files", cleaned)
     return cleaned
 
 
-def sweep_orphan_files(conn: sqlite3.Connection, min_age_s: float = ORPHAN_AGE_S) -> int:
+def sweep_orphan_files(conn: sqlite3.Connection, min_age_s: float = ORPHAN_AGE_S, stop=None) -> int:
     """Delete files under storage.SWEPT_DIRS that no row references and that are older than
     min_age_s (a crash between a commit and its file cleanup leaves them behind for good), plus
-    empty page directories. Files of uploads still being ingested are kept. Runs on the main
-    worker thread between jobs, so no ingest is writing meanwhile."""
+    empty page directories. Files of uploads still being ingested are kept. Runs on its own thread
+    (worker._sweep_loop) while jobs run, so every delete re-checks the database: _is_referenced and
+    the upload's status (an ingest may have started after the snapshot below). Stops early when the
+    threading.Event stop is set."""
     root = storage.root()
     items = {(r[0], int(r[1])): r[2] for r in conn.execute("SELECT uid, version, ext FROM items")}
     crops = {
@@ -737,11 +906,17 @@ def sweep_orphan_files(conn: sqlite3.Connection, min_age_s: float = ORPHAN_AGE_S
     active = {r[0] for r in conn.execute(f"SELECT uid FROM uploads WHERE status IN ({marks})", tuple(ACTIVE))}
     cutoff = time.time() - min_age_s
     removed = 0
+    def live_upload(uid: str) -> bool:
+        return conn.execute(f"SELECT 1 FROM uploads WHERE uid = ? AND status IN ({marks})",
+                            (uid, *ACTIVE)).fetchone() is not None
+
     for top in storage.SWEPT_DIRS:
         base = root / top
         if not base.is_dir():
             continue
         for p in base.rglob("*"):
+            if stop is not None and stop.is_set():
+                return removed
             try:
                 if not p.is_file() or p.is_symlink() or p.stat().st_mtime > cutoff:
                     continue
@@ -763,6 +938,11 @@ def sweep_orphan_files(conn: sqlite3.Connection, min_age_s: float = ORPHAN_AGE_S
                     keep = m["uid"] in active or (ext is not None and (top != "originals" or ext == m["ext"]))
             if keep or _is_referenced(conn, p):
                 continue
+            if top not in crops:
+                m = _PAGES_DIR_NAME.match(p.parent.name) if top == "pages" else \
+                    (_ORIGINAL_NAME if top == "originals" else _DERIVED_NAME).match(p.name)
+                if m and live_upload(m["uid"]):
+                    continue
             log.info("cleanup: removing orphaned file %s", p.relative_to(root))
             storage.safe_unlink(p)
             removed += 1
@@ -780,23 +960,34 @@ def sweep_orphan_files(conn: sqlite3.Connection, min_age_s: float = ORPHAN_AGE_S
 def recover_on_startup(conn: sqlite3.Connection) -> None:
     """Re-queue interrupted jobs; make sure every queued/processing upload has an ingest job and
     every item whose analysis, text or streaming copy is pending has its job; wipe data_dir/tmp."""
-    n = jobs.requeue_running(conn)
+    n, exhausted = jobs.requeue_running(conn)
     if n:
         log.info("startup: re-queued %d interrupted jobs", n)
-    added = 0
-    for r in conn.execute("SELECT id FROM uploads WHERE status IN ('queued', 'processing') ORDER BY id").fetchall():
-        added += jobs.enqueue(conn, "ingest", {"upload_id": int(r["id"])}, unique=True) is not None
+    if exhausted:
+        from app import worker
+
+        worker.finish_exhausted(conn, exhausted)
     kinds = ",".join(f"'{k}'" for k in ANALYSED_KINDS)
-    for r in conn.execute(
-        f"SELECT id, version FROM items WHERE analysis_status = 'pending' AND kind IN ({kinds}) ORDER BY id"
-    ).fetchall():
-        added += jobs.enqueue(conn, "analyze", item_payload(r["id"], r["version"]), unique=True) is not None
-    for r in conn.execute("SELECT id, version FROM items WHERE text_status = 'pending' ORDER BY id").fetchall():
-        added += jobs.enqueue(conn, "text", item_payload(r["id"], r["version"]), unique=True) is not None
-    for r in conn.execute(
-        "SELECT id, version FROM items WHERE kind = 'video' AND preview_status = 'pending' ORDER BY id"
-    ).fetchall():
-        added += jobs.enqueue(conn, "video_preview", item_payload(r["id"], r["version"]), unique=True) is not None
+    with tx(conn):  # one transaction for every missing job
+        added = jobs.enqueue_many(conn, "ingest", (
+            {"upload_id": int(r["id"])}
+            for r in conn.execute("SELECT id FROM uploads WHERE status IN ('queued', 'processing') ORDER BY id")
+            .fetchall()
+        ), unique=True)
+        added += jobs.enqueue_many(conn, "analyze", (
+            item_payload(r["id"], r["version"]) for r in conn.execute(
+                f"SELECT id, version FROM items WHERE analysis_status = 'pending' AND kind IN ({kinds}) ORDER BY id"
+            ).fetchall()
+        ), unique=True)
+        added += jobs.enqueue_many(conn, "text", (
+            item_payload(r["id"], r["version"])
+            for r in conn.execute("SELECT id, version FROM items WHERE text_status = 'pending' ORDER BY id").fetchall()
+        ), unique=True)
+        added += jobs.enqueue_many(conn, "video_preview", (
+            item_payload(r["id"], r["version"]) for r in conn.execute(
+                "SELECT id, version FROM items WHERE kind = 'video' AND preview_status = 'pending' ORDER BY id"
+            ).fetchall()
+        ), unique=True)
     if added:
         log.info("startup: queued %d missing jobs", added)
     tmp = storage.root() / "tmp"

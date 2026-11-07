@@ -32,10 +32,12 @@ from app.analysis import cluster, guess
 from app.api.common import (
     ITEM_CARD_COLUMNS,
     body_out,
+    box_person_ids,
     face_out,
     guess_out,
     item_card,
-    person_ref,
+    page_sql,
+    person_refs,
     valid_cursor_scalar,
     visible_sql,
 )
@@ -300,16 +302,12 @@ def _drop_body_tags(conn: sqlite3.Connection, rows: list[sqlite3.Row]) -> None:
 
 def _tags_of(conn: sqlite3.Connection, item_id: int) -> list[PersonRef]:
     rows = conn.execute(
-        "SELECT p.id, p.name, p.cover_face_id FROM item_tags t JOIN persons p ON p.id = t.person_id "
+        "SELECT p.id FROM item_tags t JOIN persons p ON p.id = t.person_id "
         "WHERE t.item_id = ? ORDER BY p.name_key IS NULL, p.name_key, p.id",
         (item_id,),
     ).fetchall()
-    out = []
-    for r in rows:
-        ref = person_ref(conn, int(r["id"]), r["name"], r["cover_face_id"])
-        if ref is not None:
-            out.append(ref)
-    return out
+    refs = person_refs(conn, [int(r["id"]) for r in rows])
+    return [refs[int(r["id"])] for r in rows if int(r["id"]) in refs]
 
 
 FACE_SELECT = (
@@ -319,13 +317,19 @@ FACE_SELECT = (
 )
 
 
-def _face_item(conn: sqlite3.Connection, row: sqlite3.Row) -> FaceListItem:
+def _face_items(conn: sqlite3.Connection, rows: list[sqlite3.Row]) -> list[FaceListItem]:
+    """FaceListItems of a page of FACE_SELECT rows; the guessed people are looked up once."""
+    refs = person_refs(conn, box_person_ids(rows))
+    return [_face_item(conn, r, refs) for r in rows]
+
+
+def _face_item(conn: sqlite3.Connection, row: sqlite3.Row, refs: dict[int, PersonRef] | None = None) -> FaceListItem:
     return FaceListItem(
         id=row["id"], item_uid=row["item_uid"], item_kind=row["item_kind"],
         thumb_url=thumb_url(row["item_uid"], int(row["item_version"])), url=face_url(int(row["id"])),
         det_score=row["det_score"], size_px=row["size_px"], quality=row["quality"],
         frame_time_s=row["frame_time_s"], person_id=row["person_id"], assigned_by=row["assigned_by"],
-        guess=guess_out(conn, row), created_at=row["created_at"],
+        guess=guess_out(conn, row, refs), created_at=row["created_at"],
     )
 
 
@@ -467,10 +471,16 @@ def update_person(person_id: int, body: PersonUpdate, conn: sqlite3.Connection =
         now = now_iso()
         if "cover_face_id" in fields:
             if body.cover_face_id is not None:
-                ok = conn.execute("SELECT 1 FROM faces WHERE id = ? AND person_id = ?",
-                                  (body.cover_face_id, person_id)).fetchone()
+                ok = conn.execute(
+                    "SELECT i.deleted_at IS NULL AND i.nsfw = 0 AS usable FROM faces f JOIN items i ON i.id = f.item_id "
+                    "WHERE f.id = ? AND f.person_id = ?",
+                    (body.cover_face_id, person_id)).fetchone()
                 if ok is None:
                     raise HTTPException(status_code=400, detail="The cover must be one of this person's faces")
+                if not ok["usable"]:
+                    raise HTTPException(status_code=422,
+                                        detail="The cover must be a face from a photo in the library, "
+                                               "not in the trash or the vault")
             conn.execute("UPDATE persons SET cover_face_id = ?, updated_at = ? WHERE id = ?",
                          (body.cover_face_id, now, person_id))
         if "name" in fields:
@@ -526,7 +536,7 @@ def person_faces(
     more = len(rows) > limit
     rows = rows[:limit]
     nxt = encode_cursor([rows[-1]["quality"], int(rows[-1]["id"])]) if more and rows else None
-    return FacePage(items=[_face_item(conn, r) for r in rows], next_cursor=nxt, total=int(total))
+    return FacePage(items=_face_items(conn, rows), next_cursor=nxt, total=int(total))
 
 
 @router.get("/people/{person_id}/items", response_model=ItemPage)
@@ -543,17 +553,13 @@ def person_items(
              "i.id IN (SELECT item_id FROM faces WHERE person_id = ? UNION SELECT item_id FROM bodies WHERE person_id = ? "
              "UNION SELECT item_id FROM item_tags WHERE person_id = ?)"]
     params: list[Any] = [person_id, person_id, person_id]
-    total = conn.execute(f"SELECT COUNT(*) FROM items i WHERE {' AND '.join(conds)}", params).fetchone()[0]
     sort_key = "COALESCE(i.taken_at, i.created_at)"
     v = _keyset(cursor, 2)
-    if v is not None:
-        conds.append(f"({sort_key} < ? OR ({sort_key} = ? AND i.id < ?))")
-        params += [v[0], v[0], v[1]]
-    rows = conn.execute(
-        f"SELECT {ITEM_CARD_COLUMNS}, {sort_key} AS sort_key FROM items i WHERE {' AND '.join(conds)} "
-        f"ORDER BY {sort_key} DESC, i.id DESC LIMIT ?",
-        [*params, limit + 1],
-    ).fetchall()
+    # The total comes with the first page only (clients read it there); later pages carry 0.
+    total = 0 if v is not None else conn.execute(
+        f"SELECT COUNT(*) FROM items i WHERE {' AND '.join(conds)}", params).fetchone()[0]
+    sql, extra = page_sql(conds, sort_key, v)
+    rows = conn.execute(sql, [*params, *extra, limit + 1]).fetchall()
     more = len(rows) > limit
     rows = rows[:limit]
     nxt = encode_cursor([rows[-1]["sort_key"], int(rows[-1]["id"])]) if more and rows else None
@@ -580,7 +586,7 @@ def unassigned_faces(
     more = len(rows) > limit
     rows = rows[:limit]
     nxt = encode_cursor([int(rows[-1]["id"])]) if more and rows else None
-    return FacePage(items=[_face_item(conn, r) for r in rows], next_cursor=nxt, total=int(total))
+    return FacePage(items=_face_items(conn, rows), next_cursor=nxt, total=int(total))
 
 
 def _assign(conn: sqlite3.Connection, table: str, ids: list[int], person_id: int | None, new_name: str | None,
@@ -667,11 +673,16 @@ def review_guesses(
     conn: sqlite3.Connection = Depends(get_db),
 ) -> GuessPage:
     person_sql = " AND g.guess_person_id = ?" if person is not None else ""
+    # The box columns face_out / body_out need come with the page (no per-row re-read).
     base = (
         "SELECT g.* FROM ("
-        "SELECT 'face' AS kind, f.id AS box_id, f.item_id, f.guess_person_id, COALESCE(f.guess_score, 0) AS score FROM faces f "
+        "SELECT 'face' AS kind, f.id AS box_id, f.item_id, f.guess_person_id, COALESCE(f.guess_score, 0) AS score, "
+        "f.id, f.x, f.y, f.w, f.h, f.det_score, f.size_px, f.quality, f.frame_time_s, f.spans, NULL AS face_id, "
+        "f.person_id, f.assigned_by, f.guess_score, f.guess_evidence FROM faces f "
         "WHERE f.guess_person_id IS NOT NULL AND f.person_id IS NULL UNION ALL "
-        "SELECT 'body' AS kind, b.id AS box_id, b.item_id, b.guess_person_id, COALESCE(b.guess_score, 0) AS score FROM bodies b "
+        "SELECT 'body' AS kind, b.id AS box_id, b.item_id, b.guess_person_id, COALESCE(b.guess_score, 0) AS score, "
+        "b.id, b.x, b.y, b.w, b.h, b.det_score, NULL, NULL, b.frame_time_s, NULL, b.face_id, "
+        "b.person_id, b.assigned_by, b.guess_score, b.guess_evidence FROM bodies b "
         "WHERE b.guess_person_id IS NOT NULL AND b.person_id IS NULL"
         f") g JOIN items i ON i.id = g.item_id AND {LIVE}{person_sql}"
     )
@@ -695,15 +706,14 @@ def review_guesses(
         for r in conn.execute(f"SELECT {ITEM_CARD_COLUMNS} FROM items i WHERE i.id IN ({_ids_sql(item_ids)})", item_ids):
             cards[int(r["id"])] = item_card(r)
     items: list[GuessItem] = []
+    refs = person_refs(conn, box_person_ids(rows))
     for r in rows:
-        table = "faces" if r["kind"] == "face" else "bodies"
-        box_row = conn.execute(f"SELECT * FROM {table} WHERE id = ?", (r["box_id"],)).fetchone()
-        if box_row is None or int(r["item_id"]) not in cards:
+        if int(r["item_id"]) not in cards:
             continue
-        g = guess_out(conn, box_row)
+        g = guess_out(conn, r, refs)
         if g is None:
             continue
-        box = face_out(conn, box_row) if r["kind"] == "face" else body_out(conn, box_row)
+        box = face_out(conn, r, refs) if r["kind"] == "face" else body_out(conn, r, refs)
         items.append(GuessItem(kind=r["kind"], id=int(r["box_id"]), item=cards[int(r["item_id"])], box=box, guess=g))
     return GuessPage(items=items, next_cursor=nxt, total=int(total))
 

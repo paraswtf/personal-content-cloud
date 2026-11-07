@@ -41,7 +41,7 @@ export default function DownloadMenu({ detail, vault, frameTime, pageUrl }: Prop
 
   const isVideo = detail.kind === 'video'
   const now = () => frameTime?.() ?? 0
-  const frameHref = (t: number) => withVault(frameUrl(detail.uid, detail.version, t, 'full', true), vault)
+  const frameHref = (t: number) => withVault(frameUrl(detail.uid, detail.version, t, 'full', true, detail.nsfw), vault)
   const onFrameClick = (e: MouseEvent<HTMLAnchorElement>) => {
     e.currentTarget.href = frameHref(now())
     setOpen(false)

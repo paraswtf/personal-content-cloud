@@ -15,14 +15,27 @@ CONTRACT (docs/ARCHITECTURE.md section 7).
   module exists).
 - A handler exception is logged with its traceback and the job retried with backoff
   (app.jobs.fail). A full disk (ENOSPC/EDQUOT or SQLite 'disk is full' anywhere in the exception
-  chain) re-queues the job after DISK_FULL_DELAY_S without using up an attempt. When a job fails
-  for good, _final_failure marks the item's analysis_status / text_status / preview_status 'error'
-  or the upload 'error' (its bytes kept in data_dir/failed).
+  chain) re-queues the job after DISK_FULL_DELAY_S without using up an attempt. A ToolFailure
+  (ffmpeg/ffprobe timeout, signal or missing tool) anywhere in the chain re-queues it without using
+  an attempt either, after 1, 5, 30 minutes and then hourly (jobs.defer_tool_failure); after about
+  48 hours of such failures in a row the job fails for good. When a job fails for good,
+  _final_failure marks the item's analysis_status / text_status / preview_status 'error' or the
+  upload 'error' (its bytes kept in data_dir/failed).
 - jobs.complete / jobs.fail are retried a few times; a job left 'running' is re-queued by the
-  main thread's periodic sweep when no live thread holds it (STALE_RUNNING_S).
+  main thread's periodic sweep when no live thread holds it (STALE_RUNNING_S). A job claimed
+  jobs.MAX_ATTEMPTS times that is found running after a crash or by that sweep fails for good
+  (finish_exhausted), so a job that kills the process cannot loop the server. stop() gives back
+  the attempt of jobs still running at a clean shutdown (jobs.refund_attempt).
 - Housekeeping every CLEANUP_INTERVAL_S on the main thread: stale running jobs, abandoned uploads
-  and orphaned files (ingest.cleanup_stale_uploads), the trash (ingest.expire_trash) and expired
-  sessions (app.auth.sessions.purge_expired).
+  (ingest.cleanup_stale_uploads), failed uploads kept longer than settings.trash_days
+  (ingest.expire_failed), the trash (ingest.expire_trash) and expired sessions
+  (app.auth.sessions.purge_expired). housekeeping() holds housekeeping_lock, so the manual
+  endpoint and the worker loop never run it at once.
+- The orphan file sweep (ingest.sweep_orphan_files) walks every stored file, so it runs on its own
+  low-priority thread: first SWEEP_FIRST_DELAY_S after start, then every SWEEP_INTERVAL_S.
+- run_in_background(key, fn, *args): one-off work that should not hold a request thread (page
+  renders of a document reprocess) runs on a short-lived thread owned by this module; one per key
+  at a time. drain() waits for these threads first.
 - After the main queue drains, one unique 'recluster' job is queued when faces were added since
   the last run and some automatic faces are still unassigned.
 - start()/stop() are called from the FastAPI lifespan; nothing starts when
@@ -53,6 +66,8 @@ RECLUSTER_MARK = "recluster_max_face_id"  # kv: highest face id when the last re
 BOOKKEEPING_DELAYS_S = (2.0, 4.0, 8.0, 16.0)  # waits between tries of jobs.complete / jobs.fail
 STALE_RUNNING_S = 3600.0  # 'running' jobs older than this, not held by a live thread, are re-queued
 DISK_FULL_DELAY_S = 120.0  # a job that failed because the disk is full waits this long, attempt not counted
+SWEEP_FIRST_DELAY_S = 3600.0  # the orphan sweep first runs this long after start
+SWEEP_INTERVAL_S = 86400.0  # and then once a day
 
 
 def _item_args(p: dict[str, Any]) -> tuple:
@@ -75,6 +90,9 @@ _stop = threading.Event()
 _lock = threading.Lock()
 _held: dict[int, int] = {}  # thread ident -> id of the job that thread is running
 _held_lock = threading.Lock()
+housekeeping_lock = threading.Lock()  # held by housekeeping() and by POST /api/system/retry-failed
+_background: dict[str, threading.Thread] = {}
+_background_lock = threading.Lock()
 
 
 class HandlerMissing(RuntimeError):
@@ -165,6 +183,15 @@ def _final_failure(conn: sqlite3.Connection, job: sqlite3.Row, exc: BaseExceptio
         log.exception("could not record the final failure of job %s", job["id"])
 
 
+def finish_exhausted(conn: sqlite3.Connection, rows: list[sqlite3.Row]) -> None:
+    """Record the final failure of jobs that jobs.requeue_running / requeue_stale moved to 'error'
+    because they were interrupted MAX_ATTEMPTS times (call after their transaction committed)."""
+    for row in rows:
+        log.error("job %s (%s %s) was interrupted %s times; giving up", row["id"], row["type"], row["payload"],
+                  row["attempts"])
+        _final_failure(conn, row, RuntimeError(f"interrupted {int(row['attempts'])} times"))
+
+
 def _bookkeep(conn: sqlite3.Connection, what: str, fn, *args, **kwargs):
     """Call jobs.complete/jobs.fail, retrying on database errors (busy, locked, disk full).
     Re-raises the last error when every try failed; the stale-job sweep then recovers the job."""
@@ -198,6 +225,20 @@ def _is_disk_full(exc: BaseException) -> bool:
     return False
 
 
+def _is_tool_failure(exc: BaseException) -> bool:
+    """True if the exception or anything in its cause/context chain is a media.probe.ToolFailure."""
+    from app.media.probe import ToolFailure
+
+    seen: set[int] = set()
+    cur: BaseException | None = exc
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        if isinstance(cur, ToolFailure):
+            return True
+        cur = cur.__cause__ or (None if cur.__suppress_context__ else cur.__context__)
+    return False
+
+
 def _handle(conn: sqlite3.Connection, job: sqlite3.Row) -> None:
     """Run one claimed job and complete or fail it. Never raises for handler errors."""
     started = time.monotonic()
@@ -224,7 +265,14 @@ def _handle(conn: sqlite3.Connection, job: sqlite3.Row) -> None:
                 log.warning("job %s waits %.0fs for disk space", job["id"], DISK_FULL_DELAY_S)
                 _bookkeep(conn, f"defer job {job['id']}", jobs.defer, int(job["id"]), tb, DISK_FULL_DELAY_S)
                 return
-            retried = _bookkeep(conn, f"record the failure of job {job['id']}", jobs.fail, int(job["id"]), tb)
+            if _is_tool_failure(exc):
+                if _bookkeep(conn, f"defer job {job['id']}", jobs.defer_tool_failure, int(job["id"]), tb):
+                    log.warning("job %s waits for ffmpeg/ffprobe to work again", job["id"])
+                    return
+                retried = _bookkeep(conn, f"record the failure of job {job['id']}", jobs.fail, int(job["id"]), tb,
+                                    retry=False)
+            else:
+                retried = _bookkeep(conn, f"record the failure of job {job['id']}", jobs.fail, int(job["id"]), tb)
             if not retried:
                 log.error("job %s (%s) failed for good", job["id"], job["type"])
                 _final_failure(conn, job, exc)
@@ -237,15 +285,26 @@ def _handle(conn: sqlite3.Connection, job: sqlite3.Row) -> None:
 
 
 def housekeeping(conn: sqlite3.Connection) -> dict[str, int]:
-    """Abandoned uploads and orphaned files, the trash, expired sessions. Each part is guarded so
-    one failure does not stop the others. Returns counts per part."""
+    """Abandoned uploads, failed uploads past their retention, the trash, expired sessions (the
+    orphan file sweep runs on its own thread, see _sweep_loop). Each part is guarded so one failure
+    does not stop the others. Holds housekeeping_lock, so two callers never run it at once. Returns
+    counts per part."""
+    with housekeeping_lock:
+        return _housekeeping(conn)
+
+
+def _housekeeping(conn: sqlite3.Connection) -> dict[str, int]:
     from app import ingest
 
-    out = {"cleaned": 0, "purged": 0, "sessions": 0}
+    out = {"cleaned": 0, "failed": 0, "purged": 0, "sessions": 0}
     try:
         out["cleaned"] = ingest.cleanup_stale_uploads(conn)
     except Exception:
         log.exception("housekeeping: upload cleanup failed")
+    try:
+        out["failed"] = ingest.expire_failed(conn)
+    except Exception:
+        log.exception("housekeeping: failed upload expiry failed")
     try:
         out["purged"] = ingest.expire_trash(conn)
     except Exception:
@@ -259,10 +318,76 @@ def housekeeping(conn: sqlite3.Connection) -> dict[str, int]:
     return out
 
 
+def run_in_background(key: str, fn: Callable[..., Any], *args: Any) -> threading.Thread | None:
+    """Run fn(*args) on a daemon thread owned by this module. Only one thread per key runs at a
+    time: returns None (and does nothing) while one for the same key is still running."""
+    def target() -> None:
+        try:
+            fn(*args)
+        except Exception:
+            log.exception("background task %s failed", key)
+        finally:
+            with _background_lock:
+                if _background.get(key) is threading.current_thread():
+                    del _background[key]
+
+    with _background_lock:
+        running = _background.get(key)
+        if running is not None and running.is_alive():
+            return None
+        t = threading.Thread(target=target, name=f"pcc-bg-{key}"[:60], daemon=True)
+        _background[key] = t
+        t.start()
+    return t
+
+
+def wait_background(timeout: float | None = None) -> None:
+    """Wait for the threads started by run_in_background (tests and drain)."""
+    with _background_lock:
+        threads = list(_background.values())
+    for t in threads:
+        t.join(timeout)
+
+
+def _lower_priority() -> None:
+    """Make the calling thread nice 19 (Linux sets niceness per thread); ignored where unsupported."""
+    try:
+        import os
+
+        os.setpriority(os.PRIO_PROCESS, threading.get_native_id(), 19)
+    except (AttributeError, OSError):
+        pass
+
+
+def _sweep_loop() -> None:
+    """Orphan file sweep: first SWEEP_FIRST_DELAY_S after start, then every SWEEP_INTERVAL_S."""
+    from app import ingest
+
+    _lower_priority()
+    if _stop.wait(SWEEP_FIRST_DELAY_S):
+        return
+    while True:
+        conn = None
+        try:
+            conn = connect()
+            n = ingest.sweep_orphan_files(conn, stop=_stop)
+            if n:
+                log.info("orphan sweep: removed %d files", n)
+        except Exception:
+            log.exception("orphan sweep failed")
+        finally:
+            if conn is not None:
+                conn.close()
+        if _stop.wait(SWEEP_INTERVAL_S):
+            return
+
+
 def drain(queue: str | None = None, max_jobs: int = 10_000) -> int:
     """Run queued jobs synchronously in the calling thread until none are runnable (jobs delayed by
     a retry backoff are left for later). All queues when queue is None: main first, then text, then
-    video. Returns the number of jobs run. Used by tests and scripts."""
+    video. Waits for run_in_background threads first. Returns the number of jobs run. Used by tests
+    and scripts."""
+    wait_background()
     queues = list(jobs.QUEUES) if queue is None else [queue]
     conn = connect()
     ran = 0
@@ -295,9 +420,10 @@ def _loop(queue: str) -> None:
                 if queue == "main" and time.monotonic() - last_cleanup >= CLEANUP_INTERVAL_S:
                     last_cleanup = time.monotonic()
                     for q in jobs.QUEUES:
-                        n = jobs.requeue_stale(conn, q, STALE_RUNNING_S, held_job_ids())
+                        n, exhausted = jobs.requeue_stale(conn, q, STALE_RUNNING_S, held_job_ids())
                         if n:
                             log.warning("re-queued %d stranded '%s' jobs", n, q)
+                        finish_exhausted(conn, exhausted)
                     housekeeping(conn)
                 wake.clear()
                 job = jobs.claim_next(conn, queue)
@@ -335,6 +461,9 @@ def start() -> None:
             t = threading.Thread(target=_loop, args=(queue,), name=f"pcc-worker-{queue}", daemon=True)
             t.start()
             _threads.append(t)
+        t = threading.Thread(target=_sweep_loop, name="pcc-worker-sweep", daemon=True)
+        t.start()
+        _threads.append(t)
     log.info("workers started")
 
 
@@ -350,5 +479,15 @@ def stop(timeout: float = 10.0) -> None:
             t.join(max(0.0, deadline - time.monotonic()))
             if t.is_alive():
                 log.warning("worker thread %s still busy at shutdown; its job is re-queued on next start", t.name)
+        busy = held_job_ids()
+        if busy:  # interrupted by a clean shutdown, not by the job: that claim does not count
+            try:
+                conn = connect()
+                try:
+                    jobs.refund_attempt(conn, busy)
+                finally:
+                    conn.close()
+            except sqlite3.Error as e:
+                log.warning("could not give back the attempts of interrupted jobs %s (%s)", sorted(busy), e)
         # A thread still finishing a job stays listed, so start() cannot run a second one beside it.
         _threads[:] = [t for t in _threads if t.is_alive()]

@@ -1,5 +1,6 @@
 // One file in the upload queue: thumbnail (or a kind icon: photo, video, PDF or document), name, size,
-// progress, outcome and actions. Finished files link to the viewer at /m/<uid>.
+// progress, outcome and actions. Finished files link to the viewer at /m/<uid> (with ?vault=1 for an
+// item stored in the vault).
 import { memo, useEffect, useRef, useState, type ReactNode } from 'react'
 import { Link } from 'react-router'
 import clsx from 'clsx'
@@ -223,7 +224,7 @@ function QueueRow({
           <div className="-mr-2 -mt-1.5 flex shrink-0 items-center">
             {item.phase === 'done' && item.itemUid && (
               <Link
-                to={`/m/${item.itemUid}`}
+                to={`/m/${item.itemUid}${item.itemNsfw ? '?vault=1' : ''}`}
                 className="inline-flex h-10 items-center gap-1 rounded-full px-3 text-sm font-semibold text-accent hover:bg-accent-soft"
               >
                 View

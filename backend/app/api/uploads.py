@@ -7,7 +7,8 @@ POST   /api/uploads                     UploadCreate -> UploadOut (201)
     size <= settings.max_upload_bytes (413) and free disk via storage.has_room_for(size + bytes
     still owed by active 'uploading' rows), checked inside the insert transaction (507). If sha256
     is given and an item (live or in the trash) has it, the row is created directly as 'duplicate'
-    pointing at that item and no bytes are sent. Otherwise status 'uploading' with an empty staging
+    pointing at that item and no bytes are sent; an item in the trash is restored first (message
+    RESTORED_MESSAGE), on every path below too. Otherwise status 'uploading' with an empty staging
     file (storage.staging_path(uid)). `source` records the way in (web, share, camera, api).
 PUT    /api/uploads/{id}/chunk?offset=N raw body -> ChunkOut
     Only while 'uploading'. offset must equal received_bytes, else 409
@@ -43,7 +44,7 @@ from starlette.concurrency import run_in_threadpool
 from app import jobs, storage
 from app.api.common import UPLOAD_SELECT, upload_out
 from app.api.deps import get_db, require_user
-from app.auth.sessions import client_ip
+from app.auth.sessions import SessionInfo, client_ip
 from app.config import settings
 from app.db import connect, tx
 from app.schemas import ChunkOut, UploadCreate, UploadList, UploadOut
@@ -65,6 +66,7 @@ RESERVE_IDLE_S = 3600
 MAX_CHUNKS_IN_FLIGHT = 64
 _chunks_in_flight = 0  # only touched on the event loop thread, with no await in between
 NO_SPACE = "The server is out of storage space"
+RESTORED_MESSAGE = "Restored from the trash (identical file)."
 
 # Per-upload locks so concurrent chunk / complete / cancel calls for one upload never interleave.
 _locks_guard = threading.Lock()
@@ -122,14 +124,32 @@ def _reserved_bytes(conn: sqlite3.Connection) -> int:
 
 
 def _known_item(conn: sqlite3.Connection, sha: str | None) -> int | None:
+    """The live item with this sha256 (a trashed one is restored by _restore_trashed first; one
+    trashed again in between is left to ingest, so these bytes are never dropped here)."""
     if not sha:
         return None
-    row = conn.execute("SELECT id FROM items WHERE sha256 = ?", (sha,)).fetchone()
+    row = conn.execute("SELECT id FROM items WHERE sha256 = ? AND deleted_at IS NULL", (sha,)).fetchone()
     return int(row["id"]) if row else None
 
 
+def _restore_trashed(conn: sqlite3.Connection, sha: str | None) -> bool:
+    """Uploading a file again whose item is in the trash takes that item out of the trash (the
+    upload then answers 'duplicate' with RESTORED_MESSAGE). Call outside a transaction, before the
+    duplicate check. Returns True when an item was restored."""
+    if not sha:
+        return False
+    row = conn.execute("SELECT id FROM items WHERE sha256 = ? AND deleted_at IS NOT NULL", (sha,)).fetchone()
+    if row is None:
+        return False
+    from app import ingest
+
+    ingest.restore(conn, int(row["id"]))
+    return conn.execute("SELECT 1 FROM items WHERE id = ? AND deleted_at IS NULL", (row["id"],)).fetchone() is not None
+
+
 @router.post("", response_model=UploadOut, status_code=201)
-def create_upload(body: UploadCreate, request: Request, conn: sqlite3.Connection = Depends(get_db)) -> UploadOut:
+def create_upload(body: UploadCreate, request: Request, conn: sqlite3.Connection = Depends(get_db),
+                  session: SessionInfo = Depends(require_user)) -> UploadOut:
     if body.size > settings.max_upload_bytes:
         limit_gb = settings.max_upload_bytes / (1024 ** 3)
         raise HTTPException(status_code=413, detail=f"The file is larger than the {limit_gb:g} GB limit")
@@ -138,6 +158,7 @@ def create_upload(body: UploadCreate, request: Request, conn: sqlite3.Connection
     mime = (body.mime or "").strip()[:128] or None
     now = now_iso()
     uid = new_uid()
+    restored = _restore_trashed(conn, body.sha256)
     known = _known_item(conn, body.sha256)
     staging = storage.staging_path(uid)
     if known is None:
@@ -151,16 +172,17 @@ def create_upload(body: UploadCreate, request: Request, conn: sqlite3.Connection
                 raise HTTPException(status_code=507, detail=NO_SPACE)
             conn.execute(
                 "INSERT INTO uploads(uid, source, client_id, original_filename, size_bytes, received_bytes, mime, "
-                "sha256, status, item_id, remote_addr, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)",
+                "sha256, status, message, item_id, remote_addr, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (uid, body.source, client_id, filename, body.size, mime, body.sha256 if known else None,
-                 "duplicate" if known else "uploading", known, client_ip(request), now, now),
+                 "duplicate" if known else "uploading", RESTORED_MESSAGE if known and restored else None, known,
+                 client_ip(request), now, now),
             )
     except BaseException:
         if known is None:
             storage.safe_unlink(staging)
         raise
-    return upload_out(_load(conn, uid))
+    return upload_out(_load(conn, uid), session.vault_unlocked)
 
 
 # --------------------------------------------------------------------- chunk
@@ -301,16 +323,17 @@ def _sha256_file(path) -> str:
 
 
 def _finish(conn: sqlite3.Connection, row: sqlite3.Row, digest: str) -> bool:
-    """Apply a computed hash: 'duplicate' of a known item, or 'queued' with an ingest job.
-    Returns True when the staged file should be deleted (duplicate)."""
+    """Apply a computed hash: 'duplicate' of a known item (restored first when it is in the trash), or
+    'queued' with an ingest job. Returns True when the staged file should be deleted (duplicate)."""
+    restored = _restore_trashed(conn, digest)
     now = now_iso()
     with tx(conn):
         known = _known_item(conn, digest)
         if known is not None:
             cur = conn.execute(
-                "UPDATE uploads SET status = 'duplicate', sha256 = ?, item_id = ?, message = NULL, updated_at = ? "
+                "UPDATE uploads SET status = 'duplicate', sha256 = ?, item_id = ?, message = ?, updated_at = ? "
                 "WHERE id = ? AND status = 'uploading'",
-                (digest, known, now, row["id"]),
+                (digest, known, RESTORED_MESSAGE if restored else None, now, row["id"]),
             )
             return cur.rowcount == 1
         cur = conn.execute(
@@ -324,11 +347,13 @@ def _finish(conn: sqlite3.Connection, row: sqlite3.Row, digest: str) -> bool:
 
 
 @router.post("/{upload_id}/complete", response_model=UploadOut)
-def complete_upload(upload_id: str, conn: sqlite3.Connection = Depends(get_db)) -> UploadOut:
+def complete_upload(upload_id: str, conn: sqlite3.Connection = Depends(get_db),
+                    session: SessionInfo = Depends(require_user)) -> UploadOut:
+    vault_open = session.vault_unlocked
     with _upload_lock(upload_id):
         row = _load(conn, upload_id)
         if row["status"] != "uploading":
-            return upload_out(row)  # idempotent
+            return upload_out(row, vault_open)  # idempotent
         if row["received_bytes"] != row["size_bytes"]:
             raise HTTPException(status_code=409, detail="The upload is not complete yet")
         path = storage.staging_path(upload_id)
@@ -347,18 +372,19 @@ def complete_upload(upload_id: str, conn: sqlite3.Connection = Depends(get_db)) 
     with _upload_lock(upload_id):
         row = _load(conn, upload_id)
         if row["status"] != "uploading":
-            return upload_out(row)  # cancelled or completed by a concurrent call
+            return upload_out(row, vault_open)  # cancelled or completed by a concurrent call
         duplicate = _finish(conn, row, digest)
         if duplicate:
             storage.safe_unlink(path)
         else:
             jobs.wake[jobs.QUEUE_OF["ingest"]].set()  # the job is committed now
-        return upload_out(_load(conn, upload_id))
+        return upload_out(_load(conn, upload_id), vault_open)
 
 
 @router.post("/simple", response_model=UploadOut, status_code=201)
 def simple_upload(request: Request, file: UploadFile = File(...), source: str = Form("api"),
-                  conn: sqlite3.Connection = Depends(get_db)) -> UploadOut:
+                  conn: sqlite3.Connection = Depends(get_db),
+                  session: SessionInfo = Depends(require_user)) -> UploadOut:
     """Whole file in one multipart request (scripts and tests)."""
     if source not in SOURCES:
         raise HTTPException(status_code=422, detail="source must be one of web, share, camera, api")
@@ -390,14 +416,15 @@ def simple_upload(request: Request, file: UploadFile = File(...), source: str = 
         now = now_iso()
         filename = safe_filename(file.filename or "upload")
         mime = (file.content_type or "").strip()[:128] or None
+        restored = _restore_trashed(conn, digest)
         with tx(conn):
             known = _known_item(conn, digest)
             conn.execute(
                 "INSERT INTO uploads(uid, source, client_id, original_filename, size_bytes, received_bytes, mime, "
-                "sha256, status, item_id, remote_addr, created_at, updated_at) "
-                "VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (uid, source, filename, size, size, mime, digest, "duplicate" if known else "queued", known,
-                 client_ip(request), now, now),
+                "sha256, status, message, item_id, remote_addr, created_at, updated_at) "
+                "VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (uid, source, filename, size, size, mime, digest, "duplicate" if known else "queued",
+                 RESTORED_MESSAGE if known and restored else None, known, client_ip(request), now, now),
             )
             if known is None:
                 upload_id = conn.execute("SELECT id FROM uploads WHERE uid = ?", (uid,)).fetchone()["id"]
@@ -409,22 +436,24 @@ def simple_upload(request: Request, file: UploadFile = File(...), source: str = 
         storage.safe_unlink(staging)
     else:
         jobs.wake[jobs.QUEUE_OF["ingest"]].set()
-    return upload_out(_load(conn, uid))
+    return upload_out(_load(conn, uid), session.vault_unlocked)
 
 
 # ---------------------------------------------------------------------- read
 @router.get("/mine", response_model=UploadList)
 def my_uploads(client_id: str = Query(min_length=1, max_length=64),
-               conn: sqlite3.Connection = Depends(get_db)) -> UploadList:
+               conn: sqlite3.Connection = Depends(get_db),
+               session: SessionInfo = Depends(require_user)) -> UploadList:
     rows = conn.execute(
         f"{UPLOAD_SELECT} WHERE u.client_id = ? ORDER BY u.id DESC LIMIT ?", (client_id.strip(), MINE_LIMIT)
     ).fetchall()
-    return UploadList(uploads=[upload_out(r) for r in rows])
+    return UploadList(uploads=[upload_out(r, session.vault_unlocked) for r in rows])
 
 
 @router.get("", response_model=UploadList)
 def many_uploads(ids: str = Query(default="", max_length=MAX_IDS * 20),
-                 conn: sqlite3.Connection = Depends(get_db)) -> UploadList:
+                 conn: sqlite3.Connection = Depends(get_db),
+                 session: SessionInfo = Depends(require_user)) -> UploadList:
     wanted = list(dict.fromkeys(i.strip() for i in ids.split(",") if i.strip()))
     if len(wanted) > MAX_IDS:
         raise HTTPException(status_code=400, detail=f"At most {MAX_IDS} ids per request")
@@ -432,21 +461,23 @@ def many_uploads(ids: str = Query(default="", max_length=MAX_IDS * 20),
         return UploadList(uploads=[])
     ph = ",".join("?" * len(wanted))
     rows = {r["uid"]: r for r in conn.execute(f"{UPLOAD_SELECT} WHERE u.uid IN ({ph})", wanted)}
-    return UploadList(uploads=[upload_out(rows[i]) for i in wanted if i in rows])
+    return UploadList(uploads=[upload_out(rows[i], session.vault_unlocked) for i in wanted if i in rows])
 
 
 @router.get("/{upload_id}", response_model=UploadOut)
-def get_upload(upload_id: str, conn: sqlite3.Connection = Depends(get_db)) -> UploadOut:
-    return upload_out(_load(conn, upload_id))
+def get_upload(upload_id: str, conn: sqlite3.Connection = Depends(get_db),
+               session: SessionInfo = Depends(require_user)) -> UploadOut:
+    return upload_out(_load(conn, upload_id), session.vault_unlocked)
 
 
 # -------------------------------------------------------------------- cancel
 @router.delete("/{upload_id}", response_model=UploadOut)
-def cancel_upload(upload_id: str, conn: sqlite3.Connection = Depends(get_db)) -> UploadOut:
+def cancel_upload(upload_id: str, conn: sqlite3.Connection = Depends(get_db),
+                  session: SessionInfo = Depends(require_user)) -> UploadOut:
     with _upload_lock(upload_id):
         row = _load(conn, upload_id)
         if row["status"] != "uploading":
-            return upload_out(row)
+            return upload_out(row, session.vault_unlocked)
         with tx(conn):
             cur = conn.execute(
                 "UPDATE uploads SET status = 'cancelled', message = NULL, updated_at = ? "
@@ -455,4 +486,4 @@ def cancel_upload(upload_id: str, conn: sqlite3.Connection = Depends(get_db)) ->
             )
         if cur.rowcount == 1:
             storage.safe_unlink(storage.staging_path(upload_id))
-        return upload_out(_load(conn, upload_id))
+        return upload_out(_load(conn, upload_id), session.vault_unlocked)

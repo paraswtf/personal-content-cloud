@@ -2,6 +2,8 @@
 
 The cookie `pcc_session` carries a random token; the table stores sha256(token). Sessions slide:
 `last_seen_at` is bumped at most once a minute and `expires_at` follows it by SESSION_DAYS.
+When the row slides, `authenticate` leaves the raw token in `request.state.refresh_cookie` and
+`app.main.SessionCookieMiddleware` sets the cookie again, so the browser's copy slides too.
 The NSFW vault unlock is a per-session window (`vault_until`).
 """
 from __future__ import annotations
@@ -117,6 +119,9 @@ def authenticate(conn: sqlite3.Connection, request: Request) -> SessionInfo | No
         with tx(conn):
             conn.execute("UPDATE sessions SET last_seen_at = ?, expires_at = ? WHERE id = ?", (now, _expiry(), info.id))
         info.last_seen_at, info.expires_at = now, _expiry()
+        # The cookie's max-age was set at login; SessionCookieMiddleware re-issues it with this
+        # token so the browser's copy slides along with the row.
+        request.state.refresh_cookie = token
     return info
 
 

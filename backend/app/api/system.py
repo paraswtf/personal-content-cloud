@@ -7,7 +7,12 @@ GET  /api/system                  SystemOut: version, GPU (app.ml.runtime.gpu_in
                                   model download state. Each optional module is imported lazily; when it
                                   is missing the field reports empty or unknown values.
 POST /api/system/models/download  starts the model downloader in a background thread -> Ok
-POST /api/system/housekeeping     runs the worker's housekeeping now -> Ok
+POST /api/system/housekeeping     runs the worker's housekeeping now (not the daily orphan file
+                                  sweep) -> Ok
+POST /api/system/retry-failed     retries what failed for good (ingest.retry_failed: uploads in 'error'
+                                  whose bytes are kept, errored jobs with their item status set back to
+                                  'pending') -> {"requeued": int}. Holds worker.housekeeping_lock so it
+                                  never runs beside housekeeping.
 """
 from __future__ import annotations
 
@@ -18,6 +23,7 @@ import threading
 from typing import Any
 
 from fastapi import APIRouter, Depends
+from pydantic import BaseModel
 
 from app import jobs, storage
 from app.api.deps import get_db, require_user
@@ -26,7 +32,11 @@ from app.schemas import DiskStats, ModelStatus, Ok, SystemOut
 
 log = logging.getLogger(__name__)
 
-router = APIRouter(dependencies=[Depends(require_user)])
+router = APIRouter(dependencies=[Depends(require_user)])  # require_user also checks the CSRF header
+
+
+class RetryOut(BaseModel):
+    requeued: int
 
 _download_thread: threading.Thread | None = None
 _download_guard = threading.Lock()
@@ -135,3 +145,13 @@ def run_housekeeping(conn: sqlite3.Connection = Depends(get_db)) -> Ok:
 
     worker.housekeeping(conn)
     return Ok()
+
+
+@router.post("/retry-failed", response_model=RetryOut)
+def retry_failed(conn: sqlite3.Connection = Depends(get_db)) -> RetryOut:
+    from app import ingest, worker
+
+    with worker.housekeeping_lock:
+        n = ingest.retry_failed(conn)
+    log.info("retry-failed: queued %d uploads and jobs again", n)
+    return RetryOut(requeued=n)

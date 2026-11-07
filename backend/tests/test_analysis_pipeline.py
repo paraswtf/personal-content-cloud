@@ -100,6 +100,29 @@ def test_skips_done_gone_and_outdated(conn, no_models):
     assert _row(conn, item["id"])["misclick"] == 0
 
 
+def test_reprocess_requested_during_a_run_is_not_lost(conn, no_models, monkeypatch):
+    from app import jobs
+
+    item = _item(conn, noise_image(800, 600, seed=3))
+    real = pipeline._run_models
+
+    def run_and_request_again(*args, **kwargs):
+        # Someone clicks reprocess while the models run: another analyze job is queued.
+        jobs.enqueue(conn, "analyze", {"item_id": item["id"], "version": 1}, unique=True)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(pipeline, "_run_models", run_and_request_again)
+    pipeline.analyze_item(conn, item["id"], 1)
+    row = _row(conn, item["id"])
+    assert row["category"] == "misc" and row["quality_scores"]  # this run's results are visible
+    assert row["analysis_status"] == "pending"  # and the queued job will run in full
+    monkeypatch.setattr(pipeline, "_run_models", real)
+    with tx(conn):  # the worker claims the queued job and runs it
+        conn.execute("UPDATE jobs SET status = 'running' WHERE type = 'analyze' AND status = 'queued'")
+    pipeline.analyze_item(conn, item["id"], 1)
+    assert _row(conn, item["id"])["analysis_status"] == "done"
+
+
 def test_user_choices_win(conn, no_models):
     item = _item(conn, flat_image(320, 240, (5, 5, 5)), category="food", category_source="user",
                  misclick=0, misclick_source="user", nsfw=1, nsfw_source="user")

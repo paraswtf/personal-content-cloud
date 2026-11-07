@@ -393,6 +393,16 @@ def _burst_entry(roles: dict[int, str | None], item_id: int, size: int) -> dict[
     return {"burst": {"best_uid": best_uid, "size": size}}
 
 
+def _analyze_requested_again(conn: sqlite3.Connection, item_id: int) -> bool:
+    """True when another analyze job for the item is queued (a reprocess requested during this run)."""
+    row = conn.execute(
+        "SELECT 1 FROM jobs WHERE type = 'analyze' AND status = 'queued' "
+        "AND json_extract(payload, '$.item_id') = ? LIMIT 1",
+        (int(item_id),),
+    ).fetchone()
+    return row is not None
+
+
 def analyze_item(conn: sqlite3.Connection, item_id: int, version: int) -> None:
     item = conn.execute("SELECT * FROM items WHERE id = ?", (item_id,)).fetchone()
     if item is None or int(item["version"]) != int(version):
@@ -590,13 +600,18 @@ def analyze_item(conn: sqlite3.Connection, item_id: int, version: int) -> None:
 
             face_count = conn.execute("SELECT COUNT(*) FROM faces WHERE item_id = ?", (item_id,)).fetchone()[0]
             body_count = conn.execute("SELECT COUNT(*) FROM bodies WHERE item_id = ?", (item_id,)).fetchone()[0]
+            # A reprocess asked for while this run was going queued another analyze job (unique enqueue
+            # only dedupes against queued jobs). Keep the status pending so that job runs in full
+            # instead of returning at its 'done' check; the results of this run stay visible meanwhile.
+            status = "pending" if _analyze_requested_again(conn, item_id) else "done"
             conn.execute(
                 "UPDATE items SET category = ?, category_scores = ?, doc_likeness = ?, nsfw = ?, nsfw_score = ?, "
                 "misclick = ?, misclick_reasons = ?, quality_scores = ?, face_count = ?, body_count = ?, "
-                "analysis_status = 'done', updated_at = ? WHERE id = ?",
+                "analysis_status = ?, updated_at = ? WHERE id = ?",
                 (category, json_dumps(r.category_scores) if r.category_scores else None, doc_like, new_nsfw,
                  nsfw_score, int(bool(mis)), json_dumps(reasons) if reasons else None,
-                 json_dumps(r.quality_scores) if r.quality_scores else None, face_count, body_count, now, item_id),
+                 json_dumps(r.quality_scores) if r.quality_scores else None, face_count, body_count, status, now,
+                 item_id),
             )
             bump_faces_version(conn)
             bump_search_version(conn)

@@ -440,6 +440,8 @@ export interface UploadOut {
   chunk_size: number
   item_uid: string | null
   item_thumb_url: string | null
+  /** True only while the vault is open and the stored item is in it: link with ?vault=1. */
+  item_nsfw: boolean
   created_at: string
 }
 export interface UploadList {

@@ -291,12 +291,21 @@ def joined_text(pages: list[PageText]) -> str:
     return "\f".join(p.text or "" for p in pages)
 
 
+ANALYZE_MAX_CHARS = 400_000  # about 130 logical pages; detection and parsing read at most this much
+ANALYZE_MAX_PAGES = 150
+
+
 def analyze_text(text: str, pages: list[PageText], item: Any = None, *, existing: sqlite3.Row | None = None,
                  forced_type: str | None = None) -> tuple[ParsedDocument, float] | None:
     """(parsed document, detection score) or None when the item gets no documents row."""
     from app.documents import parsers
     from app.documents.detect import detect
 
+    # Detection and the parsers are regex-heavy and documents that have a type are short. A 16 MB log
+    # file still gets its whole text layer and FTS entry, but only this much of it is typed.
+    if len(text) > ANALYZE_MAX_CHARS or len(pages) > ANALYZE_MAX_PAGES:
+        text = text[:ANALYZE_MAX_CHARS]
+        pages = pages[:ANALYZE_MAX_PAGES]
     boxes = [b for p in pages for b in p.boxes]
     if forced_type is None and existing is not None and existing["source"] == "user":
         forced_type = existing["doc_type"]

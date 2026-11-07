@@ -136,6 +136,11 @@ CREATE TABLE IF NOT EXISTS items (
 );
 CREATE INDEX IF NOT EXISTS items_created   ON items(created_at, id);
 CREATE INDEX IF NOT EXISTS items_taken     ON items(taken_at, id);
+-- The library's two orders over live items, led by the vault side every listing filters on, so
+-- a page reads an index in order instead of sorting every visible row (the planner picks these
+-- over items_flags with or without statistics).
+CREATE INDEX IF NOT EXISTS items_order     ON items(nsfw, COALESCE(taken_at, created_at), id) WHERE deleted_at IS NULL;
+CREATE INDEX IF NOT EXISTS items_added     ON items(nsfw, created_at, id) WHERE deleted_at IS NULL;
 CREATE INDEX IF NOT EXISTS items_kind      ON items(kind, deleted_at);
 CREATE INDEX IF NOT EXISTS items_category  ON items(category, deleted_at);
 CREATE INDEX IF NOT EXISTS items_flags     ON items(deleted_at, nsfw, misclick);
@@ -312,3 +317,5 @@ CREATE TABLE IF NOT EXISTS jobs (
   updated_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS jobs_pick ON jobs(queue, status, priority, id);
+-- enqueue(unique=True) looks for a live job with the same type and payload.
+CREATE INDEX IF NOT EXISTS jobs_dedup ON jobs(type, payload) WHERE status IN ('queued', 'running');

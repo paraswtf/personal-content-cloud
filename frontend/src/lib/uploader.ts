@@ -59,6 +59,8 @@ export interface QueueItem {
   message: string | null
   /** uid of the library item once the server stored it (or the existing item for a duplicate). */
   itemUid: string | null
+  /** The stored item is in the vault (only reported while the vault is open): link with ?vault=1. */
+  itemNsfw: boolean
   thumbUrl: string | null
   /** Rejected before any request (empty or too large): retry is pointless. */
   localReject: boolean
@@ -430,6 +432,7 @@ export class UploadEngine {
         status: null,
         message: null,
         itemUid: null,
+        itemNsfw: false,
         thumbUrl: null,
         localReject: false,
         resumed: false,
@@ -477,6 +480,7 @@ export class UploadEngine {
         status: null,
         message: null,
         itemUid: null,
+        itemNsfw: false,
         thumbUrl: null,
         retryAt: null,
         offline: false,
@@ -553,6 +557,7 @@ export class UploadEngine {
       status: u.status,
       message: u.message,
       itemUid: u.item_uid,
+      itemNsfw: u.item_nsfw === true,
       thumbUrl: u.item_thumb_url,
       retryAt: null,
       offline: false,

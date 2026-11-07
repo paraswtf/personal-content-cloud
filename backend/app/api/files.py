@@ -26,7 +26,8 @@ Rules:
 - NSFW items (and their crops, pages and ID photos): 403 vault_locked unless the session's vault is
   unlocked; when served they are never cached ("private, no-store").
 - Cache-Control: v == current version -> "private, max-age=31536000, immutable", otherwise
-  "private, no-cache"; crops "private, max-age=86400".
+  "private, no-cache"; crops "private, max-age=86400". v is any string (vault items' URLs carry
+  "<version>n", api.common.url_version, so flagging an item changes its URLs).
 - Every response: X-Content-Type-Options nosniff and a sandboxing CSP.
 """
 from __future__ import annotations
@@ -112,10 +113,12 @@ def _item(conn: sqlite3.Connection, uid: str, session: SessionInfo) -> sqlite3.R
     return row
 
 
-def _cache(row: sqlite3.Row, v: int | None) -> str:
+def _cache(row: sqlite3.Row, v: str | None) -> str:
+    """v is the URL's cache key (api.common.url_version: the version, 'n' added for vault items). Any
+    value is accepted; only the current key of a non-vault item is cached for good."""
     if row["nsfw"]:
         return NO_STORE  # never left in the browser cache once the vault locks again
-    return IMMUTABLE if v is not None and v == row["version"] else NO_CACHE
+    return IMMUTABLE if v is not None and v.strip() == str(row["version"]) else NO_CACHE
 
 
 def _send(path: Path, media_type: str, cache: str, extra: dict[str, str] | None = None) -> FileResponse:
@@ -144,14 +147,14 @@ def content_disposition(filename: str, ext: str = "", disposition: str = "attach
 
 # --------------------------------------------------------------------- items
 @router.api_route("/thumb/{uid}", methods=METHODS)
-def thumb(uid: str, v: int | None = None, session: SessionInfo = Depends(require_user),
+def thumb(uid: str, v: str | None = None, session: SessionInfo = Depends(require_user),
           conn: sqlite3.Connection = Depends(get_db)) -> FileResponse:
     row = _item(conn, uid, session)
     return _send(storage.thumb_path(row["uid"], row["version"]), "image/webp", _cache(row, v))
 
 
 @router.api_route("/preview/{uid}", methods=METHODS)
-def preview(uid: str, v: int | None = None, session: SessionInfo = Depends(require_user),
+def preview(uid: str, v: str | None = None, session: SessionInfo = Depends(require_user),
             conn: sqlite3.Connection = Depends(get_db)) -> FileResponse:
     row = _item(conn, uid, session)
     return _send(storage.preview_path(row["uid"], row["version"]), "image/webp", _cache(row, v))
@@ -182,7 +185,7 @@ def _ensure_small_preview(uid: str, version: int) -> bool:
 
 
 @router.api_route("/preview-small/{uid}", methods=METHODS)
-def preview_small(uid: str, v: int | None = None, session: SessionInfo = Depends(require_user),
+def preview_small(uid: str, v: str | None = None, session: SessionInfo = Depends(require_user),
                   conn: sqlite3.Connection = Depends(get_db)) -> FileResponse:
     row = _item(conn, uid, session)
     if _ensure_small_preview(row["uid"], row["version"]):
@@ -200,7 +203,7 @@ def _original_type(row: sqlite3.Row) -> str:
 
 
 @router.api_route("/original/{uid}", methods=METHODS)
-def original(uid: str, v: int | None = None, download: int = 0, session: SessionInfo = Depends(require_user),
+def original(uid: str, v: str | None = None, download: int = 0, session: SessionInfo = Depends(require_user),
              conn: sqlite3.Connection = Depends(get_db)) -> FileResponse:
     row = _item(conn, uid, session)
     name = media_file_name(row["original_filename"], row["ext"])
@@ -217,7 +220,7 @@ def original(uid: str, v: int | None = None, download: int = 0, session: Session
 
 
 @router.api_route("/video/{uid}", methods=METHODS)
-def video(uid: str, v: int | None = None, session: SessionInfo = Depends(require_user),
+def video(uid: str, v: str | None = None, session: SessionInfo = Depends(require_user),
           conn: sqlite3.Connection = Depends(get_db)) -> FileResponse:
     row = _item(conn, uid, session)
     if row["kind"] != "video":
@@ -256,7 +259,7 @@ def _ensure_page(row: sqlite3.Row, n: int) -> Path | None:
 
 
 @router.api_route("/page/{uid}/{n}", methods=METHODS)
-def page(uid: str, n: int, v: int | None = None, session: SessionInfo = Depends(require_user),
+def page(uid: str, n: int, v: str | None = None, session: SessionInfo = Depends(require_user),
          conn: sqlite3.Connection = Depends(get_db)) -> FileResponse:
     row = _item(conn, uid, session)
     if n < 1:
@@ -277,7 +280,7 @@ def page(uid: str, n: int, v: int | None = None, session: SessionInfo = Depends(
 
 
 @router.api_route("/doc-photo/{uid}", methods=METHODS)
-def doc_photo(uid: str, v: int | None = None, session: SessionInfo = Depends(require_user),
+def doc_photo(uid: str, v: str | None = None, session: SessionInfo = Depends(require_user),
               conn: sqlite3.Connection = Depends(get_db)) -> FileResponse:
     row = _item(conn, uid, session)
     return _send(storage.doc_photo_path(row["uid"], row["version"]), "image/webp", _cache(row, v))
@@ -440,7 +443,7 @@ def frame_file_name(row: sqlite3.Row, ms: int) -> str:
 
 
 @router.api_route("/frame/{uid}", methods=METHODS)
-def frame(uid: str, t: float, v: int | None = None, size: str = "full", download: int = 0,
+def frame(uid: str, t: float, v: str | None = None, size: str = "full", download: int = 0,
           session: SessionInfo = Depends(require_user), conn: sqlite3.Connection = Depends(get_db)) -> Response:
     if not math.isfinite(t):
         raise HTTPException(status_code=422, detail="t must be a finite number of seconds")

@@ -1,18 +1,18 @@
 // Vault (/vault): private items. Locked, it asks for the password or a passkey again and requests
 // nothing else (no lists, no thumbnails). Unlocked, it shows the library of private items with the
 // minutes left and a Lock now button; when the window ends every vault query is dropped.
-import { useCallback, useEffect, useState, type FormEvent } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { useMutation, useQueryClient, type Query } from '@tanstack/react-query'
-import { Fingerprint, Lock, LockKeyhole, ShieldCheck } from 'lucide-react'
+import { Lock, ShieldCheck } from 'lucide-react'
 import { api, ApiError } from '../lib/api'
-import type { AuthState } from '../lib/types'
-import { passkeysSupported, startPasskeyAssertion, useAuth } from '../lib/auth'
+import { passkeysSupported, useAuth } from '../lib/auth'
 import { formatMinutes } from '../lib/format'
 import { usePageTitle } from '../lib/hooks'
 import Library from '../components/library/Library'
 import { useToast } from '../components/Toast'
 import { errorMessage } from '../components/admin/adminHooks'
 import { Button } from '../components/ui'
+import UnlockForm from '../components/vault/UnlockForm'
 
 /** Query keys that hold vault data: lists and searches with vault set, details fetched with vault. */
 function isVaultQuery(q: Query): boolean {
@@ -32,91 +32,6 @@ function useMinutesLeft(until: string | null | undefined): number | null {
   const end = new Date(until).getTime()
   if (Number.isNaN(end)) return null
   return (end - now) / 60_000
-}
-
-function UnlockForm({ onUnlocked, hasPasskeys }: { onUnlocked: (s: AuthState) => void; hasPasskeys: boolean }) {
-  const [password, setPassword] = useState('')
-  const [error, setError] = useState<string | null>(null)
-  const withPassword = useMutation({
-    mutationFn: () => api.auth.vaultUnlockPassword(password),
-    onSuccess: (s) => {
-      setPassword('')
-      onUnlocked(s)
-    },
-    onError: (e) => setError(e instanceof ApiError && e.status === 401 ? 'That password is not right.' : errorMessage(e, 'Could not unlock.')),
-  })
-  const withPasskey = useMutation({
-    mutationFn: async () => {
-      const { challenge_id, credential } = await startPasskeyAssertion()
-      return api.auth.vaultUnlockPasskey(challenge_id, credential)
-    },
-    onSuccess: (s) => onUnlocked(s),
-    onError: (e) =>
-      setError(
-        e instanceof DOMException && (e.name === 'NotAllowedError' || e.name === 'AbortError')
-          ? 'The passkey request was cancelled.'
-          : errorMessage(e, 'Could not unlock with the passkey.'),
-      ),
-  })
-  const busy = withPassword.isPending || withPasskey.isPending
-
-  const submit = (e: FormEvent) => {
-    e.preventDefault()
-    if (!password || busy) return
-    setError(null)
-    withPassword.mutate()
-  }
-
-  return (
-    <div className="mx-auto flex w-full max-w-sm flex-col items-center px-4 py-16 text-center">
-      <span className="flex size-16 items-center justify-center rounded-2xl bg-surface-2 text-ink">
-        <LockKeyhole className="size-8" aria-hidden />
-      </span>
-      <h1 className="mt-4 text-2xl font-bold tracking-tight">The vault is locked</h1>
-      <p className="mt-2 text-sm text-ink-soft">
-        Private items are kept out of the library, search and people. Confirm it is you to see them for a while.
-      </p>
-      <form onSubmit={submit} className="mt-6 flex w-full flex-col gap-3 text-left">
-        <label htmlFor="vault-password" className="text-sm font-medium">
-          Password
-        </label>
-        <input
-          id="vault-password"
-          type="password"
-          autoComplete="current-password"
-          value={password}
-          onChange={(e) => setPassword(e.target.value)}
-          aria-invalid={!!error}
-          className="h-11 w-full rounded-full border border-line bg-surface px-4 text-base text-ink hover:border-ink-faint focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/20"
-        />
-        {error && (
-          <p className="text-sm text-danger" role="alert">
-            {error}
-          </p>
-        )}
-        <Button type="submit" size="lg" loading={withPassword.isPending} disabled={!password || busy}>
-          <Lock className="size-4" aria-hidden />
-          Unlock
-        </Button>
-        {hasPasskeys && (
-          <Button
-            type="button"
-            size="lg"
-            variant="secondary"
-            loading={withPasskey.isPending}
-            disabled={busy}
-            onClick={() => {
-              setError(null)
-              withPasskey.mutate()
-            }}
-          >
-            <Fingerprint className="size-4" aria-hidden />
-            Use passkey
-          </Button>
-        )}
-      </form>
-    </div>
-  )
 }
 
 export default function VaultPage() {

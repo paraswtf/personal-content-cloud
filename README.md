@@ -48,7 +48,8 @@ otherwise everything runs on the CPU.
 
 Open the site and create the account (username and password). Then add a passkey under Settings
 so the phone and laptop can sign in with a fingerprint or face. Passkeys need HTTPS (the dev server's
-public URL) or localhost.
+public URL) or localhost. Adding or removing a passkey asks for the password (or an existing passkey)
+again: that is the vault unlock, and it stays open for 15 minutes.
 
 ## Configuration
 
@@ -95,7 +96,7 @@ start, a no-op when they are present) into `MODELS_DIR`:
 | SigLIP ViT-B/16 (WebLI), ONNX export by Immich | search, categories, scene and clothes similarity | Hugging Face immich-app | Apache 2.0 |
 | Falconsai NSFW ViT, ONNX export by onnx-community | vault classifier | Hugging Face | Apache 2.0 |
 | YOLOX-S | person boxes for clothes matching | Megvii YOLOX release | Apache 2.0 |
-| PP-OCRv4 (rapidocr) | OCR | RapidAI | Apache 2.0 |
+| PP-OCRv6 small models bundled with rapidocr | OCR | RapidAI | Apache 2.0 |
 
 ## Data, backups and disk
 
@@ -111,7 +112,7 @@ trash for `TRASH_DAYS` days. To back up, stop the server and copy `DATA_DIR`, or
 cd backend && uv sync && PCC_NO_MODELS=1 .venv/bin/python -m pytest -q   # fast tests, no models
 cd backend && ORT_THREADS=2 .venv/bin/python -m pytest -q                 # with the models
 cd frontend && npm ci && npm run build                                    # typecheck + production build
-BACKEND_URL=http://127.0.0.1:41010 npm run dev                                      # Vite dev server against a running API
+BACKEND_URL=http://127.0.0.1:41010 npm run dev                            # Vite dev server against a running API
 ```
 
 Layout: `backend/app` (FastAPI app; `api/` routes, `auth/`, `media/`, `ml/`, `analysis/`, `documents/`,

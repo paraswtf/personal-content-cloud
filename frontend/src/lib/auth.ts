@@ -146,6 +146,11 @@ export async function startPasskeyAssertion(): Promise<{ challenge_id: string; c
   return { challenge_id, credential }
 }
 
+/** True for the 403 `vault_locked` answer: the request needs the vault open (password or passkey again). */
+export function isVaultLocked(e: unknown): boolean {
+  return e instanceof ApiError && e.code === 'vault_locked'
+}
+
 /** Plain-language message for a failed passkey ceremony or auth request. */
 export function authErrorMessage(e: unknown, fallback = 'Something went wrong. Try again.'): string {
   if (e instanceof ApiError) {
@@ -153,6 +158,7 @@ export function authErrorMessage(e: unknown, fallback = 'Something went wrong. T
     if (e.status === 0) return 'The server could not be reached. Check the connection and try again.'
     if (e.code === 'login_required') return 'Your session has ended. Sign in again.'
     if (e.code === 'csrf') return 'The request was refused. Reload the page and try again.'
+    if (e.code === 'vault_locked') return 'Unlock the vault first: enter your password or use a passkey.'
     if (e.status === 401) return 'That did not work. Check the details and try again.'
     return e.message || fallback
   }

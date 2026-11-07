@@ -139,8 +139,18 @@ export function frameSeconds(t: number): string {
 }
 
 /** URL of one video frame as a JPEG (`size` preview is at most 1280 px). */
-export function frameUrl(uid: string, version: number, t: number, size: 'preview' | 'full' = 'full', download = false): string {
-  return `/files/frame/${enc(uid)}${qs({ t: frameSeconds(t), size, v: version, download: download ? 1 : undefined })}`
+export function frameUrl(
+  uid: string,
+  version: number,
+  t: number,
+  size: 'preview' | 'full' = 'full',
+  download = false,
+  nsfw = false,
+): string {
+  // Vault items carry an 'n' in their cache key (see the server's url_version), so a flagged video
+  // never reuses a frame the browser cached before it was flagged.
+  const v = nsfw ? `${version}n` : String(version)
+  return `/files/frame/${enc(uid)}${qs({ t: frameSeconds(t), size, v, download: download ? 1 : undefined })}`
 }
 
 export interface ItemsQuery {
@@ -248,7 +258,10 @@ export function uploadChunk(id: string, offset: number, data: Blob, opts: ChunkP
 export const api = {
   config: () => get<ConfigOut>('/api/config'),
   stats: () => get<Stats>('/api/stats'),
-  system: () => get<SystemOut>('/api/system'),
+  /** GET /api/system; `api.system.retryFailed()` queues failed uploads again (POST /api/system/retry-failed). */
+  system: Object.assign(() => get<SystemOut>('/api/system'), {
+    retryFailed: () => post<{ requeued: number }>('/api/system/retry-failed'),
+  }),
   downloadModels: () => post<OkOut>('/api/system/models/download'),
   housekeeping: () => post<OkOut>('/api/system/housekeeping'),
 

@@ -1,10 +1,11 @@
 // Settings > System: GPU, models, queues, disk and helpers, from GET /api/system polled every 8 s
 // while this tab is open (the hub's dashboard cards, adapted). Missing models can be downloaded from
-// here; housekeeping runs the cleanup jobs now instead of waiting for their schedule.
+// here; housekeeping runs the cleanup jobs now instead of waiting for their schedule, and failed
+// uploads can be queued for processing again.
 import { useState, type ReactNode } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import clsx from 'clsx'
-import { Cpu, Download, HardDrive, ListTodo, RefreshCw, Server, Sparkles } from 'lucide-react'
+import { Cpu, Download, HardDrive, ListTodo, RefreshCw, RotateCcw, Server, Sparkles } from 'lucide-react'
 import { api } from '../../../lib/api'
 import { formatBytes } from '../../../lib/format'
 import type { ModelStatus, SystemOut } from '../../../lib/types'
@@ -63,7 +64,7 @@ function providerLabel(p: string | null): string {
 export function useSystem(poll: boolean) {
   return useQuery({
     queryKey: SYSTEM_KEY,
-    queryFn: api.system,
+    queryFn: () => api.system(),
     refetchInterval: poll ? POLL_MS : false,
     refetchIntervalInBackground: false,
   })
@@ -79,6 +80,7 @@ export default function SystemTab() {
   const q = useSystem(true)
   const [downloading, setDownloading] = useState(false)
   const [cleaning, setCleaning] = useState(false)
+  const [retrying, setRetrying] = useState(false)
 
   const download = async () => {
     setDownloading(true)
@@ -105,6 +107,21 @@ export default function SystemTab() {
       toast.error(errorText(e, 'Housekeeping failed.'))
     } finally {
       setCleaning(false)
+    }
+  }
+
+  const retryFailed = async () => {
+    setRetrying(true)
+    try {
+      const { requeued } = await api.system.retryFailed()
+      if (requeued === 0) toast.info('There were no failed uploads to retry.')
+      else toast.success(`${requeued.toLocaleString()} failed ${requeued === 1 ? 'upload was' : 'uploads were'} queued again.`)
+      void qc.invalidateQueries({ queryKey: SYSTEM_KEY })
+      void qc.invalidateQueries({ queryKey: ['stats'] })
+    } catch (e) {
+      toast.error(errorText(e, 'Could not retry the failed uploads.'))
+    } finally {
+      setRetrying(false)
     }
   }
 
@@ -280,6 +297,17 @@ export default function SystemTab() {
           </dl>
         </Section>
       </div>
+
+      <Section
+        title="Failed uploads"
+        description="Uploads whose processing failed, for example because ffmpeg was missing or timed out, are kept. Retry them once the cause is fixed."
+        aside={
+          <Button variant="secondary" onClick={() => void retryFailed()} loading={retrying}>
+            {!retrying && <RotateCcw className="size-4" aria-hidden />}
+            Retry failed uploads
+          </Button>
+        }
+      />
 
       <Section
         title="Housekeeping"

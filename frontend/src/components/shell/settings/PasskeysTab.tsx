@@ -1,19 +1,25 @@
 // Settings > Passkeys: list, add (named), rename and remove. A passkey signs in with the device's
-// fingerprint, face or screen lock; the password keeps working as a fallback.
+// fingerprint, face or screen lock; the password keeps working as a fallback. Adding or removing a
+// passkey needs the vault open (the server answers 403 vault_locked otherwise): the tab then asks for
+// the password or a passkey in a dialog and runs the same action again once.
 import { useId, useState, type FormEvent } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Fingerprint, KeyRound, Pencil, Plus, Trash2 } from 'lucide-react'
 import { api } from '../../../lib/api'
-import { AUTH_KEY, PASSKEYS_KEY, authErrorMessage, passkeysSupported, registerPasskey } from '../../../lib/auth'
+import { AUTH_KEY, PASSKEYS_KEY, authErrorMessage, isVaultLocked, passkeysSupported, registerPasskey, useAuth } from '../../../lib/auth'
 import { formatDate } from '../../../lib/format'
-import type { PasskeyOut } from '../../../lib/types'
+import type { AuthState, PasskeyOut } from '../../../lib/types'
 import { Badge, Button, ConfirmModal, ErrorState, Modal, Spinner } from '../../ui'
 import { inputClass } from '../../admin/fields'
 import { useToast } from '../../Toast'
 import { FormError } from '../AuthCard'
+import UnlockForm from '../../vault/UnlockForm'
 import { Section, describeAgent, errorText } from './common'
 
 const NAME_MAX = 60
+
+/** An add or remove that was refused because the vault is closed, to run again after the unlock. */
+type PendingAction = { kind: 'add'; name: string } | { kind: 'remove'; key: PasskeyOut }
 
 function defaultName(): string {
   return typeof navigator === 'undefined' ? 'This device' : describeAgent(navigator.userAgent)
@@ -22,6 +28,7 @@ function defaultName(): string {
 export default function PasskeysTab() {
   const qc = useQueryClient()
   const toast = useToast()
+  const { setState } = useAuth()
   const supported = passkeysSupported()
   const q = useQuery({ queryKey: PASSKEYS_KEY, queryFn: api.auth.passkeys })
   const nameId = useId()
@@ -33,16 +40,15 @@ export default function PasskeysTab() {
   const [renameBusy, setRenameBusy] = useState(false)
   const [removing, setRemoving] = useState<PasskeyOut | null>(null)
   const [removeBusy, setRemoveBusy] = useState(false)
+  const [pending, setPending] = useState<PendingAction | null>(null)
 
   const refresh = () => {
     void qc.invalidateQueries({ queryKey: PASSKEYS_KEY })
     void qc.invalidateQueries({ queryKey: AUTH_KEY })
   }
 
-  const add = async (e: FormEvent) => {
-    e.preventDefault()
-    const clean = name.replace(/\s+/g, ' ').trim()
-    if (!clean || adding) return
+  /** `retried` is true for the one automatic retry after an unlock: a second vault_locked is shown, not asked again. */
+  const runAdd = async (clean: string, retried: boolean) => {
     setAdding(true)
     setAddError(null)
     try {
@@ -50,10 +56,18 @@ export default function PasskeysTab() {
       toast.success(`Passkey "${clean}" added. You can now sign in with it.`)
       refresh()
     } catch (err) {
-      setAddError(authErrorMessage(err, 'Could not add the passkey. Try again.'))
+      if (!retried && isVaultLocked(err)) setPending({ kind: 'add', name: clean })
+      else setAddError(authErrorMessage(err, 'Could not add the passkey. Try again.'))
     } finally {
       setAdding(false)
     }
+  }
+
+  const add = (e: FormEvent) => {
+    e.preventDefault()
+    const clean = name.replace(/\s+/g, ' ').trim()
+    if (!clean || adding) return
+    void runAdd(clean, false)
   }
 
   const rename = async (e: FormEvent) => {
@@ -72,19 +86,41 @@ export default function PasskeysTab() {
     }
   }
 
-  const remove = async () => {
-    if (!removing) return
+  const runRemove = async (k: PasskeyOut, retried: boolean) => {
     setRemoveBusy(true)
     try {
-      await api.auth.deletePasskey(removing.id)
-      toast.success(`Passkey "${removing.name}" removed.`)
+      await api.auth.deletePasskey(k.id)
+      toast.success(`Passkey "${k.name}" removed.`)
       setRemoving(null)
       refresh()
     } catch (err) {
-      toast.error(errorText(err, 'Could not remove the passkey.'))
+      if (!retried && isVaultLocked(err)) {
+        // the confirm closes so only the unlock dialog is open; the removal runs again after it
+        setRemoving(null)
+        setPending({ kind: 'remove', key: k })
+      } else {
+        toast.error(isVaultLocked(err) ? authErrorMessage(err) : errorText(err, 'Could not remove the passkey.'))
+      }
     } finally {
       setRemoveBusy(false)
     }
+  }
+
+  const remove = () => {
+    if (removing) void runRemove(removing, false)
+  }
+
+  const unlocked = (s: AuthState) => {
+    setState(s)
+    const action = pending
+    setPending(null)
+    if (action?.kind === 'add') void runAdd(action.name, true)
+    else if (action?.kind === 'remove') void runRemove(action.key, true)
+  }
+
+  const cancelUnlock = () => {
+    if (pending?.kind === 'add') setAddError('The passkey was not added: the vault stayed locked.')
+    setPending(null)
   }
 
   const keys = q.data ?? []
@@ -93,7 +129,7 @@ export default function PasskeysTab() {
     <div className="flex flex-col gap-4">
       <Section
         title="Add a passkey"
-        description="A passkey lets this device sign you in with its fingerprint, face or screen lock, without typing the password. It also unlocks the vault."
+        description="A passkey lets this device sign you in with its fingerprint, face or screen lock, without typing the password. It also unlocks the vault. Adding or removing a passkey asks for the password or a passkey again."
       >
         {supported ? (
           <form onSubmit={add} className="flex max-w-lg flex-col gap-3">
@@ -222,9 +258,22 @@ export default function PasskeysTab() {
         confirmLabel="Remove"
         danger
         loading={removeBusy}
-        onConfirm={() => void remove()}
+        onConfirm={remove}
         onClose={() => setRemoving(null)}
       />
+
+      <Modal open={!!pending} onClose={cancelUnlock} title="Confirm it is you">
+        <UnlockForm
+          compact
+          hasPasskeys={supported && keys.length > 0}
+          onUnlocked={unlocked}
+          description={
+            pending?.kind === 'remove'
+              ? `To remove "${pending.key.name}", unlock the vault with your password or a passkey.`
+              : 'To add a passkey, unlock the vault with your password or a passkey.'
+          }
+        />
+      </Modal>
     </div>
   )
 }

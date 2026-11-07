@@ -29,9 +29,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
-from datetime import date, datetime, time as dtime, timedelta, timezone
 from typing import Any, Literal
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
@@ -39,12 +37,15 @@ from app import jobs, storage
 from app.api.common import (
     ITEM_CARD_COLUMNS,
     body_out,
+    box_person_ids,
     document_out,
     face_out,
     item_card,
     item_urls,
     people_filter_sql,
-    person_ref,
+    page_sql,
+    person_refs,
+    url_version,
     valid_cursor_scalar,
     visible_sql,
 )
@@ -72,6 +73,7 @@ from app.schemas import (
 )
 from app.urls import page_url
 from app.util import decode_cursor, encode_cursor, json_loads, now_iso, safe_filename
+from app.util import local_day_start_utc as _local_day_start_utc
 
 log = logging.getLogger(__name__)
 
@@ -102,42 +104,26 @@ def _keyset(cursor: str | None, n: int = 2) -> list[Any] | None:
     return values
 
 
-def _zone() -> Any:
-    try:
-        return ZoneInfo(settings.local_timezone or "UTC")
-    except (ZoneInfoNotFoundError, ValueError):
-        return timezone.utc
-
-
 def local_day_start_utc(value: str, *, next_day: bool = False) -> str:
-    """'YYYY-MM-DD' (a local calendar date) -> the UTC instant its day starts (or the next day starts),
-    formatted like util.now_iso so it compares as text with stored times. 422 when malformed."""
+    """'YYYY-MM-DD' (a local calendar date in settings.local_timezone) -> the UTC instant its day starts
+    (or the next day starts), as util.local_day_start_utc. 422 when malformed."""
     try:
-        d = date.fromisoformat(value.strip()[:10])
+        return _local_day_start_utc(value, settings.local_timezone or "UTC", next_day=next_day)
     except ValueError:
         raise HTTPException(status_code=422, detail=f"Invalid date: {value!r} (use YYYY-MM-DD)")
-    if next_day:
-        d = d + timedelta(days=1)
-    dt = datetime.combine(d, dtime(0, 0), tzinfo=_zone()).astimezone(timezone.utc)
-    return dt.isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
 def _page(conn: sqlite3.Connection, where: list[str], params: list[Any], sort_expr: str, cursor: str | None,
           limit: int) -> ItemPage:
-    """Keyset page over items (alias i), newest first by sort_expr then id."""
-    cond = " AND ".join(where) if where else "1"
-    total = conn.execute(f"SELECT COUNT(*) FROM items i WHERE {cond}", params).fetchone()[0]
-    page_where, page_params = list(where), list(params)
+    """Keyset page over items (alias i), newest first by sort_expr then id. The total is counted on
+    the first page only (no cursor); later pages carry total 0 (clients read it from the first page)."""
     after = _keyset(cursor)
-    if after is not None:
-        page_where.append(f"({sort_expr}, i.id) < (?, ?)")
-        page_params.extend(after)
-    rows = conn.execute(
-        f"SELECT {ITEM_CARD_COLUMNS}, {sort_expr} AS sort_key FROM items i "
-        f"WHERE {' AND '.join(page_where) if page_where else '1'} "
-        f"ORDER BY {sort_expr} DESC, i.id DESC LIMIT ?",
-        [*page_params, limit + 1],
-    ).fetchall()
+    total = 0
+    if after is None:
+        cond = " AND ".join(where) if where else "1"
+        total = conn.execute(f"SELECT COUNT(*) FROM items i WHERE {cond}", params).fetchone()[0]
+    sql, extra = page_sql(where, sort_expr, after)
+    rows = conn.execute(sql, [*params, *extra, limit + 1]).fetchall()
     more = len(rows) > limit
     rows = rows[:limit]
     next_cursor = encode_cursor([rows[-1]["sort_key"], int(rows[-1]["id"])]) if more and rows else None
@@ -176,16 +162,17 @@ def _float_scores(raw: str | None) -> dict[str, float] | None:
     return out
 
 
-def _people(conn: sqlite3.Connection, item_id: int) -> list:
+def _people_ids(conn: sqlite3.Connection, item_id: int) -> list[int]:
+    """Ids of the people in an item (faces, bodies, tags), in display order."""
     rows = conn.execute(
-        "SELECT p.id, p.name, p.cover_face_id FROM persons p WHERE p.id IN ("
+        "SELECT p.id FROM persons p WHERE p.id IN ("
         "SELECT person_id FROM faces WHERE item_id = ? AND person_id IS NOT NULL UNION "
         "SELECT person_id FROM bodies WHERE item_id = ? AND person_id IS NOT NULL UNION "
         "SELECT person_id FROM item_tags WHERE item_id = ?) "
         "ORDER BY p.name IS NULL, p.name_key, p.id",
         (item_id, item_id, item_id),
     ).fetchall()
-    return [person_ref(conn, int(r["id"]), r["name"], r["cover_face_id"]) for r in rows]
+    return [int(r["id"]) for r in rows]
 
 
 def item_detail(conn: sqlite3.Connection, row: sqlite3.Row) -> ItemDetail:
@@ -199,10 +186,14 @@ def item_detail(conn: sqlite3.Connection, row: sqlite3.Row) -> ItemDetail:
         "SELECT * FROM bodies WHERE item_id = ? ORDER BY frame_time_s IS NOT NULL, frame_time_s, x, id", (item_id,)
     ).fetchall()
     tags = conn.execute(
-        "SELECT p.id, p.name, p.cover_face_id FROM item_tags t JOIN persons p ON p.id = t.person_id "
+        "SELECT p.id FROM item_tags t JOIN persons p ON p.id = t.person_id "
         "WHERE t.item_id = ? ORDER BY p.name IS NULL, p.name_key, p.id",
         (item_id,),
     ).fetchall()
+    people_ids = _people_ids(conn, item_id)
+    # Every person shown on the item (boxes, guesses, tags) in one lookup.
+    refs = person_refs(conn, box_person_ids(faces) | box_person_ids(bodies) | {int(t["id"]) for t in tags}
+                       | set(people_ids))
     labels = conn.execute("SELECT label, score FROM item_labels WHERE item_id = ? ORDER BY score DESC, label",
                           (item_id,)).fetchall()
     doc = conn.execute("SELECT * FROM documents WHERE item_id = ?", (item_id,)).fetchone()
@@ -217,9 +208,9 @@ def item_detail(conn: sqlite3.Connection, row: sqlite3.Row) -> ItemDetail:
         category_scores=_float_scores(row["category_scores"]), nsfw_score=row["nsfw_score"],
         quality_scores=json_loads(row["quality_scores"]) if row["quality_scores"] else None,
         labels=[LabelOut(label=r["label"], score=float(r["score"])) for r in labels],
-        faces=[face_out(conn, f) for f in faces], bodies=[body_out(conn, b) for b in bodies],
-        tags=[r for r in (person_ref(conn, int(t["id"]), t["name"], t["cover_face_id"]) for t in tags) if r],
-        people=[p for p in _people(conn, item_id) if p],
+        faces=[face_out(conn, f, refs) for f in faces], bodies=[body_out(conn, b, refs) for b in bodies],
+        tags=[refs[int(t["id"])] for t in tags if int(t["id"]) in refs],
+        people=[refs[p] for p in people_ids if p in refs],
         document=document_out(doc, row, wallet_configured=_wallet_configured()) if doc is not None else None,
         text_status=row["text_status"], analysis_status=row["analysis_status"], preview_status=row["preview_status"],
         deleted_at=row["deleted_at"], updated_at=row["updated_at"], urls=item_urls(row, full=True),
@@ -474,7 +465,7 @@ def item_pages(uid: str, session: SessionInfo = Depends(require_user),
                conn: sqlite3.Connection = Depends(get_db)) -> list[PageOut]:
     row = _item_row(conn, uid)
     _guard(row, session)
-    v = int(row["version"])
+    v = url_version(row["version"], row["nsfw"])
     stored = {int(r["page_no"]): r for r in conn.execute(
         "SELECT page_no, width, height, text, text_source FROM pages WHERE item_id = ? ORDER BY page_no",
         (row["id"],))}
@@ -486,7 +477,8 @@ def item_pages(uid: str, session: SessionInfo = Depends(require_user),
         width = r["width"] if r is not None else (row["width"] if n == 1 else None)
         height = r["height"] if r is not None else (row["height"] if n == 1 else None)
         out.append(PageOut(page_no=n, width=width, height=height, text=r["text"] if r is not None else None,
-                           text_source=r["text_source"] if r is not None else "none", url=page_url(uid, v, n)))
+                           text_source=r["text_source"] if r is not None else "none",
+                           url=page_url(uid, v, n)))  # type: ignore[arg-type]
     return out
 
 
@@ -549,8 +541,10 @@ def review_misclicks(cursor: str | None = Query(default=None, max_length=512),
 def duplicates(cursor: str | None = Query(default=None, max_length=512), limit: int = Query(default=30, ge=1, le=100),
                vault: bool = Depends(want_vault), conn: sqlite3.Connection = Depends(get_db)) -> DupGroupPage:
     nsfw = 1 if vault else 0
+    # Copies on the other side of the vault are not part of this view (they show as their own cards).
     base = ("i.dup_role = 'best' AND i.dup_group_id = i.id AND i.deleted_at IS NULL AND i.nsfw = ? AND EXISTS "
-            "(SELECT 1 FROM items c WHERE c.dup_group_id = i.id AND c.id != i.id AND c.deleted_at IS NULL)")
+            "(SELECT 1 FROM items c WHERE c.dup_group_id = i.id AND c.id != i.id AND c.deleted_at IS NULL "
+            "AND c.nsfw = i.nsfw)")
     total = conn.execute(f"SELECT COUNT(*) FROM items i WHERE {base}", (nsfw,)).fetchone()[0]
     params: list[Any] = [nsfw]
     cond = base
@@ -566,8 +560,8 @@ def duplicates(cursor: str | None = Query(default=None, max_length=512), limit: 
     for r in rows:
         copies = conn.execute(
             f"SELECT {ITEM_CARD_COLUMNS} FROM items i WHERE i.dup_group_id = ? AND i.id != ? AND i.deleted_at IS NULL "
-            "ORDER BY i.id",
-            (r["id"], r["id"]),
+            "AND i.nsfw = ? ORDER BY i.id",
+            (r["id"], r["id"], nsfw),
         ).fetchall()
         groups.append(DupGroup(best=item_card(r), copies=[item_card(c) for c in copies]))
     next_cursor = encode_cursor([int(rows[-1]["id"])]) if more and rows else None

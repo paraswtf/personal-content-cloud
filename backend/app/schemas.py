@@ -490,6 +490,9 @@ class UploadOut(BaseModel):
     chunk_size: int
     item_uid: str | None = None
     item_thumb_url: str | None = None
+    # True only when the session may see vault items and the stored item is in the vault (the
+    # link then needs ?vault=1); a locked session gets no uid or thumb for such an item.
+    item_nsfw: bool = False
     created_at: str
 
 

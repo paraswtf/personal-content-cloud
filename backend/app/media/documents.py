@@ -4,16 +4,21 @@ CONTRACT.
 - sniff_document(data, path, filename) -> (kind, mime, ext) | None: PDF ('%PDF-' in the first
   KiB), DOCX / XLSX / PPTX (zip with [Content_Types].xml and a word/, xl/ or ppt/ folder) and plain
   text (.txt/.text/.log, .md/.markdown, .csv by the file name's extension, UTF-8 decodable, no NUL
-  bytes). Kinds: 'pdf' for PDF, 'document' for the rest.
+  bytes). Kinds: 'pdf' for PDF, 'document' for the rest. A zip that breaks the ZIP_MAX_* limits (too many
+  entries, too large a central directory, too much uncompressed data, an extreme compression ratio) is
+  not sniffed as an office file (None, so it is kept as kind 'other'); the reason is logged.
 - probe_document(path, kind, ext) -> (page_count, width, height): width/height are the size of
   the page 1 render (long side settings.page_render_size). ValueError when the file cannot be read.
+  PDFs count at most PDF_MAX_PAGES pages; office and plain-text files at most MAX_LOGICAL_PAGES.
 - logical_pages(path, ext) -> list[str]: the text of an office or plain-text file split into
   logical pages (docx and plain text: about PAGE_CHARS characters or LINES_PER_PAGE wrapped lines,
   xlsx: one per sheet, pptx: one per slide). Renders and text layers both come from this one
   function, so page N's render always shows page N's text.
 - text_layer(path, kind, ext=None) -> list[str | None]: one entry per page; for PDFs the embedded
   text layer (None when a page has none, so OCR can take over); office kinds return their logical
-  pages' text.
+  pages' text. Plain text past MAX_LOGICAL_PAGES pages (up to PLAIN_MAX_BYTES of file) is added to the
+  last entry, so it still reaches item_text and the search index; that page's render shows only its
+  own logical page.
 - render_pages(path, kind, uid, version, *, max_side, max_pages, ext=None) -> [(page_no, w, h)]:
   writes storage.page_path files (WebP); office pages are their text drawn on a white page.
 - render_page(path, kind, uid, version, page_no, *, max_side, ext=None) -> (w, h) | None: one page
@@ -27,6 +32,7 @@ from __future__ import annotations
 
 import logging
 import re
+import struct
 import textwrap
 import threading
 import zipfile
@@ -62,6 +68,19 @@ CHARS_PER_LINE = 90
 LINES_PER_PAGE = 60
 MAX_LOGICAL_PAGES = 1000
 PLAIN_MAX_BYTES = 16 * 1024 * 1024  # longer plain-text files are indexed up to this size
+PLAIN_BLOCK_CHARS = CHARS_PER_LINE * LINES_PER_PAGE  # longer plain-text lines are cut into blocks this long
+PDF_MAX_PAGES = 2000  # pages counted, text-extracted and offered for a PDF
+# Office files are zips of a few hundred XML parts. These limits keep zip bombs and huge directories
+# away from python-docx, openpyxl and python-pptx, which parse whole parts into memory.
+ZIP_MAX_ENTRIES = 10_000
+ZIP_MAX_DIR_BYTES = 2 * 1024 * 1024  # central directory size (zipfile reads entries until it is used up)
+ZIP_MAX_TOTAL_BYTES = 256 * 1024 * 1024  # sum of uncompressed sizes
+ZIP_MAX_PART_BYTES = 64 * 1024 * 1024  # one uncompressed XML part (.xml, .rels)
+ZIP_MAX_RATIO = 200  # uncompressed / compressed, checked on entries of ZIP_RATIO_MIN_BYTES or more
+ZIP_RATIO_MIN_BYTES = 1024 * 1024
+XLSX_MAX_ROWS = 100_000  # rows scanned per sheet, empty rows included
+XLSX_MAX_COLS = 1000  # cells read per row
+XLSX_MAX_CELLS = 2_000_000  # cells scanned per workbook
 PAGE_ASPECT = 2 ** -0.5  # A4 portrait: width = height / sqrt(2)
 _FONT_PATHS = (
     "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
@@ -78,10 +97,71 @@ def _ext_of(filename: str | None) -> str:
     return "." + name.rsplit(".", 1)[-1].lower() if "." in name else ""
 
 
+class ZipRefused(ValueError):
+    """A zip that breaks the ZIP_MAX_* limits."""
+
+
+def _zip_end_record(fh, size: int) -> None:
+    """Check the end-of-central-directory record before zipfile reads the directory. It is found the
+    way zipfile finds it (the last 22 bytes, else the last signature in the final 64 KiB)."""
+    eocd = 22
+    if size < eocd:
+        raise zipfile.BadZipFile("too short for a zip")
+    fh.seek(size - eocd)
+    rec = fh.read(eocd)
+    start = size - eocd
+    if not (rec[:4] == b"PK\x05\x06" and rec[-2:] == b"\x00\x00"):
+        tail_start = max(size - eocd - 65535, 0)
+        fh.seek(tail_start)
+        tail = fh.read()
+        pos = tail.rfind(b"PK\x05\x06")
+        if pos < 0 or len(tail) - pos < eocd:
+            raise zipfile.BadZipFile("no end of central directory record")
+        rec = tail[pos:pos + eocd]
+        start = tail_start + pos
+    _sig, _disk, _disk_cd, n_disk, n_total, dir_size, dir_offset, _comment = struct.unpack("<4s4H2LH", rec)
+    if start >= 20:
+        fh.seek(start - 20)
+        if fh.read(4) == b"PK\x06\x07":
+            raise ZipRefused("zip64 directory")
+    if 0xFFFF in (n_disk, n_total) or 0xFFFFFFFF in (dir_size, dir_offset):
+        raise ZipRefused("zip64 directory")
+    if n_total > ZIP_MAX_ENTRIES or n_disk > ZIP_MAX_ENTRIES:
+        raise ZipRefused(f"{max(n_total, n_disk)} entries (limit {ZIP_MAX_ENTRIES})")
+    if dir_size > ZIP_MAX_DIR_BYTES:
+        raise ZipRefused(f"central directory of {dir_size} bytes (limit {ZIP_MAX_DIR_BYTES})")
+
+
+def _office_zip_names(path: Path) -> list[str]:
+    """Entry names of a zip that stays within the ZIP_MAX_* limits. ZipRefused (a ValueError) when it
+    does not; zipfile.BadZipFile or OSError when it is not a readable zip. The central directory is read
+    once, and only after the end record showed it is small."""
+    with open(path, "rb") as fh:
+        fh.seek(0, 2)
+        _zip_end_record(fh, fh.tell())
+        fh.seek(0)
+        with zipfile.ZipFile(fh) as zf:
+            infos = zf.infolist()
+    if len(infos) > ZIP_MAX_ENTRIES:
+        raise ZipRefused(f"{len(infos)} entries (limit {ZIP_MAX_ENTRIES})")
+    total = 0
+    for info in infos:
+        total += info.file_size
+        if total > ZIP_MAX_TOTAL_BYTES:
+            raise ZipRefused(f"more than {ZIP_MAX_TOTAL_BYTES} bytes uncompressed")
+        if info.filename.lower().endswith((".xml", ".rels")) and info.file_size > ZIP_MAX_PART_BYTES:
+            raise ZipRefused(f"{info.filename} is {info.file_size} bytes uncompressed (limit {ZIP_MAX_PART_BYTES})")
+        if info.file_size >= ZIP_RATIO_MIN_BYTES and info.file_size > ZIP_MAX_RATIO * max(info.compress_size, 1):
+            raise ZipRefused(f"{info.filename} expands {info.file_size // max(info.compress_size, 1)} times")
+    return [info.filename for info in infos]
+
+
 def _sniff_zip(path: Path) -> tuple[str, str, str] | None:
     try:
-        with zipfile.ZipFile(path) as zf:
-            names = zf.namelist()
+        names = _office_zip_names(path)
+    except ZipRefused as e:
+        log.warning("zip %s is not read as an office file: %s; keeping it as a plain file", path, e)
+        return None
     except (zipfile.BadZipFile, OSError, ValueError):
         return None
     if "[Content_Types].xml" not in names:
@@ -138,7 +218,7 @@ def _pdf_probe(path: Path) -> tuple[int, int, int]:
     with PDFIUM_LOCK:
         pdf = _open_pdf(path)
         try:
-            n = len(pdf)
+            n = min(len(pdf), PDF_MAX_PAGES)
             if n <= 0:
                 raise ValueError("PDF has no pages")
             page = pdf[0]
@@ -158,7 +238,7 @@ def _pdf_page_image(path: Path, page_no: int, max_side: int) -> Image.Image | No
     with PDFIUM_LOCK:
         pdf = _open_pdf(path)
         try:
-            if page_no < 1 or page_no > len(pdf):
+            if page_no < 1 or page_no > min(len(pdf), PDF_MAX_PAGES):
                 return None
             page = pdf[page_no - 1]
             try:
@@ -177,11 +257,15 @@ def _pdf_page_image(path: Path, page_no: int, max_side: int) -> Image.Image | No
 
 
 def _pdf_text(path: Path) -> list[str | None]:
+    """Text of the first PDF_MAX_PAGES pages. PDFIUM_LOCK is taken per page, so lazy page renders
+    for other items are not held up for the whole document."""
     out: list[str | None] = []
     with PDFIUM_LOCK:
         pdf = _open_pdf(path)
-        try:
-            for i in range(len(pdf)):
+        n = min(len(pdf), PDF_MAX_PAGES)
+    try:
+        for i in range(n):
+            with PDFIUM_LOCK:
                 page = pdf[i]
                 try:
                     tp = page.get_textpage()
@@ -191,29 +275,57 @@ def _pdf_text(path: Path) -> list[str | None]:
                         tp.close()
                 finally:
                     page.close()
-                text = (text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
-                out.append(text or None)
-        finally:
+            text = (text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+            out.append(text or None)
+    finally:
+        with PDFIUM_LOCK:
             pdf.close()
     return out
 
 
 # ------------------------------------------------------------------ office and plain text
-def _wrap(text: str) -> list[str]:
+# textwrap's own whitespace set: runs of anything else are one "word" to it.
+_LONG_WORD = re.compile(r"[^\t\n\x0b\x0c\r ]{%d,}" % (CHARS_PER_LINE + 1))
+_LONG_SPACE = re.compile(r"[\t\n\x0b\x0c\r ]{%d,}" % (CHARS_PER_LINE + 1))
+
+
+def _split_long(m: re.Match) -> str:
+    run = m.group(0)
+    return " ".join(run[i:i + CHARS_PER_LINE] for i in range(0, len(run), CHARS_PER_LINE))
+
+
+def _wrap(text: str, max_lines: int | None = None) -> list[str]:
+    """Wrap to CHARS_PER_LINE in linear time. textwrap slices a long word once per output line
+    (quadratic), so runs longer than a line are cut into line-sized pieces first and long blank runs
+    become one space. With max_lines, stop once that many lines exist."""
     lines: list[str] = []
     for raw in text.split("\n"):
+        if max_lines is not None and len(lines) >= max_lines:
+            break
         raw = raw.rstrip()
         if not raw:
             lines.append("")
             continue
+        if len(raw) > CHARS_PER_LINE:
+            raw = raw.expandtabs()
+            raw = _LONG_SPACE.sub(" ", raw)
+            raw = _LONG_WORD.sub(_split_long, raw)
+            if max_lines is not None:
+                # A wrapped line uses at most one line of text and one blank run (each at most
+                # CHARS_PER_LINE long now), so this prefix still yields every line that is kept.
+                keep = (max_lines - len(lines) + 1) * 2 * CHARS_PER_LINE
+                raw = raw[:keep]
         lines.extend(textwrap.wrap(raw, CHARS_PER_LINE, break_long_words=True, break_on_hyphens=False,
                                    replace_whitespace=False, drop_whitespace=True) or [""])
+    if max_lines is not None:
+        del lines[max_lines:]
     return lines
 
 
-def _flow(blocks: list[str]) -> list[str]:
-    """Split text blocks (paragraphs) into pages of at most LINES_PER_PAGE wrapped lines and about
-    PAGE_CHARS characters. A block longer than a page is split at wrapped-line boundaries."""
+def _flow_cut(blocks: list[str], *, cap_wrap: bool = True) -> tuple[list[str], tuple[int, list[str]] | None]:
+    """_flow, also returning where it stopped: None when every block was placed, else (index of the
+    block that did not fit, its wrapped lines that were not placed). With cap_wrap False each block
+    is wrapped whole, so those lines are complete (the caller keeps blocks short)."""
     pages: list[list[str]] = []
     cur: list[str] = []
     cur_lines = 0
@@ -225,26 +337,34 @@ def _flow(blocks: list[str]) -> list[str]:
             pages.append(cur)
         cur, cur_lines, cur_chars = [], 0, 0
 
-    for block in blocks:
+    for index, block in enumerate(blocks):
         block = block.rstrip()
-        lines = _wrap(block)
-        first = True
-        while lines:
+        budget = (MAX_LOGICAL_PAGES - len(pages)) * LINES_PER_PAGE if cap_wrap else None
+        lines = _wrap(block, budget)
+        whole = budget is None or len(lines) < budget  # False when _wrap may have stopped early
+        pos = 0
+        while pos < len(lines):
             room = LINES_PER_PAGE - cur_lines
             if room <= 0 or (cur and cur_chars >= PAGE_CHARS):
                 flush()
                 if len(pages) >= MAX_LOGICAL_PAGES:
-                    return ["\n".join(p) for p in pages]
+                    return ["\n".join(p) for p in pages], (index, lines[pos:])
                 continue
-            take, lines = lines[:room], lines[room:]
+            take = lines[pos:pos + room]
+            pos += len(take)
             # A block that fits keeps its own text (rendering wraps it the same way again).
-            piece = block if first and not lines else "\n".join(take)
-            first = False
+            piece = block if whole and len(take) == len(lines) else "\n".join(take)
             cur.append(piece)
             cur_lines += len(take)
             cur_chars += len(piece)
     flush()
-    return ["\n".join(p) for p in pages[:MAX_LOGICAL_PAGES]]
+    return ["\n".join(p) for p in pages], None
+
+
+def _flow(blocks: list[str]) -> list[str]:
+    """Split text blocks (paragraphs) into pages of at most LINES_PER_PAGE wrapped lines and about
+    PAGE_CHARS characters. A block longer than a page is split at wrapped-line boundaries."""
+    return _flow_cut(blocks)[0]
 
 
 def _docx_blocks(path: Path) -> list[str]:
@@ -257,8 +377,16 @@ def _docx_blocks(path: Path) -> list[str]:
     except Exception as e:
         raise ValueError(f"cannot open DOCX: {e}") from e
     blocks: list[str] = []
+    # Every block takes at least one wrapped line and a page holds at most LINES_PER_PAGE lines of
+    # CHARS_PER_LINE characters, so nothing past these limits can reach a logical page.
+    max_blocks = MAX_LOGICAL_PAGES * LINES_PER_PAGE
+    max_chars = MAX_LOGICAL_PAGES * LINES_PER_PAGE * CHARS_PER_LINE
+    chars = 0
     body = doc.element.body
     for child in body.iterchildren():
+        if len(blocks) >= max_blocks or chars >= max_chars:
+            break
+        before = len(blocks)
         tag = child.tag.rsplit("}", 1)[-1]
         if tag == "p":
             blocks.append(Paragraph(child, doc).text)
@@ -272,6 +400,9 @@ def _docx_blocks(path: Path) -> list[str]:
                         cells.append(text)
                 if cells:
                     blocks.append(" | ".join(cells))
+                if len(blocks) >= max_blocks:
+                    break
+        chars += sum(len(b) for b in blocks[before:])
     return blocks
 
 
@@ -307,11 +438,24 @@ def _xlsx_pages(path: Path) -> list[str]:
 
 def _sheet_pages(wb) -> list[str]:
     pages: list[str] = []
+    cells_left = XLSX_MAX_CELLS
     for ws in wb.worksheets[:MAX_LOGICAL_PAGES]:
         lines = [f"Sheet: {ws.title}"]
         chars = 0
-        for row in ws.iter_rows(values_only=True):
-            cells = [_cell_text(v) for v in row]
+        if cells_left <= 0:  # the workbook's scan budget is used up: keep one page per sheet
+            lines.append("...")
+            pages.append("\n".join(lines))
+            continue
+        if hasattr(ws, "reset_dimensions"):
+            # Read-only sheets pad every row to the declared <dimension> (A1:XFD1048576 is legal for
+            # a sheet of two cells); without it rows have their own width.
+            ws.reset_dimensions()
+        for row_no, row in enumerate(ws.iter_rows(values_only=True), 1):
+            if row_no > XLSX_MAX_ROWS or cells_left <= 0:
+                lines.append("...")
+                break
+            cells_left -= max(len(row), 1)  # empty rows (gaps between <row> elements) count too
+            cells = [_cell_text(v) for v in row[:XLSX_MAX_COLS]]
             while cells and not cells[-1]:
                 cells.pop()
             if not any(cells):
@@ -350,19 +494,63 @@ def _pptx_pages(path: Path) -> list[str]:
     return pages
 
 
-def _plain_blocks(path: Path) -> list[str]:
+def _plain_text(path: Path) -> str:
     try:
         with open(path, "rb") as f:
             data = f.read(PLAIN_MAX_BYTES)
     except OSError as e:
         raise ValueError(f"cannot read text file: {e}") from e
-    text = data.decode("utf-8-sig", errors="replace").replace("\r\n", "\n").replace("\r", "\n")
-    return text.split("\n")
+    return data.decode("utf-8-sig", errors="replace").replace("\r\n", "\n").replace("\r", "\n")
+
+
+def _plain_blocks(text: str) -> tuple[list[str], list[int]]:
+    """Lines of the text, lines longer than PLAIN_BLOCK_CHARS cut into blocks (before a blank where
+    one is near), and the offset in `text` where each block ends."""
+    blocks: list[str] = []
+    ends: list[int] = []
+    start = 0
+    for line in text.split("\n"):
+        end = start + len(line)
+        pos = start
+        while end - pos > PLAIN_BLOCK_CHARS:
+            limit = pos + PLAIN_BLOCK_CHARS
+            cut = max(text.rfind(" ", pos + 1, limit + 1), text.rfind("\t", pos + 1, limit + 1))
+            if cut <= pos:
+                cut = limit
+            blocks.append(text[pos:cut])
+            ends.append(cut)
+            pos = cut
+        blocks.append(text[pos:end])
+        ends.append(end)
+        start = end + 1
+    return blocks, ends
+
+
+def _plain_pages(path: Path) -> tuple[list[str], str]:
+    """Logical pages of a plain-text file, and the text that did not fit in MAX_LOGICAL_PAGES."""
+    text = _plain_text(path)
+    blocks, ends = _plain_blocks(text)
+    pages, cut = _flow_cut(blocks, cap_wrap=False)
+    if cut is None:
+        return pages, ""
+    index, unplaced = cut
+    return pages, "\n".join(unplaced) + text[ends[index]:]
+
+
+def _check_office_zip(path: Path) -> None:
+    try:
+        _office_zip_names(path)
+    except (zipfile.BadZipFile, OSError) as e:  # ZipRefused is a ValueError and passes through
+        raise ValueError(f"cannot open {path.name}: {e}") from e
 
 
 @lru_cache(maxsize=16)
-def _logical_pages_cached(path: str, ext: str, mtime_ns: int, size: int) -> tuple[str, ...]:
+def _logical_pages_cached(path: str, ext: str, mtime_ns: int, size: int) -> tuple[tuple[str, ...], str]:
+    """(logical pages, plain text past the last page)."""
     p = Path(path)
+    rest = ""
+    if ext in OFFICE_EXTS:
+        _check_office_zip(p)  # files stored before the zip limits existed come through here too
     if ext == ".docx":
         pages = _flow(_docx_blocks(p))
     elif ext == ".xlsx":
@@ -370,21 +558,25 @@ def _logical_pages_cached(path: str, ext: str, mtime_ns: int, size: int) -> tupl
     elif ext == ".pptx":
         pages = _pptx_pages(p)
     elif ext in PLAIN_EXTS:
-        pages = _flow(_plain_blocks(p))
+        pages, rest = _plain_pages(p)
     else:
         raise ValueError(f"not an office or text document: {ext or 'no extension'}")
-    return tuple(pages) or ("",)
+    return (tuple(pages) or ("",)), rest
 
 
-def logical_pages(path: Path, ext: str | None = None) -> list[str]:
-    """Logical pages of an office or plain-text file (at least one, possibly empty)."""
+def _pages_and_rest(path: Path, ext: str | None) -> tuple[tuple[str, ...], str]:
     p = Path(path)
     ext = (ext or p.suffix).lower()
     try:
         st = p.stat()
     except OSError as e:
         raise ValueError(f"cannot read {p.name}: {e}") from e
-    return list(_logical_pages_cached(str(p), ext, st.st_mtime_ns, st.st_size))
+    return _logical_pages_cached(str(p), ext, st.st_mtime_ns, st.st_size)
+
+
+def logical_pages(path: Path, ext: str | None = None) -> list[str]:
+    """Logical pages of an office or plain-text file (at least one, possibly empty)."""
+    return list(_pages_and_rest(path, ext)[0])
 
 
 @lru_cache(maxsize=8)
@@ -435,7 +627,11 @@ def text_layer(path: Path, kind: str, ext: str | None = None) -> list[str | None
     """One entry per page: PDF text layer (None where a page has none) or office/plain page text."""
     if kind == "pdf":
         return _pdf_text(Path(path))
-    return [t if t.strip() else None for t in logical_pages(path, ext)]
+    pages, rest = _pages_and_rest(path, ext)
+    texts = list(pages)
+    if rest.strip():
+        texts[-1] = texts[-1] + "\n" + rest
+    return [t if t.strip() else None for t in texts]
 
 
 def page_image(path: Path, kind: str, page_no: int, *, max_side: int, ext: str | None = None) -> Image.Image | None:

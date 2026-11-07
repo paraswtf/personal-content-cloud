@@ -158,7 +158,6 @@ export function Card({ className, children }: { className?: string; children: Re
   return <div className={clsx('rounded-[var(--radius-card)] bg-paper shadow-[var(--shadow-card)]', className)}>{children}</div>
 }
 
-/** Accessible modal dialog rendered in a portal. Closes on Escape and backdrop click. */
 // Page scroll lock shared by every overlay. It is reference counted because nested overlays (a
 // confirm inside the viewer) unmount parent-first, so saving and restoring the style per overlay
 // would leave the page locked.
@@ -177,6 +176,47 @@ export function lockScroll(): () => void {
   }
 }
 
+const TABBABLE =
+  'a[href], area[href], button:not([disabled]), input:not([disabled]):not([type="hidden"]), select:not([disabled]), textarea:not([disabled]), iframe, audio[controls], video[controls], [contenteditable]:not([contenteditable="false"]), [tabindex]:not([tabindex="-1"])'
+
+/** The elements Tab can reach inside `root`, in document order (hidden ones left out). */
+export function tabbables(root: HTMLElement): HTMLElement[] {
+  return Array.from(root.querySelectorAll<HTMLElement>(TABBABLE)).filter(
+    (n) => n.tabIndex >= 0 && (n.offsetParent !== null || n.getClientRects().length > 0),
+  )
+}
+
+/**
+ * Keep Tab and Shift+Tab inside `panel`: past the last tabbable element focus goes to the first and
+ * back. With nothing tabbable, focus stays on the panel. Only the topmost modal dialog traps, so a
+ * dialog opened over another one is the one that keeps the focus.
+ */
+function trapTab(e: KeyboardEvent, panel: HTMLElement | null): void {
+  if (!panel) return
+  const dialogs = document.querySelectorAll<HTMLElement>('[role="dialog"][aria-modal="true"]')
+  if (dialogs[dialogs.length - 1] !== panel) return
+  const nodes = tabbables(panel)
+  const active = document.activeElement
+  if (!nodes.length) {
+    e.preventDefault()
+    panel.focus()
+    return
+  }
+  const first = nodes[0]
+  const last = nodes[nodes.length - 1]
+  if (!panel.contains(active)) {
+    e.preventDefault()
+    ;(e.shiftKey ? last : first).focus()
+  } else if (e.shiftKey && (active === first || active === panel)) {
+    e.preventDefault()
+    last.focus()
+  } else if (!e.shiftKey && active === last) {
+    e.preventDefault()
+    first.focus()
+  }
+}
+
+/** Accessible modal dialog rendered in a portal. Closes on Escape and backdrop click; Tab stays inside it. */
 export function Modal({
   open,
   onClose,
@@ -204,9 +244,14 @@ export function Modal({
     const prev = document.activeElement as HTMLElement | null
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') closeRef.current()
+      else if (e.key === 'Tab') trapTab(e, panel.current)
     }
     document.addEventListener('keydown', onKey)
-    const t = setTimeout(() => panel.current?.focus(), 0)
+    // An autoFocus field inside the panel keeps its focus; otherwise the panel itself takes it.
+    const t = setTimeout(() => {
+      const el = panel.current
+      if (el && !el.contains(document.activeElement)) el.focus()
+    }, 0)
     const unlock = lockScroll()
     return () => {
       document.removeEventListener('keydown', onKey)

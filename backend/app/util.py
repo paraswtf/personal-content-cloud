@@ -48,12 +48,20 @@ def local_date(value: str | None, tz_name: str) -> str | None:
     return dt.astimezone(zone).date().isoformat()
 
 
+# Safe range for local_day_start_utc: one day plus any UTC offset away from date.min and date.max.
+_DAY_MIN = datetime(2, 1, 1).date()
+_DAY_MAX = datetime(9998, 12, 31).date()
+
+
 def local_day_start_utc(value: str, tz_name: str, *, next_day: bool = False) -> str:
     """'YYYY-MM-DD' (a calendar date in tz_name) -> the UTC instant that day starts (or the next day
-    starts), formatted like now_iso so it compares as text with stored times. Raises ValueError."""
+    starts), formatted like now_iso so it compares as text with stored times. Raises ValueError.
+    Dates are clamped to _DAY_MIN.._DAY_MAX first, so the calendar edges (0001-01-01 converted from a
+    zone east of UTC, 9999-12-31 plus one day) give the nearest representable bound, never OverflowError."""
     from datetime import date, time as dtime
 
     d = date.fromisoformat(value.strip()[:10])
+    d = min(max(d, _DAY_MIN), _DAY_MAX)
     if next_day:
         d = d + timedelta(days=1)
     try:

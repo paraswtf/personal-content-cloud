@@ -33,13 +33,16 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import AsyncIterator
 
-from fastapi import APIRouter, FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, PlainTextResponse, RedirectResponse, Response
-from starlette.datastructures import MutableHeaders
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response
+from starlette.datastructures import Headers, MutableHeaders
 from starlette.middleware.gzip import GZipMiddleware
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from app import db, storage
+from app.api.deps import require_user
+from app.auth import sessions
+from app.auth.sessions import SessionInfo
 from app.config import settings
 
 log = logging.getLogger(__name__)
@@ -181,6 +184,65 @@ class SecurityHeadersMiddleware:
             await send(message)
 
         await self.app(scope, receive, wrapped)
+
+
+class SessionCookieMiddleware:
+    """Re-issues the session cookie when `authenticate` slid the session's expiry (it leaves the raw
+    token in `request.state.refresh_cookie`), so the browser's cookie lifetime slides with the row.
+    Responses that already set or clear the cookie (login, logout) are left alone."""
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        async def wrapped(message: Message) -> None:
+            if message["type"] == "http.response.start":
+                token = (scope.get("state") or {}).get("refresh_cookie")
+                if token:
+                    headers = MutableHeaders(scope=message)
+                    if not any(v.startswith(sessions.COOKIE + "=") for v in headers.getlist("set-cookie")):
+                        probe = Response()
+                        sessions.set_cookie(probe, Request(scope), token)
+                        for k, v in probe.raw_headers:
+                            headers.append(k.decode("latin-1"), v.decode("latin-1"))
+            await send(message)
+
+        await self.app(scope, receive, wrapped)
+
+
+SIMPLE_UPLOAD_PATH = "/api/uploads/simple"
+SIMPLE_UPLOAD_MARGIN = 1024 * 1024  # multipart framing and the form fields
+
+
+class BodyLimitMiddleware:
+    """Rejects an oversized simple upload before Starlette spools its multipart body to disk: the
+    request must declare Content-Length (411 otherwise) and it must fit the configured limit plus a
+    small margin (413 otherwise). Chunked uploads read their bodies with their own caps."""
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] == "http" and scope.get("path", "") == SIMPLE_UPLOAD_PATH and scope.get("method") == "POST":
+            raw = Headers(scope=scope).get("content-length")
+            try:
+                length = int(raw) if raw is not None else None
+            except ValueError:
+                length = -1
+            if length is None or length < 0:
+                await JSONResponse({"detail": "length_required"}, status_code=411)(scope, receive, send)
+                return
+            if length > settings.simple_upload_max_bytes + SIMPLE_UPLOAD_MARGIN:
+                limit_mb = settings.simple_upload_max_bytes // (1024 * 1024)
+                await JSONResponse(
+                    {"detail": f"The file is larger than the {limit_mb} MB limit of this upload route"}, status_code=413
+                )(scope, receive, send)
+                return
+        await self.app(scope, receive, send)
 
 
 class ApiGZipMiddleware:
@@ -372,10 +434,18 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
         docs_url=None,
         redoc_url=None,
-        openapi_url="/api/openapi.json",
+        openapi_url=None,  # served by the session-protected route below
     )
+    app.add_middleware(BodyLimitMiddleware)
     app.add_middleware(ApiGZipMiddleware)
+    app.add_middleware(SessionCookieMiddleware)
     app.add_middleware(SecurityHeadersMiddleware)  # added last = outermost
     app.state.routers = _include_routers(app)
+
+    @app.get("/api/openapi.json", include_in_schema=False)
+    def openapi_schema(_session: SessionInfo = Depends(require_user)) -> JSONResponse:
+        # The route map is for the signed-in owner, not for anyone who can reach the instance.
+        return JSONResponse(app.openapi())
+
     _register_spa(app)  # catch-alls last
     return app

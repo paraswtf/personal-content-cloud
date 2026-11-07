@@ -128,7 +128,7 @@ docs/
 | `bodies/<id//1000>/<id>.webp` | person crops 256 px long side |
 | `docphoto/<sh>/<uid>.v<n>.webp` | photo cropped out of an ID document |
 | `staging/<uid>.part` | uploads in progress |
-| `failed/<uid>.part` | uploads whose ingest failed for good |
+| `failed/<uid>.part` | uploads whose ingest failed for good; deleted after `TRASH_DAYS`; Settings > System > Retry failed uploads queues them again |
 | `wallet/` | `cert.pem`, `key.pem`, `wwdr.pem` placed by the owner (never written by the app) |
 | `tmp/` | wiped at startup |
 
@@ -147,9 +147,15 @@ hour that no row references (names parsed by regex; `_is_referenced` guards ever
   `challenge_id`; the challenge is stored in `challenges` with a 5-minute expiry; `verify` creates the
   session). `RP_ID` and `ORIGIN` come from env; when unset they are derived from the request
   (`Host` without port; scheme from `X-Forwarded-Proto`). The dev server manifest sets them from `{host}`.
+  Registering and removing a passkey need an unlocked vault (403 `vault_locked`): the session must have
+  re-entered the password or used a passkey within `VAULT_UNLOCK_MIN`, so a stolen or left-open session cannot
+  enrol its own authenticator. `passkeys/login/options` has its own limit of 30 calls per minute per IP (429
+  `too_many_attempts`, apart from the login failure budget) and at most 500 open login challenges are kept.
 - Sessions: `sessions` row with `token_hash = sha256(token)`; cookie `pcc_session` = token, HttpOnly,
   SameSite=Lax, Secure when https, path `/`, 30 days sliding (`last_seen_at` bumped at most once a
-  minute; `expires_at = last_seen + SESSION_DAYS`). Revocable one by one or all at once.
+  minute; `expires_at = last_seen + SESSION_DAYS`). When the row slides, the response sets the cookie again
+  with the same token and a fresh max-age (`SessionCookieMiddleware`), so the browser's copy slides too.
+  Revocable one by one or all at once.
 - CSRF: every non-GET request must carry `X-Requested-With: pcc` (403 otherwise). Same rule for
   chunk PUTs. The upload engine and `api.ts` send it on every request.
 - Vault (NSFW): `POST /api/auth/vault/unlock` with `{password}` or `{credential}` (passkey assertion
@@ -158,9 +164,13 @@ hour that no row references (names parsed by regex; `_is_referenced` guards ever
   /api/auth/vault/lock` clears it. Every list, detail, search and `/files` route hides NSFW items
   unless the request passes `vault=1` and the session is unlocked.
 - 401 `{"detail":"login_required"}` on every protected route; the frontend redirects to `/login`.
+  `GET /api/openapi.json` (the only schema route; there is no docs UI) needs a session too.
 - Security headers on every response: nosniff, `Referrer-Policy: same-origin`, `X-Frame-Options: DENY`,
   and `Cache-Control: private, no-store` on `/api`. `/files` responses are `private, max-age=31536000,
-  immutable` when `?v=` matches the item version, else `private, no-cache`.
+  immutable` when `?v=` equals the plain current version of a non-vault item, else `private, no-cache`
+  (vault items are `no-store`). Vault items' URLs carry `<version>n` as their cache key
+  (`api.common.url_version`), so flagging an item changes its URLs and a thumb cached before the flag is
+  never shown again; `/files` accepts any `v`.
 
 ## 5. Database schema
 
@@ -217,7 +227,14 @@ The hub's chunked, resumable protocol, unchanged except: no uploader name; `Uplo
 files up to 1 GiB first and a known `sha256` answers `duplicate` with the existing item before any
 bytes move. Hashing at `complete` runs in a worker thread, not under the per-upload lock. Any file
 type is accepted (`accept` is `*/*` plus the explicit document extensions for the picker). An extra
-`POST /api/uploads/simple` (multipart, one file up to 256 MB) exists for tests and scripts.
+`POST /api/uploads/simple` (multipart, one file up to 256 MB) exists for tests and scripts; it must declare
+`Content-Length` (411 `length_required`), and a declared length above `SIMPLE_UPLOAD_MAX_MB` is refused (413)
+before any of the body is read. `UploadOut.item_nsfw` is true only when the session may see the vault and the
+stored item is in it (the frontend then links it with `?vault=1`); a locked session gets `item_uid` and
+`item_thumb_url` as null for such an item and no hint that it is private. Re-uploading a file whose item is
+in the trash restores that item on every path (client hash, chunked complete, simple) and answers `duplicate`
+with the message `Restored from the trash (identical file).`; staged bytes are never dropped while the only
+stored copy sits in the trash.
 
 ## 7. Processing pipeline
 
@@ -240,7 +257,10 @@ all GPU work except OCR so two heavy models never contend. Handlers are idempote
    without a face the upper 60 percent of the box) embedded with SigLIP into `torso_embedding`; write faces and
    bodies with crops; `cluster.assign_new_faces`; `guess.guess_item` for still-unassigned faces and bodies;
    decide category and nsfw; `analysis_status='done'`; enqueue `text` when `doc_likeness >= DOC_LIKENESS_MIN`
-   and `text_status='none'`.
+   and `text_status='none'`. A reprocess that runs without one of the models keeps that model's earlier rows
+   (embeddings and labels, faces, bodies and their covers, the nsfw decision and the scene category) instead of
+   deleting them. A reprocess requested while a run is in progress is not lost: the run commits its results
+   with `analysis_status='pending'`, so the job it queued runs in full.
 3. `text` (`documents.extract.extract_item`): PDF text layer per page via pypdfium2, OCR with rapidocr on pages
    without a layer (and on images); office files via python-docx / openpyxl / python-pptx (pages are logical:
    one per docx section of ~3000 chars, one per sheet, one per slide; the renders are text drawn with Pillow);
@@ -254,6 +274,20 @@ all GPU work except OCR so two heavy models never contend. Handlers are idempote
 6. `recluster`: the hub's `recluster_unassigned`.
 
 Statuses the UI polls: `analysis_status`, `text_status`, `preview_status`.
+
+Failure and recovery rules: a job is claimed at most `MAX_ATTEMPTS` (3) times; one found running after a
+crash, or by the stale sweep, with its attempts used up goes to `error` and gets the final-failure handling
+(upload bytes to `failed/`, item status `error`), so a poison file never crash-loops the server. A clean
+shutdown gives the attempt back to jobs still running. A `ToolFailure` (ffmpeg or ffprobe timeout, signal or
+missing tool) uses no attempt: the job is deferred after 1, 5 and 30 minutes, then hourly, and fails for good
+after 48 hours (`last_error` starts with `[tool failure N since <iso>]`). `POST /api/system/retry-failed`
+queues failed uploads whose bytes are kept and errored jobs again. Restoring an item from the trash queues
+the stages still pending (`analyze`, `text`, `video_preview`, unique). Startup recovery enqueues in one
+transaction (`jobs.enqueue_many`, partial index `jobs_dedup`). Housekeeping every 10 minutes on the main
+worker thread covers stale uploads, `failed/` retention, trash expiry and session purge; the orphan file
+sweep runs on its own low-priority thread, first an hour after start and then daily. A `preview` reprocess
+of a document renders on a worker-owned background thread into a scratch directory and swaps the pages in
+one by one, so a running text job never sees a missing page.
 
 ## 8. ML engines and models (`app/ml`)
 
@@ -299,6 +333,7 @@ Mis-click reasons (`quality.py`, images only, documents and screenshots excluded
 - `pocket`: accident zero-shot (floor, ceiling, pocket, hand over lens, sky only) `>= 0.6` and no good face;
 - `burst`: another image of the same camera taken within `BURST_WINDOW_S` (3 s) with pHash distance `<= 12`;
   the sharpest of the group is `burst_best` (not flagged) and the rest get `burst` with `best_uid` in the reasons.
+  Documents and screenshots never join a burst group, and a group stays on one side of the vault.
 Flagged items (`misclick=1`) are excluded from the library by default and listed under Review.
 Scores are stored in `quality_scores` (`blur_var`, `mean_lum`, `p95_lum`, `clipped_frac`, `accident_p`,
 `motion_blur_p`) so thresholds can be tuned later without re-running the models.
@@ -321,8 +356,15 @@ Guessing (`analysis/guess.py`). For an unassigned face or body D in item I:
   by `>= 0.05`; the result is stored as `guess_person_id`, `guess_score`, `guess_evidence` (`{clothes, scene,
   face, ref_face_id, ref_item_uid, same_day, gps_m}`) with `assigned_by='guess'`.
 - Confirming sets `person_id`, `assigned_by='user'` and enqueues `guess` for that person; rejecting writes
-  `guess_rejections` and clears the guess. A confirmed body without a face adds an `item_tags` row.
+  `guess_rejections` and clears the guess. A confirmed body without a face adds an `item_tags` row with
+  `source='guess'`, removed again when that body is moved or deleted.
 - Propagation (`guess` job) runs the same scoring from the newly tagged face outward over the window.
+- A person is guessed for at most one box per photo (the best score wins, the other boxes are scored again
+  without that person; videos are exempt), and confirming skips a box whose person is already in the item.
+  Rejections follow a face across a reprocess (carried to the new face by position). Vault items are never
+  references, and NSFW items get no guesses. Reclustering and merging refresh the FTS people column.
+- People routes and the vault: with the vault locked, tagging or untagging an NSFW item and box actions on
+  NSFW boxes answer 403 `vault_locked`; a person seen only in vault items answers 404 by id outside the vault.
 
 ## 11. Documents (`app/documents`)
 
@@ -358,6 +400,16 @@ streams a `.pkpass` zip. Needs `WALLET_PASS_TYPE_ID`, `WALLET_TEAM_ID`, `WALLET_
 PEM files in `DATA_DIR/wallet/`; `GET /api/system` reports `wallet.configured` and the Settings page
 explains what to put where. Unconfigured: 409 `{"detail":"wallet_not_configured"}`.
 
+Limits (`media/documents.py`): PDFs are read up to `PDF_MAX_PAGES` (2000) pages for the count, the text layer,
+renders and the lazy page route, and `PDFIUM_LOCK` is taken per page. Office zips are refused and the file is
+kept as kind `other` (reason logged) beyond `ZIP_MAX_*`: 10000 entries, a 2 MB central directory, zip64,
+256 MB uncompressed in total, a 64 MB `.xml`/`.rels` part, or an entry of 1 MB or more that expands over
+200x. XLSX scanning stops at 100000 rows per sheet (empty rows included), 1000 cells per row and 2000000
+cells per workbook (a cut sheet ends with `...`). Plain text is read up to 16 MB: `page_count`, logical pages
+and renders stop at 1000, and the text past that is appended to the last page's text so `item_text` and the
+FTS index hold the whole file; lines longer than 5400 characters are split into blocks. Typed-document
+detection and parsing read at most the first 400000 characters or 150 pages (`extract.ANALYZE_MAX_*`).
+
 ## 12. Search
 
 `GET /api/search?q=` runs two engines and merges:
@@ -366,6 +418,10 @@ explains what to put where. Unconfigured: 409 `{"detail":"wallet_not_configured"
 - text: FTS5 `MATCH` over `items_fts` with `bm25` ranking and snippets.
 `mode=auto` returns both lists merged (semantic order first when the query looks visual, text first
 when FTS has strong hits: any bm25 hit whose terms all matched); `mode=semantic` / `mode=text` force one.
+The contrast gate's threshold is capped at an absolute relevance of 0.25, so a subject that fills the library
+still matches. Offset pages after the first come from a short-lived in-process copy of the merged list (8
+queries, 10 minutes; the visibility of the page's ids is re-checked), and snippets are built for the
+returned page only.
 Filters (`category`, `kind`, `person`, `from`, `to`, `vault`) apply in SQL. NSFW and deleted items
 are excluded unless `vault=1` with an unlocked session.
 
@@ -377,7 +433,8 @@ All JSON. Errors are `{"detail": "<message or code>"}`. Codes used by the fronte
 login, passkey login, vault unlock and password change), `challenge_invalid` and `registration_failed` (400),
 `credential_exists` (409), `password_or_passkey_required` (400), `offset_mismatch` (409),
 `search_unavailable` (503, only when the one engine asked for cannot answer), `wallet_not_configured` (409),
-`not_a_pass` (422), `Invalid cursor` (400).
+`not_a_pass` (422), `length_required` (411, simple upload without `Content-Length`), `Invalid cursor` (400).
+`vault_locked` is also the answer of passkey registration and removal while the vault is locked.
 
 Auth (`/api/auth`): `GET state`; `POST setup`; `POST login`; `POST logout`; `POST logout-all`;
 `GET sessions`; `DELETE sessions/{id}`; `POST password {current_password,new_password}`;
@@ -397,6 +454,14 @@ Library (`/api`): `GET items` (query: `category`, `kind`, `person` repeated, `fr
 `GET review/misclicks` -> `ItemPage` (with `misclick_reasons`); `GET review/guesses?person=` -> `GuessPage` (served by the people router);
 `GET duplicates` -> `DupGroupPage{groups:[{best: ItemCard, copies: [ItemCard]}]}`; `POST duplicates/{uid}/best`;
 `GET stats` -> `Stats{items, by_kind, by_category, people, documents, misclicks, guesses, trash, queue{queued, running, failed, by_queue}, disk{free_bytes, total_bytes, originals_bytes}, analysis{pending, done, error}, text{pending, done}}`.
+Listing rules: `total` is counted on the first page only (cursor pages carry `total: 0`) for `items`, `trash`,
+`review/misclicks` and `people/{id}/items`; pages come from the `items_order` and `items_added` indexes
+(`common.page_sql`, card columns joined for the page rows only). Duplicate collapse (`dups=collapse`, shared
+with search through `visible_sql`): an item of a group is listed when it is the best, or when the best is not
+a live item on its own nsfw side, so a normal copy under a vault best stays in the library and a vault copy
+under a normal best stays in the vault; `dup_count` counts the other live members on the same side and
+`dup_group` is null when the best is on the other side. `GET duplicates` lists copies on the best item's
+side only.
 
 `ItemCard = {uid, kind, version, filename, width, height, duration_s, taken_at, created_at, category, nsfw, misclick,
 misclick_reasons, favorite, dup_group, dup_count, page_count, doc_type, urls{thumb, preview, preview_small}}`.
@@ -409,7 +474,9 @@ urls{thumb, preview, preview_small, original, download, video, pages[]}}`.
 `GuessOut = {person: PersonRef, score, evidence}`; `PersonRef = {id, name, cover_url}`.
 
 People (`/api`): `GET people?q&filter=all|named|unnamed&sort=items|name|recent&cursor&limit` -> `PersonPage`;
-`POST people {name, face_ids?}`; `GET|PATCH|DELETE people/{id}` (`PATCH {name?, cover_face_id?}`);
+`POST people {name, face_ids?}`; `GET|PATCH|DELETE people/{id}` (`PATCH {name?, cover_face_id?}`; 422 when the
+cover face's photo is in the trash or the vault; `PersonRef.cover_url` skips such a chosen cover and uses the
+automatic one);
 `POST people/merge {target_id, source_ids}`; `GET people/{id}/faces`; `GET people/{id}/items` (faces, bodies and tags);
 `GET faces/unassigned`; `POST faces/assign {face_ids, person_id | new_person_name | null}`; `DELETE faces/{id}`;
 `POST bodies/assign {body_ids, person_id | new_person_name | null}`; `DELETE bodies/{id}`;
@@ -428,6 +495,7 @@ Search: `GET /api/search?q&mode&category&kind&person&from&to&vault&limit&offset`
 `SearchHit = ItemCard + {score, match_time_s, snippet, source}`.
 
 Uploads: as the hub (`POST /api/uploads`, `PUT /api/uploads/{id}/chunk?offset`, `POST .../complete`, `GET`, `GET ?ids`, `GET mine?client_id`, `DELETE`), plus `POST /api/uploads/simple`.
+`UploadOut = {id, filename, size, received_bytes, status, message, chunk_size, item_uid, item_thumb_url, item_nsfw, created_at}`.
 
 Files (`/files`, GET and HEAD): `thumb/{uid}`, `preview/{uid}`, `preview-small/{uid}`, `original/{uid}?download=1`,
 `video/{uid}`, `frame/{uid}?t`, `page/{uid}/{n}`, `face/{id}`, `body/{id}`, `doc-photo/{uid}`. Inline PDFs are
@@ -436,7 +504,8 @@ browser's viewer works.
 
 System (`/api/system`): `GET` -> `{version, gpu{available, name, provider}, models[{key, present, loaded, provider}],
 queues, disk, wallet{configured, missing[]}, timezone, data_dir_free_bytes}`; `POST models/download` (starts the
-downloader in a thread; progress via `GET`); `POST housekeeping`.
+downloader in a thread; progress via `GET`); `POST housekeeping` (no orphan sweep); `POST retry-failed` ->
+`{requeued}` (failed uploads whose bytes are kept, errored jobs, item statuses back to `pending`).
 
 ## 14. Frontend
 
@@ -448,7 +517,7 @@ Routes: `/setup`, `/login` (no shell); everything else inside `AppShell` (sessio
 Library: filter bar (category chips, kind, people, dates, favourites), search box (one box; results page
 shows the semantic and text hits with a mode switch), `MediaGrid` with document tiles (page 1 render in
 a paper frame, type badge), video duration, mis-click and duplicate badges, multi-select with bulk actions.
-Viewer: the hub's viewer with a document mode (page strip, text, the virtual document card), face and
+Viewer: the hub's viewer with a document mode (a page strip of 30 pages either side of the current one plus the first and last, text, the virtual document card), face and
 body boxes with guess chips (confirm, reject, assign), an info panel (category with override, quality
 scores, labels, camera, dates), download original.
 Vault: locked screen asking for password or passkey; once unlocked the same Library component with
@@ -511,6 +580,15 @@ file name; MediaInfo has `page_count`, `raw`, `reason`; the people router carrie
 serves `/api/review/guesses`; `pdfium` calls hold `app.media.documents.PDFIUM_LOCK`; worker job payloads are
 `{"item_id", "version"}` and `{"person_id", "item_id"}` in that key order; `SearchResult.semantic_used`;
 items whose text stage finds a typed document move to `documents` unless the owner chose a category.
+
+Review round (2026-11-07): an adversarial review of the first build (75 findings, 72 confirmed by two
+independent verifiers) was fixed area by area with regression tests in `tests/test_*_regressions.py`
+(backend) and the frontend follow-ups; the behaviour changes are folded into the sections above.
+`extract_item` sets `text_status='error'` for problems with the file itself, while database, memory and
+disk-full errors propagate so the worker retries or defers the text job. Frontend: every `Modal` traps Tab
+and Shift+Tab; Settings > Passkeys asks for the vault unlock in a dialog when adding or removing a passkey
+answers `vault_locked`, then retries once (`components/vault/UnlockForm.tsx` is shared with the vault page);
+Settings > System has a Retry failed uploads button; the upload queue links vault items with `?vault=1`.
 
 ### Ownership for parallel implementation
 
