@@ -714,8 +714,8 @@ def snippet_originals(conn: sqlite3.Connection, ids: list[int]) -> dict[int, tup
 
 
 def refresh_fts(conn: sqlite3.Connection, item_id: int) -> None:
-    item = conn.execute("SELECT original_filename FROM items WHERE id = ?", (item_id,)).fetchone()
-    if item is None:
+    item = conn.execute("SELECT original_filename, companion_of FROM items WHERE id = ?", (item_id,)).fetchone()
+    if item is None or item["companion_of"]:
         remove_fts(conn, item_id)
         return
     text_row = conn.execute("SELECT text FROM item_text WHERE item_id = ?", (item_id,)).fetchone()

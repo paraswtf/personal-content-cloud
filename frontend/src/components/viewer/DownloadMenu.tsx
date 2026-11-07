@@ -1,13 +1,15 @@
 // Viewer download control: a small menu with the original (always byte for byte) and, for videos,
-// the frame on screen as a JPEG; documents also get the current page image. Every download is a
-// plain link, so the tap itself is the download gesture (iOS Safari ignores downloads started later).
+// the frame on screen as a JPEG; documents also get the current page image; Live Photos and motion
+// photos also get their clip (section 20). Every download is a plain link, so the tap itself is the
+// download gesture (iOS Safari ignores downloads started later).
 import { useEffect, useRef, useState, type KeyboardEvent, type MouseEvent } from 'react'
 import { Download, FileImage, Image as ImageIcon } from 'lucide-react'
-import { frameUrl } from '../../lib/api'
+import { frameUrl, liveClipDownloadUrl } from '../../lib/api'
 import type { ItemDetail } from '../../lib/types'
-import { formatBytes } from '../../lib/format'
+import { formatBytes, formatDuration } from '../../lib/format'
 import { withVault } from '../../lib/preview'
 import { iconButton } from './shared'
+import { LiveIcon } from './LiveButton'
 
 const itemClass =
   'flex min-h-11 w-full items-center gap-2.5 rounded-lg px-3 py-2 text-left text-sm text-white/90 hover:bg-white/10 focus-visible:bg-white/10'
@@ -46,6 +48,9 @@ export default function DownloadMenu({ detail, vault, frameTime, pageUrl }: Prop
     e.currentTarget.href = frameHref(now())
     setOpen(false)
   }
+
+  const liveHref = withVault(liveClipDownloadUrl(detail), vault)
+  const liveLength = formatDuration(detail.live_video?.duration_s)
 
   const items = () => Array.from(menu.current?.querySelectorAll<HTMLElement>('[role="menuitem"]') ?? [])
   const onKeyDown = (e: KeyboardEvent) => {
@@ -101,6 +106,15 @@ export default function DownloadMenu({ detail, vault, frameTime, pageUrl }: Prop
               <span className="block text-xs text-white/50">{formatBytes(detail.size_bytes)}, full quality</span>
             </span>
           </a>
+          {liveHref && (
+            <a role="menuitem" href={liveHref} download className={itemClass} onClick={() => setOpen(false)}>
+              <LiveIcon className="size-4 shrink-0" />
+              <span className="min-w-0">
+                Download the Live Photo clip
+                <span className="block text-xs text-white/50">{liveLength ? `Video, ${liveLength}` : 'Video'}</span>
+              </span>
+            </a>
+          )}
           {isVideo && (
             <a role="menuitem" href={frameHref(openedAt)} download className={itemClass} onClick={onFrameClick}>
               <ImageIcon className="size-4 shrink-0" aria-hidden />

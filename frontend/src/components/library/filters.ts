@@ -15,6 +15,8 @@ export interface LibraryFilters {
   from: string
   to: string
   favorite: boolean
+  /** Live Photos and motion photos only (URL live=1). */
+  live: boolean
   misclicks: 'exclude' | 'include' | 'only'
   dups: 'collapse' | 'all'
   sort: 'taken' | 'added'
@@ -58,6 +60,7 @@ export function readFilters(params: URLSearchParams, vault: boolean): LibraryFil
     from: DATE.test(from) ? from : '',
     to: DATE.test(to) ? to : '',
     favorite: params.get('fav') === '1',
+    live: params.get('live') === '1',
     misclicks: mis === 'include' || mis === 'only' ? mis : 'exclude',
     dups: params.get('dups') === 'all' ? 'all' : 'collapse',
     sort: params.get('sort') === 'added' ? 'added' : 'taken',
@@ -73,6 +76,7 @@ export function itemsQuery(f: LibraryFilters, vault: boolean): Omit<ItemsQuery, 
     from: f.from || undefined,
     to: f.to || undefined,
     favorite: f.favorite || undefined,
+    live: f.live || undefined,
     misclicks: f.misclicks === 'exclude' ? undefined : f.misclicks,
     dups: f.dups === 'all' ? 'all' : undefined,
     sort: f.sort === 'added' ? 'added' : undefined,
@@ -91,6 +95,7 @@ export function searchQuery(f: LibraryFilters, vault: boolean): Omit<SearchQuery
     tag: f.tags.length ? f.tags : undefined,
     from: f.from || undefined,
     to: f.to || undefined,
+    live: f.live || undefined,
     vault: vault || undefined,
     limit: 60,
   }
@@ -98,5 +103,5 @@ export function searchQuery(f: LibraryFilters, vault: boolean): Omit<SearchQuery
 
 /** Any filter beyond the category chips is set (opens the filter panel on load). */
 export function hasExtraFilters(f: LibraryFilters): boolean {
-  return !!(f.kind || f.people.length || f.tags.length || f.from || f.to || f.favorite || f.misclicks !== 'exclude' || f.dups === 'all')
+  return !!(f.kind || f.people.length || f.tags.length || f.from || f.to || f.favorite || f.live || f.misclicks !== 'exclude' || f.dups === 'all')
 }

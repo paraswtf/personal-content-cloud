@@ -1,0 +1,42 @@
+# XcodeGen project for the Personal Content Cloud iOS app (docs/ARCHITECTURE.md section 21).
+# On a Mac: brew install xcodegen; cd ios; xcodegen generate; open PersonalContentCloud.xcodeproj
+name: PersonalContentCloud
+options:
+  bundleIdPrefix: in.biios
+  deploymentTarget:
+    iOS: "17.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    DEVELOPMENT_TEAM: ""           # your Apple team id, or set it in Xcode under Signing
+targets:
+  PersonalContentCloud:
+    type: application
+    platform: iOS
+    sources:
+      - path: Sources
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: in.biios.pcc
+        TARGETED_DEVICE_FAMILY: "1"
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        SWIFT_STRICT_CONCURRENCY: minimal
+    info:
+      path: Sources/Info.plist
+      properties:
+        CFBundleDisplayName: Content Cloud
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        UILaunchScreen: {}
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
+        NSPhotoLibraryUsageDescription: "Content Cloud uploads your new photos and videos to your own server, and can remove the ones it has synced from this phone when you ask it to."
+        UIBackgroundModes: [fetch, processing]
+        BGTaskSchedulerPermittedIdentifiers: [in.biios.pcc.sync]
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+        ITSAppUsesNonExemptEncryption: false

@@ -86,6 +86,7 @@ class MediaInfo:
     page_count: int | None = None  # pdf / document: pages (logical pages for office files)
     raw: bool = False  # camera RAW (decoded through app.media.raw)
     reason: str | None = None  # 'other' files that sniffed as a known type but did not decode: why
+    content_id: str | None = None  # Apple ContentIdentifier shared by a Live Photo's still and MOV
 
     @property
     def pixels(self) -> int:
@@ -586,9 +587,11 @@ def probe_image(path: Path, kind_mime_ext: tuple[str, str, str]) -> MediaInfo:
     if orientation >= 5:
         width, height = height, width
 
+    from app.media import live
+
     return MediaInfo(
         kind="image", mime=mime, ext=ext, width=width, height=height, orientation=orientation,
-        animated=animated, **_exif_fields(exif),
+        animated=animated, content_id=live.content_identifier(exif), **_exif_fields(exif),
     )
 
 
@@ -764,7 +767,14 @@ def probe_video(path: Path, kind_mime_ext: tuple[str, str, str]) -> MediaInfo:
         rotation=rotation,
         taken_at=_video_time(tags),
         gps_lat=gps[0] if gps else None, gps_lon=gps[1] if gps else None, gps_alt=gps[2] if gps else None,
+        content_id=_live_content_id(tags),
     )
+
+
+def _live_content_id(tags: dict) -> str | None:
+    from app.media import live
+
+    return live.video_content_identifier(tags)
 
 
 def probe_document(path: Path, kind_mime_ext: tuple[str, str, str]) -> MediaInfo:

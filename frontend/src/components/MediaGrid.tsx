@@ -1,5 +1,6 @@
 // Tight grid of square tiles with lazy thumbnails, badges, optional selection and infinite scroll.
 // Documents show their first page inside a paper frame with the type badge; videos show their length;
+// Live Photos and motion photos show a LIVE badge;
 // search hits can show the matched moment and a text snippet.
 import { memo, useState, type ReactNode } from 'react'
 import clsx from 'clsx'
@@ -12,6 +13,7 @@ import { Button, EmptyState, Spinner } from './ui'
 import { docTypeLabel, extLabel } from './documents/docMeta'
 import { reasonKeys, reasonLabel } from './library/misclick'
 import Snippet from './library/Snippet'
+import { LiveIcon } from './viewer/LiveButton'
 
 /** A grid item; search hits also carry the matched moment of a video and a text snippet. */
 export type GridItem = ItemCard & { match_time_s?: number | null; snippet?: string | null; source?: string }
@@ -46,7 +48,11 @@ function matchTime(item: GridItem): number | null {
 const KIND_NAMES: Record<string, string> = { image: 'Photo', video: 'Video', pdf: 'PDF', document: 'Document', other: 'File' }
 
 function describe(item: GridItem): string {
-  const what = item.doc_type ? docTypeLabel(item.doc_type) : (KIND_NAMES[item.kind] ?? 'Item')
+  const what = item.doc_type
+    ? docTypeLabel(item.doc_type)
+    : item.live === true && item.kind === 'image'
+      ? 'Live Photo'
+      : (KIND_NAMES[item.kind] ?? 'Item')
   const len = item.kind === 'video' && item.duration_s ? `, ${formatDuration(item.duration_s)}` : ''
   const at = matchTime(item)
   const match = at === null ? '' : `, match at ${formatDuration(at)}`
@@ -160,6 +166,12 @@ const Tile = memo(function Tile({
         {item.favorite && (
           <span className="inline-flex size-5 items-center justify-center rounded-full bg-black/55 text-amber-300" title="Favourite">
             <Star className="size-3 fill-current" aria-hidden />
+          </span>
+        )}
+        {item.live === true && (
+          <span className="inline-flex items-center gap-1 rounded-full bg-black/55 px-1.5 py-0.5 text-[11px] font-bold tracking-wide text-white" title="Live Photo">
+            <LiveIcon className="size-3" />
+            LIVE
           </span>
         )}
         {item.misclick && !showReasons && (

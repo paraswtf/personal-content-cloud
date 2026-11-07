@@ -12,6 +12,7 @@ import type {
   ChallengeOut,
   ChunkOut,
   ConfigOut,
+  DeviceCreated,
   DocumentOut,
   DocumentPage,
   DocumentTypeOut,
@@ -158,6 +159,25 @@ export function frameUrl(
   return `/files/frame/${enc(uid)}${qs({ t: frameSeconds(t), size, v, download: download ? 1 : undefined })}`
 }
 
+/**
+ * Download link of a Live Photo's clip (section 20): the hidden companion's original for an iPhone
+ * pair, or the clip extracted from a motion photo. Both use the still's version key `v` (the
+ * server's url_version, which carries an 'n' for vault items). Null when the item has no clip.
+ * The caller adds vault=1 for vault items (withVault).
+ */
+export function liveClipDownloadUrl(detail: Pick<ItemDetail, 'uid' | 'version' | 'nsfw' | 'live_video' | 'urls'>): string | null {
+  const live = detail.live_video
+  if (!live) return null
+  let v = detail.nsfw ? `${detail.version}n` : String(detail.version)
+  const still = detail.urls.download ?? detail.urls.original
+  if (still) {
+    const fromStill = new URLSearchParams(still.split('?')[1] ?? '').get('v')
+    if (fromStill) v = fromStill
+  }
+  const path = live.uid ? `/files/original/${enc(live.uid)}` : `/files/live/${enc(detail.uid)}`
+  return `${path}${qs({ v, download: 1 })}`
+}
+
 export interface ItemsQuery {
   category?: Category | ''
   kind?: ItemKind | ''
@@ -165,6 +185,8 @@ export interface ItemsQuery {
   from?: string
   to?: string
   favorite?: boolean
+  /** Live Photos and motion photos only (live=1). Pass true or leave it out: false sends live=0. */
+  live?: boolean
   misclicks?: 'exclude' | 'include' | 'only'
   dups?: 'collapse' | 'all'
   vault?: boolean
@@ -184,6 +206,8 @@ export interface SearchQuery {
   from?: string
   to?: string
   vault?: boolean
+  /** Live Photos and motion photos only (live=1). Pass true or leave it out. */
+  live?: boolean
   /** Tag names, repeated as tag=; every one is required. */
   tag?: string[]
   limit?: number
@@ -292,6 +316,11 @@ export const api = {
     logoutAll: () => post<AuthState>('/api/auth/logout-all'),
     sessions: () => get<SessionOut[]>('/api/auth/sessions'),
     revokeSession: (id: number) => del<OkOut>(`/api/auth/sessions/${id}`),
+    /** Device tokens for the iOS app (same shape as sessions, with device_name set). */
+    devices: () => get<SessionOut[]>('/api/auth/devices'),
+    /** Answers 403 vault_locked while the vault is locked. The token in the reply is shown once. */
+    createDevice: (name: string) => post<DeviceCreated>('/api/auth/devices', { name }),
+    revokeDevice: (id: number) => del<OkOut>(`/api/auth/devices/${id}`),
     changePassword: (current_password: string, new_password: string) =>
       post<OkOut>('/api/auth/password', { current_password, new_password }),
     passkeys: () => get<PasskeyOut[]>('/api/auth/passkeys'),

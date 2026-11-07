@@ -58,7 +58,7 @@ STAGES = ("analyze", "text", "preview")
 # File names under the swept directories (storage.SWEPT_DIRS).
 _ORIGINAL_NAME = re.compile(r"^(?P<uid>[a-z0-9]+)\.v(?P<version>\d+)(?P<ext>\.[a-z0-9]+)$")
 # thumbs, previews (large and .sm), videos, docphoto: <uid>.v<n>.webp | .sm.webp | .mp4
-_DERIVED_NAME = re.compile(r"^(?P<uid>[a-z0-9]+)\.v(?P<version>\d+)\.(?:sm\.webp|webp|mp4)$")
+_DERIVED_NAME = re.compile(r"^(?P<uid>[a-z0-9]+)\.v(?P<version>\d+)\.(?:sm\.webp|webp|mp4|live\.mp4)$")
 _PAGES_DIR_NAME = re.compile(r"^(?P<uid>[a-z0-9]+)\.v(?P<version>\d+)$")
 _PAGE_NAME = re.compile(r"^(?P<page>\d+)\.webp$")
 _CROP_NAME = re.compile(r"^(?P<id>\d+)\.webp$")  # faces/<id//1000>/<id>.webp, bodies/...
@@ -291,6 +291,60 @@ def _write_derivatives(info: MediaInfo, uid: str, version: int, original: Path,
     return written, fp
 
 
+def _write_motion_clip(info: MediaInfo, uid: str, version: int, original: Path) -> Path | None:
+    """The MP4 embedded in a JPEG motion photo, written next to the streaming copies (section 20)."""
+    if info.kind != "image" or info.ext != ".jpg":
+        return None
+    from app.media import live
+
+    try:
+        clip = live.extract_motion_clip(original)
+    except Exception:  # noqa: BLE001 - never block an upload on this
+        log.exception("ingest: could not read the motion clip of %s", uid)
+        return None
+    if not clip:
+        return None
+    dest = storage.live_clip_path(uid, version)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    storage.write_bytes_atomic(dest, clip)
+    return dest
+
+
+def pair_live(conn: sqlite3.Connection, item_id: int, pair_key: str | None) -> bool:
+    """Pair a just-stored still or short MOV with its other half (section 20). The MOV becomes a hidden
+    companion of the still: no analysis, no search row, no duplicate group, the still's vault flag.
+    Runs in the caller's transaction."""
+    from app.media import live
+
+    row = conn.execute("SELECT * FROM items WHERE id = ?", (item_id,)).fetchone()
+    if row is None or row["companion_of"] or row["live_video_item_id"]:
+        return False
+    partner = live.find_partner(conn, row, pair_key)
+    if partner is None:
+        return False
+    still, mov = (row, partner) if row["kind"] == "image" else (partner, row)
+    now = now_iso()
+    conn.execute("UPDATE items SET live = 1, live_video_item_id = ?, updated_at = ? WHERE id = ?",
+                 (int(mov["id"]), now, int(still["id"])))
+    members = dedup.group_member_ids(conn, int(mov["id"])) if mov["dup_group_id"] else []
+    conn.execute(
+        "UPDATE items SET companion_of = ?, analysis_status = 'done', dup_group_id = NULL, dup_role = NULL, "
+        "nsfw = ?, deleted_at = ?, updated_at = ? WHERE id = ?",
+        (int(still["id"]), int(still["nsfw"]), still["deleted_at"], now, int(mov["id"])),
+    )
+    conn.execute("DELETE FROM item_embeddings WHERE item_id = ?", (int(mov["id"]),))
+    if len(members) > 1:
+        dedup.regroup(conn, [m for m in members if m != int(mov["id"])])
+    try:
+        from app.documents.extract import remove_fts
+
+        remove_fts(conn, int(mov["id"]))
+    except ImportError:
+        pass
+    log.info("ingest: paired Live Photo still %s with clip %s", still["uid"], mov["uid"])
+    return True
+
+
 def _insert_item(conn: sqlite3.Connection, uid: str, info: MediaInfo, sha: str, fp: Fingerprint | None,
                  size: int, filename: str, now: str) -> tuple[int, dict[str, str]]:
     item_id = next_item_id(conn)
@@ -308,7 +362,8 @@ def _insert_item(conn: sqlite3.Connection, uid: str, info: MediaInfo, sha: str, 
         exif_subsec=info.exif_subsec, camera=info.camera, gps_lat=info.gps_lat, gps_lon=info.gps_lon,
         gps_alt=info.gps_alt, phash=fp.phash if fp else None, dhash=fp.dhash if fp else None,
         sig=fp.sig if fp else None, frames=json_dumps(fp.frames) if fp and fp.frames is not None else None,
-        category="documents" if info.kind in TEXT_KINDS else "misc", **statuses, created_at=now, updated_at=now,
+        category="documents" if info.kind in TEXT_KINDS else "misc", content_id=info.content_id, **statuses,
+        created_at=now, updated_at=now,
     )
     conn.execute(f"INSERT INTO items({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))})", tuple(cols.values()))
     return item_id, statuses
@@ -391,6 +446,9 @@ def _store_new(conn: sqlite3.Connection, up: sqlite3.Row, src: Path, info: Media
     try:
         if _place(src, dest):
             written.append(dest)
+        clip_path = _write_motion_clip(info, uid, 1, dest)
+        if clip_path is not None:
+            written.append(clip_path)
         files, doc_fp = _write_derivatives(info, uid, 1, dest, img)
         written += files
         if doc_fp is not None:
@@ -403,6 +461,8 @@ def _store_new(conn: sqlite3.Connection, up: sqlite3.Row, src: Path, info: Media
             if conn.execute("SELECT 1 FROM items WHERE sha256 = ?", (sha,)).fetchone():
                 raise _Stale("an identical file was stored meanwhile")
             item_id, statuses = _insert_item(conn, uid, info, sha, fp, size, up["original_filename"], now)
+            if clip_path is not None:
+                conn.execute("UPDATE items SET live = 1 WHERE id = ?", (item_id,))
             if decision.action == "link" and decision.target_id is not None:
                 target = conn.execute("SELECT id FROM items WHERE id = ? AND deleted_at IS NULL",
                                       (decision.target_id,)).fetchone()
@@ -410,6 +470,7 @@ def _store_new(conn: sqlite3.Connection, up: sqlite3.Row, src: Path, info: Media
                     dedup.link_into_group(conn, item_id, int(target["id"]), decision.detail)
             _set_upload(conn, up["id"], "stored", item_id, None, now, sha)
             _enqueue_followups(conn, item_id, 1, info.kind, statuses)
+            pair_live(conn, item_id, up["pair_key"] if "pair_key" in up.keys() else None)
             bump_search_version(conn)
     except _Stale:
         _cleanup_unreferenced(conn, written)
@@ -739,7 +800,15 @@ def soft_delete(conn: sqlite3.Connection, item_id: int) -> None:
         members = dedup.group_member_ids(conn, item_id)
         if len(members) > 1:
             dedup.regroup(conn, members)
+        _sync_companion(conn, item_id)
         bump_search_version(conn)
+
+
+def _sync_companion(conn: sqlite3.Connection, still_id: int) -> None:
+    """A Live Photo's companion follows the still into and out of the trash and the vault."""
+    from app.media import live
+
+    live.sync_companion(conn, still_id)
 
 
 def restore(conn: sqlite3.Connection, item_id: int) -> None:
@@ -756,6 +825,7 @@ def restore(conn: sqlite3.Connection, item_id: int) -> None:
         members = dedup.group_member_ids(conn, item_id)
         if len(members) > 1:
             dedup.regroup(conn, members)
+        _sync_companion(conn, item_id)
         bump_search_version(conn)
         row = conn.execute("SELECT kind, version, analysis_status, text_status, preview_status FROM items "
                            "WHERE id = ?", (item_id,)).fetchone()
@@ -782,7 +852,7 @@ def _item_files(uid: str) -> tuple[list[Path], list[Path]]:
     return files, dirs
 
 
-def purge(conn: sqlite3.Connection, item_id: int) -> None:
+def _purge_one(conn: sqlite3.Connection, item_id: int) -> None:
     """Delete an item for good: its rows (faces, bodies, embeddings, text, pages, document and tags
     cascade; uploads keep their outcome with item_id NULL), its full-text row, unnamed people left
     empty, and every file (original, thumbs, previews, page renders, streaming copy, face and body
@@ -1032,3 +1102,12 @@ def recover_on_startup(conn: sqlite3.Connection) -> None:
                     p.unlink()
             except FileNotFoundError:
                 pass
+
+
+def purge(conn: sqlite3.Connection, item_id: int) -> None:
+    """Delete an item for good, and a Live Photo's companion clip item with it (section 20)."""
+    row = conn.execute("SELECT live_video_item_id FROM items WHERE id = ?", (item_id,)).fetchone()
+    companion = int(row["live_video_item_id"]) if row is not None and row["live_video_item_id"] else None
+    _purge_one(conn, item_id)
+    if companion is not None:
+        _purge_one(conn, companion)

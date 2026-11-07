@@ -70,6 +70,11 @@ def video_preview_path(uid: str, version: int) -> Path:
     return root() / "videos" / _shard(uid) / f"{uid}.v{version}.mp4"
 
 
+def live_clip_path(uid: str, version: int) -> Path:
+    """The clip embedded in a motion photo (section 20), a derivative next to the streaming copies."""
+    return root() / "videos" / _shard(uid) / f"{uid}.v{version}.live.mp4"
+
+
 def face_crop_path(face_id: int) -> Path:
     return root() / "faces" / str(face_id // 1000) / f"{face_id}.webp"
 

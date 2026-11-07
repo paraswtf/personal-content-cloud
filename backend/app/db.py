@@ -21,7 +21,14 @@ from app.config import settings
 SCHEMA_VERSION = 1
 # Columns added after the first release: (table, column, SQL type). init_db adds the missing ones,
 # so an existing database upgrades in place on the next start without losing data.
-MIGRATED_COLUMNS: tuple[tuple[str, str, str], ...] = ()
+MIGRATED_COLUMNS: tuple[tuple[str, str, str], ...] = (
+    ("items", "content_id", "TEXT"),
+    ("items", "companion_of", "INTEGER REFERENCES items(id) ON DELETE SET NULL"),
+    ("items", "live_video_item_id", "INTEGER REFERENCES items(id) ON DELETE SET NULL"),
+    ("items", "live", "INTEGER NOT NULL DEFAULT 0"),
+    ("uploads", "pair_key", "TEXT"),
+    ("sessions", "device_name", "TEXT"),
+)
 _SCHEMA_FILE = Path(__file__).with_name("schema.sql")
 # Full-text tokenizer of items_fts. unicode61 treats combining marks (Unicode Mn, Mc) as separators,
 # which splits a Devanagari word at every vowel sign and virama ("मुंबईत" became "म" and "बईत").

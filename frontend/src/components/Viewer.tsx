@@ -1,6 +1,8 @@
 // Full-screen viewer overlay for photos, videos and documents: face and body boxes with person
 // guesses, prev/next (keys, buttons, swipe), the info panel, downloads of the original, and a
 // document mode with the page viewer. `vault` shows vault items (every request carries vault=1).
+// Live Photos and motion photos get a LIVE button over the stage that plays the clip in place of the
+// still (section 20); leaving the item, Escape or a second tap stops it.
 import { useCallback, useEffect, useMemo, useRef, useState, type TouchEvent } from 'react'
 import { createPortal } from 'react-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
@@ -18,6 +20,7 @@ import DocumentStage, { FileCard } from './viewer/DocumentStage'
 import DownloadMenu from './viewer/DownloadMenu'
 import FaceEditor from './viewer/FaceEditor'
 import InfoPanel from './viewer/InfoPanel'
+import LiveButton from './viewer/LiveButton'
 import PhotoStage from './viewer/PhotoStage'
 import VideoPreparing from './viewer/VideoPreparing'
 import VideoStage, { currentFrameTime, posterTime } from './viewer/VideoStage'
@@ -132,6 +135,7 @@ export default function Viewer({ uid, onClose, onPrev, onNext, position, startAt
   const [toast, setToast] = useState<string | null>(null)
   const [seekFace, setSeekFace] = useState<{ key: string; shown: boolean } | null>(null)
   const [page, setPage] = useState(0)
+  const [livePlaying, setLivePlaying] = useState(false)
 
   const placeholder = useMemo(() => findCachedItem(qc, uid), [qc, uid])
   const detailQ = useQuery({
@@ -169,6 +173,14 @@ export default function Viewer({ uid, onClose, onPrev, onNext, position, startAt
   }, [uid])
 
   const detailVersion = detail?.version
+  // Leaving the item (or a new version of it) stops the clip: it only plays on request.
+  useEffect(() => setLivePlaying(false), [uid, detailVersion])
+  const liveUrl = detail?.kind === 'image' && detail.live_video ? (detail.urls.live ?? detail.live_video.url) : null
+  const stopLive = useCallback(() => setLivePlaying(false), [])
+  const onLiveError = useCallback(() => {
+    setLivePlaying(false)
+    setToast('The clip could not be played')
+  }, [])
   useEffect(() => {
     return () => {
       seekCtl.current?.abort()
@@ -354,7 +366,8 @@ export default function Viewer({ uid, onClose, onPrev, onNext, position, startAt
       if (e.key === 'Escape') {
         if (e.defaultPrevented) return
         e.preventDefault()
-        if (tagging) setTagging(false)
+        if (livePlaying) setLivePlaying(false)
+        else if (tagging) setTagging(false)
         else onClose()
         return
       }
@@ -382,7 +395,7 @@ export default function Viewer({ uid, onClose, onPrev, onNext, position, startAt
     }
     document.addEventListener('keydown', onKey)
     return () => document.removeEventListener('keydown', onKey)
-  }, [confirmDelete, editing, tagging, onClose, onPrev, onNext, closeEditor, toggleInfo, toggleFaces, detail, favorite, isDocKind, pageCount])
+  }, [confirmDelete, editing, tagging, livePlaying, onClose, onPrev, onNext, closeEditor, toggleInfo, toggleFaces, detail, favorite, isDocKind, pageCount])
 
   const onTouchStart = (e: TouchEvent) => {
     const t = e.touches[0]
@@ -468,6 +481,9 @@ export default function Viewer({ uid, onClose, onPrev, onNext, position, startAt
           guessPendingKey={guesses.pendingKey}
           onConfirmGuess={guesses.confirm}
           onRejectGuess={guesses.reject}
+          liveSrc={livePlaying ? liveUrl : null}
+          onLiveStop={stopLive}
+          onLiveError={onLiveError}
         />
       )
     }
@@ -597,6 +613,7 @@ export default function Viewer({ uid, onClose, onPrev, onNext, position, startAt
             onTouchEnd={onTouchEnd}
           >
             {stage}
+            {liveUrl && <LiveButton playing={livePlaying} onChange={setLivePlaying} className="absolute left-3 top-3 z-10 sm:left-5 sm:top-5" />}
           </div>
           {onPrev && (
             <button type="button" onClick={onPrev} className={clsx(navButton, 'left-2 sm:left-4')} aria-label="Previous" title="Previous">

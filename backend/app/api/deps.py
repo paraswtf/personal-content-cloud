@@ -28,6 +28,8 @@ def check_csrf(request: Request) -> None:
     """Every non-GET request must carry `X-Requested-With: pcc` (403 `csrf` otherwise)."""
     if request.method in SAFE_METHODS:
         return
+    if not request.cookies.get("pcc_session") and (request.headers.get("authorization") or "")[:7].lower() == "bearer ":
+        return  # a device token in the header cannot be sent by a browser on the owner's behalf
     if request.headers.get(CSRF_HEADER, "").strip().lower() != CSRF_VALUE:
         raise HTTPException(status_code=403, detail="csrf")
 

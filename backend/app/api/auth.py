@@ -29,6 +29,8 @@ from app.config import settings
 from app.schemas import (
     AuthState,
     ChallengeOut,
+    DeviceCreated,
+    DeviceIn,
     LoginIn,
     Ok,
     PasskeyLoginVerifyIn,
@@ -140,7 +142,7 @@ def list_sessions(session: SessionInfo = Depends(require_user), conn: sqlite3.Co
     return [
         SessionOut(id=s.id, created_at=s.created_at, last_seen_at=s.last_seen_at, user_agent=s.user_agent, ip=s.ip,
                    current=s.id == session.id)
-        for s in sessions.list_sessions(conn)
+        for s in sessions.list_sessions(conn) if not s.device_name
     ]
 
 
@@ -261,3 +263,33 @@ def vault_unlock(body: VaultUnlockIn, request: Request, session: SessionInfo = D
 def vault_lock(session: SessionInfo = Depends(require_user), conn: sqlite3.Connection = Depends(get_db)):
     sessions.vault_lock(conn, session.id)
     return _state(conn, session)
+
+
+# ----------------------------------------------------------------- device tokens (the iOS app)
+@router.get("/devices", response_model=list[SessionOut])
+def list_devices(session: SessionInfo = Depends(require_user), conn: sqlite3.Connection = Depends(get_db)):
+    return [
+        SessionOut(id=s.id, created_at=s.created_at, last_seen_at=s.last_seen_at, user_agent=s.user_agent, ip=s.ip,
+                   current=s.id == session.id, device_name=s.device_name)
+        for s in sessions.list_devices(conn)
+    ]
+
+
+@router.post("/devices", response_model=DeviceCreated)
+def create_device(body: DeviceIn, request: Request, session: SessionInfo = Depends(require_vault),
+                  conn: sqlite3.Connection = Depends(get_db)):
+    """A long-lived token for a device (365 days, sliding), shown once. Needs the vault open, like
+    enrolling a passkey: it is a credential."""
+    name = " ".join(body.name.split())[:80] or "Device"
+    token, info = sessions.create_session(conn, request, device_name=name)
+    log.info("device token created for %r", name)
+    return DeviceCreated(id=info.id, name=name, token=token)
+
+
+@router.delete("/devices/{session_id}", response_model=Ok)
+def revoke_device(session_id: int, session: SessionInfo = Depends(require_user),
+                  conn: sqlite3.Connection = Depends(get_db)):
+    row = conn.execute("SELECT device_name FROM sessions WHERE id = ?", (session_id,)).fetchone()
+    if row is None or not row["device_name"] or not sessions.revoke(conn, session_id):
+        raise HTTPException(status_code=404, detail="No such device")
+    return Ok()

@@ -1,0 +1,42 @@
+import SwiftUI
+
+struct SettingsView: View {
+    @EnvironmentObject private var session: AppSession
+    @State private var wifiOnly = AppSettings.wifiOnly
+    @State private var chargingOnly = AppSettings.chargingOnly
+    @State private var includeVideos = AppSettings.includeVideos
+    @State private var autoSync = AppSettings.autoSync
+    @State private var onlyRecent = AppSettings.syncSince != nil
+    @State private var since = AppSettings.syncSince ?? Date()
+    @State private var confirmSignOut = false
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Server") {
+                    LabeledContent("Address", value: session.serverURL?.absoluteString ?? "")
+                    Button("Sign out", role: .destructive) { confirmSignOut = true }
+                }
+                Section("Sync") {
+                    Toggle("Sync automatically", isOn: $autoSync).onChange(of: autoSync) { _, v in AppSettings.autoSync = v; if v { BackgroundSync.schedule() } }
+                    Toggle("Only on Wi-Fi", isOn: $wifiOnly).onChange(of: wifiOnly) { _, v in AppSettings.wifiOnly = v }
+                    Toggle("Only while charging", isOn: $chargingOnly).onChange(of: chargingOnly) { _, v in AppSettings.chargingOnly = v; BackgroundSync.schedule() }
+                    Toggle("Include videos", isOn: $includeVideos).onChange(of: includeVideos) { _, v in AppSettings.includeVideos = v }
+                    Toggle("Only items taken after a date", isOn: $onlyRecent).onChange(of: onlyRecent) { _, v in AppSettings.syncSince = v ? since : nil }
+                    if onlyRecent {
+                        DatePicker("Taken after", selection: $since, displayedComponents: .date)
+                            .onChange(of: since) { _, v in AppSettings.syncSince = v }
+                    }
+                }
+                Section {
+                    Text("Originals are uploaded as they are and kept on the server at full quality. Nothing leaves your own server.")
+                        .font(.footnote).foregroundStyle(.secondary)
+                }
+            }
+            .navigationTitle("Settings")
+            .confirmationDialog("Sign out of this server?", isPresented: $confirmSignOut, titleVisibility: .visible) {
+                Button("Sign out", role: .destructive) { session.signOut() }
+            }
+        }
+    }
+}

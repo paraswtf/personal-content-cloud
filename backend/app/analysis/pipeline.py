@@ -410,6 +410,11 @@ def analyze_item(conn: sqlite3.Connection, item_id: int, version: int) -> None:
         return
     if item["analysis_status"] == "done":
         return
+    if item["companion_of"]:
+        # A Live Photo's clip: the still carries the analysis (section 20).
+        with tx(conn):
+            conn.execute("UPDATE items SET analysis_status = 'done', updated_at = ? WHERE id = ?", (now_iso(), item_id))
+        return
     uid, kind = item["uid"], item["kind"]
 
     siglip = _model("siglip")
@@ -624,6 +629,10 @@ def analyze_item(conn: sqlite3.Connection, item_id: int, version: int) -> None:
                  json_dumps(r.quality_scores) if r.quality_scores else None, face_count, body_count, status, now,
                  item_id),
             )
+            if cur["live_video_item_id"]:
+                from app.media import live as live_media
+
+                live_media.sync_companion(conn, item_id)
             tags_added = 0
             try:
                 from app.learning import tags as learned_tags

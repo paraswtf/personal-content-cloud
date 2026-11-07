@@ -21,6 +21,7 @@ from app.util import new_token, now_iso, parse_iso
 
 COOKIE = "pcc_session"
 TOUCH_INTERVAL_S = 60
+DEVICE_DAYS = 365  # device tokens (the iOS app) slide by this much
 MAX_SESSIONS = 50  # oldest live sessions are revoked beyond this
 
 
@@ -33,6 +34,8 @@ class SessionInfo:
     vault_until: str | None
     user_agent: str | None
     ip: str | None
+    device_name: str | None = None
+    bearer: bool = False  # authenticated by an Authorization: Bearer header, not the cookie
 
     @property
     def vault_unlocked(self) -> bool:
@@ -48,8 +51,8 @@ def _hash(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 
 
-def _expiry() -> str:
-    return now_iso(settings.session_days * 86400)
+def _expiry(days: int | None = None) -> str:
+    return now_iso((days or settings.session_days) * 86400)
 
 
 def client_ip(request: Request) -> str:
@@ -73,15 +76,17 @@ def clear_cookie(response: Response, request: Request) -> None:
     response.delete_cookie(COOKIE, path="/", httponly=True, samesite="lax", secure=_secure(request))
 
 
-def create_session(conn: sqlite3.Connection, request: Request) -> tuple[str, SessionInfo]:
-    """Insert a session and return (raw token, info). The caller sets the cookie."""
+def create_session(conn: sqlite3.Connection, request: Request, *, device_name: str | None = None) -> tuple[str, SessionInfo]:
+    """Insert a session and return (raw token, info). The caller sets the cookie. With device_name the
+    session is a device token (DEVICE_DAYS, used as a bearer token by the iOS app)."""
     token = new_token(32)
     now = now_iso()
     with tx(conn):
         cur = conn.execute(
-            "INSERT INTO sessions(token_hash, created_at, last_seen_at, expires_at, user_agent, ip) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (_hash(token), now, now, _expiry(), (request.headers.get("user-agent") or "")[:300], client_ip(request)),
+            "INSERT INTO sessions(token_hash, created_at, last_seen_at, expires_at, user_agent, ip, device_name) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (_hash(token), now, now, _expiry(DEVICE_DAYS if device_name else None),
+             (request.headers.get("user-agent") or "")[:300], client_ip(request), device_name),
         )
         session_id = int(cur.lastrowid)
         # Keep the table small: beyond MAX_SESSIONS live sessions, the oldest go.
@@ -98,12 +103,18 @@ def _info(row: sqlite3.Row) -> SessionInfo:
     return SessionInfo(
         id=int(row["id"]), created_at=row["created_at"], last_seen_at=row["last_seen_at"],
         expires_at=row["expires_at"], vault_until=row["vault_until"], user_agent=row["user_agent"], ip=row["ip"],
+        device_name=row["device_name"] if "device_name" in row.keys() else None,
     )
 
 
 def authenticate(conn: sqlite3.Connection, request: Request) -> SessionInfo | None:
     """The live session of the request's cookie, or None. Slides the expiry (at most once a minute)."""
     token = request.cookies.get(COOKIE)
+    bearer = False
+    if not token:
+        auth = request.headers.get("authorization") or ""
+        if auth[:7].lower() == "bearer ":
+            token, bearer = auth[7:].strip(), True
     if not token or len(token) > 200:
         return None
     row = conn.execute(
@@ -113,15 +124,18 @@ def authenticate(conn: sqlite3.Connection, request: Request) -> SessionInfo | No
     if row is None:
         return None
     info = _info(row)
+    info.bearer = bearer
     last = parse_iso(info.last_seen_at)
     if last is None or datetime.now(timezone.utc) - last > timedelta(seconds=TOUCH_INTERVAL_S):
         now = now_iso()
+        days = DEVICE_DAYS if info.device_name else None
         with tx(conn):
-            conn.execute("UPDATE sessions SET last_seen_at = ?, expires_at = ? WHERE id = ?", (now, _expiry(), info.id))
-        info.last_seen_at, info.expires_at = now, _expiry()
-        # The cookie's max-age was set at login; SessionCookieMiddleware re-issues it with this
-        # token so the browser's copy slides along with the row.
-        request.state.refresh_cookie = token
+            conn.execute("UPDATE sessions SET last_seen_at = ?, expires_at = ? WHERE id = ?", (now, _expiry(days), info.id))
+        info.last_seen_at, info.expires_at = now, _expiry(days)
+        if not bearer:
+            # The cookie's max-age was set at login; SessionCookieMiddleware re-issues it with this
+            # token so the browser's copy slides along with the row.
+            request.state.refresh_cookie = token
     return info
 
 
@@ -167,3 +181,7 @@ def purge_expired(conn: sqlite3.Connection) -> int:
         cur = conn.execute("DELETE FROM sessions WHERE expires_at < ? OR revoked_at < ?", (cutoff, cutoff))
         conn.execute("DELETE FROM challenges WHERE expires_at < ?", (now_iso(),))
         return cur.rowcount
+
+
+def list_devices(conn: sqlite3.Connection) -> list[SessionInfo]:
+    return [s for s in list_sessions(conn) if s.device_name]

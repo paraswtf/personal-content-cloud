@@ -45,6 +45,27 @@ class SessionOut(BaseModel):
     user_agent: str | None = None
     ip: str | None = None
     current: bool = False
+    device_name: str | None = None
+
+
+class DeviceIn(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+
+
+class DeviceCreated(BaseModel):
+    id: int
+    name: str
+    token: str  # shown once
+
+
+class SyncCheckIn(BaseModel):
+    sha256: list[str] = Field(default=[], max_length=2000)
+    asset_ids: list[str] = Field(default=[], max_length=2000)
+
+
+class SyncCheckOut(BaseModel):
+    known: dict[str, str] = {}   # sha256 -> item uid (live or in the trash)
+    assets: dict[str, str] = {}  # asset id (the upload pair key) -> item uid
 
 
 class PasskeyOut(BaseModel):
@@ -139,6 +160,13 @@ class ItemUrls(BaseModel):
     download: str | None = None
     video: str | None = None
     pages: list[str] = []
+    live: str | None = None  # the Live Photo clip (section 20), on details
+
+
+class LiveVideoOut(BaseModel):
+    uid: str | None = None  # the companion item for an iPhone pair, None for an extracted motion clip
+    url: str
+    duration_s: float | None = None
 
 
 class ItemCard(BaseModel):
@@ -160,6 +188,7 @@ class ItemCard(BaseModel):
     dup_count: int = 0             # copies in the group (0 when not in a group)
     page_count: int | None = None
     doc_type: str | None = None
+    live: bool = False
     urls: ItemUrls
 
 
@@ -219,6 +248,7 @@ class ItemDetail(ItemCard):
     tags: list[PersonRef] = []
     people: list[PersonRef] = []
     user_tags: list[ItemTagOut] = []
+    live_video: LiveVideoOut | None = None
     document: DocumentOut | None = None
     text_status: Literal["none", "pending", "done", "error"] = "none"
     analysis_status: Literal["pending", "done", "error"] = "pending"
@@ -479,6 +509,7 @@ class UploadCreate(BaseModel):
     client_id: str | None = Field(default=None, max_length=64)
     sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     source: Literal["web", "share", "camera", "api"] = "web"
+    pair_key: str | None = Field(default=None, max_length=128)  # both halves of a Live Photo carry the same key
 
 
 class UploadOut(BaseModel):

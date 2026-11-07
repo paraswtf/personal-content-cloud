@@ -41,7 +41,8 @@ CREATE TABLE IF NOT EXISTS sessions (
   user_agent   TEXT,
   ip           TEXT,
   vault_until  TEXT,                           -- NSFW vault unlocked until this time (NULL = locked)
-  revoked_at   TEXT
+  revoked_at   TEXT,
+  device_name  TEXT                            -- set for device tokens (the iOS app): a bearer session
 );
 CREATE INDEX IF NOT EXISTS sessions_expires ON sessions(expires_at);
 
@@ -60,6 +61,7 @@ CREATE TABLE IF NOT EXISTS uploads (
   id                INTEGER PRIMARY KEY,
   uid               TEXT NOT NULL UNIQUE,      -- returned to the client; a new item reuses it as items.uid
   source            TEXT NOT NULL DEFAULT 'web' CHECK (source IN ('web','share','camera','api')),
+  pair_key          TEXT,                       -- the client's key for the two halves of a Live Photo
   client_id         TEXT,                      -- random id kept in the browser (resume, "mine")
   original_filename TEXT NOT NULL,
   size_bytes        INTEGER NOT NULL,          -- declared size
@@ -130,6 +132,10 @@ CREATE TABLE IF NOT EXISTS items (
   face_count        INTEGER NOT NULL DEFAULT 0,
   body_count        INTEGER NOT NULL DEFAULT 0,
   favorite          INTEGER NOT NULL DEFAULT 0,
+  content_id        TEXT,                       -- Apple ContentIdentifier of a Live Photo (still and MOV share it)
+  companion_of      INTEGER REFERENCES items(id) ON DELETE SET NULL,  -- a Live Photo's MOV: the still it belongs to
+  live_video_item_id INTEGER REFERENCES items(id) ON DELETE SET NULL, -- a Live Photo still: its MOV item
+  live              INTEGER NOT NULL DEFAULT 0, -- the still has a clip (a paired MOV or an embedded motion clip)
   deleted_at        TEXT,                      -- in the trash since (NULL = live)
   created_at        TEXT NOT NULL,
   updated_at        TEXT NOT NULL
@@ -145,6 +151,8 @@ CREATE INDEX IF NOT EXISTS items_kind      ON items(kind, deleted_at);
 CREATE INDEX IF NOT EXISTS items_category  ON items(category, deleted_at);
 CREATE INDEX IF NOT EXISTS items_flags     ON items(deleted_at, nsfw, misclick);
 CREATE INDEX IF NOT EXISTS items_dup       ON items(dup_group_id);
+CREATE INDEX IF NOT EXISTS items_content   ON items(content_id);
+CREATE INDEX IF NOT EXISTS items_companion ON items(companion_of);
 CREATE INDEX IF NOT EXISTS items_analysis  ON items(analysis_status);
 CREATE INDEX IF NOT EXISTS items_text      ON items(text_status);
 

@@ -1,7 +1,7 @@
 // The picture with face and body boxes drawn in percent of the rendered image box. A box with a
 // person shows the name; a box with a guess shows "Name?" with confirm and reject; a tap on a box
-// opens the editor.
-import { useState } from 'react'
+// opens the editor. A Live Photo's clip plays over the still, in the same box, while `liveSrc` is set.
+import { useEffect, useRef, useState } from 'react'
 import clsx from 'clsx'
 import { Loader2 } from 'lucide-react'
 import type { ItemDetail } from '../../lib/types'
@@ -20,6 +20,51 @@ interface Props {
   onRejectGuess: (target: BoxTarget) => void
   /** Use this image instead of the preview (a document page). */
   src?: string
+  /** Live Photo clip to play over the still, muted and looping; null or undefined shows the still. */
+  liveSrc?: string | null
+  /** A tap on the playing clip stops it. */
+  onLiveStop?: () => void
+  /** The clip could not be loaded or played. */
+  onLiveError?: () => void
+}
+
+/** The clip over the still. Mounted only while playing, so it never starts on its own. */
+function LiveClip({ src, onStop, onError }: { src: string; onStop?: () => void; onError?: () => void }) {
+  const ref = useRef<HTMLVideoElement>(null)
+  const [playing, setPlaying] = useState(false)
+  const onErrorRef = useRef(onError)
+  useEffect(() => {
+    onErrorRef.current = onError
+  }, [onError])
+  useEffect(() => {
+    const v = ref.current
+    if (!v) return
+    // Set before play(): iOS Safari only allows inline playback of a muted video this way.
+    v.muted = true
+    v.defaultMuted = true
+    v.play().catch((e: unknown) => {
+      if (!(e instanceof DOMException && e.name === 'AbortError')) onErrorRef.current?.()
+    })
+  }, [src])
+  return (
+    <video
+      ref={ref}
+      src={src}
+      muted
+      loop
+      playsInline
+      disablePictureInPicture
+      preload="auto"
+      aria-label="Live Photo clip, playing"
+      onPlaying={() => setPlaying(true)}
+      onError={() => onErrorRef.current?.()}
+      onClick={onStop}
+      className={clsx(
+        'absolute inset-0 block size-full bg-black object-contain transition-opacity duration-200',
+        playing ? 'opacity-100' : 'opacity-0',
+      )}
+    />
+  )
 }
 
 export default function PhotoStage({
@@ -31,6 +76,9 @@ export default function PhotoStage({
   onConfirmGuess,
   onRejectGuess,
   src,
+  liveSrc,
+  onLiveStop,
+  onLiveError,
 }: Props) {
   const [loaded, setLoaded] = useState(false)
   const [failed, setFailed] = useState(false)
@@ -82,8 +130,11 @@ export default function PhotoStage({
         </div>
       )}
 
+      {liveSrc && <LiveClip key={liveSrc} src={liveSrc} onStop={onLiveStop} onError={onLiveError} />}
+
       {showFaces &&
         loaded &&
+        !liveSrc &&
         boxes.map((t) => {
           const b = t.box
           const key = boxKey(t)

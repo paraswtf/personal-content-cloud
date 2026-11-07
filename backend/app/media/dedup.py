@@ -248,7 +248,7 @@ def _find_image(conn: sqlite3.Connection, info: MediaInfo, fp: Fingerprint, size
     # Cheap pass: aspect in SQL, hashes in Python; only survivors load the signature.
     gated: dict[int, tuple[int, int]] = {}
     for r in conn.execute(
-        "SELECT id, width, height, phash, dhash FROM items WHERE kind = 'image' AND deleted_at IS NULL "
+        "SELECT id, width, height, phash, dhash FROM items WHERE kind = 'image' AND deleted_at IS NULL AND companion_of IS NULL "
         "AND phash IS NOT NULL AND height > 0 AND CAST(width AS REAL) / height BETWEEN ? AND ?",
         (lo, hi),
     ):
@@ -297,7 +297,7 @@ def _find_video(conn: sqlite3.Connection, info: MediaInfo, fp: Fingerprint, size
     best: tuple[float, float, sqlite3.Row, str] | None = None
     for row in conn.execute(
         "SELECT id, uid, duration_s, width, height, frames, taken_at FROM items WHERE kind = 'video' "
-        "AND deleted_at IS NULL AND frames IS NOT NULL AND duration_s > 0"
+        "AND deleted_at IS NULL AND companion_of IS NULL AND frames IS NOT NULL AND duration_s > 0"
     ):
         other = float(row["duration_s"])
         if abs(other - duration) > max(VIDEO_DURATION_ABS_S, VIDEO_DURATION_REL * max(other, duration)):

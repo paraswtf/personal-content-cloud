@@ -464,3 +464,17 @@ def frame(uid: str, t: float, v: str | None = None, size: str = "full", download
     if download:
         headers["content-disposition"] = content_disposition(frame_file_name(row, ms))
     return Response(content=buf.getvalue(), media_type="image/jpeg", headers=headers)
+
+
+@router.api_route("/live/{uid}", methods=METHODS)
+def live_clip(uid: str, v: str | None = None, download: int = 0, session: SessionInfo = Depends(require_user),
+              conn: sqlite3.Connection = Depends(get_db)) -> FileResponse:
+    """The clip embedded in a motion photo (section 20); a paired Live Photo plays its companion's
+    /files/video instead."""
+    row = _item(conn, uid, session)
+    path = storage.live_clip_path(row["uid"], row["version"])
+    extra = None
+    if download:
+        stem = Path(row["original_filename"] or uid).stem or uid
+        extra = {"content-disposition": f'attachment; filename="{stem}-live.mp4"'}
+    return _send(path, "video/mp4", _cache(row, v), extra)

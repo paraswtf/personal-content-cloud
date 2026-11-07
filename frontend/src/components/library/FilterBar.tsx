@@ -1,5 +1,5 @@
 // Library filter bar: category chips, then (behind "Filters" on small screens) kind, people, tags,
-// dates, favourites, mis-clicks and duplicates. Every change goes to the URL through `set`, except the
+// dates, favourites, Live Photos, mis-clicks and duplicates. Every change goes to the URL through `set`, except the
 // tags: they are a repeated tag= parameter, which `set` cannot write, so they update the URL here.
 import { useState } from 'react'
 import { useSearchParams } from 'react-router'
@@ -10,6 +10,7 @@ import Select from '../Select'
 import Segmented from '../public/Segmented'
 import PeopleFilter from '../people/PeopleFilter'
 import { useTagList } from '../viewer/TagsPanel'
+import { LiveIcon } from '../viewer/LiveButton'
 import { hasExtraFilters, type LibraryFilters } from './filters'
 
 interface Props {
@@ -169,6 +170,10 @@ export default function FilterBar({ filters: f, set, clearAll, vault, searching 
             <button type="button" className={chip(f.favorite)} aria-pressed={f.favorite} onClick={() => set('fav', f.favorite ? null : '1')}>
               <Star className={clsx('size-4', f.favorite && 'fill-current')} aria-hidden />
               Favourites
+            </button>
+            <button type="button" className={chip(f.live)} aria-pressed={f.live} onClick={() => set('live', f.live ? null : '1')}>
+              <LiveIcon className="size-4" />
+              Live Photos
             </button>
             {!searching && (
               <>

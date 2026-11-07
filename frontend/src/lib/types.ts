@@ -56,6 +56,14 @@ export interface SessionOut {
   user_agent: string | null
   ip: string | null
   current: boolean
+  /** The name given to an iOS app device token; null for a browser session. */
+  device_name: string | null
+}
+/** POST /api/auth/devices: the token is returned this once and never again. */
+export interface DeviceCreated {
+  id: number
+  name: string
+  token: string
 }
 export interface PasskeyOut {
   id: number
@@ -221,6 +229,8 @@ export interface ItemUrls {
   download: string | null
   video: string | null
   pages: string[]
+  /** Live Photo or motion photo clip (section 20): the companion's web video or /files/live/{uid}?v=; null otherwise. */
+  live: string | null
 }
 export interface ItemCard {
   uid: string
@@ -242,6 +252,8 @@ export interface ItemCard {
   dup_count: number
   page_count: number | null
   doc_type: string | null
+  /** The still has a clip: a paired iPhone MOV or an embedded Android motion clip (section 20). */
+  live: boolean
   urls: ItemUrls
 }
 export interface ItemPage {
@@ -281,6 +293,14 @@ export interface LabelOut {
   label: string
   score: number
 }
+/** The clip of a Live Photo or motion photo (section 20). */
+export interface LiveVideoOut {
+  /** The hidden companion item's uid for an iPhone pair; null for a clip extracted from a motion photo. */
+  uid: string | null
+  /** Playable URL: the companion's web video, or /files/live/{uid}?v= for an extracted clip. */
+  url: string
+  duration_s: number | null
+}
 export interface ItemDetail extends ItemCard {
   mime: string
   size_bytes: number
@@ -308,6 +328,7 @@ export interface ItemDetail extends ItemCard {
   preview_status: PreviewStatus
   deleted_at: string | null
   updated_at: string
+  live_video: LiveVideoOut | null
 }
 export interface ItemUpdate {
   category?: Category

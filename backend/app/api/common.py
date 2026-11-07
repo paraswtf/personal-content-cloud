@@ -18,6 +18,7 @@ from app.schemas import (
     GuessOut,
     ItemCard,
     ItemUrls,
+    LiveVideoOut,
     PersonOut,
     PersonRef,
     UploadOut,
@@ -53,7 +54,8 @@ UPLOAD_MESSAGES = {
 ITEM_CARD_COLUMNS = (
     "i.id, i.uid, i.kind, i.version, i.original_filename, i.width, i.height, i.duration_s, i.taken_at, i.created_at, "
     "i.category, i.nsfw, i.misclick, i.misclick_reasons, i.favorite, i.dup_group_id, i.dup_role, i.page_count, "
-    "i.preview_status, i.video_codec, i.ext, i.bitrate, "
+    "i.preview_status, i.video_codec, i.ext, i.bitrate, i.live, i.live_video_item_id, "
+    "(SELECT c.uid FROM items c WHERE c.id = i.live_video_item_id) AS live_uid, "
     "(SELECT d.doc_type FROM documents d WHERE d.item_id = i.id) AS doc_type, "
     "CASE WHEN i.dup_group_id IS NULL THEN NULL "
     "ELSE (SELECT g.uid FROM items g WHERE g.id = i.dup_group_id AND g.nsfw = i.nsfw) END AS dup_group_uid, "
@@ -89,7 +91,7 @@ def visible_sql(*, vault: bool = False, misclicks: str = "exclude", dups: str = 
     collapse works within the visible side of the vault: an item of a duplicate group shows when it is
     the group's best, or when the best is not a live item on the same side (a normal copy under a vault
     best shows in the library, a vault copy under a normal best shows in the vault)."""
-    parts = [f"{alias}.deleted_at IS NULL", f"{alias}.nsfw = {1 if vault else 0}"]
+    parts = [f"{alias}.deleted_at IS NULL", f"{alias}.nsfw = {1 if vault else 0}", f"{alias}.companion_of IS NULL"]
     if misclicks == "exclude":
         parts.append(f"{alias}.misclick = 0")
     elif misclicks == "only":
@@ -143,6 +145,11 @@ def _row_nsfw(row: sqlite3.Row) -> bool:
 def item_urls(row: sqlite3.Row, *, full: bool = False) -> ItemUrls:
     uid, v = row["uid"], url_version(row["version"], _row_nsfw(row))
     urls = ItemUrls(thumb=thumb_url(uid, v), preview=preview_url(uid, v), preview_small=preview_small_url(uid, v))
+    keys = row.keys()
+    if "live" in keys and row["live"]:
+        # Section 20: the clip of a Live Photo (the companion's video route adapts to its preview state).
+        live_uid = row["live_uid"] if "live_uid" in keys else None
+        urls.live = f"/files/video/{live_uid}?v={v}" if live_uid else f"/files/live/{uid}?v={v}"
     if full:
         urls.original = original_url(uid, v)
         urls.download = download_url(uid, v)
@@ -177,6 +184,7 @@ def item_card(row: sqlite3.Row) -> ItemCard:
         dup_count=int(row["dup_count"] or 0) if "dup_count" in keys else 0,
         page_count=row["page_count"],
         doc_type=row["doc_type"] if "doc_type" in keys else None,
+        live=bool(row["live"]) if "live" in keys else False,
         urls=item_urls(row),
     )
 
@@ -427,3 +435,23 @@ def tags_filter_sql(names: list[str], alias: str = "i") -> tuple[str, list[Any]]
         f"WHERE t.name_key IN ({ph}) GROUP BY ut.item_id HAVING COUNT(DISTINCT t.id) = ?)"
     )
     return sql, [*keys, len(keys)]
+
+
+def live_video_out(conn: sqlite3.Connection, row: sqlite3.Row) -> LiveVideoOut | None:
+    """The clip of a Live Photo still (section 20): the companion's playable video, or the extracted
+    motion clip served by /files/live. None for items without a clip."""
+    keys = row.keys()
+    if "live" not in keys or not row["live"]:
+        return None
+    v = url_version(row["version"], _row_nsfw(row))
+    comp_id = row["live_video_item_id"] if "live_video_item_id" in keys else None
+    if comp_id:
+        comp = conn.execute(
+            "SELECT uid, version, nsfw, preview_status, video_codec, ext, width, height, bitrate, duration_s "
+            "FROM items WHERE id = ?", (comp_id,)
+        ).fetchone()
+        if comp is not None:
+            cv = url_version(comp["version"], bool(comp["nsfw"]))
+            url = playable_video_url(comp["uid"], cv, comp["preview_status"], stream_friendly_row(comp))
+            return LiveVideoOut(uid=comp["uid"], url=url, duration_s=comp["duration_s"])
+    return LiveVideoOut(uid=None, url=f"/files/live/{row['uid']}?v={v}", duration_s=None)

@@ -38,6 +38,8 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
+
+from app.schemas import SyncCheckIn, SyncCheckOut
 from fastapi.responses import JSONResponse
 from starlette.concurrency import run_in_threadpool
 
@@ -172,11 +174,11 @@ def create_upload(body: UploadCreate, request: Request, conn: sqlite3.Connection
                 raise HTTPException(status_code=507, detail=NO_SPACE)
             conn.execute(
                 "INSERT INTO uploads(uid, source, client_id, original_filename, size_bytes, received_bytes, mime, "
-                "sha256, status, message, item_id, remote_addr, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "sha256, status, message, item_id, remote_addr, created_at, updated_at, pair_key) "
+                "VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (uid, body.source, client_id, filename, body.size, mime, body.sha256 if known else None,
                  "duplicate" if known else "uploading", RESTORED_MESSAGE if known and restored else None, known,
-                 client_ip(request), now, now),
+                 client_ip(request), now, now, body.pair_key),
             )
     except BaseException:
         if known is None:
@@ -383,6 +385,7 @@ def complete_upload(upload_id: str, conn: sqlite3.Connection = Depends(get_db),
 
 @router.post("/simple", response_model=UploadOut, status_code=201)
 def simple_upload(request: Request, file: UploadFile = File(...), source: str = Form("api"),
+                  pair_key: str | None = Form(None),
                   conn: sqlite3.Connection = Depends(get_db),
                   session: SessionInfo = Depends(require_user)) -> UploadOut:
     """Whole file in one multipart request (scripts and tests)."""
@@ -421,10 +424,11 @@ def simple_upload(request: Request, file: UploadFile = File(...), source: str = 
             known = _known_item(conn, digest)
             conn.execute(
                 "INSERT INTO uploads(uid, source, client_id, original_filename, size_bytes, received_bytes, mime, "
-                "sha256, status, message, item_id, remote_addr, created_at, updated_at) "
-                "VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "sha256, status, message, item_id, remote_addr, created_at, updated_at, pair_key) "
+                "VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (uid, source, filename, size, size, mime, digest, "duplicate" if known else "queued",
-                 RESTORED_MESSAGE if known and restored else None, known, client_ip(request), now, now),
+                 RESTORED_MESSAGE if known and restored else None, known, client_ip(request), now, now,
+                 (pair_key or "").strip()[:128] or None),
             )
             if known is None:
                 upload_id = conn.execute("SELECT id FROM uploads WHERE uid = ?", (uid,)).fetchone()["id"]
@@ -487,3 +491,26 @@ def cancel_upload(upload_id: str, conn: sqlite3.Connection = Depends(get_db),
         if cur.rowcount == 1:
             storage.safe_unlink(storage.staging_path(upload_id))
         return upload_out(_load(conn, upload_id), session.vault_unlocked)
+
+
+@router.post("/check", response_model=SyncCheckOut)
+def sync_check(body: SyncCheckIn, session: SessionInfo = Depends(require_user),
+               conn: sqlite3.Connection = Depends(get_db)) -> SyncCheckOut:
+    """What the server already holds, for a device deciding what to send: item uids by file hash
+    (live or in the trash) and by the upload pair key the device used (its asset identifier)."""
+    known: dict[str, str] = {}
+    shas = sorted({s.lower() for s in body.sha256 if len(s) == 64})
+    for i in range(0, len(shas), 500):
+        chunk = shas[i:i + 500]
+        for r in conn.execute(f"SELECT sha256, uid FROM items WHERE sha256 IN ({','.join('?' * len(chunk))})", chunk):
+            known[r["sha256"]] = r["uid"]
+    assets: dict[str, str] = {}
+    keys = sorted({a for a in body.asset_ids if a})
+    for i in range(0, len(keys), 500):
+        chunk = keys[i:i + 500]
+        for r in conn.execute(
+            f"SELECT u.pair_key, i.uid FROM uploads u JOIN items i ON i.id = u.item_id "
+            f"WHERE u.pair_key IN ({','.join('?' * len(chunk))}) ORDER BY u.id", chunk
+        ):
+            assets.setdefault(r["pair_key"], r["uid"])
+    return SyncCheckOut(known=known, assets=assets)

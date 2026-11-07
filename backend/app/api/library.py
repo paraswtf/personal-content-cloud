@@ -44,6 +44,7 @@ from app.api.common import (
     item_urls,
     people_filter_sql,
     tags_filter_sql,
+    live_video_out,
     page_sql,
     person_refs,
     url_version,
@@ -219,6 +220,10 @@ def item_detail(conn: sqlite3.Connection, row: sqlite3.Row) -> ItemDetail:
     from app.api.tags import item_tags_out
 
     data["user_tags"] = item_tags_out(conn, int(row["id"]))
+    live_video = live_video_out(conn, row)
+    data["live_video"] = live_video
+    if live_video is not None:
+        data["urls"].live = live_video.url
     return ItemDetail(**data)
 
 
@@ -283,6 +288,9 @@ def _apply_update(conn: sqlite3.Connection, row: sqlite3.Row, body: ItemUpdate) 
                  [*sets.values(), int(row["id"])])
     if "nsfw" in sets:
         bump_search_version(conn)
+        from app.media import live
+
+        live.sync_companion(conn, int(row["id"]))
     _record_corrections(conn, row, sets)
     return renamed
 
@@ -327,6 +335,7 @@ def list_items(
     kind: Literal[ITEM_KINDS] | None = None,  # type: ignore[valid-type]
     person: list[int] = Query(default=[]),
     tag: list[str] = Query(default=[]),
+    live: bool | None = None,
     date_from: str | None = Query(default=None, alias="from", max_length=10),
     date_to: str | None = Query(default=None, alias="to", max_length=10),
     favorite: bool | None = None,
@@ -354,6 +363,8 @@ def list_items(
         sql, p = tags_filter_sql(tag[:10])
         where.append(sql)
         params.extend(p)
+    if live is not None:
+        where.append(f"i.live = {1 if live else 0}")
     sort_expr = SORT_KEYS[sort]
     date_expr = "COALESCE(i.taken_at, i.created_at)"
     if date_from:
@@ -640,7 +651,7 @@ def choose_best(uid: str, session: SessionInfo = Depends(require_user),
 # ------------------------------------------------------------------ stats
 @router.get("/stats", response_model=Stats)
 def stats(conn: sqlite3.Connection = Depends(get_db)) -> Stats:
-    live = "deleted_at IS NULL AND nsfw = 0"
+    live = "deleted_at IS NULL AND nsfw = 0 AND companion_of IS NULL"
 
     def n(sql: str, params: tuple = ()) -> int:
         return int(conn.execute(sql, params).fetchone()[0] or 0)
