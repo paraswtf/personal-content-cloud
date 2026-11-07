@@ -2,6 +2,8 @@
 // CSRF header. A 401 anywhere means the session is gone: `onUnauthorized` (set by the app shell)
 // sends the user to /login.
 import type {
+  AnimalPage,
+  AssignAnimalsIn,
   AssignBodiesIn,
   AssignFacesIn,
   AssignOut,
@@ -386,7 +388,7 @@ export const api = {
   },
 
   people: {
-    list: (q: { q?: string; filter?: 'all' | 'named' | 'unnamed'; sort?: 'items' | 'name' | 'recent'; cursor?: string | null; limit?: number } = {}) =>
+    list: (q: { q?: string; kind?: 'person' | 'pet' | 'all'; filter?: 'all' | 'named' | 'unnamed'; sort?: 'items' | 'name' | 'recent'; cursor?: string | null; limit?: number } = {}) =>
       get<PersonPage>(`/api/people${qs(q)}`),
     create: (body: PersonCreate) => post<PersonOut>('/api/people', body),
     get: (id: number) => get<PersonOut>(`/api/people/${id}`),
@@ -394,6 +396,7 @@ export const api = {
     remove: (id: number) => del<OkOut>(`/api/people/${id}`),
     merge: (body: MergeIn) => post<PersonOut>('/api/people/merge', body),
     faces: (id: number, cursor?: string | null, limit = 200) => get<FacePage>(`/api/people/${id}/faces${qs({ cursor, limit })}`),
+    animals: (id: number, cursor?: string | null, limit = 120) => get<AnimalPage>(`/api/people/${id}/animals${qs({ cursor, limit })}`),
     items: (id: number, cursor?: string | null, limit = 60, vault = false) =>
       get<ItemPage>(`/api/people/${id}/items${qs({ cursor, limit, vault })}`),
     unassignedFaces: (cursor?: string | null, limit = 200) => get<FacePage>(`/api/faces/unassigned${qs({ cursor, limit })}`),
@@ -406,6 +409,11 @@ export const api = {
     suggestions: (limit = 30) => get<SuggestionList>(`/api/suggestions${qs({ limit })}`),
     dismissSuggestion: (a: number, b: number) => post<OkOut>('/api/suggestions/dismiss', { a, b }),
     recluster: () => post<OkOut>('/api/recluster'),
+  },
+
+  animals: {
+    assign: (body: AssignAnimalsIn) => post<AssignOut>('/api/animals/assign', body),
+    remove: (id: number) => del<OkOut>(`/api/animals/${id}`),
   },
 
   documents: {

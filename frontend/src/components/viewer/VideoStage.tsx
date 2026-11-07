@@ -9,7 +9,7 @@ import { useEffect, useLayoutEffect, useState, type MutableRefObject, type RefOb
 import type { ItemDetail } from '../../lib/types'
 import { personName } from '../../lib/format'
 import { posterTime } from '../../lib/preview'
-import type { BoxTarget } from './boxes'
+import { animalLabel, type BoxTarget } from './boxes'
 import { boxInVideo, type Rect } from './videoSeek'
 
 interface Props {
@@ -99,7 +99,7 @@ export default function VideoStage({ detail, src, videoRef, face, onDismissFace,
   }, [face, videoRef, onDismissFace])
 
   const p = face?.box.person
-  const name = p ? personName(p) : face?.box.guess ? `${personName(face.box.guess.person)}?` : 'Not tagged'
+  const name = face?.kind === 'animal' ? animalLabel(face.box) : p ? personName(p) : face?.box.guess ? `${personName(face.box.guess.person)}?` : 'Not tagged'
   return (
     <div className="relative">
       <video

@@ -108,10 +108,15 @@ class Ok(BaseModel):
 
 # ---------------------------------------------------------------- items
 
+PersonKind = Literal["person", "pet"]
+Species = Literal["bird", "cat", "dog", "horse", "sheep", "cow", "elephant", "bear", "zebra", "giraffe"]
+
+
 class PersonRef(BaseModel):
     id: int
     name: str | None = None
     cover_url: str | None = None
+    kind: PersonKind = "person"
 
 
 class GuessOut(BaseModel):
@@ -149,6 +154,21 @@ class BodyOut(BaseModel):
     assigned_by: AssignedBy = "auto"
     guess: GuessOut | None = None
     frame_time_s: float | None = None
+    url: str
+
+
+class AnimalOut(BaseModel):
+    """An animal box (section 22); person is the pet identity it belongs to."""
+    id: int
+    x: float
+    y: float
+    w: float
+    h: float
+    det_score: float
+    species: str
+    frame_time_s: float | None = None
+    person: PersonRef | None = None
+    assigned_by: Literal["auto", "user"] = "auto"
     url: str
 
 
@@ -245,6 +265,7 @@ class ItemDetail(ItemCard):
     labels: list[LabelOut] = []
     faces: list[FaceOut] = []
     bodies: list[BodyOut] = []
+    animals: list[AnimalOut] = []
     tags: list[PersonRef] = []
     people: list[PersonRef] = []
     user_tags: list[ItemTagOut] = []
@@ -366,6 +387,9 @@ class PersonOut(BaseModel):
     item_count: int = 0
     guess_count: int = 0
     created_at: str
+    kind: PersonKind = "person"
+    species: str | None = None    # pets only
+    animal_count: int = 0         # pets: crops in visible items
 
 
 class PersonPage(BaseModel):
@@ -411,6 +435,26 @@ class FacePage(BaseModel):
     total: int
 
 
+class AnimalListItem(BaseModel):
+    id: int
+    item_uid: str
+    item_kind: ItemKind
+    thumb_url: str
+    url: str
+    det_score: float
+    species: str
+    frame_time_s: float | None = None
+    person_id: int | None = None
+    assigned_by: Literal["auto", "user"] = "auto"
+    created_at: str
+
+
+class AnimalPage(BaseModel):
+    items: list[AnimalListItem]
+    next_cursor: str | None = None
+    total: int
+
+
 class AssignFacesIn(BaseModel):
     face_ids: list[int] = Field(min_length=1, max_length=1000)
     person_id: int | None = None
@@ -419,6 +463,12 @@ class AssignFacesIn(BaseModel):
 
 class AssignBodiesIn(BaseModel):
     body_ids: list[int] = Field(min_length=1, max_length=1000)
+    person_id: int | None = None
+    new_person_name: str | None = Field(default=None, max_length=120)
+
+
+class AssignAnimalsIn(BaseModel):
+    animal_ids: list[int] = Field(min_length=1, max_length=1000)
     person_id: int | None = None
     new_person_name: str | None = Field(default=None, max_length=120)
 

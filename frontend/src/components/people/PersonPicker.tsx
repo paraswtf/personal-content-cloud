@@ -3,10 +3,10 @@
 import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from 'react'
 import { keepPreviousData, useQuery } from '@tanstack/react-query'
 import clsx from 'clsx'
-import { Search, UserPlus } from 'lucide-react'
+import { PawPrint, Search, UserPlus } from 'lucide-react'
 import { api } from '../../lib/api'
-import type { PersonOut } from '../../lib/types'
-import { formatCount, personName } from '../../lib/format'
+import type { PersonOut, Species } from '../../lib/types'
+import { formatCount, personName, speciesLabel } from '../../lib/format'
 import { useDebounced } from '../../lib/hooks'
 import { Avatar, Spinner } from '../ui'
 
@@ -24,6 +24,12 @@ interface Props {
   allowCreate?: boolean
   excludeIds?: number[]
   autoFocus?: boolean
+  /** Who to list: people (the default) or pets. Never both. */
+  kind?: 'person' | 'pet'
+  /** Pets: this species is listed first. */
+  species?: Species
+  /** Pets: list only `species`. */
+  speciesOnly?: boolean
 }
 
 type Option = { kind: 'person'; person: PersonOut } | { kind: 'create'; name: string }
@@ -34,7 +40,11 @@ export default function PersonPicker({
   allowCreate = true,
   excludeIds,
   autoFocus = false,
+  kind = 'person',
+  species,
+  speciesOnly = false,
 }: Props) {
+  const pets = kind === 'pet'
   const [text, setText] = useState('')
   const [active, setActive] = useState(0)
   const inputRef = useRef<HTMLInputElement>(null)
@@ -43,15 +53,20 @@ export default function PersonPicker({
   const q = useDebounced(text.trim(), 200)
 
   const persons = useQuery({
-    queryKey: ['people', 'picker', q],
-    queryFn: () => api.people.list({ q: q || undefined, sort: q ? 'name' : 'items', filter: 'all', limit: 30 }),
+    queryKey: ['people', 'picker', kind, q],
+    queryFn: () => api.people.list({ q: q || undefined, kind, sort: q ? 'name' : 'items', filter: 'all', limit: 30 }),
     placeholderData: keepPreviousData,
     staleTime: 10_000,
   })
 
   const options = useMemo<Option[]>(() => {
     const exclude = new Set(excludeIds ?? [])
-    const list: Option[] = (persons.data?.items ?? []).filter((p) => !exclude.has(p.id)).map((p) => ({ kind: 'person', person: p }))
+    const found = (persons.data?.items ?? []).filter((p) => (p.kind ?? 'person') === kind)
+    // Pets of the box's species first, the others after them.
+    const ranked = species ? [...found].sort((a, b) => Number(b.species === species) - Number(a.species === species)) : found
+    const list: Option[] = ranked
+      .filter((p) => !exclude.has(p.id) && !(speciesOnly && species && p.species !== species))
+      .map((p) => ({ kind: 'person', person: p }))
     const typed = text.trim()
     if (allowCreate && typed) {
       const lower = typed.toLowerCase()
@@ -59,7 +74,7 @@ export default function PersonPicker({
       if (!exact) list.push({ kind: 'create', name: typed })
     }
     return list
-  }, [persons.data, excludeIds, allowCreate, text])
+  }, [persons.data, excludeIds, allowCreate, text, kind, species, speciesOnly])
 
   useEffect(() => setActive(0), [q, options.length])
   useEffect(() => {
@@ -128,7 +143,7 @@ export default function PersonPicker({
         ref={listRef}
         id={`${baseId}-list`}
         role="listbox"
-        aria-label="People"
+        aria-label={pets ? 'Pets' : 'People'}
         className="max-h-64 overflow-y-auto overscroll-contain rounded-xl border border-line bg-surface p-1"
       >
         {persons.isError && (
@@ -137,7 +152,13 @@ export default function PersonPicker({
           </li>
         )}
         {!persons.isPending && !persons.isError && options.length === 0 && (
-          <li className="px-3 py-2 text-sm text-ink-soft">{text.trim() ? 'No one matches that name.' : 'No people yet. Type a name to create one.'}</li>
+          <li className="px-3 py-2 text-sm text-ink-soft">{text.trim()
+              ? pets
+                ? 'No pet matches that name.'
+                : 'No one matches that name.'
+              : pets
+                ? 'No pets yet. Type a name to add one.'
+                : 'No people yet. Type a name to create one.'}</li>
         )}
         {options.map((opt, i) => (
           <li
@@ -160,17 +181,19 @@ export default function PersonPicker({
                 <span className="min-w-0 flex-1">
                   <span className={clsx('block truncate font-medium', !opt.person.name && 'text-ink-soft')}>{personName(opt.person)}</span>
                   <span className="block text-xs text-ink-faint">
-                    {formatCount(opt.person.face_count, 'face')}, {formatCount(opt.person.item_count, 'item')}
+                    {pets
+                      ? `${speciesLabel(opt.person.species)}, ${formatCount(opt.person.item_count, 'item')}`
+                      : `${formatCount(opt.person.face_count, 'face')}, ${formatCount(opt.person.item_count, 'item')}`}
                   </span>
                 </span>
               </>
             ) : (
               <>
                 <span className="flex size-8 shrink-0 items-center justify-center rounded-full bg-accent-soft text-accent">
-                  <UserPlus className="size-4" aria-hidden />
+                  {pets ? <PawPrint className="size-4" aria-hidden /> : <UserPlus className="size-4" aria-hidden />}
                 </span>
                 <span className="min-w-0 flex-1 truncate">
-                  Create <span className="font-semibold">"{opt.name}"</span>
+                  {pets ? 'New pet' : 'Create'} <span className="font-semibold">"{opt.name}"</span>
                 </span>
               </>
             )}

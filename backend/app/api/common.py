@@ -11,6 +11,7 @@ from typing import Any
 
 from app.config import settings
 from app.schemas import (
+    AnimalOut,
     BodyOut,
     DocumentField,
     DocumentOut,
@@ -24,6 +25,7 @@ from app.schemas import (
     UploadOut,
 )
 from app.urls import (
+    animal_url,
     body_url,
     doc_photo_url,
     download_url,
@@ -230,13 +232,13 @@ def person_refs(conn: sqlite3.Connection, person_ids: Iterable[int | None]) -> d
         chunk = ids[start:start + 500]
         ph = ",".join("?" * len(chunk))
         rows = conn.execute(
-            f"SELECT p.id, p.name, ci.id IS NOT NULL AS cover_ok, p.cover_face_id FROM persons p "
+            f"SELECT p.id, p.name, p.kind, ci.id IS NOT NULL AS cover_ok, p.cover_face_id FROM persons p "
             f"LEFT JOIN faces f ON f.id = p.cover_face_id LEFT JOIN items ci ON ci.id = f.item_id AND {COVER_ITEM_OK} "
             f"WHERE p.id IN ({ph})",
             chunk,
         ).fetchall()
         covers = {int(r["id"]): int(r["cover_face_id"]) for r in rows if r["cover_ok"]}
-        need = [int(r["id"]) for r in rows if int(r["id"]) not in covers]
+        need = [int(r["id"]) for r in rows if int(r["id"]) not in covers and r["kind"] != "pet"]
         if need:
             for r in conn.execute(
                 "SELECT pid, fid FROM ("
@@ -248,10 +250,35 @@ def person_refs(conn: sqlite3.Connection, person_ids: Iterable[int | None]) -> d
                 need,
             ):
                 covers[int(r["pid"])] = int(r["fid"])
+        pets = [int(r["id"]) for r in rows if r["kind"] == "pet"]
+        pet_covers = pet_cover_ids(conn, pets) if pets else {}
         for r in rows:
             pid = int(r["id"])
+            if r["kind"] == "pet":
+                aid = pet_covers.get(pid)
+                out[pid] = PersonRef(id=pid, name=r["name"], cover_url=animal_url(aid) if aid else None, kind="pet")
+                continue
             cover = covers.get(pid)
             out[pid] = PersonRef(id=pid, name=r["name"], cover_url=face_url(cover) if cover else None)
+    return out
+
+
+def pet_cover_ids(conn: sqlite3.Connection, pet_ids: list[int]) -> dict[int, int]:
+    """{pet id: its best animal crop in a visible item} (section 22)."""
+    out: dict[int, int] = {}
+    ids = sorted({int(p) for p in pet_ids})
+    for start in range(0, len(ids), 500):
+        chunk = ids[start:start + 500]
+        for r in conn.execute(
+            "SELECT pid, aid FROM ("
+            "  SELECT a.person_id AS pid, a.id AS aid, "
+            "         ROW_NUMBER() OVER (PARTITION BY a.person_id ORDER BY a.assigned_by = 'user' DESC, a.det_score DESC, a.id) AS rn "
+            f"  FROM animals a JOIN items ci ON ci.id = a.item_id AND {COVER_ITEM_OK} "
+            f"  WHERE a.person_id IN ({','.join('?' * len(chunk))})"
+            ") WHERE rn = 1",
+            chunk,
+        ):
+            out[int(r["pid"])] = int(r["aid"])
     return out
 
 
@@ -340,6 +367,15 @@ def body_out(conn: sqlite3.Connection, row: sqlite3.Row, refs: dict[int, PersonR
     )
 
 
+def animal_out(conn: sqlite3.Connection, row: sqlite3.Row, refs: dict[int, PersonRef] | None = None) -> AnimalOut:
+    """row from animals (section 22)."""
+    return AnimalOut(
+        id=row["id"], x=row["x"], y=row["y"], w=row["w"], h=row["h"], det_score=row["det_score"],
+        species=row["species"], frame_time_s=row["frame_time_s"], person=_ref(conn, row["person_id"], refs),
+        assigned_by=row["assigned_by"], url=animal_url(int(row["id"])),
+    )
+
+
 def document_out(row: sqlite3.Row, item_row: sqlite3.Row, *, wallet_configured: bool = False) -> DocumentOut:
     """row from documents; item_row needs uid, version."""
     raw = json_loads(row["fields"], {}) or {}
@@ -365,17 +401,18 @@ def document_out(row: sqlite3.Row, item_row: sqlite3.Row, *, wallet_configured: 
 
 
 def people_filter_sql(person_ids: list[int], alias: str = "i") -> tuple[str, list[int]]:
-    """SQL condition: the item contains ALL the given people (faces, bodies or tags)."""
+    """SQL condition: the item contains ALL the given people (faces, bodies, animal boxes or tags)."""
     ids = sorted({int(p) for p in person_ids})
     ph = ",".join("?" * len(ids))
     sql = (
         f"{alias}.id IN (SELECT item_id FROM ("
         f"SELECT item_id, person_id FROM faces WHERE person_id IN ({ph}) UNION "
         f"SELECT item_id, person_id FROM bodies WHERE person_id IN ({ph}) UNION "
+        f"SELECT item_id, person_id FROM animals WHERE person_id IN ({ph}) UNION "
         f"SELECT item_id, person_id FROM item_tags WHERE person_id IN ({ph})"
         ") GROUP BY item_id HAVING COUNT(DISTINCT person_id) = ?)"
     )
-    return sql, [*ids, *ids, *ids, len(ids)]
+    return sql, [*ids, *ids, *ids, *ids, len(ids)]
 
 
 def valid_cursor_scalar(value: object) -> bool:

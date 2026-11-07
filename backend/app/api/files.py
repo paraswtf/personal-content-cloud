@@ -305,6 +305,13 @@ def face(face_id: int, session: SessionInfo = Depends(require_user),
     return _send(storage.face_crop_path(int(row["id"])), "image/webp", NO_STORE if row["nsfw"] else CROP_CACHE)
 
 
+@router.api_route("/animal/{animal_id}", methods=METHODS)
+def animal(animal_id: int, session: SessionInfo = Depends(require_user),
+           conn: sqlite3.Connection = Depends(get_db)) -> Response:
+    row = _crop(conn, "animals", animal_id, session)
+    return _send(storage.animal_crop_path(int(row["id"])), "image/webp", NO_STORE if row["nsfw"] else CROP_CACHE)
+
+
 @router.api_route("/body/{body_id}", methods=METHODS)
 def body(body_id: int, session: SessionInfo = Depends(require_user),
          conn: sqlite3.Connection = Depends(get_db)) -> FileResponse:

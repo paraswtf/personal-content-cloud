@@ -1,11 +1,11 @@
-// Multi-select of people for the library filters: selected people as removable chips plus an
+// Multi-select of people and pets for the library filters: selected ones as removable chips plus an
 // "Add a person" search popover (searches the server, 30 at a time).
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
 import { keepPreviousData, useQueries, useQuery } from '@tanstack/react-query'
 import clsx from 'clsx'
-import { Search, UserPlus, X } from 'lucide-react'
+import { PawPrint, Search, UserPlus, X } from 'lucide-react'
 import { api, ApiError } from '../../lib/api'
-import { formatCount, personName } from '../../lib/format'
+import { formatCount, personName, speciesLabel } from '../../lib/format'
 import { useDebounced } from '../../lib/hooks'
 import { Avatar, Spinner } from '../ui'
 
@@ -28,7 +28,7 @@ export default function PeopleFilter({ value, onChange, exclude }: Props) {
 
   const people = useQuery({
     queryKey: ['people', 'filter', q],
-    queryFn: () => api.people.list({ q: q || undefined, sort: q ? 'name' : 'items', limit: 30 }),
+    queryFn: () => api.people.list({ q: q || undefined, kind: 'all', sort: q ? 'name' : 'items', limit: 30 }),
     enabled: open,
     placeholderData: keepPreviousData,
     staleTime: 30_000,
@@ -113,6 +113,7 @@ export default function PeopleFilter({ value, onChange, exclude }: Props) {
         return (
           <span key={id} className="inline-flex h-10 max-w-full items-center gap-2 rounded-full border border-line bg-surface pl-1 pr-0.5 text-sm">
             <Avatar src={r?.data?.cover_url} name={r?.data?.name ?? '?'} size={30} />
+            {r?.data?.kind === 'pet' && <PawPrint className="-mr-1 size-3.5 shrink-0 text-ink-soft" aria-label="Pet" />}
             <span className="min-w-0 truncate font-medium">{r?.isPending ? <Spinner className="[&_svg]:size-4" /> : name}</span>
             <button
               type="button"
@@ -138,7 +139,7 @@ export default function PeopleFilter({ value, onChange, exclude }: Props) {
         )}
       >
         <UserPlus className="size-4" aria-hidden />
-        {value.length ? 'Add another person' : 'Add a person'}
+        {value.length ? 'Add another person or pet' : 'Add a person or pet'}
       </button>
 
       {open && (
@@ -162,7 +163,7 @@ export default function PeopleFilter({ value, onChange, exclude }: Props) {
               aria-controls={`${baseId}-list`}
               aria-activedescendant={options[active] ? optionId(active) : undefined}
               aria-autocomplete="list"
-              aria-label="Search people by name"
+              aria-label="Search people and pets by name"
               placeholder="Search by name"
               value={text}
               onChange={(e) => setText(e.target.value)}
@@ -205,8 +206,13 @@ export default function PeopleFilter({ value, onChange, exclude }: Props) {
               >
                 <Avatar src={p.cover_url} name={p.name ?? '?'} size={32} />
                 <span className="min-w-0 flex-1">
-                  <span className={clsx('block truncate font-medium', !p.name && 'text-ink-soft')}>{personName(p)}</span>
-                  <span className="block text-xs text-ink-faint">{formatCount(p.item_count, 'item')}</span>
+                  <span className={clsx('flex items-center gap-1 font-medium', !p.name && 'text-ink-soft')}>
+                    {p.kind === 'pet' && <PawPrint className="size-3.5 shrink-0" aria-label="Pet" />}
+                    <span className="truncate">{personName(p)}</span>
+                  </span>
+                  <span className="block text-xs text-ink-faint">
+                    {p.kind === 'pet' ? `${speciesLabel(p.species)}, ${formatCount(p.item_count, 'item')}` : formatCount(p.item_count, 'item')}
+                  </span>
                 </span>
               </li>
             ))}

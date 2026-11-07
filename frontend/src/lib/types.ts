@@ -81,10 +81,14 @@ export interface OkOut {
 }
 
 // people
+export type Species = 'bird' | 'cat' | 'dog' | 'horse' | 'sheep' | 'cow' | 'elephant' | 'bear' | 'zebra' | 'giraffe'
+export type PersonKind = 'person' | 'pet'
 export interface PersonRef {
   id: number
   name: string | null
   cover_url: string | null
+  /** Older servers omit it: treat a missing kind as 'person'. */
+  kind: PersonKind
 }
 export interface GuessOut {
   person: PersonRef
@@ -121,11 +125,29 @@ export interface BodyOut {
   frame_time_s: number | null
   url: string
 }
+/** An animal box (section 22): a pet found by its look, assigned to a pet identity. */
+export interface AnimalOut {
+  id: number
+  x: number
+  y: number
+  w: number
+  h: number
+  det_score: number
+  species: Species
+  frame_time_s: number | null
+  person: PersonRef | null
+  assigned_by: 'auto' | 'user'
+  url: string
+}
 export interface PersonOut {
   id: number
   name: string | null
   cover_url: string | null
   cover_face_id: number | null
+  kind: PersonKind
+  /** Set for a pet, null for a person. */
+  species: Species | null
+  animal_count: number
   face_count: number
   item_count: number
   guess_count: number
@@ -163,6 +185,24 @@ export interface FaceListItem {
   guess: GuessOut | null
   created_at: string
 }
+export interface AnimalListItem {
+  id: number
+  item_uid: string
+  item_kind: ItemKind
+  thumb_url: string
+  url: string
+  det_score: number
+  species: Species
+  frame_time_s: number | null
+  person_id: number | null
+  assigned_by: 'auto' | 'user'
+  created_at: string
+}
+export interface AnimalPage {
+  items: AnimalListItem[]
+  next_cursor: string | null
+  total: number
+}
 export interface FacePage {
   items: FaceListItem[]
   next_cursor: string | null
@@ -177,6 +217,11 @@ export interface AssignBodiesIn {
   body_ids: number[]
   person_id?: number | null
   new_person_name?: string | null
+}
+export interface AssignAnimalsIn {
+  animal_ids: number[]
+  person_id?: number | null
+  new_person_name?: string
 }
 export interface AssignOut {
   updated: number
@@ -318,6 +363,7 @@ export interface ItemDetail extends ItemCard {
   labels: LabelOut[]
   faces: FaceOut[]
   bodies: BodyOut[]
+  animals: AnimalOut[]
   tags: PersonRef[]
   people: PersonRef[]
   /** Free-form tags: the owner's first, then suggestions by score. */

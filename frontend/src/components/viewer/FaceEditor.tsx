@@ -9,20 +9,20 @@ import { formatCount, formatPercent, personName } from '../../lib/format'
 import PersonPicker, { choiceBody, type PersonChoice } from '../people/PersonPicker'
 import { evidenceLine } from '../people/evidence'
 import { Button } from '../ui'
-import type { BoxTarget } from './boxes'
+import type { PersonBoxTarget } from './boxes'
 import { useInvalidateItem } from './shared'
 
 interface Props {
   uid: string
-  target: BoxTarget
+  target: PersonBoxTarget
   anchor: HTMLElement | null
   onClose: () => void
   onDone: (message: string) => void
 }
 
-const WIDTH = 320
+export const WIDTH = 320
 
-function placement(anchor: HTMLElement | null): CSSProperties {
+export function placement(anchor: HTMLElement | null): CSSProperties {
   const vw = window.innerWidth
   const vh = window.innerHeight
   if (!anchor || vw < 640) return { left: 0, right: 0, bottom: 0 }

@@ -31,6 +31,8 @@ What it does with each file:
   asks for the password or a passkey again and stays open for 15 minutes. A sensitivity setting in
   Settings, Learning (low, normal or high) decides how readily photos go there, and moving photos
   into or out of the vault tunes it further.
+- **Pets.** Cats, dogs, birds and other animals get a box like faces do; crops of the same animal become a
+  pet you can name, and the People page lists your pets with their photos.
 - **Ways in.** Drag and drop in the browser, the camera inside the app, and the phone's Share menu
   (install the app from the browser menu first).
 - **Learning from your choices.** Corrections to categories, the vault, mis-clicks, document types
@@ -92,6 +94,8 @@ Environment variables (all optional):
 | `DOC_LIKENESS_MIN` | `0.55` | Images at or above this are sent to OCR. |
 | `BLUR_VAR_MIN`, `BURST_WINDOW_S` | `40`, `3` | Mis-click thresholds. |
 | `GUESS_WINDOW_H`, `GUESS_SCENE_SIM`, `GUESS_CLOTHES_SIM`, `GUESS_GPS_M` | `12`, `0.80`, `0.85`, `250` | Person guessing. |
+| `PETS_ENABLED`, `ANIMAL_DET_THRESHOLD` | `true`, `0.45` | Pet identities (section 22) and the animal detection cut. |
+| `PET_MATCH_THRESHOLD`, `PET_NEW_THRESHOLD` | `0.82`, `0.86` | Cosine cuts for matching a crop to a known pet and for pairing two crops into a new pet. |
 | `WALLET_PASS_TYPE_ID`, `WALLET_TEAM_ID`, `WALLET_ORG_NAME` | unset | Apple Wallet passes (see below). |
 | `OCR_ENABLED`, `OCR_MAX_PAGES` | `true`, `50` | OCR runs in English, Hindi and Marathi when the Devanagari model is present. |
 

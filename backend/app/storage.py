@@ -83,6 +83,10 @@ def body_crop_path(body_id: int) -> Path:
     return root() / "bodies" / str(body_id // 1000) / f"{body_id}.webp"
 
 
+def animal_crop_path(animal_id: int) -> Path:
+    return root() / "animals" / str(animal_id // 1000) / f"{animal_id}.webp"
+
+
 def doc_photo_path(uid: str, version: int) -> Path:
     return root() / "docphoto" / _shard(uid) / f"{uid}.v{version}.webp"
 

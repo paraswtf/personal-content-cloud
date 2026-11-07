@@ -36,6 +36,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from app import jobs, storage
 from app.api.common import (
     ITEM_CARD_COLUMNS,
+    animal_out,
     body_out,
     box_person_ids,
     document_out,
@@ -165,14 +166,15 @@ def _float_scores(raw: str | None) -> dict[str, float] | None:
 
 
 def _people_ids(conn: sqlite3.Connection, item_id: int) -> list[int]:
-    """Ids of the people in an item (faces, bodies, tags), in display order."""
+    """Ids of the people and pets in an item (faces, bodies, animal boxes, tags), in display order."""
     rows = conn.execute(
         "SELECT p.id FROM persons p WHERE p.id IN ("
         "SELECT person_id FROM faces WHERE item_id = ? AND person_id IS NOT NULL UNION "
         "SELECT person_id FROM bodies WHERE item_id = ? AND person_id IS NOT NULL UNION "
+        "SELECT person_id FROM animals WHERE item_id = ? AND person_id IS NOT NULL UNION "
         "SELECT person_id FROM item_tags WHERE item_id = ?) "
-        "ORDER BY p.name IS NULL, p.name_key, p.id",
-        (item_id, item_id, item_id),
+        "ORDER BY p.kind = 'pet', p.name IS NULL, p.name_key, p.id",
+        (item_id, item_id, item_id, item_id),
     ).fetchall()
     return [int(r["id"]) for r in rows]
 
@@ -187,6 +189,9 @@ def item_detail(conn: sqlite3.Connection, row: sqlite3.Row) -> ItemDetail:
     bodies = conn.execute(
         "SELECT * FROM bodies WHERE item_id = ? ORDER BY frame_time_s IS NOT NULL, frame_time_s, x, id", (item_id,)
     ).fetchall()
+    animals = conn.execute(
+        "SELECT * FROM animals WHERE item_id = ? ORDER BY frame_time_s IS NOT NULL, frame_time_s, x, id", (item_id,)
+    ).fetchall()
     tags = conn.execute(
         "SELECT p.id FROM item_tags t JOIN persons p ON p.id = t.person_id "
         "WHERE t.item_id = ? ORDER BY p.name IS NULL, p.name_key, p.id",
@@ -195,7 +200,7 @@ def item_detail(conn: sqlite3.Connection, row: sqlite3.Row) -> ItemDetail:
     people_ids = _people_ids(conn, item_id)
     # Every person shown on the item (boxes, guesses, tags) in one lookup.
     refs = person_refs(conn, box_person_ids(faces) | box_person_ids(bodies) | {int(t["id"]) for t in tags}
-                       | set(people_ids))
+                       | {int(a["person_id"]) for a in animals if a["person_id"] is not None} | set(people_ids))
     labels = conn.execute("SELECT label, score FROM item_labels WHERE item_id = ? ORDER BY score DESC, label",
                           (item_id,)).fetchall()
     doc = conn.execute("SELECT * FROM documents WHERE item_id = ?", (item_id,)).fetchone()
@@ -211,6 +216,7 @@ def item_detail(conn: sqlite3.Connection, row: sqlite3.Row) -> ItemDetail:
         quality_scores=json_loads(row["quality_scores"]) if row["quality_scores"] else None,
         labels=[LabelOut(label=r["label"], score=float(r["score"])) for r in labels],
         faces=[face_out(conn, f, refs) for f in faces], bodies=[body_out(conn, b, refs) for b in bodies],
+        animals=[animal_out(conn, a, refs) for a in animals],
         tags=[refs[int(t["id"])] for t in tags if int(t["id"]) in refs],
         people=[refs[p] for p in people_ids if p in refs],
         document=document_out(doc, row, wallet_configured=_wallet_configured()) if doc is not None else None,

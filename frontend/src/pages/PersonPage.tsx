@@ -1,17 +1,19 @@
 // One person (/people/:id): rename in place, cover, their items (with the viewer), their faces
 // (move, remove, use as cover), guesses waiting for them, merge into someone else, delete.
+// A pet has no cover picker, faces or guesses: it shows its animal crops instead.
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router'
 import { useMutation, useQuery } from '@tanstack/react-query'
 import clsx from 'clsx'
-import { ArrowLeft, Check, CheckCheck, GitMerge, Images, ListChecks, Pencil, ScanFace, Sparkles, Star, Trash2, UserMinus, X } from 'lucide-react'
+import { ArrowLeft, Check, CheckCheck, GitMerge, Images, ListChecks, PawPrint, Pencil, ScanFace, Sparkles, Star, Trash2, UserMinus, X } from 'lucide-react'
 import { ApiError, api } from '../lib/api'
-import type { FaceListItem, GuessItem } from '../lib/types'
-import { formatCount, personName } from '../lib/format'
+import type { AnimalListItem, FaceListItem, GuessItem, PersonKind, Species } from '../lib/types'
+import { formatCount, personName, speciesLabel } from '../lib/format'
 import { useInfiniteSentinel, usePageTitle, useRefreshLibrary, useStableCallback } from '../lib/hooks'
 import { useItemList } from '../lib/useItemList'
 import MediaGrid from '../components/MediaGrid'
 import Viewer from '../components/Viewer'
+import AnimalGrid from '../components/people/AnimalGrid'
 import FaceGrid from '../components/people/FaceGrid'
 import GuessCard from '../components/people/GuessCard'
 import PersonChoiceModal from '../components/people/PersonChoiceModal'
@@ -24,9 +26,9 @@ import { LoadMore, SelectionBar } from '../components/admin/fields'
 import { useViewerParam } from '../components/public/useViewerParam'
 import { Avatar, Button, EmptyState, ErrorState, PageSpinner, buttonClasses } from '../components/ui'
 
-type Tab = 'items' | 'faces' | 'guesses'
+type Tab = 'items' | 'faces' | 'guesses' | 'animals'
 
-function NameEditor({ id, name }: { id: number; name: string | null }) {
+function NameEditor({ id, name, kind, species }: { id: number; name: string | null; kind: PersonKind; species: Species | null }) {
   const toast = useToast()
   const navigate = useNavigate()
   const refresh = useRefreshLibrary()
@@ -64,7 +66,7 @@ function NameEditor({ id, name }: { id: number; name: string | null }) {
   if (!editing)
     return (
       <div className="flex min-w-0 items-center gap-1">
-        <h1 className={clsx('min-w-0 break-words text-2xl font-bold tracking-tight sm:text-3xl', !name && 'text-ink-soft')}>{personName({ name })}</h1>
+        <h1 className={clsx('min-w-0 break-words text-2xl font-bold tracking-tight sm:text-3xl', !name && 'text-ink-soft')}>{personName({ name, kind, species })}</h1>
         <button
           type="button"
           onClick={() => setEditing(true)}
@@ -83,7 +85,7 @@ function NameEditor({ id, name }: { id: number; name: string | null }) {
         onChange={(e) => setText(e.target.value)}
         onKeyDown={(e) => e.key === 'Escape' && setEditing(false)}
         maxLength={120}
-        placeholder="Their name"
+        placeholder={kind === 'pet' ? 'Its name' : 'Their name'}
         aria-label="Name"
         className="h-11 min-w-0 flex-1 rounded-full border border-accent bg-surface px-4 text-lg font-semibold text-ink focus:outline-none focus:ring-2 focus:ring-accent/20"
       />
@@ -225,6 +227,121 @@ function FacesTab({ id, name, coverId }: { id: number; name: string; coverId: nu
   )
 }
 
+function AnimalsTab({ id, name, species }: { id: number; name: string; species: Species | null }) {
+  const toast = useToast()
+  const refresh = useRefreshLibrary()
+  const fetchPage = useCallback((c: string | null) => api.people.animals(id, c, 120), [id])
+  const list = useItemList<AnimalListItem>(['person-animals', id], fetchPage, { keyOf: (a) => a.id })
+  const sel = useSelection<number>()
+  const [selecting, setSelecting] = useState(false)
+  const [moving, setMoving] = useState(false)
+  const [removing, setRemoving] = useState(false)
+  const itemRefs = useMemo(() => {
+    const seen = new Set<string>()
+    return list.items.filter((a) => (seen.has(a.item_uid) ? false : (seen.add(a.item_uid), true))).map((a) => ({ uid: a.item_uid }))
+  }, [list.items])
+  const viewer = useViewerParam(itemRefs, list.hasMore, list.loadMore)
+
+  const assign = useMutation({
+    mutationFn: (choice: PersonChoice | null) => api.animals.assign({ animal_ids: [...sel.selected], ...choiceBody(choice) }),
+    onSuccess: (r, choice) => {
+      toast.success(choice ? `${formatCount(r.updated, 'crop')} moved${r.person ? ` to ${personName(r.person)}` : ''}.` : `${formatCount(r.updated, 'crop')} removed from ${name}.`)
+      setMoving(false)
+      sel.clear()
+      void refresh()
+    },
+    onError: (e) => toast.error(errorMessage(e, 'Could not move the crops.')),
+  })
+  const remove = useMutation({
+    mutationFn: (ids: number[]) => Promise.all(ids.map((animalId) => api.animals.remove(animalId))),
+    onSuccess: (done) => {
+      toast.success(`${formatCount(done.length, 'box', 'boxes')} removed.`)
+      setRemoving(false)
+      sel.clear()
+      void refresh()
+    },
+    onError: (e) => {
+      setRemoving(false)
+      toast.error(errorMessage(e, 'Could not remove the boxes.'))
+    },
+  })
+  const busy = assign.isPending || remove.isPending
+
+  return (
+    <div>
+      <div className="mb-3 flex flex-wrap items-center gap-2">
+        <Button
+          variant="secondary"
+          aria-pressed={selecting}
+          onClick={() => {
+            sel.clear()
+            setSelecting((v) => !v)
+          }}
+        >
+          <ListChecks className="size-4" aria-hidden />
+          {selecting ? 'Done' : 'Select crops'}
+        </Button>
+        <p className="text-sm text-ink-soft">{selecting ? 'Pick crops to move or remove.' : 'Tap a crop to open where it was found.'}</p>
+      </div>
+      {list.error && !list.items.length ? (
+        <ErrorState error={list.error} onRetry={list.refetch} />
+      ) : list.loading && !list.items.length ? (
+        <PageSpinner />
+      ) : list.items.length === 0 ? (
+        <EmptyState icon={<PawPrint className="size-8" aria-hidden />} title="No crops yet" />
+      ) : (
+        <AnimalGrid
+          animals={list.items}
+          selecting={selecting}
+          selected={sel.selected}
+          onToggle={sel.toggle}
+          onOpen={(a) => viewer.open(a.item_uid, a.frame_time_s)}
+          hasMore={list.hasMore}
+          loadMore={list.loadMore}
+          loadingMore={list.loading}
+        />
+      )}
+      {selecting && sel.count > 0 && (
+        <SelectionBar count={sel.count} noun={sel.count === 1 ? 'crop' : 'crops'} onClear={sel.clear} onSelectAll={() => sel.setAll(list.items.map((a) => a.id))} allSelected={sel.count >= list.items.length} total={list.items.length}>
+          <Button variant="secondary" disabled={busy} onClick={() => setMoving(true)}>
+            <GitMerge className="size-4" aria-hidden />
+            Move to
+          </Button>
+          <Button variant="secondary" disabled={busy} loading={assign.isPending && assign.variables === null} onClick={() => assign.mutate(null)}>
+            <UserMinus className="size-4" aria-hidden />
+            Not {name}
+          </Button>
+          <Button variant="danger" disabled={busy} onClick={() => setRemoving(true)}>
+            <Trash2 className="size-4" aria-hidden />
+            Remove boxes
+          </Button>
+        </SelectionBar>
+      )}
+      <PersonChoiceModal
+        open={moving}
+        title={`Move ${formatCount(sel.count, 'crop')} to`}
+        busy={assign.isPending}
+        excludeIds={[id]}
+        kind="pet"
+        species={species ?? undefined}
+        onPick={(c) => assign.mutate(c)}
+        onClose={() => setMoving(false)}
+      />
+      <Confirm
+        open={removing}
+        title={`Remove ${formatCount(sel.count, 'box', 'boxes')}?`}
+        body="These are not pets. The boxes are removed from the photos and will not come back."
+        confirmLabel="Remove"
+        danger
+        loading={remove.isPending}
+        onConfirm={() => remove.mutate([...sel.selected])}
+        onClose={() => !remove.isPending && setRemoving(false)}
+      />
+      {viewer.uid && <Viewer uid={viewer.uid} onClose={viewer.close} onPrev={viewer.onPrev} onNext={viewer.onNext} position={viewer.position} startAt={viewer.t} />}
+    </div>
+  )
+}
+
 function GuessesTab({ id }: { id: number }) {
   const fetchPage = useCallback((c: string | null) => api.review.guesses(c, 60, id), [id])
   const list = useItemList<GuessItem>(['review', 'guesses', id], fetchPage, { keyOf: guessKey })
@@ -276,7 +393,6 @@ function PersonView({ id }: { id: number }) {
   const refresh = useRefreshLibrary()
   const [search, setSearch] = useSearchParams()
   const raw = search.get('tab')
-  const tab: Tab = raw === 'faces' || raw === 'guesses' ? raw : 'items'
   const person = useQuery({ queryKey: ['person', id], queryFn: () => api.people.get(id) })
   const p = person.data
   usePageTitle(p ? personName(p) : 'Person')
@@ -299,7 +415,7 @@ function PersonView({ id }: { id: number }) {
   const remove = useMutation({
     mutationFn: () => api.people.remove(id),
     onSuccess: () => {
-      toast.success('Person deleted. Their faces are unassigned again.')
+      toast.success(person.data?.kind === 'pet' ? 'Pet deleted. Its crops are unassigned again.' : 'Person deleted. Their faces are unassigned again.')
       void refresh()
       navigate('/people', { replace: true })
     },
@@ -334,25 +450,39 @@ function PersonView({ id }: { id: number }) {
   }
   if (!p) return <PageSpinner />
   const name = personName(p)
-  const tabs: { value: Tab; label: string; count?: number }[] = [
-    { value: 'items', label: 'Items', count: p.item_count },
-    { value: 'faces', label: 'Faces', count: p.face_count },
-    { value: 'guesses', label: 'Guesses', count: p.guess_count },
-  ]
+  const pet = p.kind === 'pet'
+  const tab: Tab = pet ? (raw === 'animals' ? raw : 'items') : raw === 'faces' || raw === 'guesses' ? raw : 'items'
+  const tabs: { value: Tab; label: string; count?: number }[] = pet
+    ? [
+        { value: 'items', label: 'Items', count: p.item_count },
+        { value: 'animals', label: 'Crops', count: p.animal_count },
+      ]
+    : [
+        { value: 'items', label: 'Items', count: p.item_count },
+        { value: 'faces', label: 'Faces', count: p.face_count },
+        { value: 'guesses', label: 'Guesses', count: p.guess_count },
+      ]
 
   return (
     <div className="mx-auto w-full max-w-7xl px-4 pb-8">
       <Link to="/people" className="mt-4 inline-flex h-10 items-center gap-1.5 text-sm font-medium text-ink-soft hover:text-ink">
-        <ArrowLeft className="size-4" aria-hidden /> All people
+        <ArrowLeft className="size-4" aria-hidden /> {pet ? 'People and pets' : 'All people'}
       </Link>
       <div className="mt-2 flex flex-col gap-4 sm:flex-row sm:items-center">
         <Avatar src={p.cover_url} name={p.name} size={96} />
         <div className="min-w-0 flex-1">
-          <NameEditor key={p.id} id={p.id} name={p.name} />
-          <p className="mt-1 text-sm text-ink-soft">
-            {formatCount(p.item_count, 'item')}, {formatCount(p.face_count, 'face')}
-            {p.guess_count > 0 && `, ${formatCount(p.guess_count, 'guess', 'guesses')} to review`}
-          </p>
+          <NameEditor key={p.id} id={p.id} name={p.name} kind={p.kind} species={p.species} />
+          {pet ? (
+            <p className="mt-1 flex flex-wrap items-center gap-x-1.5 text-sm text-ink-soft">
+              <PawPrint className="size-4 shrink-0" aria-hidden />
+              {speciesLabel(p.species)}, {formatCount(p.item_count, 'item')}, {formatCount(p.animal_count, 'crop')}
+            </p>
+          ) : (
+            <p className="mt-1 text-sm text-ink-soft">
+              {formatCount(p.item_count, 'item')}, {formatCount(p.face_count, 'face')}
+              {p.guess_count > 0 && `, ${formatCount(p.guess_count, 'guess', 'guesses')} to review`}
+            </p>
+          )}
         </div>
         <div className="flex flex-wrap gap-2">
           <Button variant="secondary" onClick={() => setMergeOpen(true)}>
@@ -388,15 +518,23 @@ function PersonView({ id }: { id: number }) {
       <div role="tabpanel">
         {tab === 'items' && <ItemsTab id={id} />}
         {tab === 'faces' && <FacesTab id={id} name={name} coverId={p.cover_face_id} />}
+        {tab === 'animals' && <AnimalsTab id={id} name={name} species={p.species} />}
         {tab === 'guesses' && <GuessesTab id={id} />}
       </div>
 
       <PersonChoiceModal
         open={mergeOpen}
         title={`Merge ${name} into`}
-        description="Pick the person this really is. Every face, body and tag moves to them and this entry goes away."
+        description={
+          pet
+            ? `Pick the pet this really is. Only pets of the same species (${speciesLabel(p.species).toLowerCase()}) are listed. Every crop and tag moves to them and this entry goes away.`
+            : 'Pick the person this really is. Every face, body and tag moves to them and this entry goes away.'
+        }
         allowCreate={false}
         excludeIds={[id]}
+        kind={pet ? 'pet' : undefined}
+        species={p.species ?? undefined}
+        speciesOnly={pet}
         onPick={(c) => {
           if ('personId' in c) {
             setMergeOpen(false)
@@ -408,7 +546,7 @@ function PersonView({ id }: { id: number }) {
       <Confirm
         open={mergeTarget !== null}
         title={`Merge into ${targetQ.data ? personName(targetQ.data) : 'this person'}?`}
-        body={`${name} and everything tagged as them becomes ${targetQ.data ? personName(targetQ.data) : 'the other person'}.`}
+        body={`${name} and everything tagged as ${pet ? 'it' : 'them'} becomes ${targetQ.data ? personName(targetQ.data) : pet ? 'the other pet' : 'the other person'}.`}
         confirmLabel="Merge"
         loading={merge.isPending}
         onConfirm={() => mergeTarget !== null && merge.mutate(mergeTarget)}
@@ -417,7 +555,11 @@ function PersonView({ id }: { id: number }) {
       <Confirm
         open={deleteOpen}
         title={`Delete ${name}?`}
-        body="The person goes away. Their faces and bodies stay in the photos, unassigned, and their tags are removed."
+        body={
+          pet
+            ? 'The pet goes away. Its boxes stay in the photos, unassigned, and its tags are removed.'
+            : 'The person goes away. Their faces and bodies stay in the photos, unassigned, and their tags are removed.'
+        }
         confirmLabel="Delete"
         danger
         loading={remove.isPending}

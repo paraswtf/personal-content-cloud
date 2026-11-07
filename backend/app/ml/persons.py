@@ -1,9 +1,11 @@
-"""Person detector: YOLOX-S (Megvii release 0.1.1rc0, COCO, class 0 = person), onnxruntime.
+"""Person (and animal) detector: YOLOX-S (Megvii release 0.1.1rc0, COCO, class 0 = person), onnxruntime.
 
-Contract (docs/ARCHITECTURE.md sections 8 and 10):
+Contract (docs/ARCHITECTURE.md sections 8, 10 and 22):
   available() -> bool                         yolox_s.onnx present (app.ml.models 'persons')
   detect(img_bgr, threshold=0.5) -> list[(x0, y0, x1, y1, score)]   pixel boxes in img_bgr, clipped,
                                               best score first, after NMS (NMS_IOU)
+  detect_classes(img_bgr, {class_id: threshold}) -> {class_id: [boxes]}   the same for several COCO
+                                              classes from one run (ANIMAL_CLASSES names the pets)
   get_engine() -> PersonEngine; reset(); loaded(); provider()
 
 Preprocessing follows YOLOX's demo (yolox/data/data_augment.py preproc, legacy=False): the BGR image
@@ -31,6 +33,9 @@ STRIDES = (8, 16, 32)
 PAD_VALUE = 114
 NMS_IOU = 0.45
 PERSON_CLASS = 0
+# COCO classes of the animals that get an identity (section 22).
+ANIMAL_CLASSES: dict[int, str] = {14: "bird", 15: "cat", 16: "dog", 17: "horse", 18: "sheep", 19: "cow",
+                                  20: "elephant", 21: "bear", 22: "zebra", 23: "giraffe"}
 MIN_BOX_PX = 2.0
 
 Box = tuple[float, float, float, float, float]
@@ -62,30 +67,42 @@ def _grids(size: int = INPUT_SIZE) -> tuple[np.ndarray, np.ndarray]:
 _GRIDS, _STRIDE_COL = _grids()
 
 
-def decode(raw: np.ndarray, r: float, width: int, height: int, threshold: float,
-           nms_iou: float = NMS_IOU) -> list[Box]:
-    """Raw (8400, 85) or (1, 8400, 85) output -> person boxes in original image pixels."""
+def decode_classes(raw: np.ndarray, r: float, width: int, height: int, thresholds: dict[int, float],
+                   nms_iou: float = NMS_IOU) -> dict[int, list[Box]]:
+    """Raw (8400, 85) or (1, 8400, 85) output -> {class_id: boxes in original image pixels} for the
+    classes in `thresholds` (score = objectness * class probability, NMS per class)."""
     out = np.asarray(raw, dtype=np.float32).reshape(-1, raw.shape[-1])
     if out.shape[0] != _GRIDS.shape[0]:
         raise ValueError(f"unexpected YOLOX output shape {raw.shape}")
-    scores = out[:, 4] * out[:, 5 + PERSON_CLASS]
-    keep = np.where(scores >= threshold)[0]
-    if keep.size == 0:
-        return []
-    o = out[keep]
-    xy = (o[:, :2] + _GRIDS[keep]) * _STRIDE_COL[keep]
-    wh = np.exp(np.clip(o[:, 2:4], -20, 20)) * _STRIDE_COL[keep]
-    boxes = np.concatenate([xy - wh / 2, xy + wh / 2], axis=1) / r
-    boxes[:, [0, 2]] = np.clip(boxes[:, [0, 2]], 0, width)
-    boxes[:, [1, 3]] = np.clip(boxes[:, [1, 3]], 0, height)
-    s = scores[keep]
-    ok = ((boxes[:, 2] - boxes[:, 0]) >= MIN_BOX_PX) & ((boxes[:, 3] - boxes[:, 1]) >= MIN_BOX_PX)
-    boxes, s = boxes[ok], s[ok]
-    if len(s) == 0:
-        return []
-    order = nms(boxes, s, nms_iou)
-    return [(float(boxes[i, 0]), float(boxes[i, 1]), float(boxes[i, 2]), float(boxes[i, 3]), float(s[i]))
-            for i in order]
+    result: dict[int, list[Box]] = {}
+    for cls, threshold in thresholds.items():
+        scores = out[:, 4] * out[:, 5 + int(cls)]
+        keep = np.where(scores >= threshold)[0]
+        if keep.size == 0:
+            result[int(cls)] = []
+            continue
+        o = out[keep]
+        xy = (o[:, :2] + _GRIDS[keep]) * _STRIDE_COL[keep]
+        wh = np.exp(np.clip(o[:, 2:4], -20, 20)) * _STRIDE_COL[keep]
+        boxes = np.concatenate([xy - wh / 2, xy + wh / 2], axis=1) / r
+        boxes[:, [0, 2]] = np.clip(boxes[:, [0, 2]], 0, width)
+        boxes[:, [1, 3]] = np.clip(boxes[:, [1, 3]], 0, height)
+        s = scores[keep]
+        ok = ((boxes[:, 2] - boxes[:, 0]) >= MIN_BOX_PX) & ((boxes[:, 3] - boxes[:, 1]) >= MIN_BOX_PX)
+        boxes, s = boxes[ok], s[ok]
+        if len(s) == 0:
+            result[int(cls)] = []
+            continue
+        order = nms(boxes, s, nms_iou)
+        result[int(cls)] = [(float(boxes[i, 0]), float(boxes[i, 1]), float(boxes[i, 2]), float(boxes[i, 3]),
+                             float(s[i])) for i in order]
+    return result
+
+
+def decode(raw: np.ndarray, r: float, width: int, height: int, threshold: float,
+           nms_iou: float = NMS_IOU) -> list[Box]:
+    """Raw (8400, 85) or (1, 8400, 85) output -> person boxes in original image pixels."""
+    return decode_classes(raw, r, width, height, {PERSON_CLASS: threshold}, nms_iou)[PERSON_CLASS]
 
 
 def nms(boxes: np.ndarray, scores: np.ndarray, iou: float) -> list[int]:
@@ -136,14 +153,18 @@ class PersonEngine:
         self._lock = threading.Lock()
 
     def detect(self, img_bgr: np.ndarray, threshold: float = 0.5) -> list[Box]:
+        return self.detect_classes(img_bgr, {PERSON_CLASS: threshold})[PERSON_CLASS]
+
+    def detect_classes(self, img_bgr: np.ndarray, thresholds: dict[int, float]) -> dict[int, list[Box]]:
+        """One run, boxes for every class in `thresholds`."""
         img = _as_bgr(img_bgr)
         h, w = img.shape[:2]
-        if h < 8 or w < 8:
-            return []
+        if h < 8 or w < 8 or not thresholds:
+            return {int(c): [] for c in thresholds}
         blob, r = letterbox(img)
         with self._lock:
             raw = self._sess.run(None, {self._in: blob[None]})[0]
-        return decode(raw, r, w, h, threshold)
+        return decode_classes(raw, r, w, h, thresholds)
 
 
 _engine: PersonEngine | None = None
@@ -172,6 +193,11 @@ def get_engine() -> PersonEngine:
 def detect(img_bgr: np.ndarray, threshold: float = 0.5) -> list[Box]:
     """Person boxes (x0, y0, x1, y1, score) in img_bgr pixels, best first."""
     return get_engine().detect(img_bgr, threshold)
+
+
+def detect_classes(img_bgr: np.ndarray, thresholds: dict[int, float]) -> dict[int, list[Box]]:
+    """{class_id: boxes (x0, y0, x1, y1, score)} for several COCO classes from one run."""
+    return get_engine().detect_classes(img_bgr, thresholds)
 
 
 def reset() -> None:

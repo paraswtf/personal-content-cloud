@@ -56,35 +56,41 @@ def clean_person_name(value: str | None) -> str | None:
     return name or None
 
 
-def new_person(conn: sqlite3.Connection, name: str | None = None) -> int:
-    """Insert a person (unnamed when name is None). Call inside the caller's transaction."""
+def new_person(conn: sqlite3.Connection, name: str | None = None, *, kind: str = "person",
+               species: str | None = None) -> int:
+    """Insert a person (unnamed when name is None), or a pet identity (kind 'pet' with its species,
+    section 22). Call inside the caller's transaction."""
     now = now_iso()
     name = clean_person_name(name)
     return int(conn.execute(
-        "INSERT INTO persons(name, name_key, created_at, updated_at) VALUES (?, ?, ?, ?)",
-        (name, name.casefold() if name else None, now, now),
+        "INSERT INTO persons(name, name_key, created_at, updated_at, kind, species) VALUES (?, ?, ?, ?, ?, ?)",
+        (name, name.casefold() if name else None, now, now, kind, species if kind == "pet" else None),
     ).lastrowid)
 
 
-def find_person_by_name(conn: sqlite3.Connection, name: str | None, exclude_id: int | None = None) -> int | None:
-    """The person whose name matches (case-insensitive), most faces first, then lowest id."""
+def find_person_by_name(conn: sqlite3.Connection, name: str | None, exclude_id: int | None = None,
+                        kind: str | None = "person") -> int | None:
+    """The person (of that kind; None = any) whose name matches (case-insensitive), most faces or
+    crops first, then lowest id."""
     clean = clean_person_name(name)
     if not clean:
         return None
     row = conn.execute(
-        "SELECT p.id FROM persons p WHERE p.name_key = ? AND p.id IS NOT ? "
-        "ORDER BY (SELECT COUNT(*) FROM faces f WHERE f.person_id = p.id) DESC, p.id LIMIT 1",
-        (clean.casefold(), exclude_id),
+        "SELECT p.id FROM persons p WHERE p.name_key = ? AND p.id IS NOT ? AND (? IS NULL OR p.kind = ?) "
+        "ORDER BY (SELECT COUNT(*) FROM faces f WHERE f.person_id = p.id) "
+        "+ (SELECT COUNT(*) FROM animals a WHERE a.person_id = p.id) DESC, p.id LIMIT 1",
+        (clean.casefold(), exclude_id, kind, kind),
     ).fetchone()
     return int(row[0]) if row else None
 
 
-def find_or_create_person(conn: sqlite3.Connection, name: str | None) -> int | None:
+def find_or_create_person(conn: sqlite3.Connection, name: str | None, *, kind: str = "person",
+                          species: str | None = None) -> int | None:
     clean = clean_person_name(name)
     if not clean:
         return None
-    found = find_person_by_name(conn, clean)
-    return found if found is not None else new_person(conn, clean)
+    found = find_person_by_name(conn, clean, kind=kind)
+    return found if found is not None else new_person(conn, clean, kind=kind, species=species)
 
 
 def clear_guesses_for(conn: sqlite3.Connection, person_ids: list[int] | set[int]) -> int:
@@ -104,7 +110,7 @@ def clear_guesses_for(conn: sqlite3.Connection, person_ids: list[int] | set[int]
 
 
 def prune_empty_persons(conn: sqlite3.Connection, person_ids: set[int] | list[int]) -> int:
-    """Delete unnamed people left with no faces, bodies or tags (call inside a tx)."""
+    """Delete unnamed people (and pets) left with no faces, bodies, animal boxes or tags (call inside a tx)."""
     ids = sorted({int(p) for p in person_ids if p is not None})
     if not ids:
         return 0
@@ -113,6 +119,7 @@ def prune_empty_persons(conn: sqlite3.Connection, person_ids: set[int] | list[in
         f"SELECT id FROM persons WHERE id IN ({marks}) AND name IS NULL "
         "AND NOT EXISTS (SELECT 1 FROM faces f WHERE f.person_id = persons.id) "
         "AND NOT EXISTS (SELECT 1 FROM bodies b WHERE b.person_id = persons.id) "
+        "AND NOT EXISTS (SELECT 1 FROM animals a WHERE a.person_id = persons.id) "
         "AND NOT EXISTS (SELECT 1 FROM item_tags t WHERE t.person_id = persons.id)",
         ids,
     )]
@@ -517,14 +524,21 @@ def merge_persons(conn: sqlite3.Connection, target_id: int, source_ids: list[int
     with tx(conn):
         marks = ",".join("?" * (len(sources) + 1))
         found = {r["id"]: r for r in conn.execute(
-            f"SELECT id, name, name_key, cover_face_id FROM persons WHERE id IN ({marks})", [target_id, *sources]
+            f"SELECT id, name, name_key, cover_face_id, kind, species FROM persons WHERE id IN ({marks})",
+            [target_id, *sources]
         )}
         missing = [i for i in [target_id, *sources] if i not in found]
         if missing:
             raise ValueError(f"Unknown person id(s): {', '.join(map(str, missing))}")
+        kinds = {found[i]["kind"] for i in [target_id, *sources]}
+        if len(kinds) > 1:
+            raise ValueError("A pet and a person cannot be merged")
+        if kinds == {"pet"} and len({found[i]["species"] for i in [target_id, *sources]}) > 1:
+            raise ValueError("Pets of different species cannot be merged")
         s = ",".join("?" * len(sources))
         conn.execute(f"UPDATE faces SET person_id = ? WHERE person_id IN ({s})", [target_id, *sources])
         conn.execute(f"UPDATE bodies SET person_id = ? WHERE person_id IN ({s})", [target_id, *sources])
+        conn.execute(f"UPDATE animals SET person_id = ? WHERE person_id IN ({s})", [target_id, *sources])
         for table in ("faces", "bodies"):
             conn.execute(f"UPDATE {table} SET guess_person_id = ? WHERE guess_person_id IN ({s})",
                          [target_id, *sources])

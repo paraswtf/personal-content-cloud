@@ -10,6 +10,7 @@ import {
   EyeOff,
   Loader2,
   Lock,
+  PawPrint,
   RefreshCw,
   Star,
   Tag,
@@ -88,6 +89,7 @@ function PersonChip({
   onRemove: () => void
 }) {
   const name = personName(person)
+  const pet = person.kind === 'pet'
   return (
     <li className="flex max-w-full items-center rounded-full bg-white/10 transition-colors hover:bg-white/15">
       <Link to={`/people/${person.id}`} className="flex h-10 min-w-0 items-center gap-2 rounded-full pl-1 pr-3 text-sm font-medium text-white">
@@ -95,9 +97,10 @@ function PersonChip({
           <img src={thumb} alt="" className="size-8 shrink-0 rounded-full object-cover" />
         ) : (
           <span className="flex size-8 shrink-0 items-center justify-center rounded-full bg-white/10">
-            <Tag className="size-3.5 text-white/70" aria-hidden />
+            {pet ? <PawPrint className="size-3.5 text-white/70" aria-hidden /> : <Tag className="size-3.5 text-white/70" aria-hidden />}
           </span>
         )}
+        {pet && thumb && <PawPrint className="-mr-0.5 size-3.5 shrink-0 text-white/70" aria-label="Pet" />}
         <span className={person.name ? 'truncate' : 'truncate text-white/70'}>{name}</span>
       </Link>
       {removable && (
@@ -167,6 +170,8 @@ export default function InfoPanel({
   const thumbs = new Map<number, string>()
   for (const f of detail.faces) if (f.person && !thumbs.has(f.person.id)) thumbs.set(f.person.id, f.url)
   for (const b of detail.bodies) if (b.person && !thumbs.has(b.person.id)) thumbs.set(b.person.id, b.url)
+  for (const a of detail.animals) if (a.person && !thumbs.has(a.person.id)) thumbs.set(a.person.id, a.url)
+  const unnamedAnimals = detail.animals.filter((a) => !a.person).length
   const tagIds = new Set(detail.tags.map((t) => t.id))
   const unmatched = detail.faces.filter((f) => !f.person && !f.guess).length
   const guessTargets: BoxTarget[] = [
@@ -344,7 +349,7 @@ export default function InfoPanel({
       )}
 
       {(!isDoc || detail.people.length > 0 || detail.faces.length > 0) && (
-        <Section title={isVideo ? 'In this video' : 'People'}>
+        <Section title={isVideo ? 'In this video' : detail.people.some((p) => p.kind === 'pet') || detail.animals.length > 0 ? 'People and pets' : 'People'}>
           {detail.people.length > 0 ? (
             <ul className="flex flex-wrap gap-2" aria-label="People in this item">
               {detail.people.map((p) => (
@@ -394,6 +399,13 @@ export default function InfoPanel({
             <p className="mt-2.5 text-xs text-white/55">
               {unmatched === 1 ? '1 face is not matched to anyone.' : `${unmatched} faces are not matched to anyone.`} Tap a face{' '}
               {isVideo ? 'chip' : 'box'} to tag it.
+            </p>
+          )}
+
+          {unnamedAnimals > 0 && (
+            <p className="mt-2.5 text-xs text-white/55">
+              {unnamedAnimals === 1 ? '1 animal is not matched to a pet.' : `${unnamedAnimals} animals are not matched to a pet.`} Tap its{' '}
+              {isVideo ? 'chip' : 'box'} to name it.
             </p>
           )}
 

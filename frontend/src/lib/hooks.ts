@@ -74,6 +74,7 @@ export const LIBRARY_KEYS = [
   'people',
   'person',
   'person-faces',
+  'person-animals',
   'person-items',
   'faces-unassigned',
   'suggestions',

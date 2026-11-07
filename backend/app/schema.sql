@@ -131,6 +131,7 @@ CREATE TABLE IF NOT EXISTS items (
   preview_status    TEXT NOT NULL DEFAULT 'none' CHECK (preview_status IN ('none','pending','done','error')),
   face_count        INTEGER NOT NULL DEFAULT 0,
   body_count        INTEGER NOT NULL DEFAULT 0,
+  animal_count      INTEGER NOT NULL DEFAULT 0,
   favorite          INTEGER NOT NULL DEFAULT 0,
   content_id        TEXT,                       -- Apple ContentIdentifier of a Live Photo (still and MOV share it)
   companion_of      INTEGER REFERENCES items(id) ON DELETE SET NULL,  -- a Live Photo's MOV: the still it belongs to
@@ -185,7 +186,9 @@ CREATE TABLE IF NOT EXISTS persons (
   name_key      TEXT,
   cover_face_id INTEGER REFERENCES faces(id) ON DELETE SET NULL,
   created_at    TEXT NOT NULL,
-  updated_at    TEXT NOT NULL
+  updated_at    TEXT NOT NULL,
+  kind          TEXT NOT NULL DEFAULT 'person', -- 'person' or 'pet' (section 22)
+  species       TEXT                            -- pets: the detector's species
 );
 CREATE INDEX IF NOT EXISTS persons_name ON persons(name_key);
 
@@ -231,6 +234,23 @@ CREATE TABLE IF NOT EXISTS bodies (
 CREATE INDEX IF NOT EXISTS bodies_item   ON bodies(item_id);
 CREATE INDEX IF NOT EXISTS bodies_person ON bodies(person_id);
 CREATE INDEX IF NOT EXISTS bodies_guess  ON bodies(guess_person_id);
+
+-- Animal boxes (YOLOX COCO animal classes, section 22): a pet identity is a persons row with kind 'pet'.
+CREATE TABLE IF NOT EXISTS animals (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,   -- never reused (crop file names)
+  item_id         INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+  person_id       INTEGER REFERENCES persons(id) ON DELETE SET NULL,
+  assigned_by     TEXT NOT NULL DEFAULT 'auto' CHECK (assigned_by IN ('auto','user')),
+  x REAL NOT NULL, y REAL NOT NULL, w REAL NOT NULL, h REAL NOT NULL,  -- normalised [0,1]
+  det_score       REAL NOT NULL,
+  species         TEXT NOT NULL,                -- bird, cat, dog, horse, sheep, cow, elephant, bear, zebra, giraffe
+  frame_time_s    REAL,                         -- videos: the sampled frame
+  embedding       BLOB,                         -- float32[768], L2-normalised (SigLIP of the padded crop)
+  created_at      TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS animals_item    ON animals(item_id);
+CREATE INDEX IF NOT EXISTS animals_person  ON animals(person_id);
+CREATE INDEX IF NOT EXISTS animals_species ON animals(species, person_id);
 
 -- People in an item without a usable face box (manual tags, confirmed faceless bodies).
 CREATE TABLE IF NOT EXISTS item_tags (

@@ -1,4 +1,5 @@
 // Display formatting helpers. Dates are shown in the browser's local time.
+import type { PersonKind, Species } from './types'
 
 export function formatBytes(n: number | null | undefined): string {
   if (n === null || n === undefined || !Number.isFinite(n)) return '-'
@@ -106,8 +107,15 @@ export function formatExact(iso: string): string {
 }
 
 /** A person's display name: their name, or "Unnamed" when they have none yet. */
-export function personName(p: { name: string | null } | null | undefined): string {
-  return p?.name?.trim() ? p.name : 'Unnamed'
+export function personName(p: { name: string | null; kind?: PersonKind; species?: Species | null } | null | undefined): string {
+  if (p?.name?.trim()) return p.name
+  if (p?.kind === 'pet') return p.species ? `Unnamed ${speciesLabel(p.species)}` : 'Unnamed pet'
+  return 'Unnamed'
+}
+
+/** "dog" -> "Dog". */
+export function speciesLabel(species: string | null | undefined): string {
+  return species ? species.charAt(0).toUpperCase() + species.slice(1) : 'Pet'
 }
 
 /** 0.861 -> "86%". */

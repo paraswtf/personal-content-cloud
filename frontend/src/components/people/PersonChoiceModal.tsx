@@ -1,4 +1,5 @@
 // Modal that asks "which person?" with PersonPicker (an existing person or a new name).
+import type { Species } from '../../lib/types'
 import { Spinner } from '../ui'
 import { AdminModal } from '../admin/AdminModal'
 import PersonPicker, { type PersonChoice } from './PersonPicker'
@@ -12,6 +13,9 @@ export default function PersonChoiceModal({
   busy = false,
   allowCreate = true,
   excludeIds,
+  kind,
+  species,
+  speciesOnly,
   onPick,
   onClose,
 }: {
@@ -21,6 +25,10 @@ export default function PersonChoiceModal({
   busy?: boolean
   allowCreate?: boolean
   excludeIds?: number[]
+  /** Pick among pets instead of people; `species` is listed first, or alone with `speciesOnly`. */
+  kind?: 'person' | 'pet'
+  species?: Species
+  speciesOnly?: boolean
   onPick: (choice: PersonChoice) => void
   onClose: () => void
 }) {
@@ -33,7 +41,16 @@ export default function PersonChoiceModal({
             <Spinner label="Working" />
           </div>
         ) : (
-          <PersonPicker autoFocus allowCreate={allowCreate} excludeIds={excludeIds} placeholder="Search people by name" onPick={onPick} />
+          <PersonPicker
+            autoFocus
+            allowCreate={allowCreate}
+            excludeIds={excludeIds}
+            kind={kind}
+            species={species}
+            speciesOnly={speciesOnly}
+            placeholder={kind === 'pet' ? 'Search pets by name' : 'Search people by name'}
+            onPick={onPick}
+          />
         )}
       </div>
     </AdminModal>

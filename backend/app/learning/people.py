@@ -37,7 +37,8 @@ def _vec(blob: bytes | None) -> np.ndarray | None:
 
 
 def person_thresholds(conn: sqlite3.Connection) -> dict[int, float]:
-    default = float(settings.cluster_match_threshold)
+    """{person_id: match threshold} for the people (faces) and the pets (animal crops, section 22)
+    whose owner-assigned examples say the default is too loose or too tight."""
     by_person: dict[int, list[np.ndarray]] = {}
     for r in conn.execute(
         "SELECT person_id, embedding FROM faces WHERE assigned_by = 'user' AND person_id IS NOT NULL"
@@ -52,6 +53,21 @@ def person_thresholds(conn: sqlite3.Connection) -> dict[int, float]:
         v = _vec(r["embedding"])
         if v is not None:
             rejected.setdefault(int(r["person_id"]), []).append(v)
+    out = _thresholds(by_person, rejected, float(settings.cluster_match_threshold))
+    by_pet: dict[int, list[np.ndarray]] = {}
+    for r in conn.execute(
+        "SELECT a.person_id, a.embedding FROM animals a JOIN persons p ON p.id = a.person_id "
+        "WHERE a.assigned_by = 'user' AND a.embedding IS NOT NULL AND p.kind = 'pet'"
+    ):
+        v = _vec(r["embedding"])
+        if v is not None:
+            by_pet.setdefault(int(r["person_id"]), []).append(v)
+    out.update(_thresholds(by_pet, {}, float(settings.pet_match_threshold)))
+    return out
+
+
+def _thresholds(by_person: dict[int, list[np.ndarray]], rejected: dict[int, list[np.ndarray]],
+                default: float) -> dict[int, float]:
     out: dict[int, float] = {}
     for pid in set(by_person) | set(rejected):
         confirmed = by_person.get(pid, [])

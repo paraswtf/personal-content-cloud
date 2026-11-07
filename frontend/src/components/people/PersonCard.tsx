@@ -1,10 +1,10 @@
-// A person tile: round face, name ("Unnamed" when none), item count and a badge for open guesses.
+// A person or pet tile: round face (or animal crop), name ("Unnamed" when none), item count and a badge for open guesses.
 // Links to the person page, or acts as a selectable button when onSelect is given.
 import { Link } from 'react-router'
 import clsx from 'clsx'
-import { Check } from 'lucide-react'
+import { Check, PawPrint } from 'lucide-react'
 import type { PersonOut } from '../../lib/types'
-import { formatCount, personName } from '../../lib/format'
+import { formatCount, personName, speciesLabel } from '../../lib/format'
 import { Avatar } from '../ui'
 
 interface Props {
@@ -17,6 +17,7 @@ interface Props {
 
 export default function PersonCard({ person, size = 'md', to, selected = false, onSelect }: Props) {
   const md = size === 'md'
+  const pet = person.kind === 'pet'
   const body = (
     <>
       <span className="relative">
@@ -50,7 +51,10 @@ export default function PersonCard({ person, size = 'md', to, selected = false, 
         <span className={clsx('max-w-full truncate font-semibold', md ? 'text-sm' : 'text-xs', person.name ? 'text-ink' : 'text-ink-soft')}>
           {personName(person)}
         </span>
-        <span className={clsx('text-ink-faint', md ? 'text-xs' : 'text-[11px]')}>{formatCount(person.item_count, 'item')}</span>
+        <span className={clsx('inline-flex items-center gap-1 text-ink-faint', md ? 'text-xs' : 'text-[11px]')}>
+          {pet && <PawPrint className="size-3 shrink-0" aria-hidden />}
+          {pet ? `${speciesLabel(person.species)}, ${formatCount(person.item_count, 'item')}` : formatCount(person.item_count, 'item')}
+        </span>
       </span>
     </>
   )

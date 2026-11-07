@@ -41,6 +41,7 @@ import numpy as np
 from PIL import Image
 
 from app import storage
+from app.analysis import animals as animals_mod
 from app.analysis import bodies as bodies_mod
 from app.analysis import categories, cluster, quality
 from app.analysis import faces as faces_mod
@@ -54,6 +55,8 @@ log = logging.getLogger(__name__)
 ANALYSIS_SIDE = 2048
 FRAME_KEEP_SIDE = 448  # video frames kept in memory for SigLIP / NSFW / exposure
 NSFW_VIDEO_FRAMES = 16
+ANIMAL_VIDEO_FRAMES = 6  # sampled frames the animal detector looks at (plus the poster)
+ANIMAL_MIN_AREA = 0.05   # an animal box this large (share of the frame) makes the photo a pet photo
 LABEL_COUNT = 5
 
 
@@ -92,9 +95,12 @@ class Result:
     face_torsos: list[np.ndarray | None] = field(default_factory=list)  # SigLIP vectors per face
     bodies: list[bodies_mod.BodyRecord] = field(default_factory=list)
     body_torsos: list[np.ndarray | None] = field(default_factory=list)
+    animals: list[animals_mod.AnimalRecord] = field(default_factory=list)  # section 22
+    animal_looks: list[np.ndarray | None] = field(default_factory=list)  # SigLIP vectors per animal crop
     skipped: list[str] = field(default_factory=list)
     faces_ran: bool = False  # the face engine looked at this item (r.faces is the real answer)
     bodies_ran: bool = False  # the person detector looked at this item
+    animals_ran: bool = False  # the animal classes were asked for
 
 
 # ------------------------------------------------------------------ model access
@@ -260,13 +266,41 @@ def _run_models(item: sqlite3.Row, v: Visual, siglip: ModuleType | None, nsfw: M
         else:
             r.skipped.append("faces")
 
-    # Person boxes (images only).
+    # Person boxes (images only) and animal boxes (images and sampled video frames, section 22):
+    # one YOLOX run per frame answers both.
     if kind == "image" and visual:
-        if bodies_mod.available():
-            r.bodies = bodies_mod.detect_bodies(v.img, v.bgr, r.faces)  # type: ignore[arg-type]
-            r.bodies_ran = True
-        else:
+        want_bodies, want_animals = bodies_mod.available(), animals_mod.available()
+        if want_bodies or want_animals:
+            from app.ml import persons as persons_ml
+
+            asks: dict[int, float] = {}
+            if want_bodies:
+                asks[persons_ml.PERSON_CLASS] = float(settings.body_det_threshold)
+            if want_animals:
+                asks.update(animals_mod.thresholds())
+            found = persons_ml.detect_classes(v.bgr, asks)  # type: ignore[arg-type]
+            if want_bodies:
+                r.bodies = bodies_mod.detect_bodies(v.img, v.bgr, r.faces,  # type: ignore[arg-type]
+                                                    raw=found.get(persons_ml.PERSON_CLASS, []))
+                r.bodies_ran = True
+            if want_animals:
+                r.animals = animals_mod.from_boxes(v.img, v.bgr, found)  # type: ignore[arg-type]
+                r.animals_ran = True
+        if not want_bodies:
             r.skipped.append("bodies")
+        if not want_animals:
+            r.skipped.append("animals")
+    elif kind == "video" and visual:
+        if animals_mod.available():
+            frames: list[tuple[float, Image.Image | None, np.ndarray]] = [(float(v.poster_time or 0.0), v.img, v.bgr)]  # type: ignore[list-item]
+            frames += [(float(t), None, f) for t, f in _spread(v.frames, ANIMAL_VIDEO_FRAMES)]
+            for t, img, bgr in frames:
+                pil = img if img is not None else Image.fromarray(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
+                r.animals.extend(animals_mod.detect_animals(pil, bgr, frame_time_s=t))
+            r.animals = sorted(r.animals, key=lambda a: -a.det_score)[:animals_mod.MAX_ANIMALS]
+            r.animals_ran = True
+        else:
+            r.skipped.append("animals")
 
     # SigLIP: frame 0, video frames, torso crops, zero-shot scores.
     if siglip is not None and visual:
@@ -299,20 +333,23 @@ def _run_models(item: sqlite3.Row, v: Visual, siglip: ModuleType | None, nsfw: M
             r.category_scores["screenshot_p"] = round(r.screenshot_p, 4)
             r.quality_scores["accident_p"] = round(float(quality.accident_probability(engine, frame0)[0]), 4)
             r.quality_scores["motion_blur_p"] = round(float(quality.motion_blur_probability(engine, frame0)[0]), 4)
-        crops = [f.torso for f in r.faces] + [b.torso for b in r.bodies]
+        crops = [f.torso for f in r.faces] + [b.torso for b in r.bodies] + [a.look for a in r.animals]
         valid = [i for i, c in enumerate(crops) if c is not None and c.size]
         vecs: list[np.ndarray | None] = [None] * len(crops)
         if valid:
             out = np.asarray(engine.embed_images([crops[i] for i in valid]), dtype=np.float32)
             for i, e in zip(valid, out):
                 vecs[i] = _norm(e)
-        r.face_torsos = vecs[:len(r.faces)]
-        r.body_torsos = vecs[len(r.faces):]
+        nf, nb = len(r.faces), len(r.bodies)
+        r.face_torsos = vecs[:nf]
+        r.body_torsos = vecs[nf:nf + nb]
+        r.animal_looks = vecs[nf + nb:]
     else:
         if visual:
             r.skipped.append("siglip")
         r.face_torsos = [None] * len(r.faces)
         r.body_torsos = [None] * len(r.bodies)
+        r.animal_looks = [None] * len(r.animals)
 
     # NSFW classifier (images and videos).
     if kind in ("image", "video") and visual:
@@ -451,8 +488,15 @@ def analyze_item(conn: sqlite3.Connection, item_id: int, version: int) -> None:
         r.faces, r.face_torsos = [], []
     if keep_bodies:
         r.bodies, r.body_torsos = [], []
+    keep_animals = kind in ("image", "video") and not r.animals_ran
+    if keep_animals:
+        r.animals, r.animal_looks = [], []
     face_crops = [_encode_face_crop(f.crop) for f in r.faces]
     body_crops = [bodies_mod.encode_crop(b.crop) for b in r.bodies]
+    animal_crops = [animals_mod.encode_crop(a.crop) for a in r.animals]
+    has_animal = any(a.w * a.h >= ANIMAL_MIN_AREA for a in r.animals)
+
+    from app.analysis import pets as pets_mod
 
     idx = get_index()
     idx.sync(conn)
@@ -559,13 +603,47 @@ def analyze_item(conn: sqlite3.Connection, item_id: int, version: int) -> None:
                 if remaining:
                     cluster.assign_new_faces(conn, remaining, exclude_face_ids=set(old_ids))
             cluster.sync_bodies_to_faces(conn, [item_id])
+
+            # Animals (section 22): boxes, crops, look embeddings, then the pet identities.
+            old_animals = [] if keep_animals else conn.execute(
+                "SELECT * FROM animals WHERE item_id = ? ORDER BY id", (item_id,)).fetchall()
+            if keep_animals:
+                has_animal = has_animal or conn.execute(
+                    "SELECT 1 FROM animals WHERE item_id = ? AND w * h >= ? LIMIT 1", (item_id, ANIMAL_MIN_AREA)
+                ).fetchone() is not None
+            old_animal_ids = [int(a["id"]) for a in old_animals]
+            old_people |= {int(a["person_id"]) for a in old_animals if a["person_id"] is not None}
+            new_animal_ids: list[int] = []
+            for rec, crop, look in zip(r.animals, animal_crops, r.animal_looks):
+                aid = int(conn.execute(
+                    "INSERT INTO animals(item_id, person_id, assigned_by, x, y, w, h, det_score, species, "
+                    "frame_time_s, embedding, created_at) VALUES (?, NULL, 'auto', ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (item_id, rec.x, rec.y, rec.w, rec.h, rec.det_score, rec.species, rec.frame_time_s,
+                     _blob(look), now),
+                ).lastrowid)
+                new_animal_ids.append(aid)
+                path = storage.animal_crop_path(aid)
+                written.append(path)
+                storage.write_bytes_atomic(path, crop)
+            if old_animals and new_animal_ids:
+                pets_mod.carry_over(conn, old_animals, new_animal_ids)
+            if old_animal_ids:
+                marks = ",".join("?" * len(old_animal_ids))
+                conn.execute(f"DELETE FROM animals WHERE id IN ({marks})", old_animal_ids)
+                trash.extend(storage.animal_crop_path(a) for a in old_animal_ids)
+            if new_animal_ids:
+                try:
+                    pets_mod.assign_new_animals(conn, item_id)
+                except Exception:  # noqa: BLE001 - an identity failure must not lose the analysis
+                    log.exception("pets: assigning animals of item %s failed", item_id)
             if old_people:
                 cluster.prune_empty_persons(conn, old_people)
             # items_fts.people lists the names on the item: refresh it when they may have changed.
             people_changed = bool(old_people) or conn.execute(
                 "SELECT 1 FROM faces WHERE item_id = ? AND person_id IS NOT NULL UNION ALL "
-                "SELECT 1 FROM bodies WHERE item_id = ? AND person_id IS NOT NULL LIMIT 1",
-                (item_id, item_id),
+                "SELECT 1 FROM bodies WHERE item_id = ? AND person_id IS NOT NULL UNION ALL "
+                "SELECT 1 FROM animals WHERE item_id = ? AND person_id IS NOT NULL LIMIT 1",
+                (item_id, item_id, item_id),
             ).fetchone() is not None
 
             # Category and nsfw.
@@ -595,7 +673,7 @@ def analyze_item(conn: sqlite3.Connection, item_id: int, version: int) -> None:
                 kind, nsfw_score=nsfw_score, explicit_p=r.explicit_p, nsfw_override=nsfw_override,
                 screenshot_heur=screen_heur, screenshot_p=r.screenshot_p, doc_like=doc_like,
                 has_person=has_person, scores=r.category_scores, learned=learned_cat, nsfw_learned=learned_nsfw,
-                suggestive_p=r.suggestive_p, safe_p=r.safe_p, sensitivity=sensitivity,
+                suggestive_p=r.suggestive_p, safe_p=r.safe_p, sensitivity=sensitivity, has_animal=has_animal,
             )
             if cur["category_source"] == "user":
                 category = cur["category"]
@@ -628,6 +706,7 @@ def analyze_item(conn: sqlite3.Connection, item_id: int, version: int) -> None:
 
             face_count = conn.execute("SELECT COUNT(*) FROM faces WHERE item_id = ?", (item_id,)).fetchone()[0]
             body_count = conn.execute("SELECT COUNT(*) FROM bodies WHERE item_id = ?", (item_id,)).fetchone()[0]
+            animal_count = conn.execute("SELECT COUNT(*) FROM animals WHERE item_id = ?", (item_id,)).fetchone()[0]
             # A reprocess asked for while this run was going queued another analyze job (unique enqueue
             # only dedupes against queued jobs). Keep the status pending so that job runs in full
             # instead of returning at its 'done' check; the results of this run stay visible meanwhile.
@@ -635,11 +714,11 @@ def analyze_item(conn: sqlite3.Connection, item_id: int, version: int) -> None:
             conn.execute(
                 "UPDATE items SET category = ?, category_scores = ?, doc_likeness = ?, nsfw = ?, nsfw_score = ?, "
                 "misclick = ?, misclick_reasons = ?, quality_scores = ?, face_count = ?, body_count = ?, "
-                "analysis_status = ?, updated_at = ? WHERE id = ?",
+                "animal_count = ?, analysis_status = ?, updated_at = ? WHERE id = ?",
                 (category, json_dumps(r.category_scores) if r.category_scores else None, doc_like, new_nsfw,
                  nsfw_score, int(bool(mis)), json_dumps(reasons) if reasons else None,
-                 json_dumps(r.quality_scores) if r.quality_scores else None, face_count, body_count, status, now,
-                 item_id),
+                 json_dumps(r.quality_scores) if r.quality_scores else None, face_count, body_count, animal_count,
+                 status, now, item_id),
             )
             if cur["live_video_item_id"]:
                 from app.media import live as live_media
@@ -669,8 +748,8 @@ def analyze_item(conn: sqlite3.Connection, item_id: int, version: int) -> None:
     idx.settle(conn, final_version)
     for p in trash:
         storage.safe_unlink(p)
-    log.info("analyze: %s %s v%s -> %s, %d faces, %d bodies%s", kind, uid, version, category, len(r.faces),
-             len(r.bodies), f", skipped {sorted(set(r.skipped))}" if r.skipped else "")
+    log.info("analyze: %s %s v%s -> %s, %d faces, %d bodies, %d animals%s", kind, uid, version, category,
+             len(r.faces), len(r.bodies), len(r.animals), f", skipped {sorted(set(r.skipped))}" if r.skipped else "")
     _after(conn, item_id, int(version), kind, doc_like, bool(r.labels) or people_changed or tags_added > 0)
 
 

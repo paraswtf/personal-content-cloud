@@ -7,7 +7,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type TouchEvent } fr
 import { createPortal } from 'react-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import clsx from 'clsx'
-import { ChevronLeft, ChevronRight, Info, Loader2, Pencil, ScanFace, Star, X } from 'lucide-react'
+import { ChevronLeft, ChevronRight, Info, Loader2, Pencil, PawPrint, ScanFace, Star, X } from 'lucide-react'
 import { api, ApiError } from '../lib/api'
 import type { ItemDetail } from '../lib/types'
 import { formatDuration, personName } from '../lib/format'
@@ -18,13 +18,14 @@ import { ConfirmModal, lockScroll } from './ui'
 import { errorMessage } from './admin/adminHooks'
 import DocumentStage, { FileCard } from './viewer/DocumentStage'
 import DownloadMenu from './viewer/DownloadMenu'
+import AnimalEditor from './viewer/AnimalEditor'
 import FaceEditor from './viewer/FaceEditor'
 import InfoPanel from './viewer/InfoPanel'
 import LiveButton from './viewer/LiveButton'
 import PhotoStage from './viewer/PhotoStage'
 import VideoPreparing from './viewer/VideoPreparing'
 import VideoStage, { currentFrameTime, posterTime } from './viewer/VideoStage'
-import { boxKey, findBox, videoBoxes, type BoxKind, type BoxTarget } from './viewer/boxes'
+import { animalLabel, boxKey, findBox, videoBoxes, type BoxKind, type BoxTarget } from './viewer/boxes'
 import { useGuessActions } from './viewer/useGuessActions'
 import { useOnScreenFaces } from './viewer/useOnScreenFaces'
 import { seekToFrame } from './viewer/videoSeek'
@@ -70,11 +71,12 @@ function VideoChips({
   if (!targets.length) return null
   return (
     <div className="shrink-0 border-t border-white/10 px-2 py-2">
-      <ul className="flex gap-2 overflow-x-auto overscroll-x-contain px-1 pb-1" aria-label="People in this video" data-no-swipe>
+      <ul className="flex gap-2 overflow-x-auto overscroll-x-contain px-1 pb-1" aria-label="People and pets in this video" data-no-swipe>
         {targets.map((t) => {
           const key = boxKey(t)
           const b = t.box
-          const name = b.person ? personName(b.person) : b.guess ? `${personName(b.guess.person)}?` : 'Not tagged'
+          const isAnimal = t.kind === 'animal'
+          const name = isAnimal ? animalLabel(t.box) : b.person ? personName(b.person) : b.guess ? `${personName(b.guess.person)}?` : 'Not tagged'
           return (
             <li
               key={key}
@@ -93,6 +95,7 @@ function VideoChips({
                 aria-label={`Show the frame at ${formatDuration(b.frame_time_s)}, ${name}`}
               >
                 <img src={b.url} alt="" className="size-8 rounded-full object-cover" />
+                {isAnimal && <PawPrint className="-mr-1 size-3.5 shrink-0 text-white/70" aria-hidden />}
                 <span className={clsx('max-w-[9rem] truncate', b.guess && !b.person && 'text-amber-200')}>{name}</span>
                 <span className="text-xs tabular-nums text-white/55">{formatDuration(b.frame_time_s)}</span>
               </button>
@@ -100,7 +103,7 @@ function VideoChips({
                 type="button"
                 onClick={(e) => onEdit(t, e.currentTarget)}
                 className="-ml-1 flex size-10 items-center justify-center rounded-full text-white/60 hover:bg-white/10 hover:text-white"
-                aria-label={b.person ? `Edit, tagged as ${name}` : 'Tag this person'}
+                aria-label={b.person ? `Edit, tagged as ${name}` : isAnimal ? 'Name this pet' : 'Tag this person'}
               >
                 <Pencil className="size-4" aria-hidden />
               </button>
@@ -199,8 +202,8 @@ export default function Viewer({ uid, onClose, onPrev, onNext, position, startAt
   const guessActions = useGuessActions(uid, showToast)
   const guesses = useMemo(
     () => ({
-      confirm: (t: BoxTarget) => t.box.guess && guessActions.confirm(t.kind, t.box.id, t.box.guess),
-      reject: (t: BoxTarget) => t.box.guess && guessActions.reject(t.kind, t.box.id, t.box.guess),
+      confirm: (t: BoxTarget) => t.kind !== 'animal' && t.box.guess && guessActions.confirm(t.kind, t.box.id, t.box.guess),
+      reject: (t: BoxTarget) => t.kind !== 'animal' && t.box.guess && guessActions.reject(t.kind, t.box.id, t.box.guess),
       pendingKey: guessActions.pendingKey,
     }),
     [guessActions],
@@ -444,7 +447,7 @@ export default function Viewer({ uid, onClose, onPrev, onNext, position, startAt
 
   const kind = detail?.kind ?? placeholder?.kind
   const isVideo = kind === 'video'
-  const boxCount = detail ? detail.faces.length + detail.bodies.filter((b) => b.face_id === null).length : 0
+  const boxCount = detail ? detail.faces.length + detail.bodies.filter((b) => b.face_id === null).length + detail.animals.length : 0
   const errCode = detailQ.error instanceof ApiError ? detailQ.error : null
   const notFound = errCode?.status === 404
   const locked = hiddenPrivate || errCode?.code === 'vault_locked'
@@ -583,7 +586,7 @@ export default function Viewer({ uid, onClose, onPrev, onNext, position, startAt
               onClick={toggleFaces}
               aria-pressed={showFaces}
               className={iconButton}
-              aria-label={isVideo ? 'Show people in this video' : 'Show face and person boxes'}
+              aria-label={isVideo ? 'Show people and pets in this video' : 'Show face, person and pet boxes'}
               title="Faces (F)"
             >
               <ScanFace className="size-5" aria-hidden />
@@ -675,16 +678,29 @@ export default function Viewer({ uid, onClose, onPrev, onNext, position, startAt
       </div>
 
       {editing && editingTarget && (
-        <FaceEditor
-          uid={uid}
-          target={editingTarget}
-          anchor={editing.anchor}
-          onClose={closeEditor}
-          onDone={(msg) => {
-            showToast(msg)
-            closeEditor()
-          }}
-        />
+        editingTarget.kind === 'animal' ? (
+          <AnimalEditor
+            uid={uid}
+            box={editingTarget.box}
+            anchor={editing.anchor}
+            onClose={closeEditor}
+            onDone={(msg) => {
+              showToast(msg)
+              closeEditor()
+            }}
+          />
+        ) : (
+          <FaceEditor
+            uid={uid}
+            target={editingTarget}
+            anchor={editing.anchor}
+            onClose={closeEditor}
+            onDone={(msg) => {
+              showToast(msg)
+              closeEditor()
+            }}
+          />
+        )
       )}
 
       <div aria-live="polite" className="pointer-events-none absolute inset-x-0 bottom-6 z-50 flex justify-center px-4">

@@ -840,38 +840,49 @@ confirms it holds (a sync check right before) and deletes them from the library 
 shows the system confirmation. The app cannot be built or run on this server; `ios/README.md` has the
 steps for a Mac.
 
-## 22. Pets (`app/analysis/pets.py`, `animals` table)
+## 22. Pets (`app/analysis/animals.py`, `app/analysis/pets.py`, `animals` table)
 
-Individual pets are recognised by their look the way people are recognised by their face: a detector
+Individual pets are recognised by their look the way people are recognised by their face: the detector
 finds the animal, a crop embedding describes it, crops are grouped into identities the owner names, and
-corrections teach the thresholds.
+corrections teach each pet its own threshold.
 
-Detection: the YOLOX-S person detector (`app/ml/persons.py`) also returns the COCO animal classes (bird,
-cat, dog, horse, sheep, cow, elephant, bear, zebra, giraffe; score >= 0.45) as `species`; the analysis
-pipeline stores each box in `animals(id, item_id, frame_time_s, x, y, w, h, det_score, species, embedding
-BLOB float32[768] = SigLIP of the box crop padded by 10 percent, person_id REFERENCES persons, assigned_by
-auto|user, created_at)` with a crop at `animals/<id // 1000>/<id>.webp` (`storage.animal_crop_path`), and
-sets `items.animal_count`. Videos keep the best box per species per sampled frame, like faces.
+Detection: the YOLOX-S person detector (`app/ml/persons.py`, `detect_classes`) answers for the person class
+and the COCO animal classes (`ANIMAL_CLASSES`: bird, cat, dog, horse, sheep, cow, elephant, bear, zebra,
+giraffe; `ANIMAL_DET_THRESHOLD` 0.45) from one run per image. `analysis/animals.py` turns the boxes into
+`AnimalRecord`s (at most 6 per species and 12 per item, boxes under 24 px dropped) with a crop padded by 10
+percent for SigLIP and a crop for storage. Videos run the detector on the poster and 6 sampled frames and keep
+the 12 best boxes with their `frame_time_s`. The pipeline stores each box in `animals(id, item_id, person_id,
+assigned_by auto|user, x, y, w, h, det_score, species, frame_time_s, embedding BLOB float32[768] = SigLIP of
+the padded crop, created_at)` with the crop at `animals/<id // 1000>/<id>.webp` (`storage.animal_crop_path`),
+sets `items.animal_count`, and makes a photo with an animal box covering 5 percent of the frame and no person
+a `pets` photo (`categories.decide(has_animal=...)`). A re-analysis keeps user assignments on the
+best-overlapping new box of the same species (IoU >= 0.5, `pets.carry_over`). When the detector did not run,
+the old boxes stay (like bodies). `PETS_ENABLED=false` turns the animal classes off.
 
-Identities: `persons.kind` is `person` (default) or `pet` (migration column; a pet identity also carries
-`species`). `analysis/pets.py`: `assign_new_animals(conn, item_id)` compares each new box to every pet
-identity of the same species through the centroid of its assigned crops (cosine >= PET_MATCH 0.82, or
-the pet's learned threshold from `learning.people`), assigns the best, and otherwise groups unassigned
-boxes of one species that match each other at >= PET_NEW 0.86 into a new unnamed pet once two such boxes
-exist (`persons.kind = 'pet'`, `assigned_by = 'auto'`). A reprocess keeps user assignments by box overlap
-like faces. Merge, rename, cover, delete and listing go through the people routes: `PersonOut.kind` and
-`PersonOut.species`, `GET /api/people?kind=person|pet|all` (default all), `GET /api/people/{id}/items`
-includes animal boxes, `people_filter_sql` counts animals, `refresh_fts` puts pet names into the people
-column, and `GET /api/people/{id}/animals` lists the pet's crops.
+Identities: `persons.kind` is `person` (default) or `pet`, and a pet carries `species` (migrated columns).
+`pets.assign_new_animals(conn, item_id)` compares each new box to every pet of the same species through the
+centroid of the pet's assigned crops (cosine >= `PET_MATCH_THRESHOLD` 0.82, or the pet's learned threshold
+from `learning.people`, which fits pets from their owner-assigned crops with the pet default), assigns the
+best, and otherwise pairs the box with an unassigned box of that species from another item at >=
+`PET_NEW_THRESHOLD` 0.86 into a new unnamed pet (other close unassigned boxes join it; two boxes of one
+item never pair, two dogs in one photo are two dogs). Names: `cluster.find_person_by_name(kind=...)` keeps
+people and pets apart, so a dog and a person may both be called Bruno; a renamed pet merges only into a pet
+of the same species. `cluster.merge_persons` refuses a pet and a person, or two species. Deleting a pet
+unassigns its boxes; pruning removes unnamed pets without boxes.
 
-Boxes: `ItemDetail.animals: [AnimalOut{id, x, y, w, h, det_score, species, frame_time_s, person: PersonRef |
-null, assigned_by, url}]`; `POST /api/animals/assign {animal_ids, person_id | new_person_name | null}`
-(a new name creates a pet identity of the box's species); `DELETE /api/animals/{id}`; `/files/animal/{id}`
-serves the crop with the face-crop rules. Learning: an animal assigned by the owner is a positive example
-for its pet's threshold (section 18, people learner, over the 768-d look embeddings), and the category
-learner already sees the owner's choices.
+Routes: `GET /api/people?kind=person|pet|all` (default `all`); `PersonOut.kind`, `species`, `animal_count`
+(for a pet `face_count` is 0, `cover_face_id` null and `cover_url` its best crop, user-assigned first);
+`PersonRef.kind`; `GET /api/people/{id}/animals` (`AnimalPage` of `AnimalListItem`, best detection first);
+`GET /api/people/{id}/items` and the `person` filter of the library and search include animal boxes;
+`ItemDetail.animals: [AnimalOut{id, x, y, w, h, det_score, species, frame_time_s, person, assigned_by, url}]`
+and `ItemDetail.people` lists pets with kind `pet`; `POST /api/animals/assign {animal_ids, person_id |
+new_person_name}` (one species per call; a person target or a pet of another species is 400; a new name
+creates or reuses a pet of the boxes' species; null unassigns); `DELETE /api/animals/{id}`;
+`/files/animal/{id}` serves the crop with the face-crop rules (403 `vault_locked` for vault items). Pet names
+go into the `people` column of the search index. Pets have no guesses and no merge suggestions.
 
-Frontend: the viewer draws animal boxes with a paw mark and the same name-or-assign popover as faces (the
-picker lists pets of that species first); the People page shows a Pets section with cover crops and
-counts and the person page works for a pet; the library filter by person includes pets; search by a pet's
-name finds its photos.
+Frontend: the viewer draws animal boxes with a paw mark (name or species, dashed when unassigned) and an
+assign popover that lists pets of that species first and never people; the item's people chips show pets
+with the paw; the People page requests `kind=person` and shows a Pets section below; the person page of a
+pet shows its species and a crops grid (select, move, unassign, remove) instead of faces and guesses; the
+library's person filter lists pets too.

@@ -3,7 +3,7 @@
 import { useCallback, useMemo, useState } from 'react'
 import { useSearchParams } from 'react-router'
 import { useMutation } from '@tanstack/react-query'
-import { GitMerge, ScanFace, Users } from 'lucide-react'
+import { GitMerge, PawPrint, ScanFace, Users } from 'lucide-react'
 import { api } from '../lib/api'
 import type { PersonOut } from '../lib/types'
 import { formatCount, personName } from '../lib/format'
@@ -22,6 +22,47 @@ import { Button, EmptyState, ErrorState, buttonClasses } from '../components/ui'
 type Filter = 'all' | 'named' | 'unnamed'
 type Sort = 'items' | 'name' | 'recent'
 
+/** Pets found in the library, below the people. Search and filters above apply to people only. */
+function PetsSection() {
+  const fetchPage = useCallback((cursor: string | null) => api.people.list({ kind: 'pet', sort: 'items', cursor, limit: 60 }), [])
+  const list = useItemList<PersonOut>(['people', 'pets'], fetchPage, { keyOf: (p) => p.id })
+  const sentinel = useInfiniteSentinel(list.loadMore, list.hasMore && !list.loading)
+  return (
+    <section className="mt-10 pb-8" aria-labelledby="pets-heading">
+      <div className="mb-3">
+        <h2 id="pets-heading" className="text-xl font-bold tracking-tight">
+          Pets
+        </h2>
+        <p className="mt-1 text-sm text-ink-soft" aria-live="polite">
+          {list.loading && !list.items.length ? 'Loading' : formatCount(list.total, 'pet')}
+        </p>
+      </div>
+      {list.error && !list.items.length ? (
+        <ErrorState error={list.error} onRetry={list.refetch} />
+      ) : list.loading && !list.items.length ? (
+        <ul className="grid grid-cols-3 gap-2 sm:grid-cols-4 sm:gap-3 md:grid-cols-5 lg:grid-cols-6" aria-busy="true">
+          {Array.from({ length: 6 }, (_, i) => (
+            <li key={i} className="aspect-[4/5] animate-pulse rounded-2xl bg-surface-2" />
+          ))}
+        </ul>
+      ) : list.items.length === 0 ? (
+        <EmptyState icon={<PawPrint className="size-8" aria-hidden />} title="No pets found yet">
+          Pets are found in new photos as they are analysed.
+        </EmptyState>
+      ) : (
+        <ul className="grid grid-cols-3 gap-2 sm:grid-cols-4 sm:gap-3 md:grid-cols-5 lg:grid-cols-6">
+          {list.items.map((p) => (
+            <li key={p.id} className="min-w-0">
+              <PersonCard person={p} />
+            </li>
+          ))}
+        </ul>
+      )}
+      <LoadMore hasMore={list.hasMore} loading={list.loading} onClick={list.loadMore} sentinelRef={sentinel} />
+    </section>
+  )
+}
+
 export default function PeoplePage() {
   usePageTitle('People')
   const toast = useToast()
@@ -36,7 +77,7 @@ export default function PeoplePage() {
   const sel = useSelection<number>()
   const [merging, setMerging] = useState(false)
 
-  const query = useMemo(() => ({ q: q || undefined, filter, sort }), [q, filter, sort])
+  const query = useMemo(() => ({ q: q || undefined, kind: 'person' as const, filter, sort }), [q, filter, sort])
   const fetchPage = useCallback((cursor: string | null) => api.people.list({ ...query, cursor, limit: 60 }), [query])
   const list = useItemList<PersonOut>(['people', 'list', query], fetchPage, { keyOf: (p) => p.id })
   const sentinel = useInfiniteSentinel(list.loadMore, list.hasMore && !list.loading)
@@ -161,6 +202,8 @@ export default function PeoplePage() {
         onClose={() => setMerging(false)}
       />
       <UnassignedFaces open={drawer} onClose={() => setDrawer(false)} />
+
+      <PetsSection />
     </div>
   )
 }

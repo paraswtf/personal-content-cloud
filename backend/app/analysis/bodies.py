@@ -117,13 +117,17 @@ def available() -> bool:
         return False
 
 
-def detect_bodies(img: Image.Image, img_bgr: np.ndarray, faces: list[Any]) -> list[BodyRecord]:
+def detect_bodies(img: Image.Image, img_bgr: np.ndarray, faces: list[Any],
+                  raw: list[Any] | None = None) -> list[BodyRecord]:
     """Person boxes in the analysed image (score >= settings.body_det_threshold), matched to the faces
-    (FaceRecord.bbox_px). Raises ImportError when app.ml.persons is missing; callers check available()."""
+    (FaceRecord.bbox_px). `raw`: person boxes from a detector run shared with the animal classes
+    (section 22); without it the detector runs here. Raises ImportError when app.ml.persons is
+    missing; callers check available()."""
     from app.ml import persons
 
     H, W = img_bgr.shape[:2]
-    raw = persons.detect(img_bgr, threshold=settings.body_det_threshold)
+    if raw is None:
+        raw = persons.detect(img_bgr, threshold=settings.body_det_threshold)
     boxes: list[tuple[float, float, float, float]] = []
     scores: list[float] = []
     for x1, y1, x2, y2, score in sorted(raw, key=lambda b: -float(b[4]))[:MAX_BODIES]:

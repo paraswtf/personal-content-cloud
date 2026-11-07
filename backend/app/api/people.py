@@ -31,6 +31,7 @@ from app import storage
 from app.analysis import cluster, guess
 from app.api.common import (
     ITEM_CARD_COLUMNS,
+    animal_out,
     body_out,
     box_person_ids,
     face_out,
@@ -38,6 +39,7 @@ from app.api.common import (
     item_card,
     page_sql,
     person_refs,
+    pet_cover_ids,
     valid_cursor_scalar,
     visible_sql,
 )
@@ -45,6 +47,9 @@ from app.api.deps import get_db, require_user, want_vault
 from app.auth.sessions import SessionInfo
 from app.db import bump_faces_version, bump_search_version, tx
 from app.schemas import (
+    AnimalListItem,
+    AnimalPage,
+    AssignAnimalsIn,
     AssignBodiesIn,
     AssignFacesIn,
     AssignOut,
@@ -67,7 +72,7 @@ from app.schemas import (
     SuggestionList,
     TagIn,
 )
-from app.urls import face_url, thumb_url
+from app.urls import animal_url, face_url, thumb_url
 from app.util import clean_name, decode_cursor, encode_cursor, now_iso
 
 log = logging.getLogger(__name__)
@@ -78,8 +83,10 @@ LIVE = "i.deleted_at IS NULL AND i.nsfw = 0"
 _PRESENT = (
     "SELECT person_id, item_id FROM faces WHERE person_id IS NOT NULL UNION "
     "SELECT person_id, item_id FROM bodies WHERE person_id IS NOT NULL UNION "
+    "SELECT person_id, item_id FROM animals WHERE person_id IS NOT NULL UNION "
     "SELECT person_id, item_id FROM item_tags"
 )
+PERSON_COLUMNS = "id, name, name_key, cover_face_id, created_at, kind, species"
 
 
 # ------------------------------------------------------------------ helpers
@@ -102,8 +109,7 @@ def _ids_sql(ids: list[int]) -> str:
 
 
 def _person_row(conn: sqlite3.Connection, person_id: int) -> sqlite3.Row:
-    row = conn.execute("SELECT id, name, name_key, cover_face_id, created_at FROM persons WHERE id = ?",
-                       (person_id,)).fetchone()
+    row = conn.execute(f"SELECT {PERSON_COLUMNS} FROM persons WHERE id = ?", (person_id,)).fetchone()
     if row is None:
         raise HTTPException(status_code=404, detail="Person not found")
     return row
@@ -158,9 +164,9 @@ def _visible_person_row(conn: sqlite3.Connection, session: SessionInfo, person_i
     return row
 
 
-def _stats(conn: sqlite3.Connection, ids: list[int]) -> dict[int, tuple[int, int, int]]:
-    """{person_id: (face_count, item_count, guess_count)} over live, non-NSFW items."""
-    out: dict[int, list[int]] = {i: [0, 0, 0] for i in ids}
+def _stats(conn: sqlite3.Connection, ids: list[int]) -> dict[int, tuple[int, int, int, int]]:
+    """{person_id: (face_count, item_count, guess_count, animal_count)} over live, non-NSFW items."""
+    out: dict[int, list[int]] = {i: [0, 0, 0, 0] for i in ids}
     for start in range(0, len(ids), 500):
         chunk = ids[start:start + 500]
         ph = _ids_sql(chunk)
@@ -182,7 +188,12 @@ def _stats(conn: sqlite3.Connection, ids: list[int]) -> dict[int, tuple[int, int
             f") g JOIN items i ON i.id = g.item_id AND {LIVE} GROUP BY g.pid", [*chunk, *chunk],
         ):
             out[int(r[0])][2] = int(r[1])
-    return {k: (v[0], v[1], v[2]) for k, v in out.items()}
+        for r in conn.execute(
+            f"SELECT a.person_id, COUNT(*) FROM animals a JOIN items i ON i.id = a.item_id AND {LIVE} "
+            f"WHERE a.person_id IN ({ph}) GROUP BY a.person_id", chunk,
+        ):
+            out[int(r[0])][3] = int(r[1])
+    return {k: (v[0], v[1], v[2], v[3]) for k, v in out.items()}
 
 
 def _covers(conn: sqlite3.Connection, rows: list[sqlite3.Row]) -> dict[int, str | None]:
@@ -199,7 +210,10 @@ def _covers(conn: sqlite3.Connection, rows: list[sqlite3.Row]) -> dict[int, str 
     for pid, fid in chosen.items():
         if fid in visible:
             out[pid] = face_url(fid)
-    rest = sorted({int(r["id"]) for r in rows} - out.keys())
+    pets = sorted({int(r["id"]) for r in rows if r["kind"] == "pet"} - out.keys())
+    for pid, aid in pet_cover_ids(conn, pets).items():
+        out[pid] = animal_url(aid)
+    rest = sorted({int(r["id"]) for r in rows} - out.keys() - set(pets))
     for start in range(0, len(rest), 500):
         chunk = rest[start:start + 500]
         for r in conn.execute(
@@ -215,15 +229,17 @@ def _covers(conn: sqlite3.Connection, rows: list[sqlite3.Row]) -> dict[int, str 
 
 
 def person_outs(conn: sqlite3.Connection, rows: list[sqlite3.Row]) -> list[PersonOut]:
-    """PersonOut for persons rows (id, name, cover_face_id, created_at), counts over visible items only."""
+    """PersonOut for persons rows (PERSON_COLUMNS), counts over visible items only."""
     st = _stats(conn, [int(r["id"]) for r in rows]) if rows else {}
     covers = _covers(conn, rows) if rows else {}
     out = []
     for r in rows:
-        fc, ic, gc = st.get(int(r["id"]), (0, 0, 0))
+        fc, ic, gc, ac = st.get(int(r["id"]), (0, 0, 0, 0))
+        pet = r["kind"] == "pet"
         out.append(PersonOut(id=int(r["id"]), name=r["name"], cover_url=covers.get(int(r["id"])),
-                             cover_face_id=r["cover_face_id"],
-                             face_count=fc, item_count=ic, guess_count=gc, created_at=r["created_at"]))
+                             cover_face_id=None if pet else r["cover_face_id"],
+                             face_count=fc, item_count=ic, guess_count=gc, created_at=r["created_at"],
+                             kind=r["kind"] or "person", species=r["species"] if pet else None, animal_count=ac))
     return out
 
 
@@ -239,16 +255,27 @@ def _item_row(conn: sqlite3.Connection, uid: str) -> sqlite3.Row:
 
 
 def _target_person(conn: sqlite3.Connection, person_id: int | None, new_name: str | None,
-                   name_given: bool, session: SessionInfo) -> int | None:
-    """Resolve {person_id | new_person_name | neither}. Call inside a tx."""
+                   name_given: bool, session: SessionInfo, species: str | None = None) -> int | None:
+    """Resolve {person_id | new_person_name | neither}. With `species` the target is a pet identity of
+    that species (section 22): an existing one must match, a new name creates one. Call inside a tx."""
     if person_id is not None and name_given:
         raise HTTPException(status_code=400, detail="Choose an existing person or a new name, not both")
     if person_id is not None:
-        return int(_visible_person_row(conn, session, person_id)["id"])
+        row = _visible_person_row(conn, session, person_id)
+        if species is not None:
+            if row["kind"] != "pet":
+                raise HTTPException(status_code=400, detail="That is a person, not a pet")
+            if row["species"] and row["species"] != species:
+                raise HTTPException(status_code=400, detail=f"That pet is a {row['species']}, this box is a {species}")
+        elif row["kind"] == "pet":
+            raise HTTPException(status_code=400, detail="That is a pet, not a person")
+        return int(row["id"])
     if name_given:
         name = cluster.clean_person_name(new_name)
         if not name:
             raise HTTPException(status_code=400, detail="Enter a name")
+        if species is not None:
+            return cluster.find_or_create_person(conn, name, kind="pet", species=species)
         return cluster.find_or_create_person(conn, name)
     return None
 
@@ -256,14 +283,14 @@ def _target_person(conn: sqlite3.Connection, person_id: int | None, new_name: st
 def _items_of_person(conn: sqlite3.Connection, person_id: int) -> set[int]:
     return {int(r[0]) for r in conn.execute(
         "SELECT item_id FROM faces WHERE person_id = ? UNION SELECT item_id FROM bodies WHERE person_id = ? "
-        "UNION SELECT item_id FROM item_tags WHERE person_id = ?",
-        (person_id, person_id, person_id),
+        "UNION SELECT item_id FROM animals WHERE person_id = ? UNION SELECT item_id FROM item_tags WHERE person_id = ?",
+        (person_id, person_id, person_id, person_id),
     )}
 
 
 def _move_boxes(conn: sqlite3.Connection, table: str, ids: list[int], target: int | None) -> tuple[int, set[int]]:
-    """Assign faces or bodies to target (None unassigns), locked as 'user'. Call inside a tx.
-    Returns (rows updated, item ids). 404 when an id is unknown."""
+    """Assign faces, bodies or animal boxes to target (None unassigns), locked as 'user'. Call inside
+    a tx. Returns (rows updated, item ids). 404 when an id is unknown."""
     ids = sorted({int(i) for i in ids})
     ph = _ids_sql(ids)
     rows = conn.execute(f"SELECT id, item_id, person_id FROM {table} WHERE id IN ({ph})", ids).fetchall()
@@ -273,12 +300,12 @@ def _move_boxes(conn: sqlite3.Connection, table: str, ids: list[int], target: in
     if table == "bodies":
         _drop_body_tags(conn, [r for r in rows if r["person_id"] is not None and r["person_id"] != target])
     items = {int(r["item_id"]) for r in rows}
-    clear = "guess_person_id = NULL, guess_score = NULL, guess_evidence = NULL"
-    conn.execute(f"UPDATE {table} SET person_id = ?, assigned_by = 'user', {clear} WHERE id IN ({ph})", [target, *ids])
+    clear = "" if table == "animals" else ", guess_person_id = NULL, guess_score = NULL, guess_evidence = NULL"
+    conn.execute(f"UPDATE {table} SET person_id = ?, assigned_by = 'user'{clear} WHERE id IN ({ph})", [target, *ids])
     now = now_iso()
     if table == "faces":
         # A body around the face follows it.
-        conn.execute(f"UPDATE bodies SET person_id = ?, assigned_by = 'user', {clear} WHERE face_id IN ({ph})",
+        conn.execute(f"UPDATE bodies SET person_id = ?, assigned_by = 'user'{clear} WHERE face_id IN ({ph})",
                      [target, *ids])
         conn.execute(
             f"UPDATE persons SET cover_face_id = NULL, updated_at = ? WHERE cover_face_id IN ({ph}) AND id IS NOT ?",
@@ -348,12 +375,16 @@ def list_people(
     q: str | None = Query(default=None, max_length=200),
     filter: Literal["all", "named", "unnamed"] = "all",
     sort: Literal["items", "name", "recent"] = "items",
+    kind: Literal["person", "pet", "all"] = "all",
     cursor: str | None = Query(default=None, max_length=512),
     limit: int = Query(default=100, ge=1, le=500),
     conn: sqlite3.Connection = Depends(get_db),
 ) -> PersonPage:
     conds = ["(x.item_count > 0 OR x.any_count = 0)"]
     params: list[Any] = []
+    if kind != "all":
+        conds.append("x.kind = ?")
+        params.append(kind)
     if filter == "named":
         conds.append("x.name IS NOT NULL")
     elif filter == "unnamed":
@@ -368,7 +399,8 @@ def list_people(
         "cnt AS (SELECT p.person_id, COUNT(*) AS any_n, "
         "SUM(i.deleted_at IS NULL AND i.nsfw = 0) AS vis_n FROM present p JOIN items i ON i.id = p.item_id "
         "GROUP BY p.person_id), "
-        "x AS (SELECT p.id, p.name, p.name_key, p.cover_face_id, p.created_at, COALESCE(cnt.vis_n, 0) AS item_count, "
+        "x AS (SELECT p.id, p.name, p.name_key, p.cover_face_id, p.created_at, p.kind, p.species, "
+        "COALESCE(cnt.vis_n, 0) AS item_count, "
         "COALESCE(cnt.any_n, 0) AS any_count, (p.name_key IS NULL) AS nf, COALESCE(p.name_key, '') AS nk "
         "FROM persons p LEFT JOIN cnt ON cnt.person_id = p.id) "
     )
@@ -467,8 +499,10 @@ def update_person(person_id: int, body: PersonUpdate, conn: sqlite3.Connection =
     result = person_id
     renamed = False
     with tx(conn):
-        _visible_person_row(conn, session, person_id)
+        row = _visible_person_row(conn, session, person_id)
         now = now_iso()
+        if row["kind"] == "pet":
+            fields = fields - {"cover_face_id"}  # pets have no face cover: the best crop is the cover
         if "cover_face_id" in fields:
             if body.cover_face_id is not None:
                 ok = conn.execute(
@@ -485,7 +519,11 @@ def update_person(person_id: int, body: PersonUpdate, conn: sqlite3.Connection =
                          (body.cover_face_id, now, person_id))
         if "name" in fields:
             name = cluster.clean_person_name(body.name)
-            other = cluster.find_person_by_name(conn, name, exclude_id=person_id) if name else None
+            other = cluster.find_person_by_name(conn, name, exclude_id=person_id, kind=row["kind"] or "person") if name else None
+            if other is not None and row["kind"] == "pet":
+                other_row = _person_row(conn, other)
+                if other_row["species"] and row["species"] and other_row["species"] != row["species"]:
+                    other = None  # a cat and a dog may share a name
             if other is not None:
                 cluster.merge_persons(conn, other, [person_id])
                 result = other
@@ -508,6 +546,7 @@ def delete_person(person_id: int, conn: sqlite3.Connection = Depends(get_db),
         cluster.clear_guesses_for(conn, [person_id])
         conn.execute("UPDATE faces SET person_id = NULL, assigned_by = 'user' WHERE person_id = ?", (person_id,))
         conn.execute("UPDATE bodies SET person_id = NULL, assigned_by = 'user' WHERE person_id = ?", (person_id,))
+        conn.execute("UPDATE animals SET person_id = NULL, assigned_by = 'user' WHERE person_id = ?", (person_id,))
         conn.execute("DELETE FROM persons WHERE id = ?", (person_id,))
         bump_faces_version(conn)
     guess.refresh_fts(conn, items)
@@ -551,8 +590,8 @@ def person_items(
     _visible_person_row(conn, session, person_id)
     conds = [visible_sql(vault=vault, misclicks="exclude", dups="all"),
              "i.id IN (SELECT item_id FROM faces WHERE person_id = ? UNION SELECT item_id FROM bodies WHERE person_id = ? "
-             "UNION SELECT item_id FROM item_tags WHERE person_id = ?)"]
-    params: list[Any] = [person_id, person_id, person_id]
+             "UNION SELECT item_id FROM animals WHERE person_id = ? UNION SELECT item_id FROM item_tags WHERE person_id = ?)"]
+    params: list[Any] = [person_id, person_id, person_id, person_id]
     sort_key = "COALESCE(i.taken_at, i.created_at)"
     v = _keyset(cursor, 2)
     # The total comes with the first page only (clients read it there); later pages carry 0.
@@ -614,24 +653,96 @@ def assign_bodies(body: AssignBodiesIn, conn: sqlite3.Connection = Depends(get_d
                    "new_person_name" in body.model_fields_set and body.new_person_name is not None, session)
 
 
+ANIMAL_SELECT = (
+    "SELECT a.id, a.person_id, a.assigned_by, a.det_score, a.species, a.frame_time_s, a.created_at, "
+    "i.uid AS item_uid, i.kind AS item_kind, i.version AS item_version FROM animals a JOIN items i ON i.id = a.item_id"
+)
+_BOX_NAMES = {"faces": ("Face not found", "face_count"), "bodies": ("Body not found", "body_count"),
+              "animals": ("Animal box not found", "animal_count")}
+_CROP_PATHS = {"faces": storage.face_crop_path, "bodies": storage.body_crop_path, "animals": storage.animal_crop_path}
+
+
+def _animal_item(row: sqlite3.Row) -> AnimalListItem:
+    return AnimalListItem(
+        id=row["id"], item_uid=row["item_uid"], item_kind=row["item_kind"],
+        thumb_url=thumb_url(row["item_uid"], int(row["item_version"])), url=animal_url(int(row["id"])),
+        det_score=row["det_score"], species=row["species"], frame_time_s=row["frame_time_s"],
+        person_id=row["person_id"], assigned_by=row["assigned_by"], created_at=row["created_at"],
+    )
+
+
+@router.get("/people/{person_id}/animals", response_model=AnimalPage)
+def person_animals(
+    person_id: int,
+    cursor: str | None = Query(default=None, max_length=512),
+    limit: int = Query(default=200, ge=1, le=1000),
+    conn: sqlite3.Connection = Depends(get_db),
+    session: SessionInfo = Depends(require_user),
+) -> AnimalPage:
+    """A pet's crops (section 22), best detection first; empty for a person."""
+    _visible_person_row(conn, session, person_id)
+    conds = ["a.person_id = ?", LIVE]
+    params: list[Any] = [person_id]
+    total = conn.execute(f"SELECT COUNT(*) FROM animals a JOIN items i ON i.id = a.item_id WHERE {' AND '.join(conds)}",
+                         params).fetchone()[0]
+    v = _keyset(cursor, 2)
+    if v is not None:  # ORDER BY det_score DESC, id ASC
+        conds.append("(a.det_score < ? OR (a.det_score = ? AND a.id > ?))")
+        params += [v[0], v[0], v[1]]
+    rows = conn.execute(f"{ANIMAL_SELECT} WHERE {' AND '.join(conds)} ORDER BY a.det_score DESC, a.id ASC LIMIT ?",
+                        [*params, limit + 1]).fetchall()
+    more = len(rows) > limit
+    rows = rows[:limit]
+    nxt = encode_cursor([rows[-1]["det_score"], int(rows[-1]["id"])]) if more and rows else None
+    return AnimalPage(items=[_animal_item(r) for r in rows], next_cursor=nxt, total=int(total))
+
+
+@router.post("/animals/assign", response_model=AssignOut)
+def assign_animals(body: AssignAnimalsIn, conn: sqlite3.Connection = Depends(get_db),
+                   session: SessionInfo = Depends(require_user)) -> AssignOut:
+    """Assign animal boxes to a pet (person_id), to a new or existing pet by name, or to nobody
+    (section 22). All boxes must be of one species; the pet must be of that species."""
+    ids = sorted({int(i) for i in body.animal_ids})
+    rows = conn.execute(f"SELECT id, species FROM animals WHERE id IN ({_ids_sql(ids)})", ids).fetchall()
+    if len(rows) != len(ids):
+        raise HTTPException(status_code=404, detail="Some boxes no longer exist. Reload and try again.")
+    species = {str(r["species"]) for r in rows}
+    if len(species) > 1:
+        raise HTTPException(status_code=400, detail="Choose boxes of one species at a time")
+    _check_boxes_vault(conn, session, "animals", ids)
+    name_given = "new_person_name" in body.model_fields_set and body.new_person_name is not None
+    with tx(conn):
+        target = _target_person(conn, body.person_id, body.new_person_name, name_given, session, species=species.pop())
+        updated, items = _move_boxes(conn, "animals", ids, target)
+    _after_people_change(conn, items, set())
+    return AssignOut(updated=updated, person=_person_out(conn, target) if target is not None else None)
+
+
+@router.delete("/animals/{animal_id}", response_model=Ok)
+def delete_animal(animal_id: int, conn: sqlite3.Connection = Depends(get_db),
+                  session: SessionInfo = Depends(require_user)) -> Ok:
+    return _delete_box(conn, "animals", animal_id, session)
+
+
 def _delete_box(conn: sqlite3.Connection, table: str, box_id: int, session: SessionInfo) -> Ok:
-    count_col = "face_count" if table == "faces" else "body_count"
+    not_found, count_col = _BOX_NAMES[table]
     with tx(conn):
         row = conn.execute(f"SELECT id, item_id, person_id FROM {table} WHERE id = ?", (box_id,)).fetchone()
         if row is None:
-            raise HTTPException(status_code=404, detail="Face not found" if table == "faces" else "Body not found")
+            raise HTTPException(status_code=404, detail=not_found)
         _check_items_vault(conn, session, [int(row["item_id"])])
         if table == "bodies" and row["person_id"] is not None:
             _drop_body_tags(conn, [row])
         conn.execute(f"DELETE FROM {table} WHERE id = ?", (box_id,))
-        cluster.drop_rejections(conn, "face" if table == "faces" else "body", [box_id])
+        if table != "animals":
+            cluster.drop_rejections(conn, "face" if table == "faces" else "body", [box_id])
         conn.execute(f"UPDATE items SET {count_col} = (SELECT COUNT(*) FROM {table} WHERE item_id = ?) WHERE id = ?",
                      (row["item_id"], row["item_id"]))
         if row["person_id"] is not None:
             cluster.prune_empty_persons(conn, {int(row["person_id"])})
         bump_faces_version(conn)
         bump_search_version(conn)
-    storage.safe_unlink(storage.face_crop_path(box_id) if table == "faces" else storage.body_crop_path(box_id))
+    storage.safe_unlink(_CROP_PATHS[table](box_id))
     guess.refresh_fts(conn, {int(row["item_id"])})
     return Ok()
 
@@ -730,7 +841,7 @@ def suggestions(
     ids = sorted({int(a) for a, _, _ in pairs} | {int(b) for _, b, _ in pairs})
     ph = _ids_sql(ids)
     rows = {int(r["id"]): r for r in conn.execute(
-        f"SELECT id, name, cover_face_id, created_at FROM persons WHERE id IN ({ph})", ids)}
+        f"SELECT {PERSON_COLUMNS} FROM persons WHERE id IN ({ph})", ids)}
     outs = {o.id: o for o in person_outs(conn, list(rows.values()))}
     samples: dict[int, list[str]] = {}
     for r in conn.execute(

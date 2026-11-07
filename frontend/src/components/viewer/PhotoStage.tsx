@@ -3,11 +3,11 @@
 // opens the editor. A Live Photo's clip plays over the still, in the same box, while `liveSrc` is set.
 import { useEffect, useRef, useState } from 'react'
 import clsx from 'clsx'
-import { Loader2 } from 'lucide-react'
+import { Loader2, PawPrint } from 'lucide-react'
 import type { ItemDetail } from '../../lib/types'
 import { personName } from '../../lib/format'
 import { previewSrcSet } from '../../lib/preview'
-import { boxKey, stillBoxes, type BoxTarget } from './boxes'
+import { animalLabel, boxKey, stillBoxes, type BoxTarget } from './boxes'
 import GuessChip from './GuessChip'
 
 interface Props {
@@ -139,7 +139,9 @@ export default function PhotoStage({
           const b = t.box
           const key = boxKey(t)
           const isBody = t.kind === 'body'
-          const label = b.person ? personName(b.person) : isBody ? 'Person, not tagged' : 'Not tagged'
+          const isAnimal = t.kind === 'animal'
+          const noun = isAnimal ? 'pet' : isBody ? 'person' : 'face'
+          const label = isAnimal ? animalLabel(t.box) : b.person ? personName(b.person) : isBody ? 'Person, not tagged' : 'Not tagged'
           const below = b.y + b.h < 0.86
           const pos = { left: `${b.x * 100}%`, top: `${b.y * 100}%`, width: `${b.w * 100}%`, height: `${b.h * 100}%` }
           return (
@@ -148,11 +150,21 @@ export default function PhotoStage({
                 type="button"
                 className={clsx(
                   'absolute inset-0 rounded-md border-2 shadow-[0_0_0_1px_rgba(0,0,0,0.45)] transition-colors focus-visible:outline-none',
-                  isBody && 'rounded-lg border-[1.5px]',
-                  b.person ? (isBody ? 'border-sky-300/80' : 'border-white/90') : b.guess ? 'border-amber-300' : 'border-dashed border-amber-300/90',
+                  (isBody || isAnimal) && 'rounded-lg border-[1.5px]',
+                  b.person
+                    ? isAnimal
+                      ? 'border-emerald-300/90'
+                      : isBody
+                        ? 'border-sky-300/80'
+                        : 'border-white/90'
+                    : isAnimal
+                      ? 'border-dashed border-emerald-300/90'
+                      : b.guess
+                        ? 'border-amber-300'
+                        : 'border-dashed border-amber-300/90',
                   editingKey === key ? 'border-accent ring-2 ring-accent' : 'hover:border-accent focus-visible:border-accent',
                 )}
-                aria-label={b.person ? `Edit ${isBody ? 'person' : 'face'} tagged as ${label}` : `Tag this ${isBody ? 'person' : 'face'}`}
+                aria-label={b.person ? `Edit ${noun} tagged as ${label}` : `Tag this ${noun}`}
                 onClick={(e) => onEditBox(t, e.currentTarget)}
               />
               <span
@@ -174,10 +186,11 @@ export default function PhotoStage({
                   <span
                     className={clsx(
                       'truncate rounded-full px-2 py-0.5 text-[11px] font-semibold',
-                      b.person ? 'bg-black/70 text-white' : 'bg-amber-300 text-black',
-                      b.person && b.person.name ? '' : 'opacity-0 group-hover:opacity-100 group-focus-within:opacity-100',
+                      b.person || isAnimal ? 'bg-black/70 text-white' : 'bg-amber-300 text-black',
+                      isAnimal || (b.person && b.person.name) ? '' : 'opacity-0 group-hover:opacity-100 group-focus-within:opacity-100',
                     )}
                   >
+                    {isAnimal && <PawPrint className="mr-1 inline size-3 align-[-1px]" aria-hidden />}
                     {label}
                   </span>
                 )}

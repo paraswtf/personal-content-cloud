@@ -724,8 +724,9 @@ def refresh_fts(conn: sqlite3.Connection, item_id: int) -> None:
         "SELECT DISTINCT p.name FROM persons p WHERE p.name IS NOT NULL AND p.id IN ("
         "SELECT person_id FROM faces WHERE item_id = ? AND person_id IS NOT NULL UNION "
         "SELECT person_id FROM bodies WHERE item_id = ? AND person_id IS NOT NULL UNION "
+        "SELECT person_id FROM animals WHERE item_id = ? AND person_id IS NOT NULL UNION "
         "SELECT person_id FROM item_tags WHERE item_id = ?) ORDER BY p.name",
-        (item_id, item_id, item_id),
+        (item_id, item_id, item_id, item_id),
     )]
     labels = [r["label"] for r in conn.execute(
         "SELECT label FROM item_labels WHERE item_id = ? ORDER BY score DESC", (item_id,))]

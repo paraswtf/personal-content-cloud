@@ -103,6 +103,12 @@ class Settings:
     bodies_enabled: bool
     body_det_threshold: float
 
+    # pets (section 22)
+    pets_enabled: bool
+    animal_det_threshold: float
+    pet_match_threshold: float
+    pet_new_threshold: float
+
     # categories, nsfw, mis-clicks
     nsfw_threshold: float
     doc_likeness_min: float
@@ -202,6 +208,10 @@ def _load(**overrides) -> Settings:
         suggest_threshold=_float("SUGGEST_THRESHOLD", 0.35),
         bodies_enabled=_bool("BODIES_ENABLED", True),
         body_det_threshold=_float("BODY_DET_THRESHOLD", 0.5),
+        pets_enabled=_bool("PETS_ENABLED", True),
+        animal_det_threshold=_float("ANIMAL_DET_THRESHOLD", 0.45),
+        pet_match_threshold=_float("PET_MATCH_THRESHOLD", 0.82),
+        pet_new_threshold=_float("PET_NEW_THRESHOLD", 0.86),
         nsfw_threshold=_float("NSFW_THRESHOLD", 0.7),
         doc_likeness_min=_float("DOC_LIKENESS_MIN", 0.55),
         blur_var_min=_float("BLUR_VAR_MIN", 40.0),

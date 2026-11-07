@@ -391,7 +391,7 @@ def decide(kind: str, *, nsfw_score: float | None = None, explicit_p: float | No
            doc_like: float | None = None, has_person: bool = False,
            scores: dict[str, float] | None = None, learned: tuple[str, float] | None = None,
            nsfw_learned: bool | None = None, suggestive_p: float | None = None, safe_p: float | None = None,
-           sensitivity: str = "normal") -> Decision:
+           sensitivity: str = "normal", has_animal: bool = False) -> Decision:
     """Section 9 order: documents by kind, nsfw, screenshots, document-like images, people, then the
     best scene group (places, food, pets, objects; probability from the joint CATEGORY_PROMPTS softmax)
     when >= SCENE_MIN, else misc.
@@ -423,6 +423,8 @@ def decide(kind: str, *, nsfw_score: float | None = None, explicit_p: float | No
         return Decision("documents", False, "doc_likeness")
     if has_person:
         return Decision("personal", False, "people")
+    if has_animal:
+        return Decision("pets", False, "animal")
     scores = scores or {}
     scene = {k: float(scores.get(k, 0.0)) for k in SCENE_GROUPS}
     best = max(scene, key=lambda k: scene[k])

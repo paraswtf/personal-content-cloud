@@ -48,6 +48,10 @@ def body_url(body_id: int) -> str:
     return f"/files/body/{body_id}"
 
 
+def animal_url(animal_id: int) -> str:
+    return f"/files/animal/{animal_id}"
+
+
 def doc_photo_url(uid: str, version: int) -> str:
     return f"/files/doc-photo/{uid}?v={version}"
 
