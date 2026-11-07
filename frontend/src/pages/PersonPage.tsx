@@ -26,12 +26,6 @@ import { Avatar, Button, EmptyState, ErrorState, PageSpinner, buttonClasses } fr
 
 type Tab = 'items' | 'faces' | 'guesses'
 
-/** Face id from a cover URL ("/files/face/123"), to mark the cover in the faces grid. */
-function coverFaceId(url: string | null | undefined): number | null {
-  const m = url ? /\/files\/face\/(\d+)/.exec(url) : null
-  return m ? Number(m[1]) : null
-}
-
 function NameEditor({ id, name }: { id: number; name: string | null }) {
   const toast = useToast()
   const refresh = useRefreshLibrary()
@@ -118,7 +112,7 @@ function ItemsTab({ id }: { id: number }) {
   )
 }
 
-function FacesTab({ id, name, coverUrl }: { id: number; name: string; coverUrl: string | null }) {
+function FacesTab({ id, name, coverId }: { id: number; name: string; coverId: number | null }) {
   const toast = useToast()
   const refresh = useRefreshLibrary()
   const fetchPage = useCallback((c: string | null) => api.people.faces(id, c, 120), [id])
@@ -188,7 +182,7 @@ function FacesTab({ id, name, coverUrl }: { id: number; name: string; coverUrl: 
           hasMore={list.hasMore}
           loadMore={list.loadMore}
           loadingMore={list.loading}
-          coverId={coverFaceId(coverUrl)}
+          coverId={coverId}
         />
       )}
       {selecting && sel.count > 0 && (
@@ -223,9 +217,8 @@ function FacesTab({ id, name, coverUrl }: { id: number; name: string; coverUrl: 
 }
 
 function GuessesTab({ id }: { id: number }) {
-  // /api/review/guesses has no person filter: page through it and keep this person's guesses.
-  const fetchPage = useCallback((c: string | null) => api.review.guesses(c, 200), [])
-  const list = useItemList<GuessItem>(['review', 'guesses', 'all'], fetchPage, { keyOf: guessKey })
+  const fetchPage = useCallback((c: string | null) => api.review.guesses(c, 60, id), [id])
+  const list = useItemList<GuessItem>(['review', 'guesses', id], fetchPage, { keyOf: guessKey })
   const mine = useMemo(() => list.items.filter((g) => g.guess.person.id === id), [list.items, id])
   const review = useGuessReview()
   const items = useMemo(() => {
@@ -385,7 +378,7 @@ function PersonView({ id }: { id: number }) {
 
       <div role="tabpanel">
         {tab === 'items' && <ItemsTab id={id} />}
-        {tab === 'faces' && <FacesTab id={id} name={name} coverUrl={p.cover_url} />}
+        {tab === 'faces' && <FacesTab id={id} name={name} coverId={p.cover_face_id} />}
         {tab === 'guesses' && <GuessesTab id={id} />}
       </div>
 

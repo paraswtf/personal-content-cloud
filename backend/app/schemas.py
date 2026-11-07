@@ -330,6 +330,7 @@ class PersonOut(BaseModel):
     id: int
     name: str | None = None
     cover_url: str | None = None
+    cover_face_id: int | None = None
     face_count: int = 0
     item_count: int = 0
     guess_count: int = 0

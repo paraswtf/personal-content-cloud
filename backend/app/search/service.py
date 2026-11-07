@@ -410,13 +410,15 @@ def _filters(*, vault: bool, category: str | None, kind: str | None, person_ids:
         sql, p = people_filter_sql(ids, alias="i")
         parts.append(sql)
         params.extend(p)
+    from app.util import local_day_start_utc
+
     start, end = _iso_date(date_from), _iso_date(date_to)
     if start is not None:
         parts.append("COALESCE(i.taken_at, i.created_at) >= ?")
-        params.append(start.isoformat())
+        params.append(local_day_start_utc(start.isoformat(), settings.local_timezone))
     if end is not None:
         parts.append("COALESCE(i.taken_at, i.created_at) < ?")
-        params.append((end + timedelta(days=1)).isoformat())
+        params.append(local_day_start_utc(end.isoformat(), settings.local_timezone, next_day=True))
     return _Filters(sql=" AND ".join(parts), params=params)
 
 

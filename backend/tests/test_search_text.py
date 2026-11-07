@@ -138,7 +138,8 @@ def test_snippet_falls_back_to_doc_column_then_none(conn):
 # ------------------------------------------------------------------ filters
 def test_category_kind_and_date_filters(conn):
     a = item(conn, kind="pdf", category="documents", taken_at="2026-03-10T08:00:00.000Z")
-    b = item(conn, kind="image", category="personal", taken_at="2026-03-12T23:30:00.000Z")
+    # dates are calendar days in settings.local_timezone (Asia/Kolkata): 10:30Z is 16:00 local on the 12th
+    b = item(conn, kind="image", category="personal", taken_at="2026-03-12T10:30:00.000Z")
     c = item(conn, kind="video", category="personal", created_at="2026-04-01T10:00:00.000Z")
     for r in (a, b, c):
         add_fts(conn, r["id"], text="birthday party")

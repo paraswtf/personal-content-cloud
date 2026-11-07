@@ -157,12 +157,12 @@ export function SelectionBar({
             type="button"
             onClick={onSelectAll}
             disabled={selectingAll}
-            className="h-8 rounded-full px-3 text-sm font-medium text-ink-soft hover:bg-ink/5 disabled:cursor-wait disabled:opacity-60"
+            className="h-10 rounded-full px-3 text-sm font-medium text-ink-soft hover:bg-ink/5 disabled:cursor-wait disabled:opacity-60"
           >
             {selectingAll ? 'Loading...' : total !== undefined ? `Select all ${total.toLocaleString()}` : 'Select all loaded'}
           </button>
         )}
-        <button type="button" onClick={onClear} className="h-8 rounded-full px-3 text-sm font-medium text-ink-soft hover:bg-ink/5">
+        <button type="button" onClick={onClear} className="h-10 rounded-full px-3 text-sm font-medium text-ink-soft hover:bg-ink/5">
           Clear
         </button>
       </div>

@@ -270,7 +270,7 @@ def sign_manifest(manifest: bytes, wallet_dir: Path | None = None) -> bytes:
     try:
         cert = _load_cert(d / "cert.pem")
         wwdr = _load_cert(d / "wwdr.pem")
-        pw = os.environ.get("WALLET_KEY_PASSWORD")
+        pw = settings.wallet_key_password or os.environ.get("WALLET_KEY_PASSWORD")
         key = serialization.load_pem_private_key((d / "key.pem").read_bytes(), password=pw.encode() if pw else None)
         return (
             pkcs7.PKCS7SignatureBuilder()

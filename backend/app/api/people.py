@@ -151,6 +151,7 @@ def person_outs(conn: sqlite3.Connection, rows: list[sqlite3.Row]) -> list[Perso
     for r in rows:
         fc, ic, gc = st.get(int(r["id"]), (0, 0, 0))
         out.append(PersonOut(id=int(r["id"]), name=r["name"], cover_url=_cover(conn, int(r["id"]), r["cover_face_id"]),
+                             cover_face_id=r["cover_face_id"],
                              face_count=fc, item_count=ic, guess_count=gc, created_at=r["created_at"]))
     return out
 
@@ -552,19 +553,22 @@ def reject_guesses(body: GuessIdsIn, conn: sqlite3.Connection = Depends(get_db))
 def review_guesses(
     cursor: str | None = Query(default=None, max_length=512),
     limit: int = Query(default=60, ge=1, le=200),
+    person: int | None = Query(default=None, description="only guesses naming this person"),
     conn: sqlite3.Connection = Depends(get_db),
 ) -> GuessPage:
+    person_sql = " AND g.guess_person_id = ?" if person is not None else ""
     base = (
         "SELECT g.* FROM ("
-        "SELECT 'face' AS kind, f.id AS box_id, f.item_id, COALESCE(f.guess_score, 0) AS score FROM faces f "
+        "SELECT 'face' AS kind, f.id AS box_id, f.item_id, f.guess_person_id, COALESCE(f.guess_score, 0) AS score FROM faces f "
         "WHERE f.guess_person_id IS NOT NULL AND f.person_id IS NULL UNION ALL "
-        "SELECT 'body' AS kind, b.id AS box_id, b.item_id, COALESCE(b.guess_score, 0) AS score FROM bodies b "
+        "SELECT 'body' AS kind, b.id AS box_id, b.item_id, b.guess_person_id, COALESCE(b.guess_score, 0) AS score FROM bodies b "
         "WHERE b.guess_person_id IS NOT NULL AND b.person_id IS NULL"
-        f") g JOIN items i ON i.id = g.item_id AND {LIVE}"
+        f") g JOIN items i ON i.id = g.item_id AND {LIVE}{person_sql}"
     )
-    total = conn.execute(f"SELECT COUNT(*) FROM ({base})").fetchone()[0]
+    base_params: list[Any] = [person] if person is not None else []
+    total = conn.execute(f"SELECT COUNT(*) FROM ({base})", base_params).fetchone()[0]
     conds: list[str] = []
-    params: list[Any] = []
+    params: list[Any] = list(base_params)
     v = _keyset(cursor, 3)
     if v is not None:  # ORDER BY score DESC, kind ASC, box_id ASC
         conds.append("(g.score < ? OR (g.score = ? AND (g.kind > ? OR (g.kind = ? AND g.box_id > ?))))")

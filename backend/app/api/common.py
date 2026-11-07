@@ -188,7 +188,8 @@ def person_out(conn: sqlite3.Connection, row: sqlite3.Row) -> PersonOut:
     ).fetchone()[0]
     cover = row["cover_face_id"] or auto_cover(conn, pid)
     return PersonOut(
-        id=pid, name=row["name"], cover_url=face_url(cover) if cover else None, face_count=face_count,
+        id=pid, name=row["name"], cover_url=face_url(cover) if cover else None, cover_face_id=row["cover_face_id"],
+        face_count=face_count,
         item_count=item_count, guess_count=guess_count, created_at=row["created_at"],
     )
 

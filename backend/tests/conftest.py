@@ -44,6 +44,12 @@ def data_dir(tmp_path):
     storage.ensure_dirs()
     db.init_db()
     try:
+        from app.auth.passwords import reset_all
+
+        reset_all()
+    except Exception:
+        pass
+    try:
         from app.analysis.index import reset_index
 
         reset_index()

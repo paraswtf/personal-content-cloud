@@ -288,7 +288,7 @@ export const api = {
     reprocess: (uid: string, stages?: Array<'analyze' | 'text' | 'preview'>) =>
       post<OkOut>(`/api/items/${enc(uid)}/reprocess`, stages ? { stages } : {}),
     pages: (uid: string) => get<PageOut[]>(`/api/items/${enc(uid)}/pages`),
-    text: (uid: string) => get<ItemTextOut>(`/api/items/${enc(uid)}/text`),
+    text: (uid: string, vault = false) => get<ItemTextOut>(`/api/items/${enc(uid)}/text${qs({ vault })}`),
     addTag: (uid: string, body: TagIn) => post<PersonRef[]>(`/api/items/${enc(uid)}/tags`, body),
     removeTag: (uid: string, personId: number) => del<PersonRef[]>(`/api/items/${enc(uid)}/tags/${personId}`),
   },
@@ -301,7 +301,8 @@ export const api = {
 
   review: {
     misclicks: (cursor?: string | null, limit = 60) => get<ItemPage>(`/api/review/misclicks${qs({ cursor, limit })}`),
-    guesses: (cursor?: string | null, limit = 60) => get<GuessPage>(`/api/review/guesses${qs({ cursor, limit })}`),
+    guesses: (cursor?: string | null, limit = 60, person?: number) =>
+      get<GuessPage>(`/api/review/guesses${qs({ cursor, limit, person })}`),
     duplicates: (cursor?: string | null, limit = 30) => get<DupGroupPage>(`/api/duplicates${qs({ cursor, limit })}`),
     setBest: (uid: string) => post<OkOut>(`/api/duplicates/${enc(uid)}/best`),
   },

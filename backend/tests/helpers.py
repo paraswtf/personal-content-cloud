@@ -89,10 +89,15 @@ def text_image(lines: list[str], w: int = 1000, h: int = 640, size: int = 28) ->
 
     img = Image.new("RGB", (w, h), "white")
     draw = ImageDraw.Draw(img)
-    try:
-        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", size)
-    except OSError:
-        font = ImageFont.load_default()
+    font = None
+    for candidate in ("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "/usr/share/fonts/truetype/freefont/FreeSans.ttf"):
+        try:
+            font = ImageFont.truetype(candidate, size)
+            break
+        except OSError:
+            continue
+    if font is None:
+        font = ImageFont.load_default(size)
     y = 30
     for line in lines:
         draw.text((40, y), line, fill="black", font=font)

@@ -429,6 +429,14 @@ def extract_item(conn: sqlite3.Connection, item_id: int, version: int) -> None:
             vals = merged_values(result[0], existing) if result is not None else None
             write_document(conn, item_id, vals, has_photo=has_photo)
             refresh_fts(conn, item_id)
+            if vals is not None and vals.get("doc_type") not in (None, "", "other") and item["kind"] == "image":
+                # A typed document photographed with the camera belongs with the documents (section 9 rule 4),
+                # unless the owner chose a category or the item is in the vault.
+                conn.execute(
+                    "UPDATE items SET category = 'documents', updated_at = ? WHERE id = ? AND category_source = 'auto' "
+                    "AND nsfw = 0 AND category != 'documents'",
+                    (now_iso(), item_id),
+                )
             conn.execute("UPDATE items SET text_status = 'done', updated_at = ? WHERE id = ?", (now_iso(), item_id))
     except Exception:
         log.exception("text extraction failed for item %s", item_id)

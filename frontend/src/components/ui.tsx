@@ -21,7 +21,7 @@ export function buttonClasses(variant: ButtonVariant = 'primary', size: ButtonSi
       primary: 'bg-brand text-white hover:bg-brand-dark shadow-sm',
       secondary: 'bg-paper text-ink border border-line hover:border-ink-faint',
       ghost: 'text-ink hover:bg-ink/5',
-      danger: 'bg-paper text-brand border border-brand/30 hover:bg-brand-tint',
+      danger: 'bg-paper text-danger border border-danger/30 hover:bg-danger/10',
     }[variant],
     extra,
   )
@@ -217,7 +217,7 @@ export function Modal({
   }, [open])
   if (!open) return null
   return createPortal(
-    <div className="fixed inset-0 z-50 flex items-end justify-center bg-ink/50 p-0 sm:items-center sm:p-4" onMouseDown={onClose}>
+    <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/50 p-0 sm:items-center sm:p-4" onMouseDown={onClose}>
       <div
         ref={panel}
         role="dialog"

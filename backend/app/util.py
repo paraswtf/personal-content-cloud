@@ -48,6 +48,22 @@ def local_date(value: str | None, tz_name: str) -> str | None:
     return dt.astimezone(zone).date().isoformat()
 
 
+def local_day_start_utc(value: str, tz_name: str, *, next_day: bool = False) -> str:
+    """'YYYY-MM-DD' (a calendar date in tz_name) -> the UTC instant that day starts (or the next day
+    starts), formatted like now_iso so it compares as text with stored times. Raises ValueError."""
+    from datetime import date, time as dtime
+
+    d = date.fromisoformat(value.strip()[:10])
+    if next_day:
+        d = d + timedelta(days=1)
+    try:
+        zone = ZoneInfo(tz_name)
+    except (ZoneInfoNotFoundError, ValueError):
+        zone = timezone.utc
+    dt = datetime.combine(d, dtime(0, 0), tzinfo=zone).astimezone(timezone.utc)
+    return dt.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
 def new_uid(length: int = 14) -> str:
     """Random lowercase id, safe for URLs and file names (~70 bits for length 14)."""
     return "".join(secrets.choice(_UID_ALPHABET) for _ in range(length))

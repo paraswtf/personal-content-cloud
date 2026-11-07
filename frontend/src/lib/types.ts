@@ -117,6 +117,7 @@ export interface PersonOut {
   id: number
   name: string | null
   cover_url: string | null
+  cover_face_id: number | null
   face_count: number
   item_count: number
   guess_count: number

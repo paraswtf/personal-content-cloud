@@ -143,6 +143,7 @@ class Settings:
     wallet_pass_type_id: str | None
     wallet_team_id: str | None
     wallet_org_name: str | None
+    wallet_key_password: str | None  # passphrase of key.pem, when it has one
     wallet_dir: Path | None
 
     # tests turn off the background worker threads
@@ -230,6 +231,7 @@ def _load(**overrides) -> Settings:
         wallet_pass_type_id=_env("WALLET_PASS_TYPE_ID"),
         wallet_team_id=_env("WALLET_TEAM_ID"),
         wallet_org_name=_env("WALLET_ORG_NAME"),
+        wallet_key_password=_env("WALLET_KEY_PASSWORD"),
         wallet_dir=Path(wallet_dir).resolve() if wallet_dir else None,
         workers_enabled=_bool("WORKERS_ENABLED", True),
     )

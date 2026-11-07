@@ -50,10 +50,11 @@ backend/
     urls.py            URL builders for /files
     auth/
       passwords.py     argon2 hashing, rate limit
+      account.py       the single account row
       sessions.py      session table, cookie, vault unlock window
       passkeys.py      WebAuthn registration and assertion ceremonies
-      deps.py          require_user(), require_vault(), csrf
     api/
+      deps.py          get_db(), require_user(), optional_user(), require_vault(), want_vault(), check_csrf()
       auth.py          /api/auth/*
       library.py       /api/items, /api/trash, /api/review, /api/duplicates, /api/stats
       people.py        /api/people, /api/faces, /api/bodies, /api/guesses, /api/suggestions, tags
@@ -268,7 +269,7 @@ pinned and checksummed, skipped when present):
 | `siglip` | `search/ViT-B-16-SigLIP__webli/{visual,textual}/model.onnx`, tokenizer | immich-app on Hugging Face, commit c3b037a | Apache 2.0 |
 | `nsfw` | `nsfw/model.onnx` (+ `config.json`, `preprocessor_config.json`) | onnx-community/nsfw_image_detection-ONNX, pinned commit | Apache 2.0 (Falconsai ViT) |
 | `persons` | `yolox/yolox_s.onnx` | Megvii YOLOX release 0.1.1rc0 (35.9 MB) | Apache 2.0 |
-| `ocr` | rapidocr's bundled PP-OCRv4 det/cls/rec models (installed with the package) | RapidAI | Apache 2.0 |
+| `ocr` | rapidocr's bundled models (`PP-OCRv6_det_small`, `PP-OCRv6_rec_small`, `ch_ppocr_mobile_v2.0_cls`; installed with the package, nothing downloaded at run time) | RapidAI | Apache 2.0 |
 
 Every engine is lazy (loaded on first use), lives once per process, and falls back to CPU when the
 CUDA provider fails to initialise (logged once). Without a model file the dependent stage marks
@@ -371,8 +372,12 @@ are excluded unless `vault=1` with an unlocked session.
 ## 13. HTTP API
 
 All JSON. Errors are `{"detail": "<message or code>"}`. Codes used by the frontend:
-`login_required` (401), `vault_locked` (403), `csrf` (403), `setup_required` (409), `offset_mismatch` (409),
-`search_unavailable` (503), `wallet_not_configured` (409), `not_a_pass` (422), `Invalid cursor` (400).
+`login_required` (401), `vault_locked` (403), `csrf` (403), `setup_required` (409, login before setup),
+`already_set_up` (409), `invalid_credentials` (401), `too_many_attempts` (429, one budget shared by password
+login, passkey login, vault unlock and password change), `challenge_invalid` and `registration_failed` (400),
+`credential_exists` (409), `password_or_passkey_required` (400), `offset_mismatch` (409),
+`search_unavailable` (503, only when the one engine asked for cannot answer), `wallet_not_configured` (409),
+`not_a_pass` (422), `Invalid cursor` (400).
 
 Auth (`/api/auth`): `GET state`; `POST setup`; `POST login`; `POST logout`; `POST logout-all`;
 `GET sessions`; `DELETE sessions/{id}`; `POST password {current_password,new_password}`;
@@ -389,7 +394,7 @@ Library (`/api`): `GET items` (query: `category`, `kind`, `person` repeated, `fr
 `DELETE items/{uid}` (trash); `POST items/{uid}/restore`; `POST items/bulk {uids, action: delete|restore|keep|category|nsfw|favorite|unfavorite, value?}`;
 `POST items/{uid}/reprocess {stages?: [analyze, text, preview]}`; `GET items/{uid}/pages`; `GET items/{uid}/text`;
 `GET trash` -> `ItemPage`; `POST trash/empty`; `DELETE trash/{uid}` (purge one);
-`GET review/misclicks` -> `ItemPage` (with `misclick_reasons`); `GET review/guesses` -> `GuessPage`;
+`GET review/misclicks` -> `ItemPage` (with `misclick_reasons`); `GET review/guesses?person=` -> `GuessPage` (served by the people router);
 `GET duplicates` -> `DupGroupPage{groups:[{best: ItemCard, copies: [ItemCard]}]}`; `POST duplicates/{uid}/best`;
 `GET stats` -> `Stats{items, by_kind, by_category, people, documents, misclicks, guesses, trash, queue{queued, running, failed, by_queue}, disk{free_bytes, total_bytes, originals_bytes}, analysis{pending, done, error}, text{pending, done}}`.
 
@@ -411,7 +416,7 @@ People (`/api`): `GET people?q&filter=all|named|unnamed&sort=items|name|recent&c
 `POST guesses/confirm {faces: [id], bodies: [id]}`; `POST guesses/reject {faces, bodies}`;
 `GET suggestions`; `POST suggestions/dismiss {a, b}`; `POST items/{uid}/tags {person_id | new_person_name}`;
 `DELETE items/{uid}/tags/{person_id}`; `POST recluster`.
-`PersonOut = {id, name, cover_url, face_count, item_count, guess_count, created_at}`.
+`PersonOut = {id, name, cover_url, cover_face_id, face_count, item_count, guess_count, created_at}` (counts over live, non-vault items).
 
 Documents (`/api/documents`): `GET ?type&group&q&cursor&limit` -> `DocumentPage{items:[{item: ItemCard, document: DocumentOut}], next_cursor, total}`;
 `GET types` -> `[{type, group, label, count}]`; `GET {uid}`; `PATCH {uid} {doc_type?, fields?, title?, doc_date?, person_name?}`;
@@ -483,7 +488,7 @@ localStorage), 16 px gutters, 40 px tap targets, no em dashes or exclamation mar
 | `GUESS_WINDOW_H`, `GUESS_SCENE_SIM`, `GUESS_CLOTHES_SIM`, `GUESS_GPS_M` | 12, 0.80, 0.85, 250 | person guessing |
 | `SEARCH_*` | as the hub | semantic search gates |
 | `OCR_ENABLED`, `OCR_MAX_PAGES` | true, 50 | |
-| `WALLET_PASS_TYPE_ID`, `WALLET_TEAM_ID`, `WALLET_ORG_NAME`, `WALLET_DIR` | unset, unset, site title, `DATA_DIR/wallet` | Apple Wallet |
+| `WALLET_PASS_TYPE_ID`, `WALLET_TEAM_ID`, `WALLET_ORG_NAME`, `WALLET_DIR`, `WALLET_KEY_PASSWORD` | unset, unset, site title, `DATA_DIR/wallet`, unset | Apple Wallet (the key password only when key.pem is encrypted) |
 | `WORKERS_ENABLED` | true (false in tests) | |
 
 ## 16. Testing
@@ -497,7 +502,17 @@ each document type (text drawn with Pillow, valid check digits), a two-page PDF 
 scanned-style PDF, generated blurry and dark images, a tiny ffmpeg-generated video. The frontend
 builds with `tsc` and is checked in a real browser with `ws-check`.
 
-## 17. Ownership for parallel implementation
+## 17. Build notes
+
+The areas below were built in parallel on 2026-11-07; each area's decisions and deviations from this
+contract are recorded in `docs/integration-notes/<area>.md`. Where a note and this file disagree, the
+note describes the code as built. Known deviations folded in: `probe(path, filename)` takes the original
+file name; MediaInfo has `page_count`, `raw`, `reason`; the people router carries its own `/api` prefix and
+serves `/api/review/guesses`; `pdfium` calls hold `app.media.documents.PDFIUM_LOCK`; worker job payloads are
+`{"item_id", "version"}` and `{"person_id", "item_id"}` in that key order; `SearchResult.semantic_used`;
+items whose text stage finds a typed document move to `documents` unless the owner chose a category.
+
+### Ownership for parallel implementation
 
 Each area owns its files; shared contracts (`schema.sql`, `config.py`, `jobs.py`, `urls.py`,
 `schemas.py`, `lib/types.ts`, `lib/api.ts`) are written first and changed only by the integrator.
