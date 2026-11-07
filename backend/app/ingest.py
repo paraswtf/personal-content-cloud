@@ -957,9 +957,41 @@ def sweep_orphan_files(conn: sqlite3.Connection, min_age_s: float = ORPHAN_AGE_S
     return removed
 
 
+FTS_REBUILD_CHUNK = 500  # items re-indexed per transaction by _rebuild_fts_if_flagged
+
+
+def _rebuild_fts_if_flagged(conn: sqlite3.Connection) -> int:
+    """When db.init_db recreated items_fts (kv fts_rebuild = 1, a tokenizer change), index every item
+    again (trashed ones too: they keep their row until purged). The flag is cleared only after the
+    whole pass, so an interrupted rebuild runs again on the next start. Returns the items indexed."""
+    from app.db import FTS_REBUILD_KEY
+
+    if kv_get(conn, FTS_REBUILD_KEY, "0") != "1":
+        return 0
+    from app.documents.extract import refresh_fts
+
+    ids = [int(r[0]) for r in conn.execute("SELECT id FROM items ORDER BY id")]
+    done = failed = 0
+    for i in range(0, len(ids), FTS_REBUILD_CHUNK):
+        with tx(conn):  # refresh_fts's own transactions become savepoints of this one
+            for item_id in ids[i:i + FTS_REBUILD_CHUNK]:
+                try:
+                    refresh_fts(conn, item_id)
+                    done += 1
+                except Exception:
+                    failed += 1
+                    log.exception("startup: could not re-index item %s for full-text search", item_id)
+    with tx(conn):
+        conn.execute("DELETE FROM kv WHERE key = ?", (FTS_REBUILD_KEY,))
+    log.info("startup: full-text index rebuilt for the new tokenizer (%d items, %d failed)", done, failed)
+    return done
+
+
 def recover_on_startup(conn: sqlite3.Connection) -> None:
-    """Re-queue interrupted jobs; make sure every queued/processing upload has an ingest job and
-    every item whose analysis, text or streaming copy is pending has its job; wipe data_dir/tmp."""
+    """Rebuild the full-text index when init_db asked for it (kv fts_rebuild); re-queue interrupted
+    jobs; make sure every queued/processing upload has an ingest job and every item whose analysis,
+    text or streaming copy is pending has its job; wipe data_dir/tmp."""
+    _rebuild_fts_if_flagged(conn)
     n, exhausted = jobs.requeue_running(conn)
     if n:
         log.info("startup: re-queued %d interrupted jobs", n)

@@ -116,3 +116,50 @@ def test_reading_order_pure():
     assert [x.text for x in out] == ["hello", "world", "next"]
     assert text_of(out) == "hello world\nnext"
     assert reading_order([]) == [] and text_of([]) == ""
+
+
+def test_reset_also_resets_devanagari_state(monkeypatch):
+    from app.ml import ocr, ocr_devanagari
+
+    sentinel = object()
+    monkeypatch.setattr(ocr_devanagari, "_engine", sentinel)
+    monkeypatch.setattr(ocr_devanagari, "_provider", "CPUExecutionProvider")
+    monkeypatch.setattr(ocr_devanagari, "_failed", None)
+    assert ocr_devanagari.loaded() and ocr_devanagari.provider() == "CPUExecutionProvider"
+    monkeypatch.setattr(ocr, "_engine", None)
+    ocr.reset()
+    assert not ocr_devanagari.loaded() and ocr_devanagari.provider() is None
+    assert not ocr.devanagari_active()
+
+
+def test_shrink_sessions_wraps_cuda_sessions_of_the_engine(monkeypatch):
+    """rapidocr keeps its onnxruntime session at engine.<part>.session.session; a CUDA one is replaced by
+    the runtime's shrinking proxy, a CPU one is left alone, a part that is not loaded is skipped."""
+    from types import SimpleNamespace
+
+    from app.ml import ocr as ml_ocr
+    from app.ml import runtime
+
+    monkeypatch.setattr(runtime.settings, "gpu_arena_shrink", True)
+
+    class Sess:
+        def __init__(self, providers):
+            self._p = providers
+
+        def get_providers(self):
+            return self._p
+
+        def run(self, out, feed, run_options=None):
+            return [run_options]
+
+    cuda, cpu = Sess([runtime.CUDA, runtime.CPU]), Sess([runtime.CPU])
+    engine = SimpleNamespace(
+        text_det=SimpleNamespace(session=SimpleNamespace(session=cuda)),
+        text_cls=None,
+        text_rec=SimpleNamespace(session=SimpleNamespace(session=cpu)),
+    )
+    assert ml_ocr.shrink_sessions(engine) == 1
+    assert engine.text_det.session.session is not cuda and engine.text_det.session.session.shrinks_arena
+    assert engine.text_rec.session.session is cpu
+    assert ml_ocr.shrink_sessions(engine) == 0  # already wrapped
+    assert engine.text_det.session.session.run(None, {})[0] is not None  # the shrink option is passed

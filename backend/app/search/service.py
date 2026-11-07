@@ -49,6 +49,13 @@ Text engine:
   them; None when neither column matched (a file name or label match). They are made only for
   the hits of the returned page, with the MATCH expression the text hits came from.
 
+Script (mode auto): a query whose letters are all non-Latin (Devanagari, say) skips the semantic
+pass, because SigLIP only knows English text; the answer is the text hits alone and semantic_used
+is False. A mixed query ("राहुल passport") runs both engines as usual.
+Indic text: items_fts keeps Indic combining marks inside tokens (app.db.FTS_TOKENIZE), so the
+query keeps them too (_KEEP), drops zero-width joiners, and searches a piece with a Devanagari
+nukta letter in both its precomposed and its base + U+093C spelling.
+
 Merge (mode auto): text hits go first when the strict query found an item through its file
 name, text, document fields or people (a "strong" text hit, labels alone do not count),
 otherwise semantic hits go first; the other list follows with the items not already listed.
@@ -86,7 +93,7 @@ from typing import Any, Callable, Hashable
 import numpy as np
 
 from app.config import settings
-from app.db import kv_get
+from app.db import FTS_TOKENCHARS, kv_get
 
 log = logging.getLogger(__name__)
 
@@ -107,8 +114,24 @@ PAGE_CACHE_TTL_S = 600.0  # later pages reuse the merged list of page 1 for this
 PAGE_CACHE_SIZE = 8  # merged lists kept (one per query and filter set)
 _OPEN, _CLOSE = "\x02", "\x03"  # snippet markers, replaced by <b> </b> after escaping
 _FTS_OPERATORS = frozenset({"AND", "OR", "NOT", "NEAR"})
-_KEEP = re.compile(r"[^\w\-./@&+']+", re.UNICODE)
+# Characters kept inside a query piece: word characters, a few joiners, and the Indic combining marks
+# that items_fts treats as token characters (app.db.FTS_TOKENCHARS). Python's \w does not match
+# combining marks, so without them "राहुल" would fall apart into "र ह ल".
+_KEEP = re.compile(r"[^\w\-./@&+'" + re.escape(FTS_TOKENCHARS) + r"]+", re.UNICODE)
 _HAS_WORD = re.compile(r"[^\W_]", re.UNICODE)
+_JOINERS = re.compile("[\u200c\u200d]")  # zero-width non-joiner / joiner: removed, they only shape glyphs
+_QUERY_DIGITS = str.maketrans({chr(0x0966 + i): str(i) for i in range(10)})  # the index stores ASCII digits
+_LETTER = re.compile(r"[^\W\d_]", re.UNICODE)
+_LATIN_LETTER = re.compile(r"[A-Za-z\u00c0-\u00d6\u00d8-\u00f6\u00f8-\u024f\u1e00-\u1eff]")
+# Devanagari letters with a nukta exist precomposed (U+0929, U+0931, U+0934, U+0958..U+095F) and as
+# base letter + U+093C. OCR, PDF text layers and keyboards use either, so a piece containing one is
+# searched in both spellings. Other text is left exactly as typed.
+_NUKTA = "\u093c"
+_NUKTA_COMPOSED = {base + _NUKTA: chr(cp) for cp, base in (
+    (0x0929, "\u0928"), (0x0931, "\u0930"), (0x0934, "\u0933"), (0x0958, "\u0915"), (0x0959, "\u0916"),
+    (0x095A, "\u0917"), (0x095B, "\u091c"), (0x095C, "\u0921"), (0x095D, "\u0922"), (0x095E, "\u092b"),
+    (0x095F, "\u092f"))}
+_NUKTA_DECOMPOSED = {v: k for k, v in _NUKTA_COMPOSED.items()}
 
 # Contrast gate: settings.search_contrast x median relevance, capped at this relevance (about
 # cosine 0.10 on SigLIP), so a subject that fills most of the library, or a library of a few
@@ -566,7 +589,7 @@ def _kinds(conn: sqlite3.Connection, ids: set[int]) -> dict[int, str]:
 def _clean_pieces(q: str) -> list[tuple[str, bool]]:
     """(cleaned piece, prefix) per usable whitespace-separated piece of the query."""
     out: list[tuple[str, bool]] = []
-    for raw in str(q).split():
+    for raw in _JOINERS.sub("", str(q)).translate(_QUERY_DIGITS).split():
         prefix = raw.endswith("*")
         words = _KEEP.sub(" ", raw.replace('"', " ").replace("*", " ")).split()
         core = " ".join(w for w in words if w not in _FTS_OPERATORS)
@@ -578,10 +601,35 @@ def _clean_pieces(q: str) -> list[tuple[str, bool]]:
     return out
 
 
+def _nukta_spellings(core: str) -> list[str]:
+    """The piece as typed, plus its other nukta spelling when it has a Devanagari nukta letter."""
+    if _NUKTA not in core and not any(c in _NUKTA_DECOMPOSED for c in core):
+        return [core]
+    composed = core
+    for pair, single in _NUKTA_COMPOSED.items():
+        composed = composed.replace(pair, single)
+    decomposed = "".join(_NUKTA_DECOMPOSED.get(c, c) for c in composed)
+    return list(dict.fromkeys((core, composed, decomposed)))
+
+
+def _term(core: str, prefix: bool) -> str:
+    star = "*" if prefix else ""
+    forms = [f'"{form}"{star}' for form in _nukta_spellings(core)]
+    return forms[0] if len(forms) == 1 else "(" + " OR ".join(forms) + ")"
+
+
+def _every(terms: list[str]) -> str:
+    """Terms joined so that all must match. FTS5 allows the implicit AND (a space) only between
+    phrases, so an OR group needs an explicit AND."""
+    return (" AND " if any(t.startswith("(") for t in terms) else " ").join(terms)
+
+
 def fts_terms(q: str) -> list[str]:
     """Sanitised FTS5 terms: each piece quoted ("a b" is a phrase), a trailing * kept as prefix
-    search, FTS operators and punctuation-only pieces dropped."""
-    return [f'"{core}"' + ("*" if prefix else "") for core, prefix in _clean_pieces(q)]
+    search, FTS operators and punctuation-only pieces dropped. Indic combining marks stay inside
+    the word and zero-width joiners are removed; a piece with a Devanagari nukta letter becomes
+    ("as typed" OR "other spelling")."""
+    return [_term(core, prefix) for core, prefix in _clean_pieces(q)]
 
 
 def fts_query(q: str, *, any_term: bool = False) -> str | None:
@@ -589,7 +637,7 @@ def fts_query(q: str, *, any_term: bool = False) -> str | None:
     terms = fts_terms(q)
     if not terms:
         return None
-    return (" OR " if any_term else " ").join(terms)
+    return " OR ".join(terms) if any_term else _every(terms)
 
 
 def _render_snippet(raw: str | None) -> str | None:
@@ -617,13 +665,21 @@ def _snippets(conn: sqlite3.Connection, match: str, ids: list[int]) -> dict[int,
     for i in range(0, len(ids), _IN_CHUNK):
         chunk = ids[i:i + _IN_CHUNK]
         ph = ",".join("?" * len(chunk))
+        # The index holds folded text (ASCII digits, no joiners); the snippet shown is mapped back onto
+        # the original text so Devanagari digits and joiner-shaped conjuncts read as written.
+        from app.documents import extract
+
+        originals = extract.snippet_originals(conn, chunk)
         for r in conn.execute(
             f"SELECT rowid AS id, snippet(items_fts, 1, ?, ?, '...', {SNIPPET_TOKENS}) AS s_text, "
             f"snippet(items_fts, 2, ?, ?, '...', {SNIPPET_TOKENS}) AS s_doc "
             f"FROM items_fts WHERE items_fts MATCH ? AND rowid IN ({ph})",
             [_OPEN, _CLOSE, _OPEN, _CLOSE, match, *chunk],
         ):
-            snippet = _render_snippet(r["s_text"]) or _render_snippet(r["s_doc"])
+            o_text, o_doc = originals.get(int(r["id"]), ("", ""))
+            s_text = extract.restore_snippet(r["s_text"], o_text, _OPEN, _CLOSE)
+            s_doc = extract.restore_snippet(r["s_doc"], o_doc, _OPEN, _CLOSE)
+            snippet = _render_snippet(s_text) or _render_snippet(s_doc)
             if snippet:
                 out[int(r["id"])] = snippet
     return out
@@ -662,10 +718,10 @@ def _text_hits(conn: sqlite3.Connection, q: str, filt: _Filters,
     """(hits best first without snippets, strong, MATCH expression the hits came from, for
     _snippets). Raises sqlite3.Error when FTS itself fails."""
     pieces = _clean_pieces(q)
-    terms = [f'"{core}"' + ("*" if prefix else "") for core, prefix in pieces]
+    terms = [_term(core, prefix) for core, prefix in pieces]
     if not terms:
         return [], False, None
-    strict = " ".join(terms)
+    strict = _every(terms)
     match = strict
     factor = 1.0
     rows = _fts_rows(conn, strict, filt, limit)
@@ -797,13 +853,22 @@ def _page_cache_put(key: tuple[Any, ...], value: tuple[list[dict[str, Any]], str
             _page_cache.popitem(last=False)
 
 
+def text_only_query(q: str) -> bool:
+    """True when the query has letters and none of them is Latin (a Hindi or Marathi query, say).
+    SigLIP is trained on English text, so mode auto skips the semantic pass for such a query: its
+    hits would be noise and its gates could only push real text hits down. Queries of digits and
+    punctuation alone are not affected."""
+    return bool(_LETTER.search(q)) and not _LATIN_LETTER.search(q)
+
+
 def _merged(conn: sqlite3.Connection, q: str, mode: str,
             filt: _Filters) -> tuple[list[dict[str, Any]], str | None, bool]:
     """(merged hits without snippets, FTS MATCH expression for the snippets, semantic used)."""
     semantic: list[_Hit] = []
     semantic_ok = False
     semantic_error: SearchUnavailable | None = None
-    if mode in ("auto", "semantic") and q:
+    text_only = mode == "auto" and text_only_query(q)
+    if mode in ("auto", "semantic") and q and not text_only:
         try:
             semantic = _semantic_hits(conn, q, filt)
             semantic_ok = True
@@ -829,7 +894,7 @@ def _merged(conn: sqlite3.Connection, q: str, mode: str,
     elif mode == "text":
         merged = _merge([], text, text_first=True)
     else:
-        merged = _merge(semantic, text, text_first=strong)
+        merged = _merge(semantic, text, text_first=strong or text_only)
     return merged, match, semantic_ok
 
 

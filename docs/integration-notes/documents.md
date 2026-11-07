@@ -52,3 +52,76 @@ Files: `backend/app/documents/{extract,detect,fields,barcodes,photo}.py`, `backe
 - Detection threshold 0.5. With no OCR text, a BCBP barcode alone classifies an image as a boarding pass.
 - ID photo: crops are made only for the `id` group, from the image or from page renders 1 and 2. When no
   face is found, a stale `docphoto` file is removed.
+
+## Hindi and Marathi (Devanagari)
+
+What the documents area does with Devanagari text (tests: `backend/tests/test_documents_hindi.py`;
+fixtures are drawn with `tests/helpers.devanagari_text_image`, which needs
+`models/fonts/NotoSansDevanagari-Regular.ttf` and skips without it).
+
+- `fields.normalize_text` folds Devanagari before anything else (`dev_fold`): digits U+0966 to U+096F
+  become ASCII digits, the danda, double danda and abbreviation sign become '.', U+200C and U+200D are
+  dropped, and the precomposed nukta letters U+0958 to U+095F are split into letter + nukta (what NFC
+  does for them), so both spellings of 'फ़रवरी' compare equal. Gaps and dashes behave as before; the
+  function stays idempotent.
+- Dates and months: Hindi and Marathi month names (`fields.LOCAL_MONTHS`, with the usual spelling
+  variants) work in `find_dates`, `parse_date` and `parse_month`; a month word must stand alone, so the
+  Marathi 'मे' (May) does not match inside Hindi 'में'. `month_label` still writes English month names.
+- Labels: every parser appends Hindi and Marathi labels after its English ones (shared lists in
+  fields.py: `NAME_LABELS_LOCAL`, `FATHER_LABELS_LOCAL`, `DOB_LABELS_LOCAL`, `ISSUE_LABELS_LOCAL`,
+  `DATE_LABELS_LOCAL`, `AMOUNT_LABELS_LOCAL`, `ADDRESS_LABELS_LOCAL`, ...), so an English label still
+  wins on a bilingual document. `after_label` guards a label by its own script (a Devanagari label does
+  not match inside a longer Devanagari word: 'नाम' not in 'उपनाम'), skips the other half of a bilingual
+  label ('जन्म तिथि/DOB:', 'Name / नाम :'; at the end of a line the other half must end in a label word,
+  so 'Name / राहुल शर्मा' gives the name), and with anchored=True accepts 'नाम / Name' as a line start.
+  The generic date words दिनांक, तारीख, तिथि ignore a hit right after 'जन्म' (birth). `STOP_LABELS_LOCAL`
+  ends a value at a later Devanagari label.
+- Names: `plausible_name`, `nice_name` and `_base.is_name_line` count combining marks as letters. A
+  value in both scripts keeps its Latin spelling; a Devanagari-only name is kept as written (no
+  casing). `name_after` prefers a Latin spelling found after any of its labels; `local_name_after`
+  reads the Devanagari spelling. New field `name_local` ("Name (local script)") on aadhaar, pan,
+  voter_id, driving_licence, vehicle_rc and marksheet, set only when it differs from the main name. It
+  is not a key field, so English confidences do not change.
+- Gender (`लिंग`; पुरुष, पुरूष, महिला, स्त्री, अन्य) and relations (पुत्र, पुत्री, पत्नी, पति, मुलगा, मुलगी) give
+  the English values ('Male', 'Son of'); the relative's name stays in Devanagari. Marksheet results
+  (उत्तीर्ण, प्रथम श्रेणी, विशेष प्राविण्य ...) and receipt payment modes (नकद, रोख, धनादेश ...) are given in
+  English too. Amounts accept रु., रू., रुपये.
+- Detection: `detect.LOCAL_RULES` adds Hindi and Marathi phrases with weights like the English ones and
+  matching negatives (a marksheet or a rent agreement is not an invoice or a receipt; 'पगार पावती' is a
+  salary slip, not a receipt). A phrase matches whole words of its script, which also stops the old
+  'आधार' keyword from firing on 'आधारित' ("based on"). There is no rent agreement type (the registry
+  must stay in sync with `api/common.py`): a rent agreement stays `other`, and the other parser sets a
+  new field `kind` = "Rent agreement" for an English, Hindi or Marathi rent agreement heading. The
+  other parser takes a Devanagari line as the title only when no mostly-Latin line exists (a Hindi line
+  that only carries an ID such as a PAN does not count as Latin); `largest_text` and
+  `invoice.seller_line` also try Latin first. Aadhaar and PAN have the rent phrases as negatives, since
+  a rent agreement prints both parties' Aadhaar and PAN numbers.
+- Language: `extract.analyze_text` adds a field `language` (label "Language", confidence 0.9) when the
+  text has Devanagari letters: "Hindi", "Marathi", "Hindi or Marathi" (the stop words do not decide),
+  each followed by ", English" when the text has two or more Latin words of three letters or more.
+  `fields.languages_of(text)` decides with stop words and common document words (`HINDI_WORDS`,
+  `MARATHI_WORDS`) and the Marathi genitive endings -चे, -ची, -च्या; it needs two Devanagari words.
+  English-only documents get no language field.
+- Search box: `extract.match_query` splits with `fields.word_tokens` (a token is a run of word
+  characters, combining marks or letters U+0900 to U+0DFF; dandas excluded; U+200C and U+200D dropped),
+  so 'मुंबईत' stays one quoted word. The query first gets the index fold (`extract.fold_for_index`:
+  U+200C and U+200D dropped, Devanagari digits as ASCII), so '१९८८' and '1988' both find a receipt that
+  says either. The search area applies the same rule in `search/service.py` (its own change in this round).
+
+### For other areas
+
+- Search: `item_text` keeps the raw page text; every `items_fts` column is stored through
+  `extract.fold_for_index` (joiners dropped, Devanagari digits as ASCII, nothing else; nukta letters and
+  dandas stay as written). A query needs exactly that fold, not `fields.dev_fold`, which also decomposes
+  nukta letters. `search/service.py` has its own copy (`_JOINERS`, `_QUERY_DIGITS`); importing
+  `fold_for_index` would keep the two from drifting.
+- Search snippets: `snippet(items_fts, ...)` returns folded text ('15' for '१५', a Marathi eyelash-ra
+  word without its ZWJ). `extract.snippet_originals(conn, ids)` gives the original text and doc columns,
+  and `extract.restore_snippet(raw, original, open, close)` maps a raw snippet (markers still in) back
+  onto the original; it returns the raw snippet when the fragment is not found. `search/service._snippets`
+  has to call them before `_render_snippet`.
+- Frontend: the new fields (`name_local`, `language`, `kind`) arrive in the fields JSON with their
+  labels like any other field; nothing in `lib/types.ts` needs to change unless the UI lists field keys.
+- Behaviour change for English text: the voter ID issue date no longer reads the 'Date of Birth' line
+  through the generic 'Date' label (it did before on cards with an English 'Date of Birth' line and no
+  issue date).

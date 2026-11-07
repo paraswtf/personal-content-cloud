@@ -4,10 +4,13 @@
 - Connections are in autocommit mode. Group writes with `with tx(conn): ...`, which starts
   BEGIN IMMEDIATE (or a SAVEPOINT when already inside a transaction).
 - Rows are sqlite3.Row (index by column name).
+- init_db recreates items_fts when its stored tokenizer differs from FTS_TOKENIZE and sets kv
+  fts_rebuild = 1; ingest.recover_on_startup then indexes every item again.
 """
 from __future__ import annotations
 
 import itertools
+import re
 import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
@@ -20,6 +23,29 @@ SCHEMA_VERSION = 1
 # so an existing database upgrades in place on the next start without losing data.
 MIGRATED_COLUMNS: tuple[tuple[str, str, str], ...] = ()
 _SCHEMA_FILE = Path(__file__).with_name("schema.sql")
+# Full-text tokenizer of items_fts. unicode61 treats combining marks (Unicode Mn, Mc) as separators,
+# which splits a Devanagari word at every vowel sign and virama ("मुंबईत" became "म" and "बईत").
+# tokenchars adds every mark from U+0900 to U+0DFF (Devanagari through Sinhala), generated once with
+# unicodedata (Unicode 15.0) and written out here and in schema.sql. Keep the two in step:
+# tests/test_search_devanagari.py checks that schema.sql contains FTS_TOKENIZE.
+FTS_TOKENCHARS = (
+    "\u0900\u0901\u0902\u0903\u093a\u093b\u093c\u093e\u093f\u0940\u0941\u0942\u0943\u0944\u0945\u0946"
+    "\u0947\u0948\u0949\u094a\u094b\u094c\u094d\u094e\u094f\u0951\u0952\u0953\u0954\u0955\u0956\u0957"
+    "\u0962\u0963\u0981\u0982\u0983\u09bc\u09be\u09bf\u09c0\u09c1\u09c2\u09c3\u09c4\u09c7\u09c8\u09cb"
+    "\u09cc\u09cd\u09d7\u09e2\u09e3\u09fe\u0a01\u0a02\u0a03\u0a3c\u0a3e\u0a3f\u0a40\u0a41\u0a42\u0a47"
+    "\u0a48\u0a4b\u0a4c\u0a4d\u0a51\u0a70\u0a71\u0a75\u0a81\u0a82\u0a83\u0abc\u0abe\u0abf\u0ac0\u0ac1"
+    "\u0ac2\u0ac3\u0ac4\u0ac5\u0ac7\u0ac8\u0ac9\u0acb\u0acc\u0acd\u0ae2\u0ae3\u0afa\u0afb\u0afc\u0afd"
+    "\u0afe\u0aff\u0b01\u0b02\u0b03\u0b3c\u0b3e\u0b3f\u0b40\u0b41\u0b42\u0b43\u0b44\u0b47\u0b48\u0b4b"
+    "\u0b4c\u0b4d\u0b55\u0b56\u0b57\u0b62\u0b63\u0b82\u0bbe\u0bbf\u0bc0\u0bc1\u0bc2\u0bc6\u0bc7\u0bc8"
+    "\u0bca\u0bcb\u0bcc\u0bcd\u0bd7\u0c00\u0c01\u0c02\u0c03\u0c04\u0c3c\u0c3e\u0c3f\u0c40\u0c41\u0c42"
+    "\u0c43\u0c44\u0c46\u0c47\u0c48\u0c4a\u0c4b\u0c4c\u0c4d\u0c55\u0c56\u0c62\u0c63\u0c81\u0c82\u0c83"
+    "\u0cbc\u0cbe\u0cbf\u0cc0\u0cc1\u0cc2\u0cc3\u0cc4\u0cc6\u0cc7\u0cc8\u0cca\u0ccb\u0ccc\u0ccd\u0cd5"
+    "\u0cd6\u0ce2\u0ce3\u0cf3\u0d00\u0d01\u0d02\u0d03\u0d3b\u0d3c\u0d3e\u0d3f\u0d40\u0d41\u0d42\u0d43"
+    "\u0d44\u0d46\u0d47\u0d48\u0d4a\u0d4b\u0d4c\u0d4d\u0d57\u0d62\u0d63\u0d81\u0d82\u0d83\u0dca\u0dcf"
+    "\u0dd0\u0dd1\u0dd2\u0dd3\u0dd4\u0dd6\u0dd8\u0dd9\u0dda\u0ddb\u0ddc\u0ddd\u0dde\u0ddf\u0df2\u0df3"
+)
+FTS_TOKENIZE = f"tokenize = 'unicode61 remove_diacritics 2 tokenchars ''{FTS_TOKENCHARS}'''"
+FTS_REBUILD_KEY = "fts_rebuild"  # kv flag: items_fts was recreated, ingest.recover_on_startup refills it
 _savepoints = itertools.count(1)
 
 
@@ -39,9 +65,11 @@ def init_db() -> None:
     conn = connect()
     try:
         conn.execute("PRAGMA journal_mode = WAL")
-        conn.executescript(_SCHEMA_FILE.read_text())
+        schema = _SCHEMA_FILE.read_text(encoding="utf-8")
+        conn.executescript(schema)
         with tx(conn):
             _add_missing_columns(conn)
+            _upgrade_fts(conn, schema)
             conn.execute("INSERT OR IGNORE INTO kv(key, value) VALUES ('schema_version', ?)", (str(SCHEMA_VERSION),))
             conn.execute(
                 "UPDATE kv SET value = ? WHERE key = 'schema_version' AND CAST(value AS INTEGER) < ?",
@@ -55,6 +83,24 @@ def init_db() -> None:
             )
     finally:
         conn.close()
+
+
+def _upgrade_fts(conn: sqlite3.Connection, schema: str) -> bool:
+    """Recreate items_fts when its stored definition lacks FTS_TOKENIZE (a database made before the
+    Devanagari tokenizer: CREATE VIRTUAL TABLE IF NOT EXISTS never alters an existing table). The
+    new table is empty; kv fts_rebuild = 1 tells ingest.recover_on_startup to index every item
+    again. Runs inside init_db's transaction, so the drop, the create and the flag commit together.
+    Returns True when the table was recreated."""
+    row = conn.execute("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'items_fts'").fetchone()
+    if row is not None and FTS_TOKENIZE in (row["sql"] or ""):
+        return False
+    m = re.search(r"CREATE VIRTUAL TABLE IF NOT EXISTS items_fts\b.*?\n\);", schema, re.DOTALL)
+    if m is None:
+        raise RuntimeError("schema.sql has no items_fts definition")
+    conn.execute("DROP TABLE IF EXISTS items_fts")
+    conn.execute(m.group(0))
+    kv_set(conn, FTS_REBUILD_KEY, 1)
+    return True
 
 
 def _add_missing_columns(conn: sqlite3.Connection) -> list[tuple[str, str]]:

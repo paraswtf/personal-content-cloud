@@ -1,7 +1,8 @@
 """Driving licence parser (Indian smart cards and Sarathi printouts of several states).
 
 Contract: parse(text, pages, boxes) -> ParsedDocument. Licence numbers follow fields.DL_RES (the
-national SS RR YYYY NNNNNNN format and older state formats); the state comes from the prefix.
+national SS RR YYYY NNNNNNN format and older state formats); the state comes from the prefix. Hindi and
+Marathi labels are read too; a Devanagari name goes to `name_local` when a Latin spelling exists.
 """
 from __future__ import annotations
 
@@ -9,16 +10,18 @@ import logging
 import re
 
 from app.documents.fields import (
-    FieldSet, ParsedDocument, address_after, after_label, date_after, find_dates, find_dl_number, name_after,
-    normalize_text, relation_name, split_lines,
+    ADDRESS_LABELS_LOCAL, DOB_LABELS_LOCAL, FATHER_LABELS_LOCAL, HUSBAND_LABELS_LOCAL, ISSUE_LABELS_LOCAL,
+    NAME_LABELS_LOCAL, FieldSet, ParsedDocument, address_after, after_label, date_after, find_dates, find_dl_number,
+    local_name, local_name_after, name_after, normalize_text, relation_name, split_lines,
 )
-from app.documents.parsers._base import finish, join_title, name_line_before
+from app.documents.parsers._base import finish, join_title, local_name_line_before, name_line_before
 
 log = logging.getLogger(__name__)
 
 DOC_TYPE = "driving_licence"
 FIELDS = [
-    ("name", "Name"), ("number", "Licence number"), ("dob", "Date of birth"), ("relation", "Relation"),
+    ("name", "Name"), ("name_local", "Name (local script)"),
+    ("number", "Licence number"), ("dob", "Date of birth"), ("relation", "Relation"),
     ("relative_name", "Father or spouse"), ("blood_group", "Blood group"), ("address", "Address"),
     ("issue_date", "Date of issue"), ("valid_till", "Valid till (non-transport)"),
     ("valid_till_transport", "Valid till (transport)"), ("vehicle_classes", "Vehicle classes"),
@@ -30,7 +33,7 @@ _COV = ["MCWOG", "MCWG", "M/CYCL.WG", "MCYCL", "LMV-NT", "LMV-TR", "LMV", "HMV",
 
 
 # the value after a generic 'Validity' / 'Valid till' label that is tagged as the transport one
-_TR_TAG = re.compile(r"^[\s(\[:\-]*(?:till|upto|up to)?[\s(\[:\-]*(?:tr|transport)\b", re.I)
+_TR_TAG = re.compile(r"^[\s(\[:\-]*(?:till|upto|up to)?[\s(\[:\-]*(?:tr|transport|परिवहन)\b", re.I)
 
 
 def parse(text: str, pages=None, boxes=None) -> ParsedDocument:
@@ -40,7 +43,8 @@ def parse(text: str, pages=None, boxes=None) -> ParsedDocument:
 
     dl = None
     num_label = after_label(t, ["dl no", "d.l. no", "licence no", "license no", "licence number", "license number",
-                                "dl number"], stop=False)
+                                "dl number", "लाइसेंस संख्या", "लाइसेंस नं", "अनुज्ञप्ति संख्या",
+                                "अनुज्ञप्ति क्रमांक", "परवाना क्रमांक", "अनुज्ञप्ति सं"], stop=False)
     if num_label:
         dl = find_dl_number(num_label)
     dl = dl or find_dl_number(t)
@@ -48,13 +52,17 @@ def parse(text: str, pages=None, boxes=None) -> ParsedDocument:
         fs.set("number", dl[0], 0.9)
         fs.set("state", dl[1], 0.8)
 
-    name = name_after(t, ["name"], anchored=True)
-    fs.set("dob", date_after(t, ["date of birth", "dob", "d.o.b"], past=True), 0.9)
+    name = name_after(t, ["name", *NAME_LABELS_LOCAL], anchored=True)
+    local = local_name_after(t, ["name", *NAME_LABELS_LOCAL], anchored=True)
+    fs.set("dob", date_after(t, ["date of birth", "dob", "d.o.b", *DOB_LABELS_LOCAL], past=True), 0.9)
     if not name:
-        idx = next((i for i, ln in enumerate(lines) if re.search(r"birth|d\.?o\.?b", ln, re.I)), None)
+        idx = next((i for i, ln in enumerate(lines) if re.search(r"birth|d\.?o\.?b|जन्म", ln, re.I)), None)
         if idx is not None:
             name = name_line_before(lines, idx)
+            local = local or local_name(local_name_line_before(lines, idx))
     fs.set("name", name, 0.8)
+    if local and local != name:
+        fs.set("name_local", local, 0.75)
 
     rel = relation_name(t)
     if rel:
@@ -62,21 +70,25 @@ def parse(text: str, pages=None, boxes=None) -> ParsedDocument:
         fs.set("relative_name", rel[1], 0.8)
     else:
         fs.set("relative_name", name_after(t, ["son/daughter/wife of", "s/d/w of", "father's name",
-                                               "husband's name"]), 0.75)
-    bg = after_label(t, ["blood group", "b.g."])
+                                               "husband's name", "पुत्र/पुत्री/पत्नी", *FATHER_LABELS_LOCAL[:4],
+                                               *HUSBAND_LABELS_LOCAL[:2]]), 0.75)
+    bg = after_label(t, ["blood group", "b.g.", "रक्त समूह", "रक्त गट", "रक्तगट"])
     if bg:
         m = re.search(r"\b(AB|A|B|O)\s*([+-]|ve|pos|neg)", bg, re.I)
         if m:
             sign = "+" if m.group(2).lower() in ("+", "ve", "pos") else "-"
             fs.set("blood_group", f"{m.group(1).upper()}{sign}", 0.8)
-    fs.set("address", address_after(t, ["address", "permanent address", "present address"]), 0.7)
-    fs.set("issue_date", date_after(t, ["date of issue", "issue date", "doi", "issued on", "date of first issue"],
-                                    past=True), 0.85)
+    fs.set("address", address_after(t, ["address", "permanent address", "present address", "स्थायी पता",
+                                         *ADDRESS_LABELS_LOCAL]), 0.7)
+    fs.set("issue_date", date_after(t, ["date of issue", "issue date", "doi", "issued on", "date of first issue",
+                                        *ISSUE_LABELS_LOCAL], past=True), 0.85)
 
     nt = date_after(t, ["validity (nt)", "valid till (nt)", "validity(nt)", "non-transport", "nt validity",
-                        "valid till", "validity", "valid upto", "valid up to"],
+                        "valid till", "validity", "valid upto", "valid up to", "वैधता (गैर परिवहन)",
+                        "वैध (गैर परिवहन)", "गैर परिवहन", "तक वैध", "पर्यंत वैध", "वैधता", "वैध"],
                     accept=lambda v: not _TR_TAG.match(v))
-    tr = date_after(t, ["validity (tr)", "valid till (tr)", "validity(tr)", "transport validity"])
+    tr = date_after(t, ["validity (tr)", "valid till (tr)", "validity(tr)", "transport validity", "वैधता (परिवहन)",
+                        "वैध (परिवहन)"])
     if not nt:
         for m in re.finditer(r"valid(?:ity)?([^\n]{0,30})", t, re.I):
             if _TR_TAG.match(m.group(1)):
@@ -96,7 +108,8 @@ def parse(text: str, pages=None, boxes=None) -> ParsedDocument:
     if covs:
         fs.set("vehicle_classes", ", ".join(covs), 0.8)
 
-    auth = after_label(t, ["issuing authority", "licensing authority", "issued by"])
+    auth = after_label(t, ["issuing authority", "licensing authority", "issued by", "अनुज्ञापन प्राधिकारी",
+                           "जारीकर्ता प्राधिकारी", "परवाना प्राधिकारी"])
     if not auth:
         m = re.search(r"\b(RTO|R\.T\.O\.?|regional transport office)\s*[,:\-]?\s*([A-Za-z ]{3,30})", t, re.I)
         if m:

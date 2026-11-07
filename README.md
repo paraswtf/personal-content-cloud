@@ -18,11 +18,13 @@ What it does with each file:
 - **Faces and people.** Faces are found in photos and in video frames (about one per second),
   grouped into people, and named once. People are also guessed from earlier photos of the same day,
   the same scene and the same clothes; guesses wait for a confirm or reject.
-- **Documents.** Text is extracted (text layer or OCR) and searchable. Aadhaar, PAN, passport,
-  driving licence, voter ID, vehicle RC, bank statements, invoices, receipts, salary slips,
-  marksheets, degrees, certificates, offer letters, insurance policies, prescriptions, lab reports,
-  vaccination certificates, event passes and boarding passes get a parsed "virtual document" card
-  with their fields. Event and boarding passes can be exported to Apple Wallet.
+- **Documents.** Text is extracted (text layer or OCR, in English, Hindi and Marathi) and searchable.
+  Aadhaar, PAN, passport, driving licence, voter ID, vehicle RC, bank statements, invoices, receipts,
+  salary slips, marksheets, degrees, certificates, offer letters, insurance policies, prescriptions,
+  lab reports, vaccination certificates, event passes and boarding passes get a parsed "virtual
+  document" card with their fields, from English, Hindi or Marathi labels. A document in Devanagari
+  shows its language, and a name printed in both scripts keeps both. Event and boarding passes can be
+  exported to Apple Wallet.
 - **Search.** One box searches by meaning ("beach at sunset", "person in a red shirt") and by text
   (OCR, file names, people, document fields), with filters for category, kind, people and dates.
 - **Vault.** NSFW items never appear in the library, search, people pages or previews. The vault
@@ -67,13 +69,14 @@ Environment variables (all optional):
 | `TRASH_DAYS` | `30` | Deleted items wait this long before they are purged. |
 | `LOCAL_TIMEZONE` | `Asia/Kolkata` | Time zone for camera times without an offset and for "same day". |
 | `GPU_ENABLED` | `auto` | `auto`, `true` or `false`. |
+| `GPU_ARENA_SHRINK` | `true` | Give unused GPU memory back after every model run (keeps the server from growing to the card's size). |
 | `MAX_UPLOAD_MB`, `CHUNK_SIZE_MB`, `MIN_FREE_DISK_MB` | `16384`, `8`, `2048` | Upload limits and the free-space floor. |
 | `NSFW_THRESHOLD` | `0.7` | Classifier probability at which an item goes to the vault. |
 | `DOC_LIKENESS_MIN` | `0.55` | Images at or above this are sent to OCR. |
 | `BLUR_VAR_MIN`, `BURST_WINDOW_S` | `40`, `3` | Mis-click thresholds. |
 | `GUESS_WINDOW_H`, `GUESS_SCENE_SIM`, `GUESS_CLOTHES_SIM`, `GUESS_GPS_M` | `12`, `0.80`, `0.85`, `250` | Person guessing. |
 | `WALLET_PASS_TYPE_ID`, `WALLET_TEAM_ID`, `WALLET_ORG_NAME` | unset | Apple Wallet passes (see below). |
-| `OCR_ENABLED`, `OCR_MAX_PAGES` | `true`, `50` | |
+| `OCR_ENABLED`, `OCR_MAX_PAGES` | `true`, `50` | OCR runs in English, Hindi and Marathi when the Devanagari model is present. |
 
 The full list, with the face, video, preview and search settings carried over from the alumni hub,
 is in `backend/app/config.py` and `docs/ARCHITECTURE.md`.
@@ -96,7 +99,9 @@ start, a no-op when they are present) into `MODELS_DIR`:
 | SigLIP ViT-B/16 (WebLI), ONNX export by Immich | search, categories, scene and clothes similarity | Hugging Face immich-app | Apache 2.0 |
 | Falconsai NSFW ViT, ONNX export by onnx-community | vault classifier | Hugging Face | Apache 2.0 |
 | YOLOX-S | person boxes for clothes matching | Megvii YOLOX release | Apache 2.0 |
-| PP-OCRv6 small models bundled with rapidocr | OCR | RapidAI | Apache 2.0 |
+| PP-OCRv6 small models bundled with rapidocr | OCR, English | RapidAI | Apache 2.0 |
+| PP-OCRv5 Devanagari mobile recogniser | OCR, Hindi and Marathi | RapidOCR model zoo | Apache 2.0 |
+| Noto Sans Devanagari | page renders of Hindi and Marathi text | Noto fonts | SIL OFL 1.1 |
 
 ## Data, backups and disk
 

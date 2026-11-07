@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import logging
 import re
+from typing import Any
 import struct
 import textwrap
 import threading
@@ -592,13 +593,91 @@ def _font(size: int) -> ImageFont.ImageFont | ImageFont.FreeTypeFont:
         return ImageFont.load_default()
 
 
+_DEVANAGARI = re.compile("[\u0900-\u097f]")
+_DEV_FONT_FALLBACK = "/usr/share/fonts/truetype/freefont/FreeSerif.ttf"
+
+
+def _devanagari_font_paths() -> list[str]:
+    """The downloaded Noto Sans Devanagari first (app.ml.models.devanagari_font), then FreeSerif,
+    which also carries Devanagari glyphs."""
+    out: list[str] = []
+    try:
+        from app.ml import models
+
+        found = models.devanagari_font()
+        if found:
+            out.append(str(found))
+    except Exception:  # noqa: BLE001 - the registry is optional for renders
+        pass
+    out.append(_DEV_FONT_FALLBACK)
+    return out
+
+
+@lru_cache(maxsize=8)
+def _dev_font(size: int) -> ImageFont.FreeTypeFont | None:
+    for candidate in _devanagari_font_paths():
+        try:
+            return ImageFont.truetype(candidate, size)
+        except OSError:
+            continue
+    return None
+
+
+def text_runs(line: str) -> list[tuple[str, bool]]:
+    """Split a line into runs of Devanagari and other text; whitespace stays with the run it follows.
+    [(text, is_devanagari), ...]"""
+    runs: list[tuple[str, bool]] = []
+    cur, dev = "", None
+    for ch in line:
+        if ch.isspace():
+            cur += ch
+            continue
+        is_dev = bool(_DEVANAGARI.match(ch))
+        if dev is None or is_dev == dev:
+            cur += ch
+            dev = is_dev
+        else:
+            runs.append((cur, bool(dev)))
+            cur, dev = ch, is_dev
+    if cur:
+        runs.append((cur, bool(dev)))
+    return runs
+
+
+def _draw_line(draw: ImageDraw.ImageDraw, x: float, y: float, line: str, font: Any, size: int, fill: Any,
+               max_width: float) -> str:
+    """Draw one line. Devanagari runs use the Devanagari font (Pillow's raqm layout shapes the matras
+    and conjuncts); the rest uses the page font. A line wider than max_width (Devanagari glyphs are
+    wider than the Latin ones the wrapper counted) is drawn in a smaller size. Returns the name of the
+    font family used for Devanagari, or '' when the line has none (a seam for tests)."""
+    if not _DEVANAGARI.search(line):
+        draw.text((x, y), line, fill=fill, font=font)
+        return ""
+    dev_font = _dev_font(size) or font
+    runs = text_runs(line)
+    fonts = {False: font, True: dev_font}
+    width = sum(fonts[d].getlength(t) for t, d in runs)
+    if width > max_width > 0:
+        smaller = max(6, int(size * max_width / width))
+        fonts = {False: _font(smaller), True: _dev_font(smaller) or _font(smaller)}
+    cx = x
+    for t, d in runs:
+        draw.text((cx, y), t, fill=fill, font=fonts[d])
+        cx += fonts[d].getlength(t)
+    try:
+        return str(dev_font.getname()[0])
+    except Exception:  # noqa: BLE001 - bitmap fallback fonts have no name
+        return ""
+
+
 def text_page_image(text: str, max_side: int) -> Image.Image:
     """A white portrait page with `text` drawn in black, wrapped the same way pagination wraps it."""
     height = int(max_side)
     width = max(1, round(height * PAGE_ASPECT))
     margin = max(8, round(width * 0.06))
     line_h = max(4, (height - 2 * margin) // LINES_PER_PAGE)
-    font = _font(max(6, int(line_h * 0.78)))
+    size = max(6, int(line_h * 0.78))
+    font = _font(size)
     img = Image.new("RGB", (width, height), "white")
     draw = ImageDraw.Draw(img)
     y = margin
@@ -608,7 +687,7 @@ def text_page_image(text: str, max_side: int) -> Image.Image:
             draw.text((margin, y - line_h), "...", fill=(90, 90, 90), font=font)
             break
         if line:
-            draw.text((margin, y), line.replace("\t", "    "), fill=(20, 20, 20), font=font)
+            _draw_line(draw, margin, y, line.replace("\t", "    "), font, size, (20, 20, 20), width - 2 * margin)
         y += line_h
     return img
 

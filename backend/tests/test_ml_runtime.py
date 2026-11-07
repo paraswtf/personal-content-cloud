@@ -64,3 +64,45 @@ def test_missing_model_file(tmp_path):
 
     with pytest.raises(FileNotFoundError):
         runtime.session(tmp_path / "nope.onnx")
+
+
+class _FakeSession:
+    def __init__(self, providers):
+        self.calls = []
+        self._providers = providers
+
+    def get_providers(self):
+        return self._providers
+
+    def get_inputs(self):
+        return ["x"]
+
+    def run(self, out, feed, run_options=None):
+        self.calls.append(run_options)
+        return [feed["x"]]
+
+
+def test_cuda_sessions_free_their_arena_after_each_run(monkeypatch):
+    import onnxruntime as ort
+
+    from app.ml import runtime
+
+    monkeypatch.setattr(runtime.settings, "gpu_arena_shrink", True)
+    fake = _FakeSession([runtime.CUDA, runtime.CPU])
+    wrapped = runtime.wrap_session(fake)
+    assert wrapped is not fake and wrapped.shrinks_arena
+    assert wrapped.run(None, {"x": 1}) == [1]
+    ro = fake.calls[0]
+    assert isinstance(ro, ort.RunOptions)  # the shrink option travels with every run
+    assert ro.get_run_config_entry("memory.enable_memory_arena_shrinkage") == "gpu:0"
+    assert wrapped.get_inputs() == ["x"] and wrapped.get_providers()[0] == runtime.CUDA
+    assert runtime.wrap_session(wrapped) is wrapped  # idempotent
+    own = ort.RunOptions()
+    wrapped.run(None, {"x": 2}, own)
+    assert fake.calls[1] is own  # a caller's own options are kept
+
+    cpu = _FakeSession([runtime.CPU])
+    assert runtime.wrap_session(cpu) is cpu  # nothing to shrink on the CPU
+    monkeypatch.setattr(runtime.settings, "gpu_arena_shrink", False)
+    off = _FakeSession([runtime.CUDA])
+    assert runtime.wrap_session(off) is off  # off: the session itself

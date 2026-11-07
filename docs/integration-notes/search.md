@@ -63,3 +63,31 @@ Nothing needs to wake search after an upload: the analysis stage writes `item_em
 `tests/test_search_api.py::test_end_to_end_through_the_real_app` skips while `app.main`, the auth
 area or the mount are missing. After integration it must run and pass, not skip: a skip there then
 means a real mount or auth problem.
+
+## Hindi and Marathi (Devanagari)
+
+- Tokenizer: `items_fts` uses `unicode61 remove_diacritics 2 tokenchars '...'`, where the list holds
+  every combining mark (Unicode Mn, Mc) from U+0900 to U+0DFF (Devanagari through Sinhala). Plain
+  `unicode61` treats vowel signs and the virama as separators, so "मुंबईत" was indexed as "म" and "बईत".
+  The literal lives in `schema.sql` and in `app.db.FTS_TOKENIZE` (`FTS_TOKENCHARS` holds the marks);
+  `tests/test_search_devanagari.py` checks that the two agree. Danda (।) stays a separator.
+- Migration: `db.init_db` compares the stored `items_fts` definition with `FTS_TOKENIZE`. When it differs,
+  it drops the table, creates it from `schema.sql` and sets kv `fts_rebuild = 1`, all in one transaction.
+  `ingest.recover_on_startup` then calls `documents.extract.refresh_fts` for every item (trashed ones
+  too), 500 per transaction, logs the count and deletes the flag. An interrupted rebuild runs again on
+  the next start. Search finds nothing between the two steps, which run back to back at startup.
+- Query side: Indic combining marks stay inside a piece, U+200C and U+200D are removed, so "राहुल" is
+  one term and "मुंबई*" a prefix query. A piece with a Devanagari nukta letter is searched in both
+  spellings, precomposed (U+0929, U+0931, U+0934, U+0958..U+095F, which the OCR model emits) and base
+  letter + U+093C: `("बड़ा" OR "बड़ा")`. The strict query then joins terms with an explicit `AND`,
+  because FTS5 allows the implicit AND only between phrases. Queries without such letters are unchanged.
+- Snippets highlight whole tokens, so a Hindi word is wrapped whole: `<b>कुमार</b>`.
+- Semantic engine: SigLIP is trained on English text. In mode `auto` a query whose letters are all
+  non-Latin (`service.text_only_query`) skips the semantic pass and answers with the text hits alone
+  (`semantic_used` false). A mixed query ("राहुल passport") and a query of digits alone run both
+  engines as before. `mode=semantic` still asks the engine. The colour check is Latin only.
+- Not done here (other owners): `documents.extract.match_query` (used by `/api/documents?q=`) still
+  splits words with `\w+`, which drops the marks, so a Hindi word there becomes several one-letter
+  prefix terms. `refresh_fts` indexes text as it comes: removing U+200C/U+200D there too would make
+  words typed with a joiner (Marathi eyelash ra) match. Devanagari digits and ASCII digits are
+  different tokens: "१९८८" does not find "1988".

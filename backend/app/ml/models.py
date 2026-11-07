@@ -1,7 +1,7 @@
 """Model registry and downloader (docs/ARCHITECTURE.md section 8).
 
 Contract:
-  REGISTRY: dict[str, ModelSpec]      keys 'faces', 'siglip', 'nsfw', 'persons', 'ocr'
+  REGISTRY: dict[str, ModelSpec]      keys 'faces', 'siglip', 'nsfw', 'persons', 'ocr', 'ocr_devanagari'
   present(key) -> bool                every file of the model is on disk with its pinned size (no hashing)
   path(key, relpath) -> Path          a file of the model (relative to the model's folder)
   model_dir(key) -> Path              the model's folder
@@ -12,13 +12,17 @@ Contract:
                                       everything is present; raises DownloadError naming the failed models
   download_state() -> dict            {running, progress, error} of the current or last download
   start_download(keys=None) -> bool   download() in a daemon thread; False when one is already running
+  devanagari_font() -> Path | None    Noto Sans Devanagari Regular (from 'ocr_devanagari') when it is on disk
+                                      with its pinned size, for page renders that draw Hindi or Marathi
 
 Every file is pinned by size and sha256 and downloaded from a pinned source: a release asset or a
 Hugging Face 'resolve' URL at a fixed commit. A file is streamed to '<name>.part' next to its target,
 checked and renamed into place, so a partial download never looks present. The InsightFace models come
 inside a release zip: the zip is streamed to a temp file, the two members are extracted, checked and
 the zip is deleted. The OCR models ship inside the rapidocr package; they cannot be downloaded here and
-present() checks that the package and its bundled model files are installed.
+present() checks that the package and its bundled model files are installed. 'ocr_devanagari' is the
+second OCR recogniser (Hindi, Marathi) plus the Devanagari font; its files sit in models/ocr and
+models/fonts (subdir '' with the folder in each file's rel).
 
 This module does not import onnxruntime (scripts/download_models.py runs it on every start).
 """
@@ -165,7 +169,27 @@ REGISTRY: dict[str, ModelSpec] = {
         license="Apache 2.0",
         package="rapidocr",
     ),
+    "ocr_devanagari": ModelSpec(
+        key="ocr_devanagari",
+        label="Devanagari text recognition (Hindi, Marathi: PP-OCRv5 mobile) and Noto Sans Devanagari font",
+        subdir="",
+        files=(
+            ModelFile("ocr/devanagari_PP-OCRv5_rec_mobile.onnx", 7_940_361,
+                      "d6f0a906580e3fa6b324a318718f1f31f268b6ea8ef985f91c2012a37f52c91e",
+                      url="https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.10.0/onnx/PP-OCRv5/rec/"
+                          "devanagari_PP-OCRv5_rec_mobile.onnx"),
+            ModelFile("fonts/NotoSansDevanagari-Regular.ttf", 277_680,
+                      "573e525d9f4923d34645fe752475419f45f8dec5a8e43f3e83c5c5f43d1f2ff9",
+                      url="https://raw.githubusercontent.com/notofonts/notofonts.github.io/86ce02c0fe7890f5936c5dffb26fca0797d1be64/fonts/"
+                          "NotoSansDevanagari/full/ttf/NotoSansDevanagari-Regular.ttf"),
+        ),
+        source="RapidOCR model zoo v3.10.0 on ModelScope (PP-OCRv5 Devanagari mobile recogniser); "
+               "Noto fonts (notofonts.github.io, Noto Sans Devanagari Regular)",
+        license="Recogniser: Apache 2.0; font: SIL Open Font License 1.1",
+    ),
 }
+
+DEVANAGARI_FONT_REL = "fonts/NotoSansDevanagari-Regular.ttf"
 
 # engine module per key: each exposes loaded() -> bool and provider() -> str | None
 _ENGINES = {
@@ -174,6 +198,7 @@ _ENGINES = {
     "nsfw": "app.ml.nsfw",
     "persons": "app.ml.persons",
     "ocr": "app.ml.ocr",
+    "ocr_devanagari": "app.ml.ocr_devanagari",
 }
 
 
@@ -242,6 +267,18 @@ def present(key: str) -> bool:
     return not missing_files(key)
 
 
+def devanagari_font() -> Path | None:
+    """The Noto Sans Devanagari font when it is on disk with its pinned size, else None."""
+    spec = REGISTRY.get("ocr_devanagari")
+    if spec is None:
+        return None
+    pinned = next((f for f in spec.files if f.rel == DEVANAGARI_FONT_REL), None)
+    if pinned is None:
+        return None
+    p = path("ocr_devanagari", pinned.rel)
+    return p if _file_ok(p, pinned.size) else None
+
+
 def sha256_file(p: Path) -> str:
     h = hashlib.sha256()
     with open(p, "rb") as fh:
@@ -291,6 +328,19 @@ def _engine_info(key: str) -> tuple[bool, str | None]:
         return False, None
 
 
+def _engine_error(key: str) -> str | None:
+    """A load failure the engine module keeps (only app.ml.ocr_devanagari has one), for the status row."""
+    mod = sys.modules.get(_ENGINES.get(key, ""))
+    fn = getattr(mod, "load_error", None) if mod is not None else None
+    if fn is None:
+        return None
+    try:
+        err = fn()
+    except Exception:  # noqa: BLE001
+        return None
+    return f"could not be loaded: {err}" if err else None
+
+
 def statuses() -> list[dict[str, Any]]:
     with _state_lock:
         current = _state["key"] if _state["running"] else None
@@ -306,7 +356,7 @@ def statuses() -> list[dict[str, Any]]:
             "provider": provider,
             "size_bytes": spec.size_bytes,
             "downloading": current == key,
-            "error": errors.get(key),
+            "error": errors.get(key) or _engine_error(key),
         })
     return out
 

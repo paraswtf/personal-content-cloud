@@ -105,6 +105,51 @@ def text_image(lines: list[str], w: int = 1000, h: int = 640, size: int = 28) ->
     return img
 
 
+DEVANAGARI_FONT = Path(__file__).resolve().parents[2] / "models" / "fonts" / "NotoSansDevanagari-Regular.ttf"
+_LATIN_FONTS = ("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "/usr/share/fonts/truetype/freefont/FreeSans.ttf")
+
+
+def devanagari_font_available() -> bool:
+    return DEVANAGARI_FONT.is_file()
+
+
+def devanagari_text_image(lines: list[str], w: int = 1100, h: int | None = None, size: int = 30) -> Image.Image:
+    """A white page with lines that mix Devanagari (Hindi, Marathi) and Latin text. Devanagari runs are
+    drawn with Noto Sans Devanagari (shaped with raqm when Pillow has it, so vowel signs and conjuncts
+    join), other runs with DejaVu Sans. Raises FileNotFoundError when the Noto font is missing; tests
+    check devanagari_font_available() first and skip."""
+    import re
+
+    from PIL import ImageFont, features
+
+    if not devanagari_font_available():
+        raise FileNotFoundError(DEVANAGARI_FONT)
+    engine = ImageFont.Layout.RAQM if features.check("raqm") else ImageFont.Layout.BASIC
+    dev = ImageFont.truetype(str(DEVANAGARI_FONT), size, layout_engine=engine)
+    latin = None
+    for candidate in _LATIN_FONTS:
+        try:
+            latin = ImageFont.truetype(candidate, size, layout_engine=engine)
+            break
+        except OSError:
+            continue
+    latin = latin or dev
+    h = h or 60 + int(size * 1.7) * len(lines)
+    img = Image.new("RGB", (w, h), "white")
+    draw = ImageDraw.Draw(img)
+    y = 30
+    for line in lines:
+        x = 40.0
+        # runs of Devanagari (with the spaces between its words) and of everything else
+        for run in re.findall(r"[\u0900-\u097F\u200c\u200d][\u0900-\u097F\u200c\u200d ]*|[^\u0900-\u097F\u200c\u200d]+",
+                              line):
+            font = dev if re.match(r"[\u0900-\u097F]", run) else latin
+            draw.text((x, y), run, fill="black", font=font)
+            x += font.getlength(run)
+        y += int(size * 1.7)
+    return img
+
+
 def pdf_bytes(pages: list[list[str]]) -> bytes:
     """A small PDF with a real text layer: one page per list of lines (Helvetica, no images)."""
     objs: list[bytes] = []

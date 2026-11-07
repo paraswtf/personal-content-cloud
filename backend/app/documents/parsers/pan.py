@@ -2,7 +2,8 @@
 
 Contract: parse(text, pages, boxes) -> ParsedDocument. The number matches [A-Z]{5}[0-9]{4}[A-Z]; the
 4th letter gives the holder type (P = individual) and, for individuals, the 5th letter is usually
-the first letter of the surname (a match raises confidence).
+the first letter of the surname (a match raises confidence). Newer cards label fields in Hindi and
+English ('नाम / Name', 'पिता का नाम / Father's Name', 'जन्म की तारीख / Date of Birth').
 """
 from __future__ import annotations
 
@@ -10,7 +11,8 @@ import logging
 import re
 
 from app.documents.fields import (
-    PAN_HOLDER, FieldSet, ParsedDocument, find_pans, name_after, nice_name, normalize_text, parse_date, split_lines,
+    FATHER_LABELS_LOCAL, NAME_LABELS_LOCAL, PAN_HOLDER, FieldSet, ParsedDocument, find_pans, has_devanagari,
+    local_name_after, name_after, nice_name, normalize_text, parse_date, split_lines,
 )
 from app.documents.parsers._base import finish, is_name_line, join_title
 
@@ -18,7 +20,8 @@ log = logging.getLogger(__name__)
 
 DOC_TYPE = "pan"
 FIELDS = [
-    ("name", "Name"), ("number", "PAN"), ("father_name", "Father's name"), ("dob", "Date of birth"),
+    ("name", "Name"), ("name_local", "Name (local script)"),
+    ("number", "PAN"), ("father_name", "Father's name"), ("dob", "Date of birth"),
     ("holder_type", "Holder type"),
 ]
 KEY_FIELDS = ["name", "number", "dob", "father_name"]
@@ -36,15 +39,17 @@ def parse(text: str, pages=None, boxes=None) -> ParsedDocument:
         fs.set("number", number, 0.95)
         fs.set("holder_type", PAN_HOLDER.get(number[3], "Unknown"), 0.9)
 
-    name = name_after(t, ["name"], anchored=True)
-    father = name_after(t, ["father's name", "fathers name", "father name"])
+    name = name_after(t, ["name", *NAME_LABELS_LOCAL], anchored=True)
+    father = name_after(t, ["father's name", "fathers name", "father name", *FATHER_LABELS_LOCAL])
+    local = local_name_after(t, ["name", *NAME_LABELS_LOCAL], anchored=True)
     for i, ln in enumerate(lines):
         d = parse_date(ln, past=True)
         if d and not fs.has("dob"):
             fs.set("dob", d, 0.9)
             if not name or not father:
                 # old layout: NAME, FATHER'S NAME, DATE OF BIRTH on consecutive lines
-                above = [lines[j] for j in range(max(0, i - 3), i) if is_name_line(lines[j])]
+                above = [lines[j] for j in range(max(0, i - 3), i)
+                         if is_name_line(lines[j]) and not has_devanagari(lines[j])]
                 if len(above) >= 2:
                     name = name or nice_name(above[-2])
                     father = father or nice_name(above[-1])
@@ -52,6 +57,8 @@ def parse(text: str, pages=None, boxes=None) -> ParsedDocument:
                     name = nice_name(above[0])
     if name:
         fs.set("name", name, 0.85)
+    if local and local != name:
+        fs.set("name_local", local, 0.75)
     if father:
         fs.set("father_name", father, 0.8)
 

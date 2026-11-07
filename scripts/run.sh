@@ -26,5 +26,8 @@ fi
 
 cd "$ROOT/backend"
 echo "[run] starting on http://$HOST:$PORT"
+# --timeout-keep-alive: the portal's proxy keeps idle connections to this server open and reuses them.
+# With uvicorn's default of 5 s the server closes them first, and the next request on a reused
+# connection (a click, a POST) fails at the proxy with "This review server is not running".
 exec .venv/bin/uvicorn --factory app.main:create_app --host "$HOST" --port "$PORT" \
-  --proxy-headers --forwarded-allow-ips 127.0.0.1 --timeout-graceful-shutdown 10
+  --proxy-headers --forwarded-allow-ips 127.0.0.1 --timeout-graceful-shutdown 10 --timeout-keep-alive 600

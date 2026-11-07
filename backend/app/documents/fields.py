@@ -9,12 +9,19 @@ Contract:
 - Normalisers: `parse_date` / `find_dates` (dd/mm/yyyy, dd-mm-yyyy, dd.mm.yyyy, dd MMM yyyy, MMM dd yyyy,
   yyyy-mm-dd), `parse_month`, `parse_amount` / `find_amounts` / `format_inr` (Rs, INR, the rupee sign,
   lakh and crore figures and words), `after_label`, `relation_name`, `find_gender`, `address_after`.
+- Hindi and Marathi (Devanagari): `normalize_text` folds Devanagari digits to ASCII, the danda to '.',
+  drops zero-width joiners and decomposes nukta letters; month names, labels, gender words, relation
+  words and names in Devanagari are understood by the helpers above. `word_tokens` is the mark-aware
+  tokenizer (a token is a run of word characters, combining marks or U+0900 to U+0DFF letters),
+  `languages_of(text)` names the languages of a text ('Hindi', 'Marathi', 'Hindi or Marathi', 'English'),
+  `latin_part` / `local_part` split a mixed-script name, `local_name_after` reads a Devanagari name.
 All functions are pure.
 """
 from __future__ import annotations
 
 import logging
 import re
+import unicodedata
 from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal, InvalidOperation
@@ -132,19 +139,63 @@ def confidence_from(fs: FieldSet, key_fields: Iterable[str], *, base: float = 0.
 
 # ------------------------------------------------------------------ text basics
 
-_DASHES = re.compile("[\u2010\u2011\u2012\u2013\u2014\u2015\u2212]")
-_SPACES = re.compile("[ \t\u00a0\u2000-\u200b]+")
-_ODD_SPACES = re.compile("[\t\u00a0\u2000-\u200b]")
+_DASHES = re.compile("[‐‑‒–—―−]")
+_SPACES = re.compile("[ \t  -​]+")
+_ODD_SPACES = re.compile("[\t  -​]")
 _GAP = re.compile(r" {3,}")
 _PAIR = re.compile(r"(?<! ) {2}(?! )")
+
+# Devanagari: the block, its letters (no marks, digits or punctuation) and a fold table used by
+# normalize_text: digits to ASCII, danda, double danda and the abbreviation sign to '.', zero-width
+# (non-)joiners dropped, precomposed nukta letters (U+0958 to U+095F, NFC composition exclusions)
+# split into letter + nukta so both spellings of a word compare equal.
+DEV = "ऀ-ॿ"
+_DEV_RE = re.compile("[" + DEV + "]")
+_DEV_LETTER_RE = re.compile("[ऄ-हऽॐक़-ॡॲ-ॿ]")
+_LATIN_LETTER_RE = re.compile("[A-Za-z]")
+_DEV_FOLD: dict[int, Any] = {0x0966 + i: str(i) for i in range(10)}
+_DEV_FOLD.update({0x0964: ".", 0x0965: ".", 0x0970: ".", 0x200C: None, 0x200D: None})
+_DEV_FOLD.update({cp: unicodedata.normalize("NFD", chr(cp)) for cp in range(0x0958, 0x0960)})
+
+
+def dev_fold(text: str) -> str:
+    """Devanagari digits -> ASCII, danda -> '.', no zero-width joiners, nukta letters decomposed."""
+    return text.translate(_DEV_FOLD) if text else text
+
+
+def has_devanagari(text: str | None) -> bool:
+    return bool(text) and bool(_DEV_LETTER_RE.search(text))
+
+
+def is_letter(ch: str) -> bool:
+    """A letter, or a combining mark (Devanagari vowel signs, virama, anusvara are marks, not letters)."""
+    return ch.isalpha() or unicodedata.category(ch) in ("Mn", "Mc")
+
+
+def word_guards(word: str) -> tuple[str, str]:
+    """Lookbehind and lookahead that keep `word` (a label, a keyword) from matching inside a longer word
+    of its own script: Latin words are guarded by Latin letters, Devanagari words by Devanagari letters
+    and marks (so 'नाम' does not match in 'उपनाम' and 'कुल' not in 'कुलकर्णी')."""
+    w = word.strip()
+    lead = r"(?<![" + DEV + "])" if w[:1] and _DEV_RE.match(w[:1]) else r"(?<![A-Za-z])"
+    trail = r"(?![" + DEV + "])" if w[-1:] and _DEV_RE.match(w[-1:]) else r"(?![A-Za-z])"
+    return lead, trail
+
+
+def word_regex(word: str) -> str:
+    """Regex for a whole word or phrase (spaces match any spacing), guarded by word_guards."""
+    lead, trail = word_guards(word)
+    return lead + re.escape(dev_fold(word)).replace(r"\ ", r"\s+") + trail
 
 
 def normalize_text(text: str) -> str:
     """Unify dashes and spaces; keep line breaks (form feeds become line breaks). A run of 3+ spaces
     (a column gap, also what extract.py writes between distant OCR boxes) stays as exactly 3 spaces,
-    so after_label can end a value there; shorter runs become one space."""
+    so after_label can end a value there; shorter runs become one space. Devanagari is folded
+    (dev_fold) so labels, dates and amounts written with Devanagari digits match. Idempotent."""
     text = (text or "").replace("\r\n", "\n").replace("\r", "\n").replace("\f", "\n")
-    text = _DASHES.sub("-", text).replace("\u20b9", "\u20b9 ").replace("\u00ad", "")
+    text = dev_fold(text)
+    text = _DASHES.sub("-", text).replace("₹", "₹ ").replace("­", "")
     text = _ODD_SPACES.sub("   ", text)
     return "\n".join(_PAIR.sub(" ", _GAP.sub("   ", ln)).rstrip() for ln in text.split("\n"))
 
@@ -163,12 +214,41 @@ def has_any(text: str, words: Iterable[str]) -> bool:
     return any(w in low for w in words)
 
 
+# a token: a run of word characters, combining marks (Latin and Indic) or Indic letters U+0900 to U+0DFF
+# (dandas and the abbreviation sign excluded). Python's \w leaves out marks, so it splits 'मुंबई'.
+TOKEN_RE = re.compile("[\\ẁ-ͯऀ-ॣ०-९ॱ-෿᪰-᫿᷀-᷿"
+                      "⃐-⃿︠-︯]+")
+
+
+def word_tokens(text: str | None) -> list[str]:
+    """Words of a text for matching and search: marks stay inside words, zero-width joiners are dropped."""
+    return TOKEN_RE.findall((text or "").replace("‌", "").replace("‍", ""))
+
+
+_NAME_DEV = "ऀ-ॣॱ-ॿ"  # Devanagari without dandas, digits and the abbreviation sign
+
+
+def latin_part(value: str | None) -> str:
+    """The Latin-script part of a name ('राहुल शर्मा / Rahul Sharma' -> 'Rahul Sharma')."""
+    v = re.sub(r"[^A-Za-z .,'&()-]", " ", value or "")
+    return _SPACES.sub(" ", v).strip(" .,-'/")
+
+
+def local_part(value: str | None) -> str:
+    """The Devanagari part of a name ('राहुल शर्मा / Rahul Sharma' -> 'राहुल शर्मा')."""
+    v = re.sub("[^" + _NAME_DEV + r" .,'&()-]", " ", dev_fold(value or ""))
+    return _SPACES.sub(" ", v).strip(" .,-'/")
+
+
 def nice_name(value: str | None) -> str | None:
-    """Clean a person's or organisation's name; title-case it when OCR gave all capitals."""
+    """Clean a person's or organisation's name; title-case it when OCR gave all capitals. A name in
+    both scripts keeps its Latin spelling; a Devanagari-only name is kept as written (no casing)."""
     if not value:
         return None
-    v = re.sub(r"[^A-Za-z .,'&()-]", " ", value)
-    v = _SPACES.sub(" ", v).strip(" .,-'")
+    v = latin_part(value)
+    if len(_LATIN_LETTER_RE.findall(v)) < 2 and has_devanagari(value):
+        v = local_part(value)
+        return v if 2 <= len(v) <= 80 else None
     if len(v) < 2 or len(v) > 80:
         return None
     if v.isupper() and len(v) > 3:
@@ -184,8 +264,16 @@ def plausible_name(value: str | None) -> bool:
     words = [w for w in re.split(r"\s+", value.strip()) if w]
     if not 1 <= len(words) <= 6:
         return False
-    letters = sum(c.isalpha() for c in value)
+    letters = sum(is_letter(c) for c in value)
     return letters >= 3 and letters / max(1, len(value.replace(" ", ""))) > 0.8
+
+
+def local_name(value: str | None) -> str | None:
+    """The Devanagari name in a value, or None."""
+    if not value or not has_devanagari(value):
+        return None
+    v = local_part(value)
+    return v if plausible_name(v) and 2 <= len(v) <= 80 else None
 
 
 # ------------------------------------------------------------------ labels
@@ -200,14 +288,34 @@ STOP_LABELS = [
     r"designation", r"department", r"uan", r"booking id", r"order id", r"venue", r"amount", r"total", r"s/o",
     r"d/o", r"w/o", r"c/o", r"ref(?:erence)?\.? no", r"reg(?:istration)?\.? no", r"ref\.? by", r"referred by",
 ]
-_STOP_RE = re.compile(r"\s(?:" + "|".join(STOP_LABELS) + r")\s*[:.\-]", re.I)
+# The same in Hindi and Marathi. They may be followed by '/' (a bilingual 'जन्म तिथि/DOB:' label).
+STOP_LABELS_LOCAL = [
+    "जन्म तिथि", "जन्मतिथि", "जन्म तारीख", "जन्मतारीख", "जन्म दिनांक", "जन्मदिनांक", "जन्म की तारीख", "जन्म वर्ष",
+    "पिता का नाम", "माता का नाम", "पति का नाम", "वडिलांचे नाव", "आईचे नाव", "पतीचे नाव", "नाम", "नाव", "लिंग",
+    "आयु", "उम्र", "वय", "पता", "पत्ता", "मोबाइल", "मोबाईल", "फोन", "दिनांक", "तारीख", "तिथि", "वैध", "राशि", "रकम",
+    "रक्कम", "कुल", "एकूण", "पुत्र", "पुत्री", "पत्नी", "मुलगा", "मुलगी", "अनुक्रमांक", "आसन क्रमांक",
+]
+_STOP_RE = re.compile(r"\s(?:(?:" + "|".join(STOP_LABELS) + r")\s*[:.\-]|(?:"
+                      + "|".join(re.escape(x).replace(r"\ ", r"\s*") for x in STOP_LABELS_LOCAL)
+                      + r")\s*[:.\-/])", re.I)
 _LABEL_SEP = r"\s*(?:[:\-=.]|\bis\b)?\s*"
+# the other half of a bilingual label: 'नाम / Name :' after 'नाम', '/ नाम :' after 'Name'. It ends at a
+# ':' '-' '='; at the end of the line it must end in a label word, so a value written after the slash
+# ('Name / राहुल शर्मा') is not taken for a label.
+_LATIN_TAIL_END = (r"(?:name\(s\)|names?|birth|dob|date|address|gender|sex|no\.?|number|year|place|issue|expiry|"
+                   r"nationality|surname|age|amount|total|validity|group|id|code)")
+_LOCAL_TAIL_END = ("(?:नाम|नाव|नांव|तिथि|तिथी|तारीख|दिनांक|पता|पत्ता|लिंग|संख्या|क्रमांक|सं\\.?|वर्ष|स्थान|राष्ट्रीयता|"
+                   "उपनाम|आयु|उम्र|वय|राशि|रक्कम|रकम|वैधता|समूह|गट)")
+_LATIN_TAIL = (r"\s*/\s*(?:[A-Za-z][A-Za-z .'()]{0,40}?\s*[:\-=]\s*|(?:[A-Za-z][A-Za-z .'()]{0,40}?\s)?"
+               + _LATIN_TAIL_END + r"\s*$)")
+_LOCAL_TAIL = (r"\s*/\s*(?:[" + DEV + r"][" + DEV + r" .'()]{0,40}?\s*[:\-=]\s*|(?:[" + DEV + r"][" + DEV
+               + r" .'()]{0,40}?\s)?" + _LOCAL_TAIL_END + r"\s*$)")
 
 
 def _label_regex(label: str) -> str:
     """Label text -> regex: spaces match any spacing, dots and apostrophes are optional."""
     out = []
-    for ch in label:
+    for ch in dev_fold(label):
         if ch == " ":
             out.append(r"\s*")
         elif ch in ".'":
@@ -219,27 +327,61 @@ def _label_regex(label: str) -> str:
     return "".join(out)
 
 
+def _is_local(label: str) -> bool:
+    return bool(_DEV_RE.search(label))
+
+
+# Hindi and Marathi label synonyms shared by the parsers (each parser appends them after its English
+# labels, so an English label still wins on a bilingual document).
+NAME_LABELS_LOCAL = ["नाम", "नाव", "नांव"]
+FATHER_LABELS_LOCAL = ["पिता का नाम", "पिता/पति का नाम", "वडिलांचे नाव", "वडिलांचे नांव", "पिता", "वडील"]
+MOTHER_LABELS_LOCAL = ["माता का नाम", "आईचे नाव", "आईचे नांव", "माता", "आई"]
+HUSBAND_LABELS_LOCAL = ["पति का नाम", "पतीचे नाव", "पति", "पती"]
+DOB_LABELS_LOCAL = ["जन्म तिथि", "जन्म तिथी", "जन्मतिथि", "जन्मतिथी", "जन्म तारीख", "जन्मतारीख", "जन्म की तारीख",
+                    "जन्म दिनांक", "जन्मदिनांक"]
+ISSUE_LABELS_LOCAL = ["जारी करने की तिथि", "जारी करने की तारीख", "जारी करने का दिनांक", "जारी दिनांक", "जारी तिथि",
+                      "जारी केल्याचा दिनांक", "दिनांक जारी"]
+VALID_LABELS_LOCAL = ["तक वैध", "पर्यंत वैध", "वैधता", "वैध"]
+# generic date words: a hit right after 'जन्म' (birth) is a date of birth, not the document's date
+DATE_LABELS_LOCAL = ["दिनांक", "तारीख", "तिथि", "तिथी"]
+AMOUNT_LABELS_LOCAL = ["कुल राशि", "कुल रकम", "एकूण रक्कम", "राशि", "रकम", "रक्कम"]
+_GENERIC_DATE = tuple(dev_fold(x) for x in DATE_LABELS_LOCAL)
+_NOT_BIRTH = r"(?<!जन्म)(?<!जन्म\s)(?<!जन्म\sकी\s)(?<!जन्म\sका\s)"
+
+
 def after_label(text: str, labels: Iterable[str], *, next_line: bool = True, anchored: bool = False,
                 max_len: int = 120, stop: bool = True, regex: bool = False, colon: bool = False,
                 accept: Callable[[str], bool] | None = None) -> str | None:
     """Value written after a label: the rest of that line (cut at a gap of 2+ spaces, a ' | ' or another
     known label), or the next line when the label stands alone. anchored=True needs the label at the
-    start of a line (or after a gap), so 'Name' does not match inside "Father's Name". colon=True needs
-    a ':', '-' or '=' after the label (or the label alone at the end of the line). accept(value) -> False
-    skips that hit and goes on to the next line or label (so 'Seat' in 'Seat No. 14C' gives way to
-    'Seat No', and 'Boarding' in a 'BOARDING PASS' heading to a later 'Boarding 06:15')."""
+    start of a line (or after a gap, or right after a Devanagari label and a '/', as in 'नाम / Name'),
+    so 'Name' does not match inside "Father's Name". colon=True needs a ':', '-' or '=' after the label
+    (or the label alone at the end of the line). accept(value) -> False skips that hit and goes on to
+    the next line or label (so 'Seat' in 'Seat No. 14C' gives way to 'Seat No', and 'Boarding' in a
+    'BOARDING PASS' heading to a later 'Boarding 06:15'). Labels may be Hindi or Marathi; the other
+    half of a bilingual label ('जन्म तिथि/DOB:') is skipped before the value."""
     raw_lines = [ln.strip() for ln in normalize_text(text).split("\n")]
     raw_lines = [ln for ln in raw_lines if ln]
     for lab in labels:
         pat = lab if regex else _label_regex(lab)
-        lead = r"(?:^|\s{2,}|\|\s*)" if anchored else r"(?<![A-Za-z])"
+        local = _is_local(lab)
+        guard_lead, guard_trail = word_guards(lab if not regex or local else "a")
+        if anchored:
+            lead = r"(?:^|\s{2,}|\|\s*|(?<=[" + DEV + r"])\s*/\s*)"
+        else:
+            lead = guard_lead
+        if local and dev_fold(lab).startswith(_GENERIC_DATE):
+            lead = _NOT_BIRTH + lead
         sep = r"\s*(?:[:\-=]|$)\s*" if colon else _LABEL_SEP
-        rx = re.compile(lead + r"(?:" + pat + r")(?![A-Za-z])" + sep, re.I)
+        tail = _LATIN_TAIL if local else _LOCAL_TAIL
+        rx = re.compile(lead + r"(?:" + pat + r")" + guard_trail + r"(?:" + tail + "|" + sep + ")", re.I)
         for i, line in enumerate(raw_lines):
             m = rx.search(line)
             if not m:
                 continue
             rest = line[m.end():]
+            # 'Name / राहुल शर्मा': a value in the other script written after the slash
+            rest = re.sub(r"^\s*/\s*(?=[A-Za-z])" if local else "^\\s*/\\s*(?=[" + DEV + "])", "", rest)
             rest = re.split(r"\s{3,}|\s\|\s|\t", rest)[0] if rest else ""
             if stop and rest:
                 sm = _STOP_RE.search(" " + rest)
@@ -257,12 +399,34 @@ def after_label(text: str, labels: Iterable[str], *, next_line: bool = True, anc
     return None
 
 
+_REL_SPLIT = re.compile(r"\s+(?:(?:s/o|d/o|w/o|c/o)\b|(?:पुत्र|पुत्री|पत्नी|पति|मुलगा|मुलगी)(?![" + DEV + "]))", re.I)
+
+
+def _latin_name_ok(v: str) -> bool:
+    return plausible_name(latin_part(_REL_SPLIT.split(v)[0])) and len(_LATIN_LETTER_RE.findall(v)) >= 3
+
+
 def name_after(text: str, labels: Iterable[str], **kw) -> str | None:
-    """A person's name after a label (rejects values with digits)."""
+    """A person's name after a label (rejects values with digits). When the text carries Devanagari and
+    the first hit gives no Latin spelling, a Latin spelling after any of the labels is preferred."""
+    labels = list(labels)
     val = after_label(text, labels, **kw)
     if val:
-        val = re.split(r"\s+(?:s/o|d/o|w/o|c/o)\b", val, flags=re.I)[0]
-    return nice_name(val) if plausible_name(val) else None
+        val = _REL_SPLIT.split(val)[0]
+    name = nice_name(val) if plausible_name(val) else None
+    if (name is None or not _LATIN_LETTER_RE.search(name)) and has_devanagari(text) and "accept" not in kw:
+        lat = after_label(text, labels, accept=_latin_name_ok, **kw)
+        if lat:
+            return nice_name(latin_part(_REL_SPLIT.split(lat)[0])) or name
+    return name
+
+
+def local_name_after(text: str, labels: Iterable[str], **kw) -> str | None:
+    """The Devanagari spelling of a name after one of the labels (Hindi or English labels), or None."""
+    if not has_devanagari(text):
+        return None
+    val = after_label(text, labels, accept=lambda v: bool(local_name(_REL_SPLIT.split(v)[0])), **kw)
+    return local_name(_REL_SPLIT.split(val)[0]) if val else None
 
 
 _RELATION_RE = re.compile(
@@ -270,10 +434,19 @@ _RELATION_RE = re.compile(
 _REL_WORD_RE = re.compile(r"(?<![A-Za-z])(son|daughter|wife|husband|care) of\s*[:\-]?\s*([A-Za-z][A-Za-z .']{1,60}?)"
                           r"(?=\s*(?:,|\n|$|\s{2,}|\d))", re.I)
 RELATIONS = {"s": "Son of", "d": "Daughter of", "w": "Wife of", "c": "Care of"}
+# Hindi and Marathi relation words before the relative's name: 'पुत्र श्री रमेश कुमार', 'पत्नी: सुनीता'
+LOCAL_RELATIONS = {"पुत्र": "Son of", "पुत्री": "Daughter of", "पत्नी": "Wife of", "पति": "Husband of",
+                   "मुलगा": "Son of", "मुलगी": "Daughter of"}
+_REL_LOCAL_RE = re.compile(
+    r"(?<![" + DEV + r"])(" + "|".join(LOCAL_RELATIONS) + r")(?![" + DEV + r"])"
+    r"(?!\s*(?:का|की|के|चे|ची|च्या)(?![" + DEV + r"]))\s*[:\-]?\s*"
+    r"(?:(?:श्रीमती|श्री|स्व\.?|कै\.?)\s+)?([" + _NAME_DEV + r"][" + _NAME_DEV + r" .']{1,60}?)"
+    r"(?=\s*(?:,|\n|$|\s{2,}|\d))")
 
 
 def relation_name(text: str) -> tuple[str, str] | None:
-    """('Son of', 'Ramesh Kumar') from 'S/O Ramesh Kumar,' or 'Son of Ramesh Kumar'."""
+    """('Son of', 'Ramesh Kumar') from 'S/O Ramesh Kumar,' or 'Son of Ramesh Kumar' (or from Hindi and
+    Marathi 'पुत्र रमेश कुमार', 'मुलगी: ...'; the name is then kept in Devanagari)."""
     t = normalize_text(text)
     m = _RELATION_RE.search(t)
     if m:
@@ -285,31 +458,51 @@ def relation_name(text: str) -> tuple[str, str] | None:
         name = nice_name(m.group(2))
         if name and plausible_name(name):
             return f"{m.group(1).capitalize()} of", name
+    m = _REL_LOCAL_RE.search(t)
+    if m:
+        name = local_name(m.group(2))
+        if name:
+            return LOCAL_RELATIONS[m.group(1)], name
     return None
 
 
 _GENDER_WORDS = {"male": "Male", "female": "Female", "transgender": "Transgender", "m": "Male", "f": "Female",
                  "t": "Transgender"}
+LOCAL_GENDER = {"पुरुष": "Male", "पुरूष": "Male", "महिला": "Female", "स्त्री": "Female", "अन्य": "Transgender",
+                 "तृतीयपंथी": "Transgender", "ट्रांसजेंडर": "Transgender"}
+GENDER_LABELS = ["gender", "sex", "लिंग"]
+_LOCAL_GENDER_RE = re.compile(r"(?<![" + DEV + r"])(पुरुष|पुरूष|महिला|स्त्री)(?![" + DEV + "])")
 
 
 def find_gender(text: str) -> str | None:
-    val = after_label(text, ["gender", "sex"], next_line=True)
+    val = after_label(text, GENDER_LABELS, next_line=True)
     if val:
         w = re.split(r"[\s/,]+", val.strip().lower())[0]
         if w in _GENDER_WORDS:
             return _GENDER_WORDS[w]
+        if w in LOCAL_GENDER:
+            return LOCAL_GENDER[w]
     m = re.search(r"(?<![A-Za-z])(female|male|transgender)(?![A-Za-z])", text, re.I)
-    return _GENDER_WORDS[m.group(1).lower()] if m else None
+    if m:
+        return _GENDER_WORDS[m.group(1).lower()]
+    m = _LOCAL_GENDER_RE.search(dev_fold(text))
+    return LOCAL_GENDER[m.group(1)] if m else None
 
 
 PIN_RE = re.compile(r"(?<!\d)([1-9]\d{2})\s?(\d{3})(?!\d)")
 
 
+ADDRESS_LABELS_LOCAL = ["पता", "पत्ता"]
+
+
 def address_after(text: str, labels: Iterable[str] = ("address",), max_lines: int = 5) -> str | None:
-    """Address block after a label: that line's rest plus following lines up to a PIN code."""
+    """Address block after a label: that line's rest plus following lines up to a PIN code. Labels may be
+    Hindi or Marathi ('पता', 'पत्ता'); the other half of a bilingual 'पता / Address:' label is skipped."""
     raw = [ln.strip() for ln in normalize_text(text).split("\n") if ln.strip()]
     for lab in labels:
-        rx = re.compile(r"(?<![A-Za-z])" + _label_regex(lab) + r"(?![A-Za-z])" + _LABEL_SEP, re.I)
+        lead, trail = word_guards(lab)
+        tail = _LATIN_TAIL if _is_local(lab) else _LOCAL_TAIL
+        rx = re.compile(lead + _label_regex(lab) + trail + "(?:" + tail + "|" + _LABEL_SEP + ")", re.I)
         for i, line in enumerate(raw):
             m = rx.search(line)
             if not m:
@@ -340,10 +533,21 @@ def find_pincode(text: str | None) -> str | None:
 
 MONTHS = {"jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6, "jul": 7, "aug": 8, "sep": 9, "sept": 9,
           "oct": 10, "nov": 11, "dec": 12}
-# whole month words only ('Marks', 'Marathi', 'Junior' are not months); compiled with re.A so that
-# U+017F (long s) does not match 's' under re.I
-_MON = (r"(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sep(?:t(?:ember)?)?|"
-        r"oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\.?(?![a-z])")
+# Hindi and Marathi month names (spellings with and without nukta, anusvara or half nasal)
+LOCAL_MONTHS: dict[str, int] = {}
+for _no, _words in enumerate((
+        ("जनवरी", "जानेवारी"), ("फ़रवरी", "फरवरी", "फेब्रुवारी"), ("मार्च",), ("अप्रैल", "अप्रेल", "एप्रिल"),
+        ("मई", "मे"), ("जून",), ("जुलाई", "जुलै"), ("अगस्त", "ऑगस्ट", "अगस्ट"),
+        ("सितंबर", "सितम्बर", "सप्टेंबर", "सप्टेम्बर"), ("अक्टूबर", "अक्तूबर", "ऑक्टोबर", "अक्टोबर"),
+        ("नवंबर", "नवम्बर", "नोव्हेंबर", "नोव्हेम्बर"), ("दिसंबर", "दिसम्बर", "डिसेंबर", "डिसेम्बर")), start=1):
+    for _w in _words:
+        LOCAL_MONTHS[dev_fold(_w)] = _no
+_LOCAL_MON = "|".join(sorted((re.escape(w) for w in LOCAL_MONTHS), key=len, reverse=True))
+# whole month words only ('Marks', 'Marathi', 'Junior' are not months; 'मे' is not in 'में'); compiled
+# with re.A so that U+017F (long s) does not match 's' under re.I
+_MON = (r"((?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sep(?:t(?:ember)?)?|"
+        r"oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)(?=\.?(?![a-z]))|(?<![" + DEV + r"])(?:" + _LOCAL_MON + r")(?!["
+        + DEV + r"]))\.?")
 _DATE_RES: list[tuple[str, re.Pattern[str]]] = [
     ("ymd", re.compile(r"(?<!\d)((?:19|20)\d{2})[/\-.](\d{1,2})[/\-.](\d{1,2})(?!\d)")),
     ("dmy", re.compile(r"(?<![\d/])(\d{1,2})\s?[/\-.]\s?(\d{1,2})\s?[/\-.]\s?(\d{4}|\d{2})(?![\d/])")),
@@ -354,6 +558,8 @@ _DATE_RES: list[tuple[str, re.Pattern[str]]] = [
 
 
 def _month_no(word: str) -> int | None:
+    if word in LOCAL_MONTHS:
+        return LOCAL_MONTHS[word]
     return MONTHS.get(word.lower()[:3])
 
 
@@ -443,9 +649,10 @@ MONTH_NAMES = ["January", "February", "March", "April", "May", "June", "July", "
 
 
 def parse_month(value: str | None) -> str | None:
-    """'March 2024', 'Mar-24', '03/2024' -> '2024-03'."""
+    """'March 2024', 'Mar-24', '03/2024', 'मार्च २०२४' -> '2024-03'."""
     if not value:
         return None
+    value = dev_fold(value)
     m = _MONTH_YEAR.search(value)
     if m:
         y = m.group(2) or m.group(3)
@@ -497,7 +704,7 @@ _SCALES = {"hundred": 100, "thousand": 1000, "lakh": 100000, "lakhs": 100000, "l
            "crore": 10000000, "crores": 10000000, "million": 1000000, "billion": 1000000000}
 _MULT = {"lakh": 100000, "lakhs": 100000, "lac": 100000, "lacs": 100000, "l": 100000, "lpa": 100000,
          "crore": 10000000, "crores": 10000000, "cr": 10000000, "k": 1000}
-CURRENCY = r"(?:rs\.?|inr|\u20b9|rupees)"
+CURRENCY = r"(?:rs\.?|inr|\u20b9|rupees|रुपये|रुपए|रुपया|रु\.?|रू\.?)"
 # a '-' right after a digit is a separator ('01-04-2024'), not a minus sign. A trailing 'Cr'/'Dr' after
 # a balance ('1,000.00 Cr', '250.00 Dr') is a credit/debit marker, not crore (see _amounts_in).
 _AMOUNT_RE = re.compile(
@@ -791,18 +998,22 @@ def find_dl_number(text: str) -> tuple[str, str | None] | None:
 # ------------------------------------------------------------------ boxes
 
 def largest_text(boxes: list[Box], page_no: int = 1, *, min_len: int = 3, skip: Iterable[str] = ()) -> str | None:
-    """Text of the tallest OCR box on a page (usually the headline: an event name, a title)."""
+    """Text of the tallest OCR box on a page (usually the headline: an event name, a title). Boxes with
+    Latin words come first; a Devanagari box is used only when no Latin box qualifies."""
     skip_l = [s.lower() for s in skip]
-    best: Box | None = None
-    for b in boxes:
-        if b.page_no != page_no or len(b.text.strip()) < min_len:
-            continue
-        low = b.text.lower()
-        if any(s in low for s in skip_l) or not re.search(r"[A-Za-z]{3}", b.text):
-            continue
-        if best is None or b.height > best.height * 1.05:
-            best = b
-    return clean_value(best.text) if best else None
+    for script in (re.compile(r"[A-Za-z]{3}"), re.compile("[" + DEV + "]{3}")):
+        best: Box | None = None
+        for b in boxes:
+            if b.page_no != page_no or len(b.text.strip()) < min_len:
+                continue
+            low = b.text.lower()
+            if any(s in low for s in skip_l) or not script.search(b.text):
+                continue
+            if best is None or b.height > best.height * 1.05:
+                best = b
+        if best:
+            return clean_value(dev_fold(best.text))
+    return None
 
 
 def all_barcodes(pages: list[PageText]) -> list[tuple[str, str]]:
@@ -816,10 +1027,9 @@ def all_barcodes(pages: list[PageText]) -> list[tuple[str, str]]:
 
 def first_line_with(text: str, words: Iterable[str], *, max_len: int = 100) -> str | None:
     """The first line containing one of the words (case-insensitive), cleaned."""
-    words_l = [w.lower() for w in words]
+    rxs = [re.compile(word_regex(w), re.I) for w in words]
     for ln in split_lines(text):
-        low = ln.lower()
-        if any(re.search(r"(?<![a-z])" + re.escape(w) + r"(?![a-z])", low) for w in words_l):
+        if any(rx.search(ln) for rx in rxs):
             v = clean_value(ln)
             if 3 <= len(v) <= max_len:
                 return v
@@ -835,3 +1045,38 @@ def known_name(text: str, names: Iterable[str]) -> str | None:
         if i >= 0 and (best is None or i < best[0]):
             best = (i, n)
     return best[1] if best else None
+
+
+# ------------------------------------------------------------------ languages
+
+# Stop words and common document words that tell Hindi from Marathi (both are written in Devanagari).
+HINDI_WORDS = frozenset(dev_fold(w) for w in (
+    "है", "हैं", "और", "का", "की", "के", "में", "को", "से",
+    "नाम", "पता", "पिता", "राशि", "रकम", "रसीद", "कुल", "किराया", "किरायानामा", "वेतन", "पर्ची", "पुत्र", "पुत्री",
+    "पति", "नहीं", "यह", "एवं", "द्वारा", "किया", "गया", "हुआ", "प्राप्तांक", "अंक", "सूची", "तिथि", "मेरा", "मेरी",
+))
+MARATHI_WORDS = frozenset(dev_fold(w) for w in (
+    "आहे", "आहेत", "आणि", "चे", "ची", "च्या", "मध्ये", "ला", "ने", "व",
+    "नाव", "पत्ता", "वडिलांचे", "आईचे", "पतीचे", "एकूण", "रक्कम", "पावती", "गुणपत्रक", "गुणपत्रिका", "जन्मतारीख",
+    "भाडे", "पगार", "मुलगा", "मुलगी", "नाही", "हे", "झाले", "केले", "माझे", "माझी", "आमचे", "गुण", "निकाल",
+))  # words both languages use on documents (दिनांक, क्रमांक, शासन, करार) are left out
+_MARATHI_SUFFIX = tuple(dev_fold(x) for x in ("चे", "ची", "च्या"))
+_LATIN_WORD = re.compile(r"[A-Za-z]{3,}")
+
+
+def languages_of(text: str | None) -> list[str]:
+    """Languages of a text, the Devanagari one first: ['Hindi', 'English'], ['Marathi'],
+    ['Hindi or Marathi'] (Devanagari, but the stop words do not decide), ['English'] or [].
+    Devanagari counts from two words of two or more letters; English from two Latin words of three or
+    more letters (so 'Rs.' or 'UPI' alone does not make a Hindi receipt English)."""
+    toks = word_tokens(dev_fold(text or ""))
+    dev = [w for w in toks if has_devanagari(w) and len(w) >= 2]
+    latin = sum(1 for w in toks if _LATIN_WORD.fullmatch(w))
+    out: list[str] = []
+    if len(dev) >= 2:
+        hi = sum(1 for w in dev if w in HINDI_WORDS)
+        mr = sum(1 for w in dev if w in MARATHI_WORDS or (len(w) > 3 and w.endswith(_MARATHI_SUFFIX)))
+        out.append("Hindi" if hi > mr else "Marathi" if mr > hi else "Hindi or Marathi")
+    if latin >= 2:
+        out.append("English")
+    return out

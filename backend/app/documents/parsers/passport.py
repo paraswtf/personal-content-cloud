@@ -1,5 +1,5 @@
 """Passport parser: the machine readable zone (ICAO 9303 TD3, two lines of 44 characters) first,
-the printed labels (Indian passport data and back pages) second.
+the printed labels (Indian passport data and back pages, bilingual Hindi and English labels) second.
 
 Contract: parse(text, pages, boxes) -> ParsedDocument; `read_mrz(text)` -> dict | None with every
 check digit verified (`checks_ok` counts the valid ones out of 5).
@@ -11,8 +11,8 @@ import re
 from datetime import date
 
 from app.documents.fields import (
-    FieldSet, ParsedDocument, address_after, after_label, date_after, mrz_valid, name_after, nice_name,
-    normalize_text, split_lines,
+    ADDRESS_LABELS_LOCAL, LOCAL_GENDER, FieldSet, ParsedDocument, address_after, after_label, date_after, mrz_valid,
+    name_after, nice_name, normalize_text, split_lines,
 )
 from app.documents.parsers._base import finish, join_title
 
@@ -110,9 +110,10 @@ def parse(text: str, pages=None, boxes=None) -> ParsedDocument:
         fs.set("mrz_valid", f"{mrz['checks_ok']} of 5", 1.0)
         bonus = 0.1 if mrz["checks_ok"] == 5 else 0.0
 
-    fs.set("surname", name_after(t, ["surname"]), 0.75)
-    fs.set("given_names", name_after(t, ["given name(s)", "given names", "given name"]), 0.75)
-    num = after_label(t, ["passport no", "passport number"])
+    fs.set("surname", name_after(t, ["surname", "उपनाम"]), 0.75)
+    fs.set("given_names", name_after(t, ["given name(s)", "given names", "given name", "दिया गया नाम",
+                                         "दिए गए नाम"]), 0.75)
+    num = after_label(t, ["passport no", "passport number", "पासपोर्ट सं", "पासपोर्ट संख्या", "पासपोर्ट नं"])
     if num:
         m = re.search(r"[A-Z]\s?\d{7}", num.upper())
         if m:
@@ -121,22 +122,25 @@ def parse(text: str, pages=None, boxes=None) -> ParsedDocument:
         m = re.search(r"(?<![A-Z0-9])([A-Z][0-9]{7})(?![A-Z0-9])", t)
         if m:
             fs.set("number", m.group(1), 0.6)
-    fs.set("nationality", after_label(t, ["nationality"]), 0.7)
-    fs.set("dob", date_after(t, ["date of birth"], past=True), 0.8)
-    sex = after_label(t, ["sex"])
+    fs.set("nationality", after_label(t, ["nationality", "राष्ट्रीयता"]), 0.7)
+    fs.set("dob", date_after(t, ["date of birth", "जन्मतिथि", "जन्म तिथि", "जन्म की तारीख"], past=True), 0.8)
+    sex = after_label(t, ["sex", "लिंग"])
     if sex and sex[:1].upper() in "MF":
         fs.set("gender", "Male" if sex[:1].upper() == "M" else "Female", 0.7)
-    fs.set("place_of_birth", after_label(t, ["place of birth"]), 0.7)
-    fs.set("place_of_issue", after_label(t, ["place of issue"]), 0.75)
-    fs.set("issue_date", date_after(t, ["date of issue"], past=True), 0.8)
-    fs.set("expiry_date", date_after(t, ["date of expiry"]), 0.8)
-    fno = after_label(t, ["file no", "file number"])
+    elif sex and re.split(r"[\s/]+", sex)[0] in LOCAL_GENDER:
+        fs.set("gender", LOCAL_GENDER[re.split(r"[\s/]+", sex)[0]], 0.7)
+    fs.set("place_of_birth", after_label(t, ["place of birth", "जन्म स्थान"]), 0.7)
+    fs.set("place_of_issue", after_label(t, ["place of issue", "जारी करने का स्थान"]), 0.75)
+    fs.set("issue_date", date_after(t, ["date of issue", "जारी करने की तिथि"], past=True), 0.8)
+    fs.set("expiry_date", date_after(t, ["date of expiry", "समाप्ति की तिथि"]), 0.8)
+    fno = after_label(t, ["file no", "file number", "फ़ाइल सं", "फाइल सं", "फ़ाइल संख्या"])
     if fno:
         fs.set("file_number", re.split(r"\s", fno)[0], 0.7)
-    fs.set("father_name", name_after(t, ["name of father / legal guardian", "name of father", "father's name"]), 0.75)
-    fs.set("mother_name", name_after(t, ["name of mother", "mother's name"]), 0.75)
-    fs.set("spouse_name", name_after(t, ["name of spouse", "spouse's name"]), 0.75)
-    fs.set("address", address_after(t, ["address"]), 0.7)
+    fs.set("father_name", name_after(t, ["name of father / legal guardian", "name of father", "father's name",
+                                         "पिता/कानूनी अभिभावक का नाम", "पिता का नाम"]), 0.75)
+    fs.set("mother_name", name_after(t, ["name of mother", "mother's name", "माता का नाम"]), 0.75)
+    fs.set("spouse_name", name_after(t, ["name of spouse", "spouse's name", "पति/पत्नी का नाम"]), 0.75)
+    fs.set("address", address_after(t, ["address", *ADDRESS_LABELS_LOCAL]), 0.7)
 
     full = " ".join(p for p in (fs.get("given_names"), fs.get("surname")) if p) or None
     return finish(DOC_TYPE, fs, KEY_FIELDS, title=join_title("Passport", full), doc_date=fs.get("issue_date"),

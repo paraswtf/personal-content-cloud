@@ -70,7 +70,7 @@ def fake_registry(tmp_path, monkeypatch, models_mod):
 
 
 def test_registry_keys_and_pins(models_mod):
-    assert set(models_mod.REGISTRY) == {"faces", "siglip", "nsfw", "persons", "ocr"}
+    assert set(models_mod.REGISTRY) == {"faces", "siglip", "nsfw", "persons", "ocr", "ocr_devanagari"}
     for key, spec in models_mod.REGISTRY.items():
         assert spec.key == key and spec.label and spec.files
         for f in spec.files:
@@ -102,7 +102,7 @@ def test_statuses_shape(models_mod):
     assert set(st) == {"running", "progress", "error"}
 
 
-@pytest.mark.parametrize("key", ["faces", "siglip", "nsfw", "persons", "ocr"])
+@pytest.mark.parametrize("key", ["faces", "siglip", "nsfw", "persons", "ocr", "ocr_devanagari"])
 def test_present_for_every_key(models_mod, key):
     skip_without_models(key)
     assert models_mod.present(key)

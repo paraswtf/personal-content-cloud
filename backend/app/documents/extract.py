@@ -18,7 +18,15 @@ Contract:
 - refresh_fts(conn, item_id) / remove_fts(conn, item_id): rewrite / drop the items_fts row (filename, text,
   doc = title + type label + field values, people = named persons on faces, bodies and tags, labels =
   item_labels). Works for any item, with or without text or a document.
-- match_query(q) -> str | None: a safe FTS5 MATCH expression (every token quoted, prefix match).
+- fold_for_index(text) -> str: the fold applied to every items_fts column (zero-width joiners dropped,
+  Devanagari digits as ASCII). Queries must get the same fold (match_query does; search.service too).
+- match_query(q) -> str | None: a safe FTS5 MATCH expression (every token quoted, prefix match) over
+  fold_for_index(q). Tokens keep combining marks (Devanagari vowel signs, virama) inside words.
+- snippet_originals(conn, ids) -> {id: (text, doc)} and restore_snippet(raw, original, open, close): map an
+  FTS5 snippet() of the folded text or doc column back onto the original text, so the user sees '१५' and
+  joiners as written. The snippet markers must still be in `raw` (restore before escaping).
+- analyze_text adds a "language" field ('Hindi', 'Marathi', 'Hindi or Marathi', each with ', English'
+  when the text also has English words) when the text has Devanagari letters.
 User edits survive: fields edited through the API carry "source": "user" in the fields JSON; when the
 documents row has source 'user', its doc_type and non-empty title, doc_date and person_name are kept.
 """
@@ -39,7 +47,9 @@ import numpy as np
 from app import storage
 from app.config import settings
 from app.db import tx
-from app.documents.fields import Box, PageText, ParsedDocument, iso_valid
+from app.documents.fields import (
+    Box, FieldValue, PageText, ParsedDocument, has_devanagari, iso_valid, languages_of, word_tokens,
+)
 from app.util import json_dumps, json_loads, now_iso
 
 log = logging.getLogger(__name__)
@@ -320,7 +330,17 @@ def analyze_text(text: str, pages: list[PageText], item: Any = None, *, existing
     parsed = parsers.parse(doc_type, text, pages, boxes, today=_capture_date(item))
     if doc_type != "other" and not forced_type:
         parsed.confidence = round(min(1.0, parsed.confidence * (0.7 + 0.3 * min(1.0, det_score))), 2)
+    _add_language(parsed, text)
     return parsed, det_score
+
+
+def _add_language(parsed: ParsedDocument, text: str) -> None:
+    """A 'language' field for documents written (partly) in Devanagari; English-only documents get none."""
+    if "language" in parsed.fields or not has_devanagari(text):
+        return
+    langs = languages_of(text)
+    if langs and langs != ["English"]:
+        parsed.fields["language"] = FieldValue(", ".join(langs), "Language", 0.9)
 
 
 def _capture_date(item: Any) -> date | None:
@@ -575,6 +595,99 @@ def _doc_text(row: sqlite3.Row | None) -> str:
     return " ".join(seen)
 
 
+_INDEX_DIGITS = str.maketrans({chr(0x0966 + i): str(i) for i in range(10)})
+_INDEX_JOINERS = re.compile("[\u200c\u200d]")
+
+
+def fold_for_index(text: str | None) -> str:
+    """Text as the FTS index stores it: zero-width joiners dropped (they only shape glyphs, and the
+    query side drops them too) and Devanagari digits written as ASCII digits, so a search for 15
+    finds a receipt that says १५. item_text keeps the original text."""
+    return _INDEX_JOINERS.sub("", text or "").translate(_INDEX_DIGITS)
+
+
+def _fold_positions(original: str) -> list[int]:
+    """For each character of fold_for_index(original), its index in original. The fold only drops
+    joiners and maps digits one to one, so this map is exact."""
+    return [i for i, ch in enumerate(original) if ch not in "\u200c\u200d"]
+
+
+def restore_snippet(raw: str | None, original: str | None, open_mark: str, close_mark: str,
+                    ellipsis: str = "...") -> str | None:
+    """An FTS5 snippet() of a folded column, rewritten over the original text: the same fragment and
+    the same highlighted words, with Devanagari digits and zero-width joiners as written. `raw` still
+    holds the open/close markers. Returns `raw` unchanged when the fragment is not found in the folded
+    original (the column was indexed from other text, or the markers are unbalanced)."""
+    if not raw or not original or open_mark not in raw:
+        return raw
+    plain_parts: list[str] = []
+    marks: list[tuple[int, str]] = []  # (offset in the plain fragment, marker)
+    n = 0
+    for ch in raw:
+        if ch == open_mark or ch == close_mark:
+            marks.append((n, ch))
+        else:
+            plain_parts.append(ch)
+            n += 1
+    plain = "".join(plain_parts)
+    folded = fold_for_index(original)
+    lead = plain.startswith(ellipsis)
+    trail = plain.endswith(ellipsis)
+    # the fragment as written first (the column may itself start or end with '...'), then without
+    # the ellipses snippet() adds when the fragment does not reach a column edge
+    for cut_lead, cut_trail in ((False, False), (lead, False), (False, trail), (lead, trail)):
+        a = len(ellipsis) if cut_lead else 0
+        b = len(plain) - (len(ellipsis) if cut_trail else 0)
+        if b <= a:
+            continue
+        frag = plain[a:b]
+        start = folded.find(frag)
+        if start >= 0:
+            break
+    else:
+        return raw
+    if any(off < a or off > b for off, _m in marks):
+        return raw  # a marker inside an ellipsis: not a fragment of this column
+    pos = _fold_positions(original)
+    end = start + len(frag)
+    o_start, o_end = pos[start], pos[end - 1] + 1
+
+    def o_index(off: int, mark: str) -> int:
+        f = start + off - a
+        if mark == open_mark:  # before the folded character at f
+            return pos[f] if f < end else o_end
+        return pos[f - 1] + 1 if f > start else o_start  # after the folded character at f - 1
+
+    out: list[str] = [plain[:a]]
+    cursor = o_start
+    for off, mark in marks:
+        i = o_index(off, mark)
+        out.append(original[cursor:i])
+        out.append(mark)
+        cursor = i
+    out.append(original[cursor:o_end])
+    out.append(plain[b:])
+    return "".join(out)
+
+
+def snippet_originals(conn: sqlite3.Connection, ids: list[int]) -> dict[int, tuple[str, str]]:
+    """{item id: (original text column, original doc column)} as refresh_fts builds them before
+    folding, for restore_snippet on snippet(items_fts, 1, ...) and snippet(items_fts, 2, ...)."""
+    out: dict[int, tuple[str, str]] = {}
+    for i in range(0, len(ids), 500):
+        chunk = [int(x) for x in ids[i:i + 500]]
+        if not chunk:
+            continue
+        ph = ",".join("?" * len(chunk))
+        texts = {int(r["item_id"]): r["text"] or "" for r in conn.execute(
+            f"SELECT item_id, text FROM item_text WHERE item_id IN ({ph})", chunk)}
+        docs = {int(r["item_id"]): _doc_text(r) for r in conn.execute(
+            f"SELECT * FROM documents WHERE item_id IN ({ph})", chunk)}
+        for item_id in chunk:
+            out[item_id] = (texts.get(item_id, ""), docs.get(item_id, ""))
+    return out
+
+
 def refresh_fts(conn: sqlite3.Connection, item_id: int) -> None:
     item = conn.execute("SELECT original_filename FROM items WHERE id = ?", (item_id,)).fetchone()
     if item is None:
@@ -597,8 +710,8 @@ def refresh_fts(conn: sqlite3.Connection, item_id: int) -> None:
         conn.execute("DELETE FROM items_fts WHERE rowid = ?", (item_id,))
         conn.execute(
             "INSERT INTO items_fts(rowid, filename, text, doc, people, labels) VALUES (?, ?, ?, ?, ?, ?)",
-            (item_id, f"{filename} {stem}".strip(), text_row["text"] if text_row else "", _doc_text(doc_row),
-             " ".join(people), " ".join(labels)),
+            (item_id, fold_for_index(f"{filename} {stem}".strip()), fold_for_index(text_row["text"] if text_row else ""),
+             fold_for_index(_doc_text(doc_row)), fold_for_index(" ".join(people)), fold_for_index(" ".join(labels))),
         )
 
 
@@ -607,13 +720,13 @@ def remove_fts(conn: sqlite3.Connection, item_id: int) -> None:
         conn.execute("DELETE FROM items_fts WHERE rowid = ?", (item_id,))
 
 
-_TOKEN = re.compile(r"\w+", re.UNICODE)
-
-
 def match_query(q: str | None, *, max_tokens: int = 12) -> str | None:
     """FTS5 MATCH expression for free text: each word quoted (so operators, quotes and slashes in the
-    input are plain text) with prefix matching, all words required. None when q has no words."""
-    tokens = _TOKEN.findall(q or "")[:max_tokens]
+    input are plain text) with prefix matching, all words required. None when q has no words. A word
+    is a run of word characters, combining marks or Indic letters (fields.word_tokens), so a Hindi word
+    with vowel signs stays one word. The query gets the index fold (fold_for_index: zero-width joiners
+    dropped, Devanagari digits as ASCII), so '१९८८' and '1988' both find a receipt that says either."""
+    tokens = word_tokens(fold_for_index(q))[:max_tokens]
     if not tokens:
         return None
     return " ".join('"' + t.replace('"', '""') + '"*' for t in tokens)

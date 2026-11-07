@@ -74,6 +74,7 @@ class Settings:
 
     # ML runtime
     gpu_enabled: str           # 'auto' | 'true' | 'false'
+    gpu_arena_shrink: bool  # free CUDA arena memory after every run
     ort_threads: int
 
     # derivatives
@@ -234,6 +235,7 @@ def _load(**overrides) -> Settings:
         wallet_key_password=_env("WALLET_KEY_PASSWORD"),
         wallet_dir=Path(wallet_dir).resolve() if wallet_dir else None,
         workers_enabled=_bool("WORKERS_ENABLED", True),
+        gpu_arena_shrink=_bool("GPU_ARENA_SHRINK", True),
     )
     values.update(overrides)
     return Settings(**values)

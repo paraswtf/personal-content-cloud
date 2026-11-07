@@ -213,8 +213,14 @@ The full DDL is `backend/app/schema.sql`. Summary of tables and the columns code
 - `pages(id, item_id, page_no, width, height, text, text_source CHECK ('layer','ocr','render','none'), ocr_boxes JSON, UNIQUE(item_id, page_no))`.
 - `items_fts` (FTS5, `content=''` contentless is not used; external content table is not used either):
   standalone FTS5 with `rowid = item_id` and columns `filename, text, doc, people, labels`, tokenizer
-  `unicode61 remove_diacritics 2`. Rows are rewritten whenever text, document fields, tags or labels change
-  (`documents.extract.refresh_fts(conn, item_id)`).
+  `unicode61 remove_diacritics 2 tokenchars '<every Mn/Mc mark of U+0900 to U+0DFF>'` (`db.FTS_TOKENIZE`), so a
+  Devanagari word with its vowel signs is one token. Rows are rewritten whenever text, document fields, tags or
+  labels change (`documents.extract.refresh_fts(conn, item_id)`); the indexed text has zero-width joiners
+  removed and Devanagari digits written as ASCII (`extract.fold_for_index`; `search.service` and
+  `extract.match_query` fold queries the same way, and search snippets are mapped back onto the original text
+  by `extract.restore_snippet`).
+  `db.init_db` drops and recreates the table when its stored definition lacks the current tokenizer and sets
+  kv `fts_rebuild`; `ingest.recover_on_startup` then re-indexes every item and clears the flag.
 - `documents(id, item_id UNIQUE, doc_type, doc_group, confidence, fields JSON, title, doc_date, issuer, person_name,
   barcode, barcode_format, has_photo INT, source CHECK ('auto','user'), created_at, updated_at)`.
   `fields` is `{"<key>": {"value": str, "label": str, "confidence": 0..1}}`.
@@ -262,7 +268,9 @@ all GPU work except OCR so two heavy models never contend. Handlers are idempote
    deleting them. A reprocess requested while a run is in progress is not lost: the run commits its results
    with `analysis_status='pending'`, so the job it queued runs in full.
 3. `text` (`documents.extract.extract_item`): PDF text layer per page via pypdfium2, OCR with rapidocr on pages
-   without a layer (and on images); office files via python-docx / openpyxl / python-pptx (pages are logical:
+   without a layer (and on images; every detected line is read by the bundled Latin recogniser and, when the
+   `ocr_devanagari` model is present, by the PP-OCRv5 Devanagari recogniser too, and the better reading is
+   kept: `ml.ocr_devanagari.choose`); office files via python-docx / openpyxl / python-pptx (pages are logical:
    one per docx section of ~3000 chars, one per sheet, one per slide; the renders are text drawn with Pillow);
    write `pages`, `item_text`, FTS; then `documents.detect.detect(text, pages, item)` -> doc type and
    `parsers.<type>.parse(...)` -> fields; barcodes via zxing-cpp on page renders; ID photo crop from the largest
@@ -304,10 +312,16 @@ pinned and checksummed, skipped when present):
 | `nsfw` | `nsfw/model.onnx` (+ `config.json`, `preprocessor_config.json`) | onnx-community/nsfw_image_detection-ONNX, pinned commit | Apache 2.0 (Falconsai ViT) |
 | `persons` | `yolox/yolox_s.onnx` | Megvii YOLOX release 0.1.1rc0 (35.9 MB) | Apache 2.0 |
 | `ocr` | rapidocr's bundled models (`PP-OCRv6_det_small`, `PP-OCRv6_rec_small`, `ch_ppocr_mobile_v2.0_cls`; installed with the package, nothing downloaded at run time) | RapidAI | Apache 2.0 |
+| `ocr_devanagari` | `ocr/devanagari_PP-OCRv5_rec_mobile.onnx` (7.9 MB, Hindi and Marathi recogniser, character list in the ONNX metadata) and `fonts/NotoSansDevanagari-Regular.ttf` (page renders and test fixtures) | RapidOCR model zoo (modelscope, release v3.10.0); Noto fonts | Apache 2.0; SIL OFL 1.1 |
 
 Every engine is lazy (loaded on first use), lives once per process, and falls back to CPU when the
 CUDA provider fails to initialise (logged once). Without a model file the dependent stage marks
 its part as skipped (`quality_scores.skipped`, `category_scores.skipped`) and the item still completes.
+
+GPU memory: onnxruntime's per-session arena grows with every new input shape and never shrinks on its own (a
+server in ordinary use was measured at 7.7 GB of the card's 8 GB). `runtime.session` therefore returns CUDA
+sessions wrapped so that every `run()` carries the `memory.enable_memory_arena_shrinkage` option
+(`runtime.wrap_session`, `GPU_ARENA_SHRINK`, default on); `app.ml.ocr` wraps rapidocr's sessions the same way.
 
 ## 9. Categories, NSFW and mis-clicks (`app/analysis`)
 
@@ -368,10 +382,27 @@ Guessing (`analysis/guess.py`). For an unassigned face or body D in item I:
 
 ## 11. Documents (`app/documents`)
 
-Text extraction order: text layer (pdf) -> OCR (rapidocr, English; Devanagari is not read, which is
-enough for the Latin-script fields of Indian IDs) -> office extractors -> plain text. `item_text.text`
-is the concatenation of pages separated by form feeds. FTS columns: `filename`, `text`, `doc`
-(document title, type label, field values), `people` (person names), `labels`.
+Text extraction order: text layer (pdf) -> OCR (rapidocr; English, Hindi and Marathi: each detected line is
+read by the Latin and the Devanagari recogniser and the better reading wins, section 7 step 3) -> office
+extractors -> plain text. `item_text.text` is the concatenation of pages separated by form feeds. FTS columns:
+`filename`, `text`, `doc` (document title, type label, field values), `people` (person names), `labels`.
+
+Hindi and Marathi: `fields.normalize_text` folds Devanagari before parsing (digits to ASCII, danda to a full
+stop, zero-width joiners dropped, nukta letters decomposed); `find_dates`, `parse_date` and `parse_month`
+know the Hindi and Marathi month names; the shared label lists (`*_LABELS_LOCAL`, `STOP_LABELS_LOCAL`,
+`LOCAL_GENDER`, `LOCAL_RELATIONS`) and `detect.LOCAL_RULES` carry the Hindi and Marathi words for names,
+parents, dates of birth, validity, amounts, addresses and document headings, and labels match whole words of
+their own script. The ID parsers (aadhaar, pan, passport, driving_licence, voter_id, vehicle_rc), marksheet,
+invoice, receipt, salary_slip and the generic fallback read them. A document that carries a name in both
+scripts keeps the Latin spelling in `name` and the Devanagari one in `name_local` ("Name (local script)");
+`extract.analyze_text` adds a `language` field ("Hindi", "Marathi", "Hindi or Marathi", each optionally
+followed by ", English"; `fields.languages_of`, which needs at least two Devanagari words to decide) when the
+text has Devanagari words; the generic parser
+adds `kind` ("Rent agreement") when it recognises one. Page renders of office and plain-text documents draw
+Devanagari runs with Noto Sans Devanagari (else FreeSerif) and shrink a line that would overflow the page
+(`media.documents._draw_line`). Search: a query without Latin letters skips the semantic engine
+(`search.service.text_only_query`) and the query keeps Devanagari words whole; a nukta letter is searched in
+both its precomposed and decomposed spelling.
 
 Type detection (`detect.py`): each registered type has keyword sets, identifier regexes with
 checksums where they exist, and negative keywords. Score = weighted hits; the best type wins when
@@ -418,6 +449,8 @@ detection and parsing read at most the first 400000 characters or 150 pages (`ex
 - text: FTS5 `MATCH` over `items_fts` with `bm25` ranking and snippets.
 `mode=auto` returns both lists merged (semantic order first when the query looks visual, text first
 when FTS has strong hits: any bm25 hit whose terms all matched); `mode=semantic` / `mode=text` force one.
+A query whose letters are all non-Latin (Hindi, Marathi) skips the semantic engine in `mode=auto`
+(`service.text_only_query`; SigLIP is English-trained) and returns the text hits alone.
 The contrast gate's threshold is capped at an absolute relevance of 0.25, so a subject that fills the library
 still matches. Offset pages after the first come from a short-lived in-process copy of the merged list (8
 queries, 10 minutes; the visibility of the page's ids is re-checked), and snippets are built for the

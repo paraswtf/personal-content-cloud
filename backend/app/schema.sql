@@ -276,9 +276,13 @@ CREATE TABLE IF NOT EXISTS pages (
 );
 
 -- Full-text search. rowid = items.id. Rewritten by app.documents.extract.refresh_fts.
+-- tokenchars lists every combining mark (Unicode Mn and Mc) from U+0900 to U+0DFF (Devanagari
+-- through Sinhala: vowel signs, virama, nukta, anusvara, visarga, candrabindu), so a Hindi or
+-- Marathi word is one token instead of being split at each vowel sign. The same literal is
+-- app.db.FTS_TOKENIZE; app.db.init_db rebuilds the table when a database has another definition.
 CREATE VIRTUAL TABLE IF NOT EXISTS items_fts USING fts5(
   filename, text, doc, people, labels,
-  tokenize = 'unicode61 remove_diacritics 2'
+  tokenize = 'unicode61 remove_diacritics 2 tokenchars ''ऀँंःऺऻ़ािीुूृॄॅॆेैॉॊोौ्ॎॏ॒॑॓॔ॕॖॗॢॣঁংঃ়ািীুূৃৄেৈোৌ্ৗৢৣ৾ਁਂਃ਼ਾਿੀੁੂੇੈੋੌ੍ੑੰੱੵઁંઃ઼ાિીુૂૃૄૅેૈૉોૌ્ૢૣૺૻૼ૽૾૿ଁଂଃ଼ାିୀୁୂୃୄେୈୋୌ୍୕ୖୗୢୣஂாிீுூெேைொோௌ்ௗఀఁంఃఄ఼ాిీుూృౄెేైొోౌ్ౕౖౢౣಁಂಃ಼ಾಿೀುೂೃೄೆೇೈೊೋೌ್ೕೖೢೣೳഀഁംഃ഻഼ാിീുൂൃൄെേൈൊോൌ്ൗൢൣඁංඃ්ාැෑිීුූෘෙේෛොෝෞෟෲෳ'''
 );
 
 -- Parsed "virtual document" of an item.
