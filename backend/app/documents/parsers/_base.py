@@ -15,12 +15,15 @@ log = logging.getLogger(__name__)
 
 def finish(doc_type: str, fs: FieldSet, key_fields: list[str], *, title: str | None = None,
            doc_date: str | None = None, issuer: str | None = None, person_name: str | None = None,
-           bonus: float = 0.0, base: float = 0.25, pages: list[PageText] | None = None) -> ParsedDocument:
-    barcode = barcode_format = None
-    if pages:
+           bonus: float = 0.0, base: float = 0.25, pages: list[PageText] | None = None,
+           barcode: tuple[str, str] | None = None) -> ParsedDocument:
+    """barcode=(format, payload) names the code the parser read its fields from (the BCBP of a boarding
+    pass); otherwise the document's barcode is the first one found on the pages."""
+    code = barcode
+    if code is None and pages:
         codes = all_barcodes(pages)
-        if codes:
-            barcode_format, barcode = codes[0]
+        code = codes[0] if codes else None
+    barcode_format, payload = code if code else (None, None)
     return ParsedDocument(
         doc_type=doc_type,
         confidence=confidence_from(fs, key_fields, base=base, bonus=bonus),
@@ -29,7 +32,7 @@ def finish(doc_type: str, fs: FieldSet, key_fields: list[str], *, title: str | N
         doc_date=doc_date,
         issuer=issuer,
         person_name=person_name,
-        barcode=barcode,
+        barcode=payload,
         barcode_format=barcode_format,
     )
 

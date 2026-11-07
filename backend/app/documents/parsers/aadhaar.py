@@ -98,7 +98,7 @@ def parse(text: str, pages=None, boxes=None) -> ParsedDocument:
     m = re.search(r"enrol(?:l)?ment\s*no\.?\s*[:\-]?\s*([\d/ ]{14,30})", t, re.I)
     if m:
         fs.set("enrolment_no", re.sub(r"\s+", " ", m.group(1)).strip(), 0.8)
-    issue = date_after(t, ["issue date", "date of issue", "download date"])
+    issue = date_after(t, ["issue date", "date of issue", "download date"], past=True)
     if issue:
         fs.set("issue_date", issue, 0.8)
 

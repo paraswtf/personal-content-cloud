@@ -92,8 +92,9 @@ def test_merge_moves_everything(conn):
             "VALUES (?, ?, 'user', 0.1, 0.1, 0.3, 0.6, 0.9, ?)", (i3["id"], source, now)).lastrowid
         conn.execute("INSERT INTO item_tags(item_id, person_id, source, created_at) VALUES (?, ?, 'user', ?)",
                      (i2["id"], source, now))
+        # (A rejection on the guessed box itself would drop the moved guess: see the merge rejection test.)
         conn.execute("INSERT INTO guess_rejections(kind, ref_id, person_id, created_at) VALUES ('face', ?, ?, ?)",
-                     (open_face, source, now))
+                     (ft, source, now))
         conn.execute("INSERT INTO merge_dismissals(person_a, person_b, created_at) VALUES (?, ?, ?)",
                      (min(source, other), max(source, other), now))
         conn.execute("UPDATE faces SET assigned_by = 'guess', guess_person_id = ?, guess_score = 0.8 WHERE id = ?",

@@ -111,7 +111,7 @@ trash for `TRASH_DAYS` days. To back up, stop the server and copy `DATA_DIR`, or
 cd backend && uv sync && PCC_NO_MODELS=1 .venv/bin/python -m pytest -q   # fast tests, no models
 cd backend && ORT_THREADS=2 .venv/bin/python -m pytest -q                 # with the models
 cd frontend && npm ci && npm run build                                    # typecheck + production build
-BACKEND_URL=http://127.0.0.1:41010 npm run dev                            # Vite dev server against a running API
+BACKEND_URL=http://127.0.0.1:41010 npm run dev                                      # Vite dev server against a running API
 ```
 
 Layout: `backend/app` (FastAPI app; `api/` routes, `auth/`, `media/`, `ml/`, `analysis/`, `documents/`,

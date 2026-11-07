@@ -7,7 +7,9 @@ CONTRACT.
      falling back to the large preview), the page 1 render (pdf, document), or sampled frames plus the
      poster (videos);
   2. runs every model that is available (each one optional; a missing one is listed under
-     quality_scores['skipped'] and category_scores['skipped']): SigLIP embeddings (frame 0 plus up to
+     quality_scores['skipped'] and category_scores['skipped'], and the rows it produced on an earlier
+     run are kept: embeddings and labels without SigLIP, faces and bodies without the face engine,
+     bodies without the person detector): SigLIP embeddings (frame 0 plus up to
      settings.search_video_frames video frames) into item_embeddings, zero-shot category scores and
      the top 5 labels into item_labels, the NSFW classifier, faces (SCRFD + ArcFace, video tracks),
      person boxes (YOLOX) with torso crops embedded by SigLIP into torso_embedding;
@@ -16,7 +18,7 @@ CONTRACT.
      reprocess), bodies (+ crops), clustering (cluster.assign_new_faces), category, nsfw and mis-click
      decisions (never overriding *_source='user'), burst flags of the neighbours, face_count,
      body_count, analysis_status 'done'; faces_version and search_version are bumped;
-  5. afterwards: guess.guess_item for the open boxes, the FTS row (labels), and the text job for
+  5. afterwards: guess.guess_item for the open boxes, the FTS row (labels, people), and the text job for
      images with doc_likeness >= settings.doc_likeness_min (app.ingest.enqueue_text).
 - mark_failed(conn, item_id, version): analysis_status 'error' (the worker calls it after the last retry).
 Heavy work (decode, inference, ffmpeg) runs outside the write transaction.
@@ -89,6 +91,8 @@ class Result:
     bodies: list[bodies_mod.BodyRecord] = field(default_factory=list)
     body_torsos: list[np.ndarray | None] = field(default_factory=list)
     skipped: list[str] = field(default_factory=list)
+    faces_ran: bool = False  # the face engine looked at this item (r.faces is the real answer)
+    bodies_ran: bool = False  # the person detector looked at this item
 
 
 # ------------------------------------------------------------------ model access
@@ -244,11 +248,13 @@ def _run_models(item: sqlite3.Row, v: Visual, siglip: ModuleType | None, nsfw: M
     if kind == "image" and visual:
         if faces_engine is not None:
             r.faces = faces_mod.analyze_image(v.img, source_scale=v.source_scale, img_bgr=v.bgr)  # type: ignore[arg-type]
+            r.faces_ran = True
         else:
             r.skipped.append("faces")
     elif kind == "video":
         if v.faces_done:
             r.faces = v.faces
+            r.faces_ran = True
         else:
             r.skipped.append("faces")
 
@@ -256,6 +262,7 @@ def _run_models(item: sqlite3.Row, v: Visual, siglip: ModuleType | None, nsfw: M
     if kind == "image" and visual:
         if bodies_mod.available():
             r.bodies = bodies_mod.detect_bodies(v.img, v.bgr, r.faces)  # type: ignore[arg-type]
+            r.bodies_ran = True
         else:
             r.skipped.append("bodies")
 
@@ -350,8 +357,11 @@ def _repoint_covers(conn: sqlite3.Connection, item_id: int, old_ids: list[int], 
 
 
 def _carry_bodies(conn: sqlite3.Connection, old_bodies: list[sqlite3.Row], new_ids: list[int]) -> None:
-    """User-assigned faceless bodies keep their person on the best-overlapping new body (IoU >= 0.5)."""
-    olds = [b for b in old_bodies if b["assigned_by"] == "user" and b["face_id"] is None]
+    """User-assigned faceless bodies keep their person on the best-overlapping new body (IoU >= 0.5);
+    faceless bodies with rejected guesses pass those rejections on the same way."""
+    rejected = cluster.rejected_ids(conn, "body", [int(b["id"]) for b in old_bodies])
+    olds = [b for b in old_bodies
+            if b["face_id"] is None and (b["assigned_by"] == "user" or int(b["id"]) in rejected)]
     if not olds or not new_ids:
         return
     marks = ",".join("?" * len(new_ids))
@@ -367,7 +377,11 @@ def _carry_bodies(conn: sqlite3.Connection, old_bodies: list[sqlite3.Row], new_i
                 best = (s, int(n["id"]))
         if best is not None:
             used.add(best[1])
-            conn.execute("UPDATE bodies SET person_id = ?, assigned_by = 'user' WHERE id = ?", (o["person_id"], best[1]))
+            if o["assigned_by"] == "user":
+                conn.execute("UPDATE bodies SET person_id = ?, assigned_by = 'user' WHERE id = ?",
+                             (o["person_id"], best[1]))
+            if int(o["id"]) in rejected:
+                cluster.move_rejections(conn, "body", int(o["id"]), best[1])
 
 
 def _burst_entry(roles: dict[int, str | None], item_id: int, size: int) -> dict[str, Any] | None:
@@ -397,13 +411,23 @@ def analyze_item(conn: sqlite3.Connection, item_id: int, version: int) -> None:
 
     # Decisions that need only this item.
     good_face = any(cluster.is_good_face(f.det_score, f.size_px) for f in r.faces)
-    has_person = good_face or bool(r.bodies)
+    # Video frames are sampled at 640 px, so their faces rarely pass the good-face size: any tracked face counts.
+    has_person = good_face or bool(r.bodies) or (kind == "video" and bool(r.faces))
     doc_like = categories.doc_likeness(r.doc_p, r.density) if kind == "image" else (1.0 if kind in ("pdf", "document") else None)
     screen_heur = kind == "image" and categories.screenshot_heuristic(
         item["ext"], item["camera"], item["width"], item["height"], item["exif_datetime"])
     if r.skipped:
         r.quality_scores["skipped"] = sorted(set(r.skipped))
         r.category_scores["skipped"] = sorted(set(r.skipped))
+    # A model that did not run must not wipe what it found before (user-named faces, labels...).
+    keep_embeddings = r.model is None
+    keep_faces = kind in ("image", "video") and not r.faces_ran
+    # Without faces, new person boxes would all look faceless: keep the old ones as well.
+    keep_bodies = keep_faces or (kind == "image" and not r.bodies_ran)
+    if keep_faces:
+        r.faces, r.face_torsos = [], []
+    if keep_bodies:
+        r.bodies, r.body_torsos = [], []
     face_crops = [_encode_face_crop(f.crop) for f in r.faces]
     body_crops = [bodies_mod.encode_crop(b.crop) for b in r.bodies]
 
@@ -422,20 +446,32 @@ def analyze_item(conn: sqlite3.Connection, item_id: int, version: int) -> None:
             now = now_iso()
 
             # Embeddings and labels.
-            conn.execute("DELETE FROM item_embeddings WHERE item_id = ?", (item_id,))
+            if keep_embeddings:
+                conn.execute("DELETE FROM item_embeddings WHERE item_id = ? AND version != ?", (item_id, int(version)))
+            else:
+                conn.execute("DELETE FROM item_embeddings WHERE item_id = ?", (item_id,))
             for frame_index, t, emb in r.embeddings:
                 conn.execute(
                     "INSERT INTO item_embeddings(item_id, version, model, frame_index, frame_time_s, embedding, created_at) "
                     "VALUES (?, ?, ?, ?, ?, ?, ?)",
                     (item_id, int(version), r.model, frame_index, t, _blob(emb), now),
                 )
-            conn.execute("DELETE FROM item_labels WHERE item_id = ?", (item_id,))
+            if not keep_embeddings:
+                conn.execute("DELETE FROM item_labels WHERE item_id = ?", (item_id,))
+            # SigLIP missing now but it ran before: its scene scores still stand.
+            prior_scene = keep_embeddings and conn.execute(
+                "SELECT 1 FROM item_embeddings WHERE item_id = ? LIMIT 1", (item_id,)).fetchone() is not None
             for label, score in r.labels:
                 conn.execute("INSERT OR REPLACE INTO item_labels(item_id, label, score) VALUES (?, ?, ?)",
                              (item_id, label, float(score)))
 
             # Faces.
             old_faces = conn.execute("SELECT * FROM faces WHERE item_id = ? ORDER BY id", (item_id,)).fetchall()
+            if keep_faces:
+                # Kept faces still say whether a person is in the picture.
+                good_face = any(cluster.is_good_face(f["det_score"], f["size_px"]) for f in old_faces)
+                has_person = has_person or good_face or (kind == "video" and bool(old_faces))
+                old_faces = []
             old_ids = [int(f["id"]) for f in old_faces]
             old_people = {int(f["person_id"]) for f in old_faces if f["person_id"] is not None}
             new_face_ids: list[int] = []
@@ -458,6 +494,11 @@ def analyze_item(conn: sqlite3.Connection, item_id: int, version: int) -> None:
 
             # Bodies (after the faces, so face_id can point at the new rows).
             old_bodies = conn.execute("SELECT * FROM bodies WHERE item_id = ? ORDER BY id", (item_id,)).fetchall()
+            if keep_bodies:
+                # Faceless bodies stay; bodies around a face go only when that face is re-detected.
+                kept = [b for b in old_bodies if keep_faces or b["face_id"] is None]
+                has_person = has_person or bool(kept)
+                old_bodies = [b for b in old_bodies if not (keep_faces or b["face_id"] is None)]
             old_body_ids = [int(b["id"]) for b in old_bodies]
             old_people |= {int(b["person_id"]) for b in old_bodies if b["person_id"] is not None}
             new_body_ids: list[int] = []
@@ -477,11 +518,13 @@ def analyze_item(conn: sqlite3.Connection, item_id: int, version: int) -> None:
             if old_body_ids:
                 marks = ",".join("?" * len(old_body_ids))
                 conn.execute(f"DELETE FROM bodies WHERE id IN ({marks})", old_body_ids)
+                cluster.drop_rejections(conn, "body", old_body_ids)
                 trash.extend(storage.body_crop_path(b) for b in old_body_ids)
             if old_ids:
                 _repoint_covers(conn, item_id, old_ids, new_face_ids, now)
                 marks = ",".join("?" * len(old_ids))
                 conn.execute(f"DELETE FROM faces WHERE id IN ({marks})", old_ids)
+                cluster.drop_rejections(conn, "face", old_ids)
                 trash.extend(storage.face_crop_path(f) for f in old_ids)
             idx.sync_item(conn, item_id, base_version)
             if new_face_ids:
@@ -495,20 +538,38 @@ def analyze_item(conn: sqlite3.Connection, item_id: int, version: int) -> None:
             cluster.sync_bodies_to_faces(conn, [item_id])
             if old_people:
                 cluster.prune_empty_persons(conn, old_people)
+            # items_fts.people lists the names on the item: refresh it when they may have changed.
+            people_changed = bool(old_people) or conn.execute(
+                "SELECT 1 FROM faces WHERE item_id = ? AND person_id IS NOT NULL UNION ALL "
+                "SELECT 1 FROM bodies WHERE item_id = ? AND person_id IS NOT NULL LIMIT 1",
+                (item_id, item_id),
+            ).fetchone() is not None
 
             # Category and nsfw.
             nsfw_override = bool(cur["nsfw"]) if cur["nsfw_source"] == "user" else None
+            nsfw_score = r.nsfw_score
+            if nsfw_override is None and r.nsfw_score is None and kind in ("image", "video"):
+                # No classifier this time: an item the classifier put in the vault stays there.
+                nsfw_override, nsfw_score = bool(cur["nsfw"]), cur["nsfw_score"]
+            if prior_scene:
+                old_scores = json_loads(cur["category_scores"], {}) or {}
+                r.category_scores = {**{k: v for k, v in old_scores.items() if k != "skipped"}, **r.category_scores}
             dec = categories.decide(
-                kind, nsfw_score=r.nsfw_score, explicit_p=r.explicit_p, nsfw_override=nsfw_override,
+                kind, nsfw_score=nsfw_score, explicit_p=r.explicit_p, nsfw_override=nsfw_override,
                 screenshot_heur=screen_heur, screenshot_p=r.screenshot_p, doc_like=doc_like,
                 has_person=has_person, scores=r.category_scores,
             )
-            category = cur["category"] if cur["category_source"] == "user" else dec.category
+            if cur["category_source"] == "user":
+                category = cur["category"]
+            elif prior_scene and not dec.nsfw and cur["category"] and cur["category"] != "nsfw":
+                category = cur["category"]  # decided with SigLIP before; nothing better to go on now
+            else:
+                category = dec.category
             new_nsfw = int(cur["nsfw"]) if cur["nsfw_source"] == "user" else int(dec.nsfw)
 
             # Mis-clicks and bursts.
             if kind == "image" and category not in ("documents", "screenshots") and "blur_var" in r.quality_scores:
-                members = quality.burst_group(conn, cur, float(r.quality_scores["blur_var"]))
+                members = quality.burst_group(conn, cur, float(r.quality_scores["blur_var"]), nsfw=new_nsfw)
                 roles = quality.burst_roles(members)
             burst = _burst_entry(roles, item_id, len(members))
             mis, reasons, _ = quality.decide(kind, category, r.quality_scores, good_face=good_face, burst=burst)
@@ -534,11 +595,12 @@ def analyze_item(conn: sqlite3.Connection, item_id: int, version: int) -> None:
                 "misclick = ?, misclick_reasons = ?, quality_scores = ?, face_count = ?, body_count = ?, "
                 "analysis_status = 'done', updated_at = ? WHERE id = ?",
                 (category, json_dumps(r.category_scores) if r.category_scores else None, doc_like, new_nsfw,
-                 r.nsfw_score, int(bool(mis)), json_dumps(reasons) if reasons else None,
+                 nsfw_score, int(bool(mis)), json_dumps(reasons) if reasons else None,
                  json_dumps(r.quality_scores) if r.quality_scores else None, face_count, body_count, now, item_id),
             )
             bump_faces_version(conn)
             bump_search_version(conn)
+            final_version = faces_version(conn)
     except _Stale:
         for p in written:
             storage.safe_unlink(p)
@@ -549,15 +611,17 @@ def analyze_item(conn: sqlite3.Connection, item_id: int, version: int) -> None:
         for p in written:
             storage.safe_unlink(p)
         raise
+    # The index already holds what this transaction committed: no full re-read on the next sync.
+    idx.settle(conn, final_version)
     for p in trash:
         storage.safe_unlink(p)
     log.info("analyze: %s %s v%s -> %s, %d faces, %d bodies%s", kind, uid, version, category, len(r.faces),
              len(r.bodies), f", skipped {sorted(set(r.skipped))}" if r.skipped else "")
-    _after(conn, item_id, int(version), kind, doc_like, bool(r.labels))
+    _after(conn, item_id, int(version), kind, doc_like, bool(r.labels) or people_changed)
 
 
 def _after(conn: sqlite3.Connection, item_id: int, version: int, kind: str, doc_like: float | None,
-           labels_changed: bool) -> None:
+           fts_changed: bool) -> None:
     """Follow-ups outside the analysis transaction; failures are logged, never raised."""
     from app.analysis import guess
 
@@ -565,7 +629,7 @@ def _after(conn: sqlite3.Connection, item_id: int, version: int, kind: str, doc_
         guess.guess_item(conn, item_id)
     except Exception as e:
         log.warning("analyze: guessing failed for item %s: %s", item_id, e)
-    if labels_changed:
+    if fts_changed:
         guess.refresh_fts(conn, [item_id])
     if kind == "image" and doc_like is not None and doc_like >= settings.doc_likeness_min:
         row = conn.execute("SELECT text_status, version FROM items WHERE id = ?", (item_id,)).fetchone()

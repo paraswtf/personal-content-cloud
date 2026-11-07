@@ -95,9 +95,9 @@ def parse(text: str, pages=None, boxes=None) -> ParsedDocument:
         fs.set("result", m.group(1).title() if m else None, 0.5)
     fs.set("father_name", name_after(t, ["father's name", "fathers name", "father name"]), 0.7)
     fs.set("mother_name", name_after(t, ["mother's name", "mothers name", "mother name"]), 0.7)
-    issue = date_after(t, ["date of issue", "issue date", "date of declaration", "date"])
+    issue = date_after(t, ["date of issue", "issue date", "date of declaration", "date"], past=True)
     if not issue:
-        ds = find_dates(t)
+        ds = find_dates(t, past=True)
         issue = ds[-1][0] if ds else None
     fs.set("issue_date", issue, 0.6)
     return finish(DOC_TYPE, fs, KEY_FIELDS, title=join_title("Marksheet", fs.get("exam"), fs.get("year")),

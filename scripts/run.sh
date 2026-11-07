@@ -26,5 +26,5 @@ fi
 
 cd "$ROOT/backend"
 echo "[run] starting on http://$HOST:$PORT"
-exec .venv/bin/uvicorn app.main:app --host "$HOST" --port "$PORT" \
+exec .venv/bin/uvicorn --factory app.main:create_app --host "$HOST" --port "$PORT" \
   --proxy-headers --forwarded-allow-ips 127.0.0.1 --timeout-graceful-shutdown 10

@@ -16,6 +16,8 @@ A sync outside a transaction reads the version, the rows and the embeddings in o
 transaction, so they come from one snapshot.
 Callers that sync and then query (cluster.py) hold `index.lock` across both, so another
 thread cannot swap the state in between.
+settle(conn, version) after a commit and advance(old, new) after guess-only writes keep the index
+current without the full row re-read a tentative or outdated state would otherwise force.
 """
 from __future__ import annotations
 
@@ -121,11 +123,32 @@ class FaceIndex:
         self._mark(conn, in_tx, {int(ids[i]) for i in missing})
         log.debug("face index synced: %d faces (%d loaded), version %d", n, len(missing), version)
 
-    def _set_state(self, ids, person, user, item, emb, version: int | None) -> None:
+    def _set_state(self, ids, person, user, item, emb, version: int | None,
+                   pos: dict[int, int] | None = None) -> None:
         self._ids, self._person, self._user, self._item, self._emb = ids, person, user, item, emb
-        self._pos = {fid: i for i, fid in enumerate(ids.tolist())}
+        self._pos = pos if pos is not None else {fid: i for i, fid in enumerate(ids.tolist())}
         self._version = version
         self._changed()
+
+    def settle(self, conn: sqlite3.Connection, version: int) -> None:
+        """Call right after the write transaction that last synced this index (sync_item, sync and
+        set_person inside it) committed, with `version` the faces_version that transaction ended with.
+        The in-memory state then is the committed state, so it stops being tentative and the next
+        sync does not re-read every face. A no-op if anything else happened since."""
+        with self.lock:
+            if (self._tentative_conn != id(conn) or conn.in_transaction
+                    or faces_version(conn) != int(version)):
+                return
+            self._version = int(version)
+            self._tentative_conn = None
+            self._tentative_ids = set()
+
+    def advance(self, old_version: int, new_version: int) -> None:
+        """A committed write moved faces_version from old_version to new_version without changing
+        anything the index holds (guess fields only). Current at old means current at new."""
+        with self.lock:
+            if self._tentative_conn is None and self._version is not None and self._version == int(old_version):
+                self._version = int(new_version)
 
     def _mark(self, conn: sqlite3.Connection, in_tx: bool, loaded_ids: set[int]) -> None:
         if in_tx:
@@ -161,16 +184,24 @@ class FaceIndex:
             if n:
                 self._load_by_id(conn, r_ids, list(range(n)), r_emb)
             keep = self._item != int(item_id)
-            ids = np.concatenate([self._ids[keep], r_ids])
-            order = np.argsort(ids, kind="stable")
-            self._set_state(
-                ids[order],
-                np.concatenate([self._person[keep], r_person])[order],
-                np.concatenate([self._user[keep], r_user])[order],
-                np.concatenate([self._item[keep], r_item])[order],
-                np.concatenate([self._emb[keep], r_emb])[order],
-                faces_version(conn),
-            )
+            kept_all = bool(keep.all())
+            parts = [self._ids, self._person, self._user, self._item, self._emb]
+            if not kept_all:
+                parts = [a[keep] for a in parts]
+            if n:
+                parts = [np.concatenate([a, b]) for a, b in zip(parts, [r_ids, r_person, r_user, r_item, r_emb])]
+            pos = None
+            if n and parts[0].size > n and r_ids[0] < parts[0][parts[0].size - n - 1]:
+                # Some new id sorts before a kept one (rare: ids grow): restore the id order.
+                order = np.argsort(parts[0], kind="stable")
+                parts = [a[order] for a in parts]
+            elif kept_all:
+                # New faces appended after every kept row (the usual case): extend the position map.
+                pos = self._pos
+                base = parts[0].size - n
+                for k, fid in enumerate(r_ids.tolist()):
+                    pos[int(fid)] = base + k
+            self._set_state(*parts, faces_version(conn), pos=pos)
             self._mark(conn, True, {int(f) for f in r_ids.tolist()})
             log.debug("face index: item %s refreshed (%d faces), version %d", item_id, n, self._version)
 

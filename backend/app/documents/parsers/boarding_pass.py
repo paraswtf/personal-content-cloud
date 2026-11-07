@@ -82,9 +82,11 @@ def parse(text: str, pages=None, boxes=None, *, today: date | None = None) -> Pa
     t = normalize_text(text)
     fs = FieldSet(FIELDS)
     bcbp = None
-    for _fmt, payload in all_barcodes(pages or []):
+    bcbp_code = None
+    for fmt, payload in all_barcodes(pages or []):
         bcbp = read_bcbp(payload, today)
         if bcbp:
+            bcbp_code = (fmt, payload)
             break
     if not bcbp:
         bcbp = read_bcbp(t.replace("\n", " "), today)
@@ -123,7 +125,8 @@ def parse(text: str, pages=None, boxes=None, *, today: date | None = None) -> Pa
     if pnr:
         mm = re.search(r"\b[A-Z0-9]{5,8}\b", pnr.upper())
         fs.set("pnr", mm.group(0) if mm else None, 0.75)
-    seat = after_label(t, ["seat", "seat no"])
+    seat = after_label(t, ["seat no", "seat number", "seat"],
+                       accept=lambda v: bool(re.match(r"\s*\d{1,3}[A-K]\b", v.upper())))
     if seat:
         mm = re.match(r"\s*(\d{1,3}[A-K])\b", seat.upper())
         fs.set("seat", mm.group(1) if mm else None, 0.75)
@@ -131,7 +134,8 @@ def parse(text: str, pages=None, boxes=None, *, today: date | None = None) -> Pa
     if gate:
         mm = re.match(r"\s*([A-Z]?\d{1,3}[A-Z]?)\b", gate.upper())
         fs.set("gate", mm.group(1) if mm else None, 0.75)
-    fs.set("boarding_time", parse_time(after_label(t, ["boarding time", "boarding", "boards at"], stop=False)), 0.75)
+    fs.set("boarding_time", parse_time(after_label(t, ["boarding time", "boards at", "boarding"], stop=False,
+                                                   accept=lambda v: parse_time(v) is not None)), 0.75)
     fs.set("departure_time", parse_time(after_label(t, ["departure time", "departure", "dep time", "departs",
                                                         "std"], stop=False)), 0.7)
     zone = after_label(t, ["zone", "group", "boarding group", "seq"])
@@ -148,4 +152,4 @@ def parse(text: str, pages=None, boxes=None, *, today: date | None = None) -> Pa
     return finish(DOC_TYPE, fs, KEY_FIELDS, title=join_title(f"Boarding pass {route}" if route else "Boarding pass",
                                                               fs.get("flight")),
                   doc_date=fs.get("date"), issuer=fs.get("airline"), person_name=fs.get("passenger"),
-                  bonus=0.1 if bcbp else 0.0, pages=pages)
+                  bonus=0.1 if bcbp else 0.0, pages=pages, barcode=bcbp_code)

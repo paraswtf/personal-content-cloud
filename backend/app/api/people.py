@@ -15,8 +15,9 @@ Routes (all under /api, all require a logged-in session; writes need the CSRF he
   POST   /items/{uid}/tags {person_id | new_person_name} -> [PersonRef];  DELETE /items/{uid}/tags/{person_id}
   POST   /recluster -> Ok
 Faces, bodies and counts in NSFW or trashed items are never shown here (person items take vault=1
-with an unlocked session). Every write to faces, bodies or persons bumps faces_version; deleting a box
-also bumps search_version (its torso embedding goes).
+with an unlocked session). With the vault locked, acting on a box or the tags of an NSFW item is
+403 vault_locked, and a person seen only in vault items is 404 (as in the list). Every write to faces,
+bodies or persons bumps faces_version; deleting a box also bumps search_version (its torso embedding goes).
 """
 from __future__ import annotations
 
@@ -30,7 +31,6 @@ from app import storage
 from app.analysis import cluster, guess
 from app.api.common import (
     ITEM_CARD_COLUMNS,
-    auto_cover,
     body_out,
     face_out,
     guess_out,
@@ -40,6 +40,7 @@ from app.api.common import (
     visible_sql,
 )
 from app.api.deps import get_db, require_user, want_vault
+from app.auth.sessions import SessionInfo
 from app.db import bump_faces_version, bump_search_version, tx
 from app.schemas import (
     AssignBodiesIn,
@@ -106,6 +107,55 @@ def _person_row(conn: sqlite3.Connection, person_id: int) -> sqlite3.Row:
     return row
 
 
+def _vault_locked() -> HTTPException:
+    return HTTPException(status_code=403, detail="vault_locked")
+
+
+def _check_items_vault(conn: sqlite3.Connection, session: SessionInfo, item_ids: set[int] | list[int]) -> None:
+    """403 vault_locked when the vault is locked and any of these items is NSFW."""
+    ids = sorted({int(i) for i in item_ids})
+    if session.vault_unlocked or not ids:
+        return
+    for start in range(0, len(ids), 500):
+        chunk = ids[start:start + 500]
+        if conn.execute(f"SELECT 1 FROM items WHERE id IN ({_ids_sql(chunk)}) AND nsfw = 1 LIMIT 1", chunk).fetchone():
+            raise _vault_locked()
+
+
+def _check_boxes_vault(conn: sqlite3.Connection, session: SessionInfo, table: str, ids: list[int]) -> None:
+    """403 vault_locked when the vault is locked and any of these faces or bodies is in an NSFW item."""
+    box_ids = sorted({int(i) for i in ids})
+    if session.vault_unlocked or not box_ids:
+        return
+    for start in range(0, len(box_ids), 500):
+        chunk = box_ids[start:start + 500]
+        if conn.execute(
+            f"SELECT 1 FROM {table} b JOIN items i ON i.id = b.item_id AND i.nsfw = 1 WHERE b.id IN ({_ids_sql(chunk)}) LIMIT 1",
+            chunk,
+        ).fetchone():
+            raise _vault_locked()
+
+
+def _hidden_person(conn: sqlite3.Connection, session: SessionInfo, person_id: int) -> bool:
+    """A locked session does not see people whose only items are in the vault (the list hides them too)."""
+    if session.vault_unlocked:
+        return False
+    row = conn.execute(
+        "SELECT COALESCE(SUM(i.deleted_at IS NULL AND i.nsfw = 0), 0), COALESCE(SUM(i.nsfw = 1), 0) FROM items i "
+        "WHERE i.id IN (SELECT item_id FROM faces WHERE person_id = ? UNION SELECT item_id FROM bodies WHERE person_id = ? "
+        "UNION SELECT item_id FROM item_tags WHERE person_id = ?)",
+        (person_id, person_id, person_id),
+    ).fetchone()
+    return int(row[0]) == 0 and int(row[1]) > 0
+
+
+def _visible_person_row(conn: sqlite3.Connection, session: SessionInfo, person_id: int) -> sqlite3.Row:
+    row = _person_row(conn, person_id)
+    if _hidden_person(conn, session, int(row["id"])):
+        raise HTTPException(status_code=404, detail="Person not found")
+    return row
+
+
 def _stats(conn: sqlite3.Connection, ids: list[int]) -> dict[int, tuple[int, int, int]]:
     """{person_id: (face_count, item_count, guess_count)} over live, non-NSFW items."""
     out: dict[int, list[int]] = {i: [0, 0, 0] for i in ids}
@@ -133,24 +183,43 @@ def _stats(conn: sqlite3.Connection, ids: list[int]) -> dict[int, tuple[int, int
     return {k: (v[0], v[1], v[2]) for k, v in out.items()}
 
 
-def _cover(conn: sqlite3.Connection, person_id: int, cover_face_id: int | None) -> str | None:
-    if cover_face_id is not None:
-        ok = conn.execute(
-            f"SELECT 1 FROM faces f JOIN items i ON i.id = f.item_id AND {LIVE} WHERE f.id = ?", (cover_face_id,)
-        ).fetchone()
-        if ok is not None:
-            return face_url(int(cover_face_id))
-    fid = auto_cover(conn, person_id)
-    return face_url(fid) if fid else None
+def _covers(conn: sqlite3.Connection, rows: list[sqlite3.Row]) -> dict[int, str | None]:
+    """_cover for many persons rows with a few queries: the chosen cover when it is still visible,
+    else the best visible face (the same order as common.auto_cover)."""
+    out: dict[int, str | None] = {}
+    chosen = {int(r["id"]): int(r["cover_face_id"]) for r in rows if r["cover_face_id"] is not None}
+    fids = sorted(set(chosen.values()))
+    visible: set[int] = set()
+    for start in range(0, len(fids), 500):
+        chunk = fids[start:start + 500]
+        visible.update(int(r[0]) for r in conn.execute(
+            f"SELECT f.id FROM faces f JOIN items i ON i.id = f.item_id AND {LIVE} WHERE f.id IN ({_ids_sql(chunk)})", chunk))
+    for pid, fid in chosen.items():
+        if fid in visible:
+            out[pid] = face_url(fid)
+    rest = sorted({int(r["id"]) for r in rows} - out.keys())
+    for start in range(0, len(rest), 500):
+        chunk = rest[start:start + 500]
+        for r in conn.execute(
+            "SELECT pid, fid FROM ("
+            "  SELECT f.person_id AS pid, f.id AS fid, "
+            "         ROW_NUMBER() OVER (PARTITION BY f.person_id ORDER BY f.quality DESC, f.id) AS rn "
+            f"  FROM faces f JOIN items i ON i.id = f.item_id AND {LIVE} WHERE f.person_id IN ({_ids_sql(chunk)})"
+            ") WHERE rn = 1",
+            chunk,
+        ):
+            out[int(r["pid"])] = face_url(int(r["fid"]))
+    return out
 
 
 def person_outs(conn: sqlite3.Connection, rows: list[sqlite3.Row]) -> list[PersonOut]:
     """PersonOut for persons rows (id, name, cover_face_id, created_at), counts over visible items only."""
     st = _stats(conn, [int(r["id"]) for r in rows]) if rows else {}
+    covers = _covers(conn, rows) if rows else {}
     out = []
     for r in rows:
         fc, ic, gc = st.get(int(r["id"]), (0, 0, 0))
-        out.append(PersonOut(id=int(r["id"]), name=r["name"], cover_url=_cover(conn, int(r["id"]), r["cover_face_id"]),
+        out.append(PersonOut(id=int(r["id"]), name=r["name"], cover_url=covers.get(int(r["id"])),
                              cover_face_id=r["cover_face_id"],
                              face_count=fc, item_count=ic, guess_count=gc, created_at=r["created_at"]))
     return out
@@ -168,12 +237,12 @@ def _item_row(conn: sqlite3.Connection, uid: str) -> sqlite3.Row:
 
 
 def _target_person(conn: sqlite3.Connection, person_id: int | None, new_name: str | None,
-                   name_given: bool) -> int | None:
+                   name_given: bool, session: SessionInfo) -> int | None:
     """Resolve {person_id | new_person_name | neither}. Call inside a tx."""
     if person_id is not None and name_given:
         raise HTTPException(status_code=400, detail="Choose an existing person or a new name, not both")
     if person_id is not None:
-        return int(_person_row(conn, person_id)["id"])
+        return int(_visible_person_row(conn, session, person_id)["id"])
     if name_given:
         name = cluster.clean_person_name(new_name)
         if not name:
@@ -199,6 +268,8 @@ def _move_boxes(conn: sqlite3.Connection, table: str, ids: list[int], target: in
     if len(rows) != len(ids):
         raise HTTPException(status_code=404, detail="Some boxes no longer exist. Reload and try again.")
     previous = {int(r["person_id"]) for r in rows if r["person_id"] is not None}
+    if table == "bodies":
+        _drop_body_tags(conn, [r for r in rows if r["person_id"] is not None and r["person_id"] != target])
     items = {int(r["item_id"]) for r in rows}
     clear = "guess_person_id = NULL, guess_score = NULL, guess_evidence = NULL"
     conn.execute(f"UPDATE {table} SET person_id = ?, assigned_by = 'user', {clear} WHERE id IN ({ph})", [target, *ids])
@@ -217,6 +288,14 @@ def _move_boxes(conn: sqlite3.Connection, table: str, ids: list[int], target: in
     cluster.prune_empty_persons(conn, previous)
     bump_faces_version(conn)
     return len(ids), items
+
+
+def _drop_body_tags(conn: sqlite3.Connection, rows: list[sqlite3.Row]) -> None:
+    """A confirmed faceless body tagged its item with source 'guess' (guess.confirm): the tag goes
+    with the body's assignment. rows: bodies (item_id, person_id) losing their person."""
+    for r in rows:
+        conn.execute("DELETE FROM item_tags WHERE item_id = ? AND person_id = ? AND source = 'guess'",
+                     (r["item_id"], r["person_id"]))
 
 
 def _tags_of(conn: sqlite3.Connection, item_id: int) -> list[PersonRef]:
@@ -279,17 +358,17 @@ def list_people(
     if needle:
         conds.append("(x.name_key LIKE ? ESCAPE '\\' OR ('unnamed #' || x.id) LIKE ? ESCAPE '\\')")
         params += [_like(needle), _like(needle)]
+    # One pass over the presence union gives both counts (items always exist: foreign keys cascade).
     base = (
         f"WITH present AS ({_PRESENT}), "
-        f"vis AS (SELECT p.person_id, COUNT(*) AS n FROM present p JOIN items i ON i.id = p.item_id AND {LIVE} "
+        "cnt AS (SELECT p.person_id, COUNT(*) AS any_n, "
+        "SUM(i.deleted_at IS NULL AND i.nsfw = 0) AS vis_n FROM present p JOIN items i ON i.id = p.item_id "
         "GROUP BY p.person_id), "
-        "anyc AS (SELECT person_id, COUNT(*) AS n FROM present GROUP BY person_id), "
-        "x AS (SELECT p.id, p.name, p.name_key, p.cover_face_id, p.created_at, COALESCE(vis.n, 0) AS item_count, "
-        "COALESCE(anyc.n, 0) AS any_count, (p.name_key IS NULL) AS nf, COALESCE(p.name_key, '') AS nk "
-        "FROM persons p LEFT JOIN vis ON vis.person_id = p.id LEFT JOIN anyc ON anyc.person_id = p.id) "
+        "x AS (SELECT p.id, p.name, p.name_key, p.cover_face_id, p.created_at, COALESCE(cnt.vis_n, 0) AS item_count, "
+        "COALESCE(cnt.any_n, 0) AS any_count, (p.name_key IS NULL) AS nf, COALESCE(p.name_key, '') AS nk "
+        "FROM persons p LEFT JOIN cnt ON cnt.person_id = p.id) "
     )
     where = " AND ".join(conds)
-    total = conn.execute(f"{base} SELECT COUNT(*) FROM x WHERE {where}", params).fetchone()[0]
     keyset_conds: list[str] = []
     kparams: list[Any] = []
     if sort == "items":
@@ -310,9 +389,17 @@ def list_people(
         if v is not None:
             keyset_conds.append("(x.created_at < ? OR (x.created_at = ? AND x.id < ?))")
             kparams += [v[0], v[0], v[1]]
-    full_where = " AND ".join([where, *keyset_conds])
-    rows = conn.execute(f"{base} SELECT * FROM x WHERE {full_where} ORDER BY {order} LIMIT ?",
-                        [*params, *kparams, limit + 1]).fetchall()
+    # The total (without the keyset) comes from the same materialisation as the page.
+    keyset_where = f" WHERE {' AND '.join(keyset_conds)}" if keyset_conds else ""
+    rows = conn.execute(
+        f"{base} SELECT * FROM (SELECT x.*, COUNT(*) OVER () AS total_n FROM x WHERE {where}) x{keyset_where} "
+        f"ORDER BY {order} LIMIT ?",
+        [*params, *kparams, limit + 1],
+    ).fetchall()
+    if rows:
+        total = int(rows[0]["total_n"])
+    else:
+        total = conn.execute(f"{base} SELECT COUNT(*) FROM x WHERE {where}", params).fetchone()[0]
     more = len(rows) > limit
     rows = rows[:limit]
     nxt = None
@@ -328,11 +415,13 @@ def list_people(
 
 
 @router.post("/people", response_model=PersonOut)
-def create_person(body: PersonCreate, conn: sqlite3.Connection = Depends(get_db)) -> PersonOut:
+def create_person(body: PersonCreate, conn: sqlite3.Connection = Depends(get_db),
+                  session: SessionInfo = Depends(require_user)) -> PersonOut:
     name = cluster.clean_person_name(body.name)
     if not name:
         raise HTTPException(status_code=400, detail="Enter a name")
     items: set[int] = set()
+    _check_boxes_vault(conn, session, "faces", body.face_ids or [])
     with tx(conn):
         pid = cluster.find_or_create_person(conn, name)
         assert pid is not None
@@ -344,13 +433,14 @@ def create_person(body: PersonCreate, conn: sqlite3.Connection = Depends(get_db)
 
 
 @router.post("/people/merge", response_model=PersonOut)
-def merge_people(body: MergeIn, conn: sqlite3.Connection = Depends(get_db)) -> PersonOut:
+def merge_people(body: MergeIn, conn: sqlite3.Connection = Depends(get_db),
+                 session: SessionInfo = Depends(require_user)) -> PersonOut:
     sources = list(dict.fromkeys(int(s) for s in body.source_ids))
     if body.target_id in sources:
         raise HTTPException(status_code=400, detail="Cannot merge a person into themselves")
     ids = [body.target_id, *sources]
     found = conn.execute(f"SELECT COUNT(*) FROM persons WHERE id IN ({_ids_sql(ids)})", ids).fetchone()[0]
-    if found != len(ids):
+    if found != len(ids) or any(_hidden_person(conn, session, int(i)) for i in ids):
         raise HTTPException(status_code=404, detail="Person not found")
     try:
         cluster.merge_persons(conn, body.target_id, sources)
@@ -361,17 +451,19 @@ def merge_people(body: MergeIn, conn: sqlite3.Connection = Depends(get_db)) -> P
 
 
 @router.get("/people/{person_id}", response_model=PersonOut)
-def get_person(person_id: int, conn: sqlite3.Connection = Depends(get_db)) -> PersonOut:
-    return _person_out(conn, person_id)
+def get_person(person_id: int, conn: sqlite3.Connection = Depends(get_db),
+               session: SessionInfo = Depends(require_user)) -> PersonOut:
+    return person_outs(conn, [_visible_person_row(conn, session, person_id)])[0]
 
 
 @router.patch("/people/{person_id}", response_model=PersonOut)
-def update_person(person_id: int, body: PersonUpdate, conn: sqlite3.Connection = Depends(get_db)) -> PersonOut:
+def update_person(person_id: int, body: PersonUpdate, conn: sqlite3.Connection = Depends(get_db),
+                  session: SessionInfo = Depends(require_user)) -> PersonOut:
     fields = body.model_fields_set
     result = person_id
     renamed = False
     with tx(conn):
-        _person_row(conn, person_id)
+        _visible_person_row(conn, session, person_id)
         now = now_iso()
         if "cover_face_id" in fields:
             if body.cover_face_id is not None:
@@ -398,9 +490,10 @@ def update_person(person_id: int, body: PersonUpdate, conn: sqlite3.Connection =
 
 
 @router.delete("/people/{person_id}", response_model=Ok)
-def delete_person(person_id: int, conn: sqlite3.Connection = Depends(get_db)) -> Ok:
+def delete_person(person_id: int, conn: sqlite3.Connection = Depends(get_db),
+                  session: SessionInfo = Depends(require_user)) -> Ok:
     with tx(conn):
-        _person_row(conn, person_id)
+        _visible_person_row(conn, session, person_id)
         items = _items_of_person(conn, person_id)
         cluster.clear_guesses_for(conn, [person_id])
         conn.execute("UPDATE faces SET person_id = NULL, assigned_by = 'user' WHERE person_id = ?", (person_id,))
@@ -417,8 +510,9 @@ def person_faces(
     cursor: str | None = Query(default=None, max_length=512),
     limit: int = Query(default=200, ge=1, le=1000),
     conn: sqlite3.Connection = Depends(get_db),
+    session: SessionInfo = Depends(require_user),
 ) -> FacePage:
-    _person_row(conn, person_id)
+    _visible_person_row(conn, session, person_id)
     conds = ["f.person_id = ?", LIVE]
     params: list[Any] = [person_id]
     total = conn.execute(f"SELECT COUNT(*) FROM faces f JOIN items i ON i.id = f.item_id WHERE {' AND '.join(conds)}",
@@ -442,8 +536,9 @@ def person_items(
     limit: int = Query(default=60, ge=1, le=200),
     vault: bool = Depends(want_vault),
     conn: sqlite3.Connection = Depends(get_db),
+    session: SessionInfo = Depends(require_user),
 ) -> ItemPage:
-    _person_row(conn, person_id)
+    _visible_person_row(conn, session, person_id)
     conds = [visible_sql(vault=vault, misclicks="exclude", dups="all"),
              "i.id IN (SELECT item_id FROM faces WHERE person_id = ? UNION SELECT item_id FROM bodies WHERE person_id = ? "
              "UNION SELECT item_id FROM item_tags WHERE person_id = ?)"]
@@ -489,9 +584,10 @@ def unassigned_faces(
 
 
 def _assign(conn: sqlite3.Connection, table: str, ids: list[int], person_id: int | None, new_name: str | None,
-            name_given: bool) -> AssignOut:
+            name_given: bool, session: SessionInfo) -> AssignOut:
+    _check_boxes_vault(conn, session, table, ids)
     with tx(conn):
-        target = _target_person(conn, person_id, new_name, name_given)
+        target = _target_person(conn, person_id, new_name, name_given, session)
         updated, items = _move_boxes(conn, table, ids, target)
     guesses = {(target, i) for i in items} if target is not None else set()
     _after_people_change(conn, items, guesses)  # type: ignore[arg-type]
@@ -499,24 +595,30 @@ def _assign(conn: sqlite3.Connection, table: str, ids: list[int], person_id: int
 
 
 @router.post("/faces/assign", response_model=AssignOut)
-def assign_faces(body: AssignFacesIn, conn: sqlite3.Connection = Depends(get_db)) -> AssignOut:
+def assign_faces(body: AssignFacesIn, conn: sqlite3.Connection = Depends(get_db),
+                 session: SessionInfo = Depends(require_user)) -> AssignOut:
     return _assign(conn, "faces", body.face_ids, body.person_id, body.new_person_name,
-                   "new_person_name" in body.model_fields_set and body.new_person_name is not None)
+                   "new_person_name" in body.model_fields_set and body.new_person_name is not None, session)
 
 
 @router.post("/bodies/assign", response_model=AssignOut)
-def assign_bodies(body: AssignBodiesIn, conn: sqlite3.Connection = Depends(get_db)) -> AssignOut:
+def assign_bodies(body: AssignBodiesIn, conn: sqlite3.Connection = Depends(get_db),
+                  session: SessionInfo = Depends(require_user)) -> AssignOut:
     return _assign(conn, "bodies", body.body_ids, body.person_id, body.new_person_name,
-                   "new_person_name" in body.model_fields_set and body.new_person_name is not None)
+                   "new_person_name" in body.model_fields_set and body.new_person_name is not None, session)
 
 
-def _delete_box(conn: sqlite3.Connection, table: str, box_id: int) -> Ok:
+def _delete_box(conn: sqlite3.Connection, table: str, box_id: int, session: SessionInfo) -> Ok:
     count_col = "face_count" if table == "faces" else "body_count"
     with tx(conn):
         row = conn.execute(f"SELECT id, item_id, person_id FROM {table} WHERE id = ?", (box_id,)).fetchone()
         if row is None:
             raise HTTPException(status_code=404, detail="Face not found" if table == "faces" else "Body not found")
+        _check_items_vault(conn, session, [int(row["item_id"])])
+        if table == "bodies" and row["person_id"] is not None:
+            _drop_body_tags(conn, [row])
         conn.execute(f"DELETE FROM {table} WHERE id = ?", (box_id,))
+        cluster.drop_rejections(conn, "face" if table == "faces" else "body", [box_id])
         conn.execute(f"UPDATE items SET {count_col} = (SELECT COUNT(*) FROM {table} WHERE item_id = ?) WHERE id = ?",
                      (row["item_id"], row["item_id"]))
         if row["person_id"] is not None:
@@ -529,23 +631,31 @@ def _delete_box(conn: sqlite3.Connection, table: str, box_id: int) -> Ok:
 
 
 @router.delete("/faces/{face_id}", response_model=Ok)
-def delete_face(face_id: int, conn: sqlite3.Connection = Depends(get_db)) -> Ok:
-    return _delete_box(conn, "faces", face_id)
+def delete_face(face_id: int, conn: sqlite3.Connection = Depends(get_db),
+                session: SessionInfo = Depends(require_user)) -> Ok:
+    return _delete_box(conn, "faces", face_id, session)
 
 
 @router.delete("/bodies/{body_id}", response_model=Ok)
-def delete_body(body_id: int, conn: sqlite3.Connection = Depends(get_db)) -> Ok:
-    return _delete_box(conn, "bodies", body_id)
+def delete_body(body_id: int, conn: sqlite3.Connection = Depends(get_db),
+                session: SessionInfo = Depends(require_user)) -> Ok:
+    return _delete_box(conn, "bodies", body_id, session)
 
 
 # ------------------------------------------------------------------ guesses
 @router.post("/guesses/confirm", response_model=BulkOut)
-def confirm_guesses(body: GuessIdsIn, conn: sqlite3.Connection = Depends(get_db)) -> BulkOut:
+def confirm_guesses(body: GuessIdsIn, conn: sqlite3.Connection = Depends(get_db),
+                    session: SessionInfo = Depends(require_user)) -> BulkOut:
+    _check_boxes_vault(conn, session, "faces", body.faces)
+    _check_boxes_vault(conn, session, "bodies", body.bodies)
     return BulkOut(updated=guess.confirm(conn, body.faces, body.bodies))
 
 
 @router.post("/guesses/reject", response_model=BulkOut)
-def reject_guesses(body: GuessIdsIn, conn: sqlite3.Connection = Depends(get_db)) -> BulkOut:
+def reject_guesses(body: GuessIdsIn, conn: sqlite3.Connection = Depends(get_db),
+                   session: SessionInfo = Depends(require_user)) -> BulkOut:
+    _check_boxes_vault(conn, session, "faces", body.faces)
+    _check_boxes_vault(conn, session, "bodies", body.bodies)
     return BulkOut(updated=guess.reject(conn, body.faces, body.bodies))
 
 
@@ -648,14 +758,17 @@ def dismiss_suggestion(body: DismissIn, conn: sqlite3.Connection = Depends(get_d
 
 # ------------------------------------------------------------------ tags
 @router.post("/items/{uid}/tags", response_model=list[PersonRef])
-def add_tag(uid: str, body: TagIn, conn: sqlite3.Connection = Depends(get_db)) -> list[PersonRef]:
+def add_tag(uid: str, body: TagIn, conn: sqlite3.Connection = Depends(get_db),
+            session: SessionInfo = Depends(require_user)) -> list[PersonRef]:
     name_given = body.new_person_name is not None
     if (body.person_id is None) == (not name_given):
         raise HTTPException(status_code=400, detail="Choose an existing person or a new name")
     with tx(conn):
         item = _item_row(conn, uid)
+        if item["nsfw"] and not session.vault_unlocked:
+            raise _vault_locked()
         item_id = int(item["id"])
-        pid = _target_person(conn, body.person_id, body.new_person_name, name_given)
+        pid = _target_person(conn, body.person_id, body.new_person_name, name_given, session)
         assert pid is not None
         on_item = conn.execute(
             "SELECT 1 FROM faces WHERE item_id = ? AND person_id = ? UNION ALL "
@@ -672,9 +785,13 @@ def add_tag(uid: str, body: TagIn, conn: sqlite3.Connection = Depends(get_db)) -
 
 
 @router.delete("/items/{uid}/tags/{person_id}", response_model=list[PersonRef])
-def remove_tag(uid: str, person_id: int, conn: sqlite3.Connection = Depends(get_db)) -> list[PersonRef]:
+def remove_tag(uid: str, person_id: int, conn: sqlite3.Connection = Depends(get_db),
+               session: SessionInfo = Depends(require_user)) -> list[PersonRef]:
     with tx(conn):
-        item_id = int(_item_row(conn, uid)["id"])
+        item = _item_row(conn, uid)
+        if item["nsfw"] and not session.vault_unlocked:
+            raise _vault_locked()
+        item_id = int(item["id"])
         cur = conn.execute("DELETE FROM item_tags WHERE item_id = ? AND person_id = ?", (item_id, person_id))
         if cur.rowcount:
             cluster.prune_empty_persons(conn, {person_id})

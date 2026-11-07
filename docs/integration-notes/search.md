@@ -45,6 +45,11 @@ Nothing needs to wake search after an upload: the analysis stage writes `item_em
 - `indexing` is true while any live item has `analysis_status='pending'` or `text_status='pending'`
   (text extraction feeds FTS, so documents waiting for OCR count as indexing too).
 - Snippets are HTML-escaped with only `<b>` and `</b>` added, safe to render as HTML.
+- Contrast gate: `search_contrast x median` is capped at `service.CONTRAST_CAP` (0.25 relevance), so a
+  one-item library or a subject that fills the library still gets its clear matches.
+- Paging: page 1 (offset 0) computes the merged list; later pages reuse it from an in-process cache
+  (keyed by query, mode and filters, 8 entries, 10 minutes) and re-check visibility of the page ids.
+  Snippets are made only for the returned page. `reset_matrix()` also clears that cache.
 - `to` is inclusive (`COALESCE(taken_at, created_at) < to + 1 day`), dates are compared on the UTC
   ISO strings (no local-timezone shift).
 

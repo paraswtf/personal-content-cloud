@@ -9,6 +9,7 @@ import { ChevronLeft, ChevronRight, Info, Loader2, Pencil, ScanFace, Star, X } f
 import { api, ApiError } from '../lib/api'
 import type { ItemDetail } from '../lib/types'
 import { formatDuration, personName } from '../lib/format'
+import { useAuth } from '../lib/auth'
 import { useConfig } from '../lib/hooks'
 import { vaultify, withVault } from '../lib/preview'
 import { ConfirmModal, lockScroll } from './ui'
@@ -111,6 +112,9 @@ function VideoChips({
 export default function Viewer({ uid, onClose, onPrev, onNext, position, startAt = null, vault = false, mode = null }: ViewerProps) {
   const qc = useQueryClient()
   const config = useConfig()
+  const auth = useAuth()
+  // While the auth state loads, vaultUnlocked reads false; do not treat that as a lock.
+  const vaultClosed = !auth.loading && !auth.vaultUnlocked
   const rootRef = useRef<HTMLDivElement>(null)
   const videoRef = useRef<HTMLVideoElement>(null)
   const frameTimeRef = useRef<number | null>(null)
@@ -141,8 +145,22 @@ export default function Viewer({ uid, onClose, onPrev, onNext, position, startAt
       return d.kind === 'video' && d.preview_status === 'pending' ? 5000 : false
     },
   })
-  const detail = detailQ.data
+  // A private item stays hidden once the vault locks or its window ends, wherever it was opened
+  // (a /m/<uid> link without vault=1 caches it under ['item', uid, false]). A refetch that fails
+  // with vault_locked keeps the old data, so the gate is on the data itself.
+  const hiddenPrivate = vaultClosed && !!detailQ.data?.nsfw
+  const detail = hiddenPrivate ? undefined : detailQ.data
   const invalidate = useInvalidateItem(uid)
+  // Drop the cached detail and text once per lock, so reopening does not bring them back. Once only:
+  // if the server's window is still open for a moment (clock skew), a refetch must not loop.
+  const purged = useRef<string | null>(null)
+  useEffect(() => {
+    if (!vaultClosed) purged.current = null
+    if (!hiddenPrivate || purged.current === uid) return
+    purged.current = uid
+    qc.removeQueries({ queryKey: ['item', uid] })
+    qc.removeQueries({ queryKey: ['item-text', uid] })
+  }, [vaultClosed, hiddenPrivate, qc, uid])
 
   useEffect(() => {
     setEditing(null)
@@ -273,7 +291,37 @@ export default function Viewer({ uid, onClose, onPrev, onNext, position, startAt
   // Keyboard: Esc, arrows, i (info), f (faces), s (favourite), [ and ] for pages, and a focus trap.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (confirmDelete) return
+      if (confirmDelete) {
+        // The confirm dialog (portaled after the viewer) has no Tab trap of its own: keep focus in it.
+        if (e.key !== 'Tab') return
+        const dialogs = Array.from(document.querySelectorAll<HTMLElement>('[role="dialog"][aria-modal="true"]')).filter(
+          (d) => d !== rootRef.current,
+        )
+        const panel = dialogs[dialogs.length - 1]
+        if (!panel) return
+        const nodes = Array.from(
+          panel.querySelectorAll<HTMLElement>('a[href], button:not([disabled]), input:not([disabled]), textarea, select, [tabindex]:not([tabindex="-1"])'),
+        ).filter((n) => n.offsetParent !== null)
+        const active = document.activeElement
+        if (!nodes.length) {
+          e.preventDefault()
+          panel.focus()
+          return
+        }
+        const first = nodes[0]
+        const last = nodes[nodes.length - 1]
+        if (!panel.contains(active)) {
+          e.preventDefault()
+          ;(e.shiftKey ? last : first).focus()
+        } else if (e.shiftKey && (active === first || active === panel)) {
+          e.preventDefault()
+          last.focus()
+        } else if (!e.shiftKey && active === last) {
+          e.preventDefault()
+          first.focus()
+        }
+        return
+      }
       if (editing) {
         if (e.key === 'Escape') {
           e.preventDefault()
@@ -386,7 +434,7 @@ export default function Viewer({ uid, onClose, onPrev, onNext, position, startAt
   const boxCount = detail ? detail.faces.length + detail.bodies.filter((b) => b.face_id === null).length : 0
   const errCode = detailQ.error instanceof ApiError ? detailQ.error : null
   const notFound = errCode?.status === 404
-  const locked = errCode?.code === 'vault_locked'
+  const locked = hiddenPrivate || errCode?.code === 'vault_locked'
 
   const stage = (() => {
     if (detail) {
@@ -423,7 +471,7 @@ export default function Viewer({ uid, onClose, onPrev, onNext, position, startAt
         />
       )
     }
-    if (detailQ.isError) {
+    if (detailQ.isError || hiddenPrivate) {
       return (
         <div className="flex max-w-sm flex-col items-center gap-4 px-4 text-center text-white">
           <p className="text-base font-semibold">
@@ -459,7 +507,7 @@ export default function Viewer({ uid, onClose, onPrev, onNext, position, startAt
             ? {
                 aspectRatio: `${pw} / ${ph}`,
                 width: `min(100cqw, calc(100cqh * ${pw / ph}))`,
-                backgroundImage: `url("${withVault(placeholder.urls.thumb, vault)}")`,
+                backgroundImage: placeholder.nsfw && vaultClosed ? undefined : `url("${withVault(placeholder.urls.thumb, vault)}")`,
               }
             : undefined
         }

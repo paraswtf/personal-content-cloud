@@ -276,12 +276,19 @@ def test_passkey_management(owner, conn):
     r = owner.patch(f"/api/auth/passkeys/{pid}", json={"name": "  Work laptop "})
     assert r.status_code == 200 and r.json()["name"] == "Work laptop"
     assert owner.patch("/api/auth/passkeys/9999", json={"name": "x"}).status_code == 404
+    _unlock(owner)
     assert owner.delete(f"/api/auth/passkeys/{pid}").status_code == 200
     assert owner.delete(f"/api/auth/passkeys/{pid}").status_code == 404
     assert owner.get("/api/auth/passkeys").json() == []
 
 
+def _unlock(client):
+    r = client.post("/api/auth/vault/unlock", json={"password": ACCOUNT["password"]})
+    assert r.status_code == 200, r.text
+
+
 def test_passkey_option_routes(owner, anon):
+    _unlock(owner)
     r = owner.post("/api/auth/passkeys/register/options")
     assert r.status_code == 200, r.text
     body = r.json()
@@ -308,6 +315,7 @@ def test_passkey_login_verify_rejects_unknown(owner, anon):
 
 
 def test_passkey_register_verify_rejects_garbage(owner):
+    _unlock(owner)
     ch = owner.post("/api/auth/passkeys/register/options").json()
     r = owner.post("/api/auth/passkeys/register/verify",
                    json={"challenge_id": ch["challenge_id"], "name": "Key", "credential": {"id": "x"}})
@@ -316,3 +324,43 @@ def test_passkey_register_verify_rejects_garbage(owner):
     r = owner.post("/api/auth/passkeys/register/verify",
                    json={"challenge_id": ch["challenge_id"], "name": "Key", "credential": {"id": "x"}})
     assert r.status_code == 400 and r.json()["detail"] == "challenge_invalid"
+
+
+def test_passkey_enroll_and_delete_need_unlocked_vault(owner, conn):
+    """Regression: a session with the vault locked must not enroll (or remove) a passkey, since a
+    passkey both signs in and unlocks the vault."""
+    from app.db import tx
+    from app.util import now_iso
+
+    with tx(conn):
+        conn.execute(
+            "INSERT INTO passkeys(credential_id, public_key, sign_count, transports, name, backup_eligible, created_at) "
+            "VALUES (?, ?, 0, '[]', 'Phone', 0, ?)",
+            (b"\x01\x02\x03", b"\x04\x05", now_iso()),
+        )
+    pid = owner.get("/api/auth/passkeys").json()[0]["id"]
+    r = owner.post("/api/auth/passkeys/register/options")
+    assert r.status_code == 403 and r.json()["detail"] == "vault_locked"
+    r = owner.post("/api/auth/passkeys/register/verify", json={"challenge_id": "x", "name": "Key", "credential": {"id": "x"}})
+    assert r.status_code == 403 and r.json()["detail"] == "vault_locked"
+    r = owner.delete(f"/api/auth/passkeys/{pid}")
+    assert r.status_code == 403 and r.json()["detail"] == "vault_locked"
+    assert conn.execute("SELECT COUNT(*) FROM challenges WHERE kind = 'register'").fetchone()[0] == 0
+    _unlock(owner)
+    assert owner.post("/api/auth/passkeys/register/options").status_code == 200
+    assert owner.delete(f"/api/auth/passkeys/{pid}").status_code == 200
+    # Locking again closes the door again.
+    owner.post("/api/auth/vault/lock")
+    assert owner.post("/api/auth/passkeys/register/options").status_code == 403
+
+
+def test_passkey_login_options_rate_limited(owner, anon):
+    """Regression: anonymous login/options calls are limited per IP, without touching the login limit."""
+    from app.auth import passwords
+
+    for _ in range(passwords.OPTIONS_MAX):
+        assert anon.post("/api/auth/passkeys/login/options", headers=CSRF).status_code == 200
+    r = anon.post("/api/auth/passkeys/login/options", headers=CSRF)
+    assert r.status_code == 429 and r.json()["detail"] == "too_many_attempts"
+    # Password login keeps its own bucket.
+    assert anon.post("/api/auth/login", json=ACCOUNT, headers=CSRF).status_code == 200

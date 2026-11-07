@@ -5,6 +5,7 @@ import { useCallback, useMemo, useState, type ReactNode } from 'react'
 import { Link, useSearchParams } from 'react-router'
 import { ImageOff, SearchX, Upload } from 'lucide-react'
 import { formatCount } from '../../lib/format'
+import { useStableCallback } from '../../lib/hooks'
 import { useLibraryItems } from '../../lib/useItemList'
 import { useSearchList } from '../../lib/useSearchList'
 import type { SearchMode } from '../../lib/types'
@@ -38,6 +39,7 @@ export default function Library({ vault = false, title, headerExtra }: Props) {
   const search = useSearchList(sq, searching)
   const list = searching ? search : browse
   const viewer = useViewerParam(list.items, list.hasMore, list.loadMore, list.total)
+  const openItem = useStableCallback((uid: string) => viewer.open(uid))
 
   const selection = useSelection<string>()
   const [selectMode, setSelectMode] = useState(false)
@@ -194,7 +196,7 @@ export default function Library({ vault = false, title, headerExtra }: Props) {
         ) : (
           <MediaGrid
             items={list.items}
-            onOpen={(uid) => viewer.open(uid)}
+            onOpen={openItem}
             hasMore={list.hasMore}
             loadMore={list.loadMore}
             loading={list.loading}

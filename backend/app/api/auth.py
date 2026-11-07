@@ -9,6 +9,10 @@ Contract: `router` is a plain APIRouter without a prefix; main.py mounts it with
 - Wrong credentials answer 401 `invalid_credentials`; too many failures 429 `too_many_attempts`;
   setup after the account exists 409 `already_set_up`; login before setup 409 `setup_required`.
 - setup, login and passkey login create a session and set the `pcc_session` cookie.
+- Adding (register options and verify) or removing a passkey needs an unlocked vault (403
+  `vault_locked`): a passkey unlocks the vault and signs in, so a session that has not re-entered the
+  password or a passkey recently must not be able to enroll one of its own.
+- passkeys/login/options is rate limited per IP (429 `too_many_attempts`), separately from logins.
 """
 from __future__ import annotations
 
@@ -17,7 +21,7 @@ import sqlite3
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 
-from app.api.deps import check_csrf, get_db, optional_user, require_user
+from app.api.deps import check_csrf, get_db, optional_user, require_user, require_vault
 from app.auth import account as accounts
 from app.auth import passkeys, passwords, sessions
 from app.auth.sessions import SessionInfo, client_ip, vault_open
@@ -169,7 +173,7 @@ def list_passkeys(session: SessionInfo = Depends(require_user), conn: sqlite3.Co
 
 
 @router.post("/passkeys/register/options", response_model=ChallengeOut)
-def passkey_register_options(request: Request, session: SessionInfo = Depends(require_user),
+def passkey_register_options(request: Request, session: SessionInfo = Depends(require_vault),
                              conn: sqlite3.Connection = Depends(get_db)):
     challenge_id, options = passkeys.registration_options(conn, request)
     return ChallengeOut(challenge_id=challenge_id, options=options)
@@ -177,7 +181,7 @@ def passkey_register_options(request: Request, session: SessionInfo = Depends(re
 
 @router.post("/passkeys/register/verify", response_model=PasskeyOut)
 def passkey_register_verify(body: PasskeyRegisterVerifyIn, request: Request,
-                            session: SessionInfo = Depends(require_user), conn: sqlite3.Connection = Depends(get_db)):
+                            session: SessionInfo = Depends(require_vault), conn: sqlite3.Connection = Depends(get_db)):
     try:
         row = passkeys.verify_registration(conn, request, body.challenge_id, body.credential, body.name)
     except passkeys.PasskeyError as exc:
@@ -198,7 +202,7 @@ def passkey_rename(passkey_id: int, body: PasskeyRenameIn, session: SessionInfo 
 
 
 @router.delete("/passkeys/{passkey_id}", response_model=Ok)
-def passkey_delete(passkey_id: int, session: SessionInfo = Depends(require_user),
+def passkey_delete(passkey_id: int, session: SessionInfo = Depends(require_vault),
                    conn: sqlite3.Connection = Depends(get_db)):
     if not passkeys.delete(conn, passkey_id):
         raise HTTPException(status_code=404, detail="Passkey not found")
@@ -208,6 +212,8 @@ def passkey_delete(passkey_id: int, session: SessionInfo = Depends(require_user)
 @router.post("/passkeys/login/options", response_model=ChallengeOut, dependencies=[Depends(check_csrf)])
 def passkey_login_options(request: Request, conn: sqlite3.Connection = Depends(get_db)):
     _require_account(conn)
+    if not passwords.claim_options_request(client_ip(request)):
+        raise HTTPException(status_code=429, detail="too_many_attempts")
     challenge_id, options = passkeys.login_options(conn, request)
     return ChallengeOut(challenge_id=challenge_id, options=options)
 

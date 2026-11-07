@@ -291,7 +291,7 @@ export default function InfoPanel({
           {bestUid && bestUid !== detail.uid && (
             <p className="mt-2 text-sm text-white/65">
               A sharper shot of this burst is{' '}
-              <Link to={`/m/${bestUid}`} className="font-semibold text-white underline underline-offset-2">
+              <Link to={`/m/${bestUid}${vault || detail.nsfw ? '?vault=1' : ''}`} className="font-semibold text-white underline underline-offset-2">
                 here
               </Link>
               .

@@ -4,8 +4,9 @@ Adapted from the hub's faces/cluster.py (docs/ARCHITECTURE.md section 10).
 
 CONTRACT.
 - assign_new_faces(conn, face_ids, exclude_face_ids=None) -> {face_id: person_id | None}
-- carry_over(conn, old_faces, new_face_ids) -> int (reprocess keeps names and user locks)
-- recluster_unassigned(conn) -> int (never creates people)
+- carry_over(conn, old_faces, new_face_ids) -> int (reprocess keeps names, user locks and rejected
+  guesses; rejected_ids / move_rejections / drop_rejections keep guess_rejections on live boxes)
+- recluster_unassigned(conn) -> int (never creates people; refreshes the FTS rows it changed)
 - merge_persons(conn, target_id, source_ids): moves faces, bodies, item_tags, guesses,
   guess_rejections, merge_dismissals and the cover; deletes the sources. ValueError on bad ids.
 - merge_suggestions(conn, limit) -> [(a, b, similarity)] with a < b
@@ -122,6 +123,31 @@ def prune_empty_persons(conn: sqlite3.Connection, person_ids: set[int] | list[in
     conn.execute(f"DELETE FROM persons WHERE id IN ({emarks})", empty)
     bump_faces_version(conn)
     return len(empty)
+
+
+# ------------------------------------------------------------------ guess rejections
+def rejected_ids(conn: sqlite3.Connection, kind: str, ids: list[int]) -> set[int]:
+    """The box ids (kind 'face' or 'body') that have guess_rejections rows."""
+    out: set[int] = set()
+    for chunk in _chunks(sorted({int(i) for i in ids})):
+        marks = ",".join("?" * len(chunk))
+        out.update(int(r[0]) for r in conn.execute(
+            f"SELECT DISTINCT ref_id FROM guess_rejections WHERE kind = ? AND ref_id IN ({marks})", [kind, *chunk]))
+    return out
+
+
+def move_rejections(conn: sqlite3.Connection, kind: str, old_id: int, new_id: int) -> None:
+    """A re-detected box takes over the rejected guesses of its predecessor."""
+    conn.execute("UPDATE OR IGNORE guess_rejections SET ref_id = ? WHERE kind = ? AND ref_id = ?",
+                 (int(new_id), kind, int(old_id)))
+    conn.execute("DELETE FROM guess_rejections WHERE kind = ? AND ref_id = ?", (kind, int(old_id)))
+
+
+def drop_rejections(conn: sqlite3.Connection, kind: str, ids: list[int]) -> None:
+    """Forget the rejections of deleted boxes (guess_rejections has no foreign key to them)."""
+    for chunk in _chunks(sorted({int(i) for i in ids})):
+        marks = ",".join("?" * len(chunk))
+        conn.execute(f"DELETE FROM guess_rejections WHERE kind = ? AND ref_id IN ({marks})", [kind, *chunk])
 
 
 # ------------------------------------------------------------------ assignment
@@ -322,8 +348,12 @@ def carry_over(conn: sqlite3.Connection, old_faces: list[sqlite3.Row], new_face_
     the matching new faces (same item): match by normalised-box IoU >= 0.3 with embedding similarity
     >= 0.3, then by similarity >= 0.6, then (user-locked old faces only) by similarity >= 0.4 or
     IoU >= 0.1 with similarity >= 0.3. Each old/new face is used once, best pairs first within each
-    pass. Only old faces that had a person or were user-locked are carried. Returns the number carried."""
-    olds = [o for o in old_faces if o["person_id"] is not None or o["assigned_by"] == "user"]
+    pass. Only old faces that had a person or were user-locked are carried; old faces with rejected
+    guesses take part too, and only their guess_rejections move to the new face. Returns the number
+    of faces whose person was carried."""
+    rejected = rejected_ids(conn, "face", [int(o["id"]) for o in old_faces])
+    olds = [o for o in old_faces
+            if o["person_id"] is not None or o["assigned_by"] == "user" or int(o["id"]) in rejected]
     if not olds or not new_face_ids:
         return 0
     news: list[sqlite3.Row] = []
@@ -360,14 +390,21 @@ def carry_over(conn: sqlite3.Connection, old_faces: list[sqlite3.Row], new_face_
             pairs.append((i, j))
     if not pairs:
         return 0
+    carried = 0
     with tx(conn):
         for i, j in pairs:
-            conn.execute(
-                "UPDATE faces SET person_id = ?, assigned_by = ? WHERE id = ?",
-                (olds[i]["person_id"], olds[i]["assigned_by"], news[j]["id"]),
-            )
-        bump_faces_version(conn)
-    return len(pairs)
+            o = olds[i]
+            if o["person_id"] is not None or o["assigned_by"] == "user":
+                conn.execute(
+                    "UPDATE faces SET person_id = ?, assigned_by = ? WHERE id = ?",
+                    (o["person_id"], o["assigned_by"], news[j]["id"]),
+                )
+                carried += 1
+            if int(o["id"]) in rejected:
+                move_rejections(conn, "face", int(o["id"]), int(news[j]["id"]))
+        if carried:
+            bump_faces_version(conn)
+    return carried
 
 
 def recluster_unassigned(conn: sqlite3.Connection) -> int:
@@ -382,30 +419,37 @@ def recluster_unassigned(conn: sqlite3.Connection) -> int:
     ).fetchall()
     if not rows:
         return 0
+    from app.analysis.guess import refresh_fts
+
     by_item, item_order = _group_by_item(rows)
     total = 0
     chunk: list[int] = []
     for i, item_id in enumerate(item_order):
         chunk.extend(r["id"] for r in by_item[item_id])
         if len(chunk) >= _RECLUSTER_CHUNK or i == len(item_order) - 1:
-            total += _recluster_chunk(conn, chunk)
+            changed, items = _recluster_chunk(conn, chunk)
+            total += changed
+            # items_fts.people lists the names on each item: the new assignments must reach text search.
+            refresh_fts(conn, items)
             chunk = []
     log.info("recluster: %d of %d unassigned faces got a person", total, len(rows))
     return total
 
 
-def _recluster_chunk(conn: sqlite3.Connection, face_ids: list[int]) -> int:
+def _recluster_chunk(conn: sqlite3.Connection, face_ids: list[int]) -> tuple[int, set[int]]:
+    """(faces that got a person, the items they are in)."""
     idx = get_index()
     empty: frozenset[int] = frozenset()
+    touched: set[int] = set()
     with idx.lock:
         idx.sync(conn)
         eligible = _eligible(_face_rows(conn, face_ids), empty)
         if not eligible:
-            return 0
+            return 0, touched
         options = dict(zip((r["id"] for r in eligible), _score(idx, eligible, empty)))
     pids = sorted({pid for opts in options.values() for pid, _ in opts})
     if not pids:
-        return 0
+        return 0, touched
     result: dict[int, int | None] = {}
     with tx(conn):
         alive: set[int] = set()
@@ -414,7 +458,7 @@ def _recluster_chunk(conn: sqlite3.Connection, face_ids: list[int]) -> int:
             alive.update(r[0] for r in conn.execute(f"SELECT id FROM persons WHERE id IN ({marks})", part))
         still = _eligible(_face_rows(conn, list(options)), empty)
         if not still:
-            return 0
+            return 0, touched
         by_item, item_order = _group_by_item(still)
         used = _used_people(conn, item_order, {r["id"] for r in still})
         changed = 0
@@ -422,11 +466,14 @@ def _recluster_chunk(conn: sqlite3.Connection, face_ids: list[int]) -> int:
             faces = by_item[item_id]
             opts = [[(pid, sc) for pid, sc in options[r["id"]] if pid in alive] for r in faces]
             # The index is not touched here: the next sync reloads it from the bumped version.
-            changed += _apply_item(conn, None, faces, opts, used[item_id], False, result)
+            n = _apply_item(conn, None, faces, opts, used[item_id], False, result)
+            if n:
+                touched.add(int(item_id))
+            changed += n
         if changed:
             sync_bodies_to_faces(conn, list(by_item))
             bump_faces_version(conn)
-    return changed
+    return changed, touched
 
 
 def sync_bodies_to_faces(conn: sqlite3.Connection, item_ids: list[int]) -> int:
@@ -487,6 +534,15 @@ def merge_persons(conn: sqlite3.Connection, target_id: int, source_ids: list[int
             "GROUP BY kind, ref_id",
             [target_id, *sources],
         )
+        # A guess re-pointed to the target on a box that already turned the target down is dropped
+        # (after the copy above, so rejections of a source count as rejections of the target).
+        for kind, table in (("face", "faces"), ("body", "bodies")):
+            conn.execute(
+                f"UPDATE {table} SET guess_person_id = NULL, guess_score = NULL, guess_evidence = NULL, "
+                "assigned_by = CASE WHEN assigned_by = 'guess' THEN 'auto' ELSE assigned_by END "
+                "WHERE guess_person_id = ? AND id IN (SELECT ref_id FROM guess_rejections WHERE kind = ? AND person_id = ?)",
+                (target_id, kind, target_id),
+            )
         conn.execute(
             "INSERT OR IGNORE INTO merge_dismissals(person_a, person_b, created_at) "
             "SELECT MIN(?, other), MAX(?, other), MIN(created_at) FROM ("

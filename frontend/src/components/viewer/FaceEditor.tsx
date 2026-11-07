@@ -79,10 +79,14 @@ export default function FaceEditor({ uid, target, anchor, onClose, onDone }: Pro
     },
   })
   const nameGroup = useMutation({
-    mutationFn: async (choice: PersonChoice) =>
-      'newName' in choice
-        ? { merged: false, person: await api.people.update(group!.id, { name: choice.newName }) }
-        : { merged: true, person: await api.people.merge({ target_id: choice.personId, source_ids: [group!.id] }) },
+    mutationFn: async (choice: PersonChoice) => {
+      if ('newName' in choice) {
+        // A name another person already has merges the group into them (the server returns that person).
+        const person = await api.people.update(group!.id, { name: choice.newName })
+        return { merged: person.id !== group!.id, person }
+      }
+      return { merged: true, person: await api.people.merge({ target_id: choice.personId, source_ids: [group!.id] }) }
+    },
     onSuccess: ({ merged, person }) => {
       invalidate()
       onDone(merged ? `Merged into ${personName(person)}` : `Named ${personName(person)}${groupFaces > 1 ? ` (${formatCount(groupFaces, 'face')})` : ''}`)

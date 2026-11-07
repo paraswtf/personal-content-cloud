@@ -43,7 +43,8 @@ def payload_fields(payload: str) -> dict[str, str]:
     try:
         obj = json.loads(payload)
         if isinstance(obj, dict):
-            data = {str(k).lower().replace(" ", ""): str(v) for k, v in obj.items() if not isinstance(v, (dict, list))}
+            data = {str(k).lower().replace(" ", ""): str(v) for k, v in obj.items()
+                    if v is not None and not isinstance(v, (dict, list, bool))}
     except (ValueError, TypeError):
         data = None
     if data is None:
@@ -115,10 +116,16 @@ def parse(text: str, pages=None, boxes=None) -> ParsedDocument:
     org = next((o for o in ORGANISERS if o.lower() in t.lower()), None)
     fs.set("organiser", org or after_label(t, ["organised by", "organized by", "presented by", "organiser"]), 0.6)
 
-    for _fmt, payload in all_barcodes(pages or []):
-        for key, val in payload_fields(payload).items():
+    ticket_code = None
+    for fmt, payload in all_barcodes(pages or []):
+        found = payload_fields(payload)
+        if not found:
+            continue
+        for key, val in found.items():
             fs.set(key, val, 0.9)
+        ticket_code = (fmt, payload)
         break
 
     return finish(DOC_TYPE, fs, KEY_FIELDS, title=join_title(fs.get("event") or "Event pass", fs.get("date")),
-                  doc_date=fs.get("date"), issuer=fs.get("organiser"), person_name=fs.get("attendee"), pages=pages)
+                  doc_date=fs.get("date"), issuer=fs.get("organiser"), person_name=fs.get("attendee"), pages=pages,
+                  barcode=ticket_code)

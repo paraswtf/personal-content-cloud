@@ -1,9 +1,9 @@
 // Shown in the header while the vault is unlocked: a link to /vault with the time left, and a button
-// that locks it again at once. The countdown ticks every second; at zero the auth state is refetched
-// so every page sees the vault as locked.
+// that locks it again at once. The countdown ticks every second; at zero the cached vault data is
+// dropped and the auth state is refetched so every page sees the vault as locked.
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router'
-import { useQueryClient } from '@tanstack/react-query'
+import { useQueryClient, type Query } from '@tanstack/react-query'
 import clsx from 'clsx'
 import { Lock, LockOpen } from 'lucide-react'
 import { api } from '../../lib/api'
@@ -14,6 +14,16 @@ function remaining(until: string | null, now: number): number {
   if (!until) return 0
   const t = Date.parse(until)
   return Number.isFinite(t) ? Math.max(0, Math.floor((t - now) / 1000)) : 0
+}
+
+/** Query keys that hold vault data: keys starting with 'vault', lists and searches with
+ * `{vault: true}`, and item details and text fetched with vault (`['item', uid, true]`,
+ * `['item-text', uid, true]`). Same rule as VaultPage's isVaultQuery. */
+function isVaultQuery(q: Query): boolean {
+  const k = q.queryKey
+  if (k[0] === 'vault') return true
+  if ((k[0] === 'item' || k[0] === 'item-text') && k[2] === true) return true
+  return k.some((part) => !!part && typeof part === 'object' && (part as { vault?: unknown }).vault === true)
 }
 
 function mmss(s: number): string {
@@ -37,7 +47,10 @@ export default function VaultBadge({ className }: { className?: string }) {
 
   const left = remaining(until, now)
   useEffect(() => {
-    if (vaultUnlocked && until && left === 0) void qc.invalidateQueries({ queryKey: AUTH_KEY })
+    if (vaultUnlocked && until && left === 0) {
+      qc.removeQueries({ predicate: isVaultQuery })
+      void qc.invalidateQueries({ queryKey: AUTH_KEY })
+    }
   }, [vaultUnlocked, until, left, qc])
 
   if (!vaultUnlocked || left === 0) return null
@@ -47,7 +60,7 @@ export default function VaultBadge({ className }: { className?: string }) {
     try {
       setState(await api.auth.vaultLock())
       // drop private data fetched while unlocked
-      qc.removeQueries({ predicate: (q) => JSON.stringify(q.queryKey).includes('"vault":true') || q.queryKey[0] === 'vault' })
+      qc.removeQueries({ predicate: isVaultQuery })
       toast.info('The vault is locked.')
     } catch {
       toast.error('Could not lock the vault. Try again.')

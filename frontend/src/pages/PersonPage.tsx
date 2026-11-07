@@ -8,7 +8,7 @@ import { ArrowLeft, Check, CheckCheck, GitMerge, Images, ListChecks, Pencil, Sca
 import { ApiError, api } from '../lib/api'
 import type { FaceListItem, GuessItem } from '../lib/types'
 import { formatCount, personName } from '../lib/format'
-import { useInfiniteSentinel, usePageTitle, useRefreshLibrary } from '../lib/hooks'
+import { useInfiniteSentinel, usePageTitle, useRefreshLibrary, useStableCallback } from '../lib/hooks'
 import { useItemList } from '../lib/useItemList'
 import MediaGrid from '../components/MediaGrid'
 import Viewer from '../components/Viewer'
@@ -28,6 +28,7 @@ type Tab = 'items' | 'faces' | 'guesses'
 
 function NameEditor({ id, name }: { id: number; name: string | null }) {
   const toast = useToast()
+  const navigate = useNavigate()
   const refresh = useRefreshLibrary()
   const [editing, setEditing] = useState(false)
   const [text, setText] = useState(name ?? '')
@@ -42,6 +43,13 @@ function NameEditor({ id, name }: { id: number; name: string | null }) {
     mutationFn: (next: string | null) => api.people.update(id, { name: next }),
     onSuccess: (p) => {
       setEditing(false)
+      // A name someone else already has merges this person into them; the server returns that person.
+      if (p.id !== id) {
+        toast.success(`Merged into ${personName(p)}.`)
+        void refresh()
+        navigate(`/people/${p.id}`, { replace: true })
+        return
+      }
       toast.success(p.name ? `Named ${p.name}.` : 'Name removed.')
       void refresh()
     },
@@ -93,6 +101,7 @@ function ItemsTab({ id }: { id: number }) {
   const fetchPage = useCallback((c: string | null) => api.people.items(id, c, 60), [id])
   const list = useItemList(['person-items', id], fetchPage)
   const viewer = useViewerParam(list.items, list.hasMore, list.loadMore, list.total)
+  const openItem = useStableCallback((uid: string) => viewer.open(uid))
   return (
     <div className="-mx-4 sm:mx-0">
       {list.error && !list.items.length ? (
@@ -100,7 +109,7 @@ function ItemsTab({ id }: { id: number }) {
       ) : (
         <MediaGrid
           items={list.items}
-          onOpen={(uid) => viewer.open(uid)}
+          onOpen={openItem}
           hasMore={list.hasMore}
           loadMore={list.loadMore}
           loading={list.loading}

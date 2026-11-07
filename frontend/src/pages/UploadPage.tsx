@@ -114,7 +114,12 @@ export default function UploadPage() {
     let cancelled = false
     takeSharedFiles()
       .then((files) => {
-        if (cancelled) return
+        // the store is already cleared, so queue the files even if the page has gone; the engine
+        // outlives it. Only the page's own state updates are skipped.
+        if (cancelled) {
+          if (files.length) engine.add(files, 'share')
+          return
+        }
         if (files.length) addFiles(files, 'share')
         else setNotice('Nothing new was shared. Files shared earlier are already in the list below.')
       })

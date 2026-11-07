@@ -18,7 +18,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal, InvalidOperation
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 log = logging.getLogger(__name__)
 
@@ -220,11 +220,14 @@ def _label_regex(label: str) -> str:
 
 
 def after_label(text: str, labels: Iterable[str], *, next_line: bool = True, anchored: bool = False,
-                max_len: int = 120, stop: bool = True, regex: bool = False, colon: bool = False) -> str | None:
+                max_len: int = 120, stop: bool = True, regex: bool = False, colon: bool = False,
+                accept: Callable[[str], bool] | None = None) -> str | None:
     """Value written after a label: the rest of that line (cut at a gap of 2+ spaces, a ' | ' or another
     known label), or the next line when the label stands alone. anchored=True needs the label at the
     start of a line (or after a gap), so 'Name' does not match inside "Father's Name". colon=True needs
-    a ':', '-' or '=' after the label (or the label alone at the end of the line)."""
+    a ':', '-' or '=' after the label (or the label alone at the end of the line). accept(value) -> False
+    skips that hit and goes on to the next line or label (so 'Seat' in 'Seat No. 14C' gives way to
+    'Seat No', and 'Boarding' in a 'BOARDING PASS' heading to a later 'Boarding 06:15')."""
     raw_lines = [ln.strip() for ln in normalize_text(text).split("\n")]
     raw_lines = [ln for ln in raw_lines if ln]
     for lab in labels:
@@ -244,10 +247,12 @@ def after_label(text: str, labels: Iterable[str], *, next_line: bool = True, anc
                     rest = (" " + rest)[: sm.start()]
             rest = clean_value(rest)
             if rest:
-                return rest[:max_len]
+                if accept is None or accept(rest[:max_len]):
+                    return rest[:max_len]
+                continue
             if next_line and i + 1 < len(raw_lines):
                 nxt = clean_value(raw_lines[i + 1])
-                if nxt and not nxt.endswith(":"):
+                if nxt and not nxt.endswith(":") and (accept is None or accept(nxt[:max_len])):
                     return nxt[:max_len]
     return None
 
@@ -335,24 +340,33 @@ def find_pincode(text: str | None) -> str | None:
 
 MONTHS = {"jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6, "jul": 7, "aug": 8, "sep": 9, "sept": 9,
           "oct": 10, "nov": 11, "dec": 12}
-_MON = r"(jan|feb|mar|apr|may|jun|jul|aug|sept?|oct|nov|dec)[a-z]*\.?"
+# whole month words only ('Marks', 'Marathi', 'Junior' are not months); compiled with re.A so that
+# U+017F (long s) does not match 's' under re.I
+_MON = (r"(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sep(?:t(?:ember)?)?|"
+        r"oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\.?(?![a-z])")
 _DATE_RES: list[tuple[str, re.Pattern[str]]] = [
     ("ymd", re.compile(r"(?<!\d)((?:19|20)\d{2})[/\-.](\d{1,2})[/\-.](\d{1,2})(?!\d)")),
     ("dmy", re.compile(r"(?<![\d/])(\d{1,2})\s?[/\-.]\s?(\d{1,2})\s?[/\-.]\s?(\d{4}|\d{2})(?![\d/])")),
     ("dMy", re.compile(r"(?<![A-Za-z0-9])(\d{1,2})(?:st|nd|rd|th)?[\s\-/.,]*" + _MON + r"[\s\-/.,]*(\d{4}|\d{2})(?!\d)",
-                       re.I)),
-    ("Mdy", re.compile(r"(?<![A-Za-z])" + _MON + r"\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4})(?!\d)", re.I)),
+                       re.I | re.A)),
+    ("Mdy", re.compile(r"(?<![A-Za-z])" + _MON + r"\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4})(?!\d)", re.I | re.A)),
 ]
 
 
+def _month_no(word: str) -> int | None:
+    return MONTHS.get(word.lower()[:3])
+
+
 def _year(y: str, past: bool) -> int:
+    """Two-digit year: past=True never lands after this year; otherwise a window up to 30 years ahead
+    (expiry dates), so an old '98' is 1998, not 2098."""
     v = int(y)
     if len(y) == 4:
         return v
     this = date.today().year % 100
     if past:
         return 2000 + v if v <= this else 1900 + v
-    return 2000 + v
+    return 2000 + v if v <= this + 30 else 1900 + v
 
 
 def _mk(y: int, m: int, d: int) -> str | None:
@@ -365,8 +379,13 @@ def _mk(y: int, m: int, d: int) -> str | None:
 
 
 def find_dates(text: str, *, past: bool = False) -> list[tuple[str, int, int]]:
-    """All dates in text as (ISO date, start, end), in text order. Day-first for numeric dates."""
-    t = normalize_text(text)
+    """All dates in text as (ISO date, start, end), in text order. Day-first for numeric dates.
+    Offsets are into normalize_text(text)."""
+    return _dates_in(normalize_text(text), past=past)
+
+
+def _dates_in(t: str, *, past: bool = False) -> list[tuple[str, int, int]]:
+    """find_dates on text that is already normalised."""
     found: list[tuple[str, int, int]] = []
     taken: list[tuple[int, int]] = []
     for kind, rx in _DATE_RES:
@@ -380,9 +399,11 @@ def find_dates(text: str, *, past: bool = False) -> list[tuple[str, int, int]]:
             elif kind == "dmy":
                 iso = _mk(_year(g[2], past), int(g[1]), int(g[0]))
             elif kind == "dMy":
-                iso = _mk(_year(g[2], past), MONTHS[g[1].lower()[:4] if g[1].lower().startswith("sept") else g[1].lower()[:3]], int(g[0]))
+                mon = _month_no(g[1])
+                iso = _mk(_year(g[2], past), mon, int(g[0])) if mon else None
             elif kind == "Mdy":
-                iso = _mk(int(g[2]), MONTHS[g[0].lower()[:3]], int(g[1]))
+                mon = _month_no(g[0])
+                iso = _mk(int(g[2]), mon, int(g[1])) if mon else None
             if iso:
                 found.append((iso, m.start(), m.end()))
                 taken.append((m.start(), m.end()))
@@ -412,7 +433,10 @@ def iso_valid(value: str | None) -> bool:
         return False
 
 
-_MONTH_YEAR = re.compile(r"(?<![A-Za-z])" + _MON + r"[\s\-'/,]*((?:19|20)\d{2}|'\d{2})(?!\d)", re.I)
+# 'March 2024', 'Mar-24', "Mar'24", 'Mar/24'; a bare two-digit number needs - / or ' so that the day in
+# 'Mar 15, 2024' is not read as a year
+_MONTH_YEAR = re.compile(r"(?<![A-Za-z])" + _MON + r"(?:[\s\-'/,]*((?:19|20)\d{2})(?!\d)|"
+                         r"[\s,]*[\-/'][\s\-']*(\d{2})(?!\d|\s*[\-/]\s*\d))", re.I | re.A)
 _NUM_MONTH_YEAR = re.compile(r"(?<![\d/])(0?[1-9]|1[0-2])[/\-]((?:19|20)\d{2})(?!\d)")
 MONTH_NAMES = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October",
                "November", "December"]
@@ -424,10 +448,11 @@ def parse_month(value: str | None) -> str | None:
         return None
     m = _MONTH_YEAR.search(value)
     if m:
-        y = m.group(2).lstrip("'")
+        y = m.group(2) or m.group(3)
         year = int(y) if len(y) == 4 else 2000 + int(y)
-        mon = MONTHS[m.group(1).lower()[:3]]
-        return f"{year:04d}-{mon:02d}"
+        mon = _month_no(m.group(1))
+        if mon:
+            return f"{year:04d}-{mon:02d}"
     m = _NUM_MONTH_YEAR.search(value)
     if m:
         return f"{int(m.group(2)):04d}-{int(m.group(1)):02d}"
@@ -473,9 +498,12 @@ _SCALES = {"hundred": 100, "thousand": 1000, "lakh": 100000, "lakhs": 100000, "l
 _MULT = {"lakh": 100000, "lakhs": 100000, "lac": 100000, "lacs": 100000, "l": 100000, "lpa": 100000,
          "crore": 10000000, "crores": 10000000, "cr": 10000000, "k": 1000}
 CURRENCY = r"(?:rs\.?|inr|\u20b9|rupees)"
+# a '-' right after a digit is a separator ('01-04-2024'), not a minus sign. A trailing 'Cr'/'Dr' after
+# a balance ('1,000.00 Cr', '250.00 Dr') is a credit/debit marker, not crore (see _amounts_in).
 _AMOUNT_RE = re.compile(
-    r"(" + CURRENCY + r")?\s*(-?\d{1,3}(?:,\d{2,3})+(?:\.\d{1,2})?|-?\d+(?:\.\d{1,2})?)"
-    r"(?:\s*(lakhs?|lacs?|crores?|cr|lpa|l|k)(?![A-Za-z]))?(\s*(?:/-|cr\b|dr\b))?", re.I)
+    r"(" + CURRENCY + r")?\s*((?:(?<!\d)-)?\d{1,3}(?:,\d{2,3})+(?:\.\d{1,2})?|(?:(?<!\d)-)?\d+(?:\.\d{1,2})?)"
+    r"(?:\s*(lakhs?|lacs?|crores?|cr|lpa|l|k)(?![A-Za-z]))?(\s*(?:/-|cr\b|dr\b(?!\.[ ]*[A-Z])))?", re.I)
+_PERCENT_RE = re.compile(r"\d+(?:\.\d+)?\s*%")
 
 
 def words_to_number(text: str) -> int | None:
@@ -503,27 +531,45 @@ def words_to_number(text: str) -> int | None:
 
 
 def find_amounts(text: str) -> list[tuple[Decimal, bool, int, int]]:
-    """Amounts in text: (value, had_currency_marker, start, end). Lakh/crore suffixes are applied."""
+    """Amounts in text: (value, had_currency_marker, start, end). Lakh/crore suffixes are applied; a 'Dr'
+    (debit) marker makes the value negative. Offsets are into normalize_text(text)."""
+    return _amounts_in(normalize_text(text))
+
+
+def _amounts_in(t: str) -> list[tuple[Decimal, bool, int, int]]:
+    """find_amounts on text that is already normalised."""
     out = []
-    for m in _AMOUNT_RE.finditer(normalize_text(text)):
+    for m in _AMOUNT_RE.finditer(t):
         cur, num, mult = m.group(1), m.group(2), (m.group(3) or "").lower()
+        mark = (m.group(4) or "").strip().lower()
+        if mult == "cr" and ("," in num or (re.search(r"\.\d{2}$", num) and not cur)):
+            # '12,345.00 Cr' on a statement is a credit balance; '2.5 Cr' / 'Rs 1.25 Cr' stay crore
+            mult, mark = "", "cr"
         try:
             val = Decimal(num.replace(",", ""))
         except InvalidOperation:
             continue
         if mult in _MULT:
             val *= _MULT[mult]
-        out.append((val, bool(cur) or bool(mult and mult != "k"), m.start(), m.end()))
+        if mark == "dr":
+            val = -abs(val)
+        out.append((val, bool(cur) or bool(mult and mult != "k") or mark in ("cr", "dr"), m.start(), m.end()))
     return out
 
 
 def parse_amount(value: str | None) -> Decimal | None:
-    """First amount in value, preferring one with a currency marker; falls back to amount words."""
+    """First amount in value, preferring one with a currency marker, then one written like money (grouping
+    commas or paise). Dates, month-years and percentages are not amounts. Falls back to amount words."""
     if not value:
         return None
-    found = [a for a in find_amounts(value) if not _looks_like_date_or_id(value, a)]
+    t = normalize_text(value)
+    skip = [(s, e) for _iso, s, e in _dates_in(t)]
+    skip += [m.span() for m in _MONTH_YEAR.finditer(t)] + [m.span() for m in _PERCENT_RE.finditer(t)]
+    found = [a for a in _amounts_in(t) if not _looks_like_date_or_id(t, a)
+             and not any(s < a[3] and a[2] < e for s, e in skip)]
     with_cur = [a for a in found if a[1]]
-    pick = with_cur[0] if with_cur else (found[0] if found else None)
+    money_like = [a for a in found if re.search(r",\d|\.\d{2}(?!\d)", t[a[2]:a[3]])]
+    pick = (with_cur or money_like or found or [None])[0]
     if pick is not None:
         return pick[0]
     n = words_to_number(value)
@@ -533,7 +579,7 @@ def parse_amount(value: str | None) -> Decimal | None:
 def _looks_like_date_or_id(text: str, a: tuple[Decimal, bool, int, int]) -> bool:
     after = text[a[3]:a[3] + 2]
     before = text[max(0, a[2] - 1):a[2]]
-    return bool(re.match(r"[/\-]\d", after)) or before == "/" and bool(re.match(r"\d", text[a[2]:a[2] + 1]))
+    return bool(re.match(r"[/\-.]\d", after)) or before == "/" and bool(re.match(r"\d", text[a[2]:a[2] + 1]))
 
 
 def format_inr(value: Decimal | int | float | None) -> str | None:
@@ -606,6 +652,9 @@ def find_aadhaar(text: str, *, grouped_only: bool = False) -> str | None:
         # part of a 16-digit VID: digits continue after a space
         tail = t[m.end():m.end() + 5]
         if re.match(r" ?\d{4}", tail):
+            continue
+        # ... or digits come before it (a VID whose first group starts with 0 or 1)
+        if re.search(r"\d{4}[ \-]?$", t[max(0, m.start() - 5):m.start()]):
             continue
         if verhoeff_valid(number):
             return f"{number[:4]} {number[4:8]} {number[8:]}"

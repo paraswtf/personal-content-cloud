@@ -15,9 +15,10 @@
 - Query keys used by the shell: `['auth','state']`, `['auth','passkeys']`, `['auth','sessions']`,
   `['system']`, `['config']` (api.config), `['stats']` (api.stats, read by the nav for the Review badge),
   `['trash']`, `['uploads-interrupted']`. Upload settles invalidate `['items']`, `['stats']`, `['documents']`.
-  Trash changes also invalidate `['search']`.
-- `VaultBadge` "lock now" removes cached queries whose key contains `{"vault": true}` or starts with
-  `'vault'`; keep vault data under such keys.
+  Trash restore, purge and empty use `useRefreshLibrary()` (people, person, review and search too).
+- `VaultBadge` "lock now" and the countdown reaching zero remove cached queries whose key starts with
+  `'vault'`, contains `{"vault": true}`, or is `['item', uid, true]` / `['item-text', uid, true]`
+  (same rule as VaultPage); keep vault data under such keys.
 - A page title helper for shell pages is `components/shell/title.ts` (`usePageTitle`).
 
 ## Tokens (index.css)

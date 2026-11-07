@@ -42,9 +42,10 @@ def test_contrast_gate_uses_settings(conn, fake_engine, monkeypatch):
     from app.config import settings
 
     a, b = item(conn), item(conn)
-    add_embedding(conn, a["id"], image_vec("dog", seed="a"))
-    add_embedding(conn, b["id"], image_vec("dog", seed="b"))
-    # two matching items out of two: 20 x median relevance is above every score
+    add_embedding(conn, a["id"], image_vec("dog", seed="a", weight=0.07))
+    add_embedding(conn, b["id"], image_vec("dog", seed="b", weight=0.07))
+    # a weak lift (relevance about 0.06) of the whole library: 20 x median is above every score,
+    # and the gate (capped at CONTRAST_CAP) still rejects it
     assert service.search(conn, "dog", mode="semantic").total == 0
     monkeypatch.setattr(settings, "search_contrast", 0.0)
     assert sorted(hit_ids(service.search(conn, "dog", mode="semantic"))) == sorted([a["id"], b["id"]])

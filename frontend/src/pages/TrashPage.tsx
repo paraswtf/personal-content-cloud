@@ -2,18 +2,18 @@
 // Each item can be restored or deleted for good; "Empty trash" deletes everything here for good.
 // Private (NSFW) items show a locked tile: their thumbnails are only served inside the vault.
 import { useMemo, useState } from 'react'
-import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useInfiniteQuery, useMutation, useQuery } from '@tanstack/react-query'
 import clsx from 'clsx'
 import { EyeOff, File as FileIcon, FileText, Film, RotateCcw, Trash2 } from 'lucide-react'
 import { api } from '../lib/api'
 import { formatDuration } from '../lib/format'
+import { useRefreshLibrary } from '../lib/hooks'
 import type { ItemCard } from '../lib/types'
 import { Button, ConfirmModal, EmptyState, ErrorState, PageSpinner } from '../components/ui'
 import { useToast } from '../components/Toast'
 import { usePageTitle } from '../components/shell/title'
 
 const PAGE = 60
-const AFTER_CHANGE = [['trash'], ['items'], ['stats'], ['documents'], ['search']] as const
 
 function errorText(e: unknown, fallback: string): string {
   return e instanceof Error && e.message ? e.message : fallback
@@ -92,7 +92,7 @@ function Tile({
 
 export default function TrashPage() {
   usePageTitle('Trash')
-  const qc = useQueryClient()
+  const refreshLibrary = useRefreshLibrary()
   const toast = useToast()
   const config = useQuery({ queryKey: ['config'], queryFn: api.config, staleTime: 60_000 })
   const list = useInfiniteQuery({
@@ -118,7 +118,8 @@ export default function TrashPage() {
   }, [list.data])
   const total = list.data?.pages[0]?.total ?? items.length
 
-  const refresh = () => Promise.all(AFTER_CHANGE.map((k) => qc.invalidateQueries({ queryKey: [...k] })))
+  // restoring or purging changes people counts, person lists and review bins as well as the lists
+  const refresh = refreshLibrary
 
   const restore = useMutation({
     mutationFn: (uid: string) => api.items.restore(uid),

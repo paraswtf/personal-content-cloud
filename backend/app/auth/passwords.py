@@ -9,6 +9,9 @@ Contract:
 - claim_login_attempt(ip) -> bool: atomically checks the limit (10 failures per 600 s per IP,
   at most 5000 IPs tracked, in process memory) and counts this attempt as a failure up front;
   False means the caller answers 429. reset_login_failures(ip) runs after a success.
+- claim_options_request(ip) -> bool: a separate, looser limit for the unauthenticated passkey
+  login options route (30 requests per 60 s per IP), which stores a challenge row per call;
+  False means 429. It never touches the login failure counter.
 - reset_all(): clears every counter (tests).
 """
 from __future__ import annotations
@@ -109,6 +112,38 @@ def reset_login_failures(ip: str) -> None:
         _failures.pop(ip, None)
 
 
+# ----------------------------------------------------------------- passkey login options rate limit
+OPTIONS_MAX = 30
+OPTIONS_WINDOW_S = 60
+
+_options_lock = threading.Lock()
+_options: dict[str, deque[float]] = {}
+
+
+def claim_options_request(ip: str) -> bool:
+    """Count one passkey login options request; False when the IP is over OPTIONS_MAX per window."""
+    now = time.monotonic()
+    with _options_lock:
+        if ip not in _options and len(_options) >= MAX_TRACKED:
+            for key in list(_options):
+                q = _options[key]
+                while q and now - q[0] > OPTIONS_WINDOW_S:
+                    q.popleft()
+                if not q:
+                    del _options[key]
+            if len(_options) >= MAX_TRACKED:  # still full: drop the IP with the oldest last request
+                del _options[min(_options, key=lambda k: _options[k][-1])]
+        q = _options.setdefault(ip, deque())
+        while q and now - q[0] > OPTIONS_WINDOW_S:
+            q.popleft()
+        if len(q) >= OPTIONS_MAX:
+            return False
+        q.append(now)
+        return True
+
+
 def reset_all() -> None:
     with _fail_lock:
         _failures.clear()
+    with _options_lock:
+        _options.clear()

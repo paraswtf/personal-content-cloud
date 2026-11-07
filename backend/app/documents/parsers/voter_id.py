@@ -50,7 +50,7 @@ def parse(text: str, pages=None, boxes=None) -> ParsedDocument:
     fs.set("constituency", ac, 0.7)
     pn = after_label(t, ["part no. and name", "part no", "part number"])
     fs.set("part_no", pn, 0.6)
-    fs.set("issue_date", date_after(t, ["date of issue", "date", "issue date"]), 0.7)
+    fs.set("issue_date", date_after(t, ["date of issue", "date", "issue date"], past=True), 0.7)
     person = fs.get("name")
     return finish(DOC_TYPE, fs, KEY_FIELDS, title=join_title("Voter ID", person), doc_date=fs.get("issue_date"),
                   issuer="Election Commission of India", person_name=person, pages=pages)

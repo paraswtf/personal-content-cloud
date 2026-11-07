@@ -71,7 +71,7 @@ def parse(text: str, pages=None, boxes=None) -> ParsedDocument:
     fs.set("plan", after_label(t, ["plan name", "product name", "plan", "product"]), 0.6)
     if ptype == "motor":
         fs.set("vehicle_number", find_vehicle_number(t), 0.75)
-    fs.set("issue_date", date_after(t, ["date of issue", "issue date", "issued on"]), 0.7)
+    fs.set("issue_date", date_after(t, ["date of issue", "issue date", "issued on"], past=True), 0.7)
     insurer = fs.get("insurer")
     return finish(DOC_TYPE, fs, KEY_FIELDS,
                   title=join_title(f"{fs.get('policy_type')} insurance" if fs.get("policy_type") else "Insurance policy",

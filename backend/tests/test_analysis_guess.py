@@ -166,7 +166,7 @@ def test_confirm_sets_person_tag_and_job(conn):
     row = _body_row(conn, body_b)
     assert row["person_id"] == p and row["assigned_by"] == "user" and row["guess_person_id"] is None
     assert conn.execute("SELECT source FROM item_tags WHERE item_id = ? AND person_id = ?",
-                        (b["id"], p)).fetchone()[0] == "user"
+                        (b["id"], p)).fetchone()[0] == "guess"
     job = conn.execute("SELECT type, payload FROM jobs WHERE type = 'guess'").fetchone()
     assert json.loads(job["payload"]) == {"person_id": p, "item_id": b["id"]}
     assert job["payload"].index("person_id") < job["payload"].index("item_id")

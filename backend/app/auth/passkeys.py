@@ -15,7 +15,8 @@ Contract:
 
 Challenges live in the `challenges` table under a random id with a 5-minute expiry. A challenge is
 claimed (used=1) before the credential is even parsed, so every challenge serves one attempt only,
-and its kind must match the ceremony. Options are JSON-ready dicts (options_to_json + json.loads).
+and its kind must match the ceremony. At most MAX_LOGIN_CHALLENGES login challenges are kept (oldest
+dropped first). Options are JSON-ready dicts (options_to_json + json.loads).
 """
 from __future__ import annotations
 
@@ -59,6 +60,7 @@ CHALLENGE_TTL_S = 300
 TIMEOUT_MS = CHALLENGE_TTL_S * 1000
 USER_HANDLE = b"pcc-account-1"  # stable WebAuthn user.id of the single account
 KINDS = ("register", "login", "assert")
+MAX_LOGIN_CHALLENGES = 500  # live unauthenticated login challenges kept at most
 
 
 class PasskeyError(Exception):
@@ -114,6 +116,14 @@ def _store_challenge(conn: sqlite3.Connection, kind: str, challenge: bytes) -> s
             "INSERT INTO challenges(id, kind, challenge, created_at, expires_at, used) VALUES (?, ?, ?, ?, ?, 0)",
             (challenge_id, kind, challenge, now, now_iso(CHALLENGE_TTL_S)),
         )
+        if kind == "login":
+            # Login options need no session, so a flood could fill the table: keep only the newest
+            # MAX_LOGIN_CHALLENGES. Register and assert challenges (session only) are never evicted.
+            conn.execute(
+                "DELETE FROM challenges WHERE kind = 'login' AND id NOT IN ("
+                "SELECT id FROM challenges WHERE kind = 'login' ORDER BY created_at DESC, rowid DESC LIMIT ?)",
+                (MAX_LOGIN_CHALLENGES,),
+            )
     return challenge_id
 
 

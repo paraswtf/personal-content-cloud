@@ -195,8 +195,9 @@ def test_guess_review_confirm_reject(api, conn):
     item = _item(conn)
     ev = json.dumps({"clothes": 0.9, "scene": 0.85, "face": None})
     b1 = _body(conn, item["id"], assigned_by="guess", guess_person_id=p, guess_score=0.8, guess_evidence=ev)
-    b2 = _body(conn, item["id"], assigned_by="guess", guess_person_id=p, guess_score=0.7, guess_evidence=ev)
-    f1 = make_face(conn, item["id"], None, embedding=_vec(2), assigned_by="guess", guess_person_id=p,
+    # One guess per photo for a person (guess._compute), so the other two boxes are in other photos.
+    b2 = _body(conn, _item(conn)["id"], assigned_by="guess", guess_person_id=p, guess_score=0.7, guess_evidence=ev)
+    f1 = make_face(conn, _item(conn)["id"], None, embedding=_vec(2), assigned_by="guess", guess_person_id=p,
                    guess_score=0.75, guess_evidence=ev)
     hidden = _item(conn, nsfw=1)
     _body(conn, hidden["id"], assigned_by="guess", guess_person_id=p, guess_score=0.9, guess_evidence=ev)

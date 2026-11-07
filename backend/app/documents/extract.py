@@ -8,7 +8,10 @@ Contract:
   -> plain text. Writes `pages` (text, text_source, ocr_boxes normalised 0..1), `item_text` (pages joined
   by form feeds), the FTS row, then detection + parsing into `documents` (barcodes from page renders and
   images, the ID photo for the 'id' group). Sets text_status 'done', or 'error' after logging an
-  exception (the job itself does not fail). Respects settings.ocr_enabled and settings.ocr_max_pages.
+  exception that is a verdict on the file (the job itself does not fail). Database errors, MemoryError
+  and a full disk (also a failure to record 'error') are raised, so the worker retries or defers the job
+  and its final failure marks text_status 'error'. The boarding pass parser gets the item's capture day
+  (taken_at, else created_at) for the BCBP year. Respects settings.ocr_enabled and settings.ocr_max_pages.
   Without the OCR model the pages get text_source 'none' and the item still completes.
 - reparse(conn, item_id, forced_type=None) -> bool: detection + parsing again on the stored text and OCR
   boxes (no OCR, no image work); keeps fields the user edited. False when the item has no stored text.
@@ -21,11 +24,13 @@ documents row has source 'user', its doc_type and non-empty title, doc_date and 
 """
 from __future__ import annotations
 
+import errno
 import logging
 import os
 import re
 import sqlite3
 from dataclasses import dataclass, field
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -303,10 +308,28 @@ def analyze_text(text: str, pages: list[PageText], item: Any = None, *, existing
         doc_type, det_score = det.doc_type, det.score
         if doc_type == "other" and len(text.strip()) < MIN_TEXT_CHARS:
             return None
-    parsed = parsers.parse(doc_type, text, pages, boxes)
+    parsed = parsers.parse(doc_type, text, pages, boxes, today=_capture_date(item))
     if doc_type != "other" and not forced_type:
         parsed.confidence = round(min(1.0, parsed.confidence * (0.7 + 0.3 * min(1.0, det_score))), 2)
     return parsed, det_score
+
+
+def _capture_date(item: Any) -> date | None:
+    """The item's capture day (taken_at, else created_at): a boarding pass barcode has no year, and the
+    year is chosen around the day the pass was photographed or saved, not around today."""
+    if item is None:
+        return None
+    for col in ("taken_at", "created_at"):
+        try:
+            val = item[col]
+        except (IndexError, KeyError, TypeError):
+            continue
+        if val:
+            try:
+                return date.fromisoformat(str(val)[:10])
+            except ValueError:
+                continue
+    return None
 
 
 def merged_values(parsed: ParsedDocument, existing: sqlite3.Row | None) -> dict[str, Any]:
@@ -438,12 +461,28 @@ def extract_item(conn: sqlite3.Connection, item_id: int, version: int) -> None:
                     (now_iso(), item_id),
                 )
             conn.execute("UPDATE items SET text_status = 'done', updated_at = ? WHERE id = ?", (now_iso(), item_id))
-    except Exception:
+    except Exception as exc:
+        if _environment_error(exc):
+            # not a verdict on the file: the worker retries with backoff (or waits for disk space) and its
+            # final failure marks text_status 'error'
+            raise
         log.exception("text extraction failed for item %s", item_id)
-        try:
-            _set_status(conn, item_id, version, "error")
-        except Exception:
-            log.exception("cannot record the text error for item %s", item_id)
+        # an error here (database locked, disk full) reaches the worker too, so the status is not left 'pending'
+        _set_status(conn, item_id, version, "error")
+
+
+def _environment_error(exc: BaseException) -> bool:
+    """True when the failure comes from the database, memory or a full disk anywhere in the exception chain."""
+    seen: set[int] = set()
+    cur: BaseException | None = exc
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        if isinstance(cur, (sqlite3.Error, MemoryError)):
+            return True
+        if isinstance(cur, OSError) and cur.errno in (errno.ENOSPC, errno.EDQUOT):
+            return True
+        cur = cur.__cause__ or (None if cur.__suppress_context__ else cur.__context__)
+    return False
 
 
 def _write_pages(conn: sqlite3.Connection, item_id: int, pages: list[PageText]) -> None:

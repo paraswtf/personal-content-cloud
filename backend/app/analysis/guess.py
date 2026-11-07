@@ -9,8 +9,9 @@ CONTRACT.
   guess_item on every item in the time window of item_id (or of every item of the person when
   item_id is None) that does not already show the person.
 - confirm(conn, face_ids, body_ids) -> int and reject(conn, face_ids, body_ids) -> int: the review
-  actions (confirm: person_id set, assigned_by 'user', item_tags row for a faceless body, a 'guess'
-  job per (person, item); reject: guess_rejections row and the guess cleared).
+  actions (confirm: person_id set, assigned_by 'user', item_tags row with source 'guess' for a faceless
+  body, a 'guess' job per (person, item); a box whose guessed person is already in the item is not
+  confirmed and its guess is cleared; reject: guess_rejections row and the guess cleared).
 - enqueue_guess(conn, person_id, item_id) and refresh_fts(conn, item_ids): small helpers shared with
   the people API (lazy imports of app.jobs and app.documents.extract).
 
@@ -23,7 +24,9 @@ assigned_by user or auto) in item J:
 - face: when D is a face, it must not match any other person at >= FACE_CONTRADICTION; a match with
   the candidate >= FACE_WEAK raises the face term above the neutral 0.5;
 - score = 0.5 * clothes + 0.3 * scene + 0.2 * face_term; the best person must lead the runner-up by
-  >= MARGIN. Persons already present in I and rejected pairs are never proposed.
+  >= MARGIN. Persons already present in I and rejected pairs are never proposed. In a photo one
+  person is proposed for at most one box (best score first; videos may show a person several times).
+- Vault (NSFW) items take no part: they are never references and never get guesses.
 """
 from __future__ import annotations
 
@@ -37,7 +40,7 @@ from typing import Any
 import numpy as np
 
 from app.config import settings
-from app.db import bump_faces_version, tx
+from app.db import bump_faces_version, faces_version, tx
 from app.util import json_dumps, local_date, now_iso, parse_iso
 
 log = logging.getLogger(__name__)
@@ -107,33 +110,62 @@ def _iso(dt: datetime) -> str:
     return dt.astimezone(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
+# The unary '+' keeps SQLite on the items_taken range index. Without ANALYZE statistics it would
+# otherwise pick the deleted_at / nsfw equality index and scan every live item.
+WINDOW_BEFORE_SQL = (
+    "SELECT id, uid, taken_at, gps_lat, gps_lon FROM items WHERE taken_at >= ? AND taken_at < ? AND id != ? "
+    "AND +deleted_at IS NULL AND +nsfw = 0 ORDER BY taken_at DESC LIMIT ?"
+)
+WINDOW_AFTER_SQL = (
+    "SELECT id, uid, taken_at, gps_lat, gps_lon FROM items WHERE taken_at >= ? AND taken_at <= ? AND id != ? "
+    "AND +deleted_at IS NULL AND +nsfw = 0 ORDER BY taken_at ASC LIMIT ?"
+)
+
+
 def window_items(conn: sqlite3.Connection, item: sqlite3.Row) -> list[sqlite3.Row]:
-    """Live items (other than `item`) taken within the guess window or on the same local date."""
+    """Live library items (other than `item`, never vault items) taken within the guess window or on the
+    same local date: the MAX_WINDOW_ITEMS closest in time, ordered by taken_at."""
     t0 = parse_iso(item["taken_at"])
     if t0 is None:
         return []
     hours = float(settings.guess_window_h)
     lo = t0 - timedelta(hours=max(hours, 24.0)) - timedelta(seconds=1)
     hi = t0 + timedelta(hours=max(hours, 24.0)) + timedelta(seconds=1)
-    rows = conn.execute(
-        "SELECT id, uid, taken_at, gps_lat, gps_lon FROM items WHERE id != ? AND deleted_at IS NULL "
-        "AND taken_at IS NOT NULL AND taken_at >= ? AND taken_at <= ? ORDER BY taken_at LIMIT ?",
-        (item["id"], _iso(lo)[:19], _iso(hi), MAX_WINDOW_ITEMS * 2),
-    ).fetchall()
+    limit = MAX_WINDOW_ITEMS
+    # Before and from t0 separately, each nearest first, so a dense day cannot crowd out the
+    # neighbours on one side.
+    rows = [
+        *conn.execute(WINDOW_BEFORE_SQL, (_iso(lo)[:19], item["taken_at"], item["id"], limit)).fetchall(),
+        *conn.execute(WINDOW_AFTER_SQL, (item["taken_at"], _iso(hi), item["id"], limit)).fetchall(),
+    ]
     day0 = local_date(item["taken_at"], settings.local_timezone)
-    out = []
+    out: list[tuple[float, sqlite3.Row]] = []
     for r in rows:
         t = parse_iso(r["taken_at"])
         if t is None:
             continue
-        close = abs((t - t0).total_seconds()) <= hours * 3600.0
+        dt = abs((t - t0).total_seconds())
+        close = dt <= hours * 3600.0
         same_day = local_date(r["taken_at"], settings.local_timezone) == day0
         if close or same_day:
-            out.append(r)
-    return out[:MAX_WINDOW_ITEMS]
+            out.append((dt, r))
+    out.sort(key=lambda x: (x[0], int(x[1]["id"])))
+    nearest = [r for _, r in out[:limit]]
+    nearest.sort(key=lambda r: (r["taken_at"], int(r["id"])))
+    return nearest
 
 
-def _scene_embeddings(conn: sqlite3.Connection, item_ids: list[int]) -> dict[int, np.ndarray]:
+def _scene_embeddings(conn: sqlite3.Connection, item_ids: list[int],
+                      cache: dict[str, Any] | None = None) -> dict[int, np.ndarray]:
+    """{item_id: frame-0 embedding}. `cache` (one propagate run) keeps what was loaded already."""
+    if cache is not None:
+        known: dict[int, np.ndarray | None] = cache.setdefault("emb", {})
+        missing = sorted({int(i) for i in item_ids} - known.keys())
+        if missing:
+            found = _scene_embeddings(conn, missing)
+            for i in missing:
+                known[i] = found.get(i)
+        return {int(i): known[int(i)] for i in item_ids if known.get(int(i)) is not None}  # type: ignore[misc]
     out: dict[int, np.ndarray] = {}
     for chunk in _chunks(sorted(set(item_ids))):
         marks = ",".join("?" * len(chunk))
@@ -176,7 +208,19 @@ def open_boxes(conn: sqlite3.Connection, item_id: int) -> list[Box]:
     return boxes
 
 
-def _reference_boxes(conn: sqlite3.Connection, item_ids: list[int], exclude_people: set[int]) -> list[Box]:
+def _reference_boxes(conn: sqlite3.Connection, item_ids: list[int], exclude_people: set[int],
+                     cache: dict[str, Any] | None = None) -> list[Box]:
+    if cache is not None:
+        # Guessing never changes who a box belongs to, so one propagate run can reuse the references.
+        known: dict[int, list[Box]] = cache.setdefault("refs", {})
+        missing = sorted({int(i) for i in item_ids} - known.keys())
+        if missing:
+            for i in missing:
+                known[i] = []
+            for ref in _reference_boxes(conn, missing, set()):
+                known[ref.item_id].append(ref)
+        return [ref for i in sorted({int(i) for i in item_ids}) for ref in known[i]
+                if ref.person_id not in exclude_people]
     refs: list[Box] = []
     for chunk in _chunks(sorted(set(item_ids))):
         marks = ",".join("?" * len(chunk))
@@ -282,7 +326,8 @@ def score_box(box: Box, refs: list[Box], scene: dict[int, tuple[float, float | N
     return winner, ranked
 
 
-def _compute(conn: sqlite3.Connection, item: sqlite3.Row, boxes: list[Box]) -> dict[tuple[str, int], Candidate | None]:
+def _compute(conn: sqlite3.Connection, item: sqlite3.Row, boxes: list[Box],
+             cache: dict[str, Any] | None = None) -> dict[tuple[str, int], Candidate | None]:
     results: dict[tuple[str, int], Candidate | None] = {(b.kind, b.id): None for b in boxes}
     if not boxes or not item["taken_at"]:
         return results
@@ -290,7 +335,7 @@ def _compute(conn: sqlite3.Connection, item: sqlite3.Row, boxes: list[Box]) -> d
     if not window:
         return results
     present = _present_people(conn, int(item["id"]))
-    embs = _scene_embeddings(conn, [int(item["id"]), *[int(r["id"]) for r in window]])
+    embs = _scene_embeddings(conn, [int(item["id"]), *[int(r["id"]) for r in window]], cache)
     e0 = embs.get(int(item["id"]))
     day0 = local_date(item["taken_at"], settings.local_timezone)
     scene: dict[int, tuple[float, float | None, float | None, bool]] = {}
@@ -309,32 +354,67 @@ def _compute(conn: sqlite3.Connection, item: sqlite3.Row, boxes: list[Box]) -> d
         scene[jid] = (float(term), cos, gps_m, bool(same_day))
     if not scene:
         return results
-    refs = _reference_boxes(conn, list(scene), present)
+    refs = _reference_boxes(conn, list(scene), present, cache)
     if not refs:
         return results
     uids = {int(r["id"]): r["uid"] for r in window}
     rejected = _rejections(conn, boxes)
     fscores = _face_scores(conn, boxes)
-    for b in boxes:
-        winner, _ = score_box(b, refs, scene, fscores.get(b.id) if b.kind == "face" else None,
-                              rejected.get((b.kind, b.id), set()), uids)
-        results[(b.kind, b.id)] = winner
+
+    def score(b: Box, taken: set[int]) -> Candidate | None:
+        return score_box(b, refs, scene, fscores.get(b.id) if b.kind == "face" else None,
+                         rejected.get((b.kind, b.id), set()) | taken, uids)[0]
+
+    if item["kind"] == "video":
+        for b in boxes:
+            results[(b.kind, b.id)] = score(b, set())
+        return results
+    # One person per photo: the best-scoring (box, person) wins, the other boxes are scored again
+    # without that person (the margin then applies among the people left).
+    pending = list(boxes)
+    taken: set[int] = set()
+    while pending:
+        scored = [(b, score(b, taken)) for b in pending]
+        winners = [(b, c) for b, c in scored if c is not None]
+        if not winners:
+            break
+        b, c = min(winners, key=lambda t: (-t[1].score, t[0].kind, t[0].id))
+        results[(b.kind, b.id)] = c
+        taken.add(c.person_id)
+        pending.remove(b)
     return results
 
 
-def guess_item(conn: sqlite3.Connection, item_id: int) -> int:
-    """(Re)compute guesses for the open boxes of one item. Returns how many boxes changed."""
+def _advance_index(conn: sqlite3.Connection, nested: bool, base: int | None, new: int | None) -> None:
+    """Guess writes touch only guess fields, which the face index does not hold: an index that was
+    current at `base` is current at `new` too, so the next sync need not re-read every face."""
+    if nested or base is None or new is None:
+        return
+    from app.analysis.index import get_index
+
+    get_index().advance(base, new)
+
+
+def guess_item(conn: sqlite3.Connection, item_id: int, cache: dict[str, Any] | None = None) -> int:
+    """(Re)compute guesses for the open boxes of one item. Returns how many boxes changed.
+    `cache` lets propagate() share scene embeddings and reference boxes between items."""
     item = conn.execute(
-        "SELECT id, uid, taken_at, gps_lat, gps_lon, deleted_at FROM items WHERE id = ?", (item_id,)
+        "SELECT id, uid, kind, taken_at, gps_lat, gps_lon, nsfw, deleted_at FROM items WHERE id = ?", (item_id,)
     ).fetchone()
     if item is None or item["deleted_at"] is not None:
         return 0
     boxes = open_boxes(conn, int(item_id))
     if not boxes:
         return 0
-    results = _compute(conn, item, boxes)
+    if item["nsfw"]:
+        results: dict[tuple[str, int], Candidate | None] = {(b.kind, b.id): None for b in boxes}  # clears stale ones
+    else:
+        results = _compute(conn, item, boxes, cache)
     changed = 0
+    nested = conn.in_transaction
+    base = new = None
     with tx(conn):
+        base = faces_version(conn)
         for (kind, box_id), cand in results.items():
             table = "faces" if kind == "face" else "bodies"
             extra = "" if kind == "face" else " AND face_id IS NULL"
@@ -358,7 +438,9 @@ def guess_item(conn: sqlite3.Connection, item_id: int) -> int:
             changed += cur.rowcount
         if changed:
             bump_faces_version(conn)
+            new = faces_version(conn)
     if changed:
+        _advance_index(conn, nested, base, new)
         log.info("guess: item %s, %d box(es) changed", item["uid"], changed)
     return changed
 
@@ -380,11 +462,14 @@ def propagate(conn: sqlite3.Connection, person_id: int, item_id: int | None) -> 
         ).fetchall()
     targets: set[int] = set()
     for a in anchors:
+        # The anchor too: a box there may still carry a guess for the person who is now present.
+        targets.add(int(a["id"]))
         for r in window_items(conn, a):
             targets.add(int(r["id"]))
         if len(targets) >= MAX_WINDOW_ITEMS:
             break
     total = 0
+    cache: dict[str, Any] = {}
     for jid in sorted(targets):
         if not conn.execute(
             "SELECT 1 FROM faces WHERE item_id = ? AND person_id IS NULL AND assigned_by IN ('auto', 'guess') "
@@ -393,7 +478,7 @@ def propagate(conn: sqlite3.Connection, person_id: int, item_id: int | None) -> 
             (jid, jid),
         ).fetchone():
             continue
-        total += guess_item(conn, jid)
+        total += guess_item(conn, jid, cache)
     log.info("guess propagation for person %s: %d box(es) changed over %d item(s)", person_id, total, len(targets))
     return total
 
@@ -424,10 +509,33 @@ def refresh_fts(conn: sqlite3.Connection, item_ids: set[int] | list[int]) -> Non
 
 def confirm(conn: sqlite3.Connection, face_ids: list[int], body_ids: list[int]) -> int:
     """Accept open guesses: person_id = guess_person_id, assigned_by 'user'. A body without a face
-    also gets an item_tags row. Queues a 'guess' job per (person, item). Returns boxes confirmed."""
+    also gets an item_tags row (source 'guess', removed again when that body is reassigned or deleted).
+    A box whose person is already in the item (also through a box confirmed earlier in this call)
+    is not confirmed: its guess is cleared. Queues a 'guess' job per (person, item). Returns boxes
+    confirmed."""
     pairs: set[tuple[int, int]] = set()
     updated = 0
+    dropped = 0
     now = now_iso()
+    present: dict[int, set[int]] = {}
+
+    def already(table: str, r: sqlite3.Row, pid: int) -> bool:
+        """True (and the stale guess cleared) when pid is already in the box's item."""
+        nonlocal dropped
+        iid = int(r["item_id"])
+        if iid not in present:
+            present[iid] = _present_people(conn, iid)
+        if pid not in present[iid]:
+            present[iid].add(pid)
+            return False
+        conn.execute(
+            f"UPDATE {table} SET assigned_by = CASE WHEN assigned_by = 'guess' THEN 'auto' ELSE assigned_by END, "
+            "guess_person_id = NULL, guess_score = NULL, guess_evidence = NULL WHERE id = ?",
+            (r["id"],),
+        )
+        dropped += 1
+        return True
+
     with tx(conn):
         for chunk in _chunks(sorted({int(f) for f in face_ids})):
             marks = ",".join("?" * len(chunk))
@@ -438,6 +546,8 @@ def confirm(conn: sqlite3.Connection, face_ids: list[int], body_ids: list[int]) 
             ).fetchall()
             for r in rows:
                 pid = int(r["guess_person_id"])
+                if already("faces", r, pid):
+                    continue
                 conn.execute(
                     "UPDATE faces SET person_id = ?, assigned_by = 'user', guess_person_id = NULL, guess_score = NULL, "
                     "guess_evidence = NULL WHERE id = ?",
@@ -459,6 +569,8 @@ def confirm(conn: sqlite3.Connection, face_ids: list[int], body_ids: list[int]) 
             ).fetchall()
             for r in rows:
                 pid = int(r["guess_person_id"])
+                if already("bodies", r, pid):
+                    continue
                 conn.execute(
                     "UPDATE bodies SET person_id = ?, assigned_by = 'user', guess_person_id = NULL, guess_score = NULL, "
                     "guess_evidence = NULL WHERE id = ?",
@@ -466,7 +578,7 @@ def confirm(conn: sqlite3.Connection, face_ids: list[int], body_ids: list[int]) 
                 )
                 if r["face_id"] is None:
                     conn.execute(
-                        "INSERT OR IGNORE INTO item_tags(item_id, person_id, source, created_at) VALUES (?, ?, 'user', ?)",
+                        "INSERT OR IGNORE INTO item_tags(item_id, person_id, source, created_at) VALUES (?, ?, 'guess', ?)",
                         (r["item_id"], pid, now),
                     )
                 pairs.add((pid, int(r["item_id"])))
@@ -474,6 +586,7 @@ def confirm(conn: sqlite3.Connection, face_ids: list[int], body_ids: list[int]) 
         if updated:
             for pid in {p for p, _ in pairs}:
                 conn.execute("UPDATE persons SET updated_at = ? WHERE id = ?", (now, pid))
+        if updated or dropped:
             bump_faces_version(conn)
     for pid, iid in sorted(pairs):
         enqueue_guess(conn, pid, iid)

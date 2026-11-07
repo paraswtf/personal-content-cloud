@@ -8,7 +8,7 @@ import { CheckCheck, Copy, Crown, Sparkles, Trash2, TriangleAlert, UsersRound } 
 import { api } from '../lib/api'
 import type { DupGroup, GuessItem, ItemCard } from '../lib/types'
 import { formatCount, formatDate, formatResolution } from '../lib/format'
-import { useInfiniteSentinel, usePageTitle, useRefreshLibrary } from '../lib/hooks'
+import { useInfiniteSentinel, usePageTitle, useRefreshLibrary, useStableCallback } from '../lib/hooks'
 import { useItemList } from '../lib/useItemList'
 import MediaGrid from '../components/MediaGrid'
 import Viewer from '../components/Viewer'
@@ -35,6 +35,7 @@ function MisclicksTab() {
   const list = useItemList(['review', 'misclicks'], fetchPage)
   const sel = useSelection<string>()
   const viewer = useViewerParam(list.items, list.hasMore, list.loadMore, list.total)
+  const openItem = useStableCallback((uid: string) => viewer.open(uid))
   const [confirmDelete, setConfirmDelete] = useState(false)
 
   const bulk = useMutation({
@@ -67,7 +68,7 @@ function MisclicksTab() {
           <div className="-mx-4 sm:mx-0">
             <MediaGrid
               items={list.items}
-              onOpen={(uid) => viewer.open(uid)}
+              onOpen={openItem}
               hasMore={list.hasMore}
               loadMore={list.loadMore}
               loading={list.loading}

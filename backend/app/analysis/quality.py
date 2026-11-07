@@ -171,9 +171,21 @@ def _hamming(a: str | None, b: str | None) -> int:
         return 64
 
 
-def burst_group(conn: sqlite3.Connection, item: sqlite3.Row, blur_var: float) -> list[BurstMember]:
+# The unary '+' keeps SQLite on the items_taken range index (without ANALYZE statistics it would pick
+# the analysis_status / deleted_at / kind equality index and scan every analysed item).
+BURST_SQL = (
+    "SELECT id, uid, taken_at, phash, quality_scores, misclick_source FROM items "
+    "WHERE taken_at >= ? AND taken_at <= ? AND id != ? AND +kind = 'image' AND +deleted_at IS NULL "
+    "AND +analysis_status = 'done' AND camera IS ? AND +nsfw = ? AND phash IS NOT NULL "
+    "AND (category IS NULL OR category NOT IN ('documents', 'screenshots'))"
+)
+
+
+def burst_group(conn: sqlite3.Connection, item: sqlite3.Row, blur_var: float,
+                nsfw: int | bool | None = None) -> list[BurstMember]:
     """Images of the same camera (both without one counts as the same) taken within
     settings.burst_window_s of `item` with pHash distance <= BURST_PHASH_MAX, analysed already, live,
+    on the same side of the vault (`nsfw`, default item['nsfw']) and not documents or screenshots,
     plus `item` itself (with blur_var). Only direct neighbours of `item` count. Empty when `item` has no
     capture time or pHash."""
     if item["kind"] != "image" or not item["taken_at"] or not item["phash"]:
@@ -186,12 +198,8 @@ def burst_group(conn: sqlite3.Connection, item: sqlite3.Row, blur_var: float) ->
     window = float(settings.burst_window_s)
     lo = (t0 - timedelta(seconds=window + 1)).isoformat().replace("+00:00", "Z")
     hi = (t0 + timedelta(seconds=window + 1)).isoformat().replace("+00:00", "Z")
-    rows = conn.execute(
-        "SELECT id, uid, taken_at, phash, quality_scores, misclick_source FROM items "
-        "WHERE id != ? AND kind = 'image' AND deleted_at IS NULL AND analysis_status = 'done' "
-        "AND camera IS ? AND taken_at IS NOT NULL AND taken_at >= ? AND taken_at <= ? AND phash IS NOT NULL",
-        (item["id"], item["camera"], lo[:19], hi),
-    ).fetchall()
+    side = int(bool(item["nsfw"] if nsfw is None else nsfw))
+    rows = conn.execute(BURST_SQL, (lo[:19], hi, item["id"], item["camera"], side)).fetchall()
     members = [BurstMember(int(item["id"]), item["uid"], float(blur_var), item["misclick_source"])]
     for r in rows:
         t = parse_iso(r["taken_at"])

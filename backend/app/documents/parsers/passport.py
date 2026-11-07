@@ -128,7 +128,7 @@ def parse(text: str, pages=None, boxes=None) -> ParsedDocument:
         fs.set("gender", "Male" if sex[:1].upper() == "M" else "Female", 0.7)
     fs.set("place_of_birth", after_label(t, ["place of birth"]), 0.7)
     fs.set("place_of_issue", after_label(t, ["place of issue"]), 0.75)
-    fs.set("issue_date", date_after(t, ["date of issue"]), 0.8)
+    fs.set("issue_date", date_after(t, ["date of issue"], past=True), 0.8)
     fs.set("expiry_date", date_after(t, ["date of expiry"]), 0.8)
     fno = after_label(t, ["file no", "file number"])
     if fno:

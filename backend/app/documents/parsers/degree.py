@@ -67,7 +67,7 @@ def parse(text: str, pages=None, boxes=None) -> ParsedDocument:
     if cert:
         mm = re.search(r"[A-Za-z0-9][A-Za-z0-9/\-]{2,24}", cert)
         fs.set("certificate_number", mm.group(0) if mm else None, 0.7)
-    d = date_after(t, ["date", "dated", "convocation held on", "given on"])
+    d = date_after(t, ["date", "dated", "convocation held on", "given on"], past=True)
     if not d:
         ds = find_dates(t)
         d = ds[-1][0] if ds else None

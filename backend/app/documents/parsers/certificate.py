@@ -48,7 +48,7 @@ def parse(text: str, pages=None, boxes=None) -> ParsedDocument:
         issuer = next((ln for ln in lines[:4] if "certif" not in ln.lower() and re.search(r"[A-Za-z]{3}", ln)
                        and len(ln) < 80), None)
     fs.set("issuer", issuer, 0.6)
-    d = date_after(t, ["date of issue", "issued on", "date", "dated", "awarded on"])
+    d = date_after(t, ["date of issue", "issued on", "date", "dated", "awarded on"], past=True)
     if not d:
         ds = find_dates(t)
         d = ds[-1][0] if ds else None

@@ -21,13 +21,14 @@ Semantic engine (adapted from the hub):
   every person crop row (faces.torso_embedding, plus bodies.torso_embedding of bodies without a
   face). It refreshes when (kv search_version, count of item_embeddings rows of the model, count
   of torso embeddings) changes, loads only the rows it has not seen (IN chunks of 500) and swaps
-  whole arrays under a lock, so a running search keeps a consistent snapshot. Rows of an older
-  item version are ignored.
+  whole arrays under a lock, so a running search keeps a consistent snapshot (a block whose rows
+  did not change is kept as it is, not copied). Rows of an older item version are ignored.
 - Scoring: cosine of the text embedding against every row, best row per item,
   engine.relevance() -> 0..1, then the hub's gates:
-  1. relevance >= max(settings.search_min_relevance, settings.search_contrast x the query's
-     median relevance over the whole index): a real query lifts a few items far above its
-     median, gibberish lifts many a little.
+  1. relevance >= max(settings.search_min_relevance, min(CONTRAST_CAP, settings.search_contrast
+     x the query's median relevance over the whole index)): a real query lifts a few items far
+     above its median, gibberish lifts many a little. The cap keeps clear matches when the
+     subject fills most of a (small) library.
   2. A query naming a colour must match that colour better than the same query with any other
      colour, checked per row (a video passes on the frames that show the colour).
   Person crops add items on their own floor max(gate 1 threshold,
@@ -45,7 +46,8 @@ Text engine:
   items_fts row yet (just uploaded) are also matched on their file name with LIKE.
 - Snippets: snippet(items_fts, 1, <b>, </b>, '...', 12) over the text column (the doc column
   when the text column has no match), HTML-escaped around the markers so the frontend may render
-  them; None when neither column matched (a file name or label match).
+  them; None when neither column matched (a file name or label match). They are made only for
+  the hits of the returned page, with the MATCH expression the text hits came from.
 
 Merge (mode auto): text hits go first when the strict query found an item through its file
 name, text, document fields or people (a "strong" text hit, labels alone do not count),
@@ -58,8 +60,10 @@ Filters (all in SQL): app.api.common.visible_sql(vault=..., misclicks='include',
 dups='collapse') (trash and NSFW excluded, or only NSFW inside the vault; mis-click shots are
 searchable; duplicate copies collapse onto the best of their group), category, kind, people (all
 of them, app.api.common.people_filter_sql), and the capture date COALESCE(taken_at, created_at)
-from date_from up to and including date_to. Paging is by offset over the whole merged list,
-recomputed on every page (capped at TEXT_LIMIT text hits).
+from date_from up to and including date_to. Paging is by offset over the whole merged list
+(capped at TEXT_LIMIT text hits). Page 1 (offset 0) computes it; later pages reuse that list for
+PAGE_CACHE_TTL_S (an in-process cache keyed by query, mode and filters), so a list that changes
+while indexing runs does not skip items; their hits are re-checked against the filters.
 
 indexed = items (not in the trash, NSFW or not as the vault flag says) with an embedding of the
 current model and version, 0 when the engine is unavailable; indexing = some live item still
@@ -73,7 +77,8 @@ import math
 import re
 import sqlite3
 import threading
-from collections import Counter
+import time
+from collections import Counter, OrderedDict
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from typing import Any, Callable, Hashable
@@ -98,10 +103,17 @@ STRONG_COLUMNS = "{filename text doc people}"  # a strict hit here puts text hit
 RELAXED_FACTOR = 0.5  # score factor for hits of the OR query
 FILENAME_ONLY_SCORE = 0.25  # items without an items_fts row, matched on their file name
 SNIPPET_TOKENS = 12
+PAGE_CACHE_TTL_S = 600.0  # later pages reuse the merged list of page 1 for this long
+PAGE_CACHE_SIZE = 8  # merged lists kept (one per query and filter set)
 _OPEN, _CLOSE = "\x02", "\x03"  # snippet markers, replaced by <b> </b> after escaping
 _FTS_OPERATORS = frozenset({"AND", "OR", "NOT", "NEAR"})
 _KEEP = re.compile(r"[^\w\-./@&+']+", re.UNICODE)
 _HAS_WORD = re.compile(r"[^\W_]", re.UNICODE)
+
+# Contrast gate: settings.search_contrast x median relevance, capped at this relevance (about
+# cosine 0.10 on SigLIP), so a subject that fills most of the library, or a library of a few
+# items, still finds its clear matches. Gibberish stays far below the cap.
+CONTRAST_CAP = 0.25
 
 # Colours the colour check compares; synonyms map onto one of them.
 COLORS = ("red", "orange", "yellow", "green", "blue", "purple", "pink", "brown", "black", "white", "grey")
@@ -156,9 +168,12 @@ def query_color(q: str) -> tuple[str, str] | None:
 
 
 def color_variants(q: str, word: str) -> list[str]:
-    """The query once per colour in COLORS, with the colour word replaced (whole word only)."""
-    pattern = re.compile(rf"\b{re.escape(word)}\b", re.IGNORECASE)
-    return [pattern.sub(color, q, count=1) for color in COLORS]
+    """The query once per colour in COLORS, with the colour word replaced. The word is found with
+    the same tokenisation as query_color (_WORD), so "blue_car" or "blue2" get "red_car", "red2"."""
+    for m in _WORD.finditer(q):
+        if m.group(0).lower() == word.lower():
+            return [q[:m.start()] + color + q[m.end():] for color in COLORS]
+    return [q] * len(COLORS)
 
 
 # --------------------------------------------------------------------- in-memory matrix
@@ -199,13 +214,16 @@ def _vector(blob: bytes | None) -> np.ndarray | None:
 def _refresh_block(old: _Block, rows: list[tuple[Hashable, int, float | None, Any]],
                    load: Callable[[list[Hashable]], dict[Hashable, np.ndarray]]) -> tuple[_Block, int]:
     """New block for rows (key, item id, time, meta); rows whose key and meta are unchanged are
-    copied from `old`, the others loaded. Keeps the most common embedding size."""
+    copied from `old`, the others loaded. Keeps the most common embedding size. When every row
+    is unchanged (a visibility-only search_version bump), `old` itself is returned: no copy."""
     old_pos = {k: i for i, k in enumerate(old.keys)}
     missing = []
     for key, _item, _t, meta in rows:
         pos = old_pos.get(key)
         if pos is None or old.metas[pos] != meta:
             missing.append(key)
+    if not missing and len(rows) == old.size:
+        return old, 0
     loaded = load(missing) if missing else {}
     counts: Counter[int] = Counter(int(v.shape[0]) for v in loaded.values())
     if old.size and old.dim:
@@ -363,8 +381,10 @@ def get_matrix() -> EmbeddingMatrix:
 
 
 def reset_matrix() -> None:
-    """Drop the in-memory matrix (tests: each test has a fresh database)."""
+    """Drop the in-memory matrix and the page cache (tests: each test has a fresh database)."""
     _matrix.reset()
+    with _page_lock:
+        _page_cache.clear()
 
 
 def _best_rows(items: np.ndarray, cos: np.ndarray) -> np.ndarray:
@@ -471,7 +491,7 @@ def _semantic_hits(conn: sqlite3.Connection, q: str, filt: _Filters) -> list[_Hi
             best = _best_rows(fr.items, cos)
             rel = np.asarray(engine.relevance(cos[best]), dtype=np.float64).reshape(-1)
             if settings.search_contrast > 0:
-                threshold = max(threshold, float(settings.search_contrast) * float(np.median(rel)))
+                threshold = max(threshold, min(CONTRAST_CAP, float(settings.search_contrast) * float(np.median(rel))))
             if not (rel >= threshold).any():
                 whole = False
         floor = max(threshold, float(settings.search_person_min_relevance))
@@ -484,9 +504,10 @@ def _semantic_hits(conn: sqlite3.Connection, q: str, filt: _Filters) -> list[_Hi
             return []
         color = query_color(q) if settings.search_color_check else None
         variants = None
-        if color is not None:
+        texts = color_variants(q, color[0]) if color is not None else []
+        if len(set(texts)) == len(COLORS):  # the colour word could be replaced: check it
             variants = np.stack([np.asarray(engine.embed_text(v), dtype=np.float32).reshape(-1)
-                                 for v in color_variants(q, color[0])])
+                                 for v in texts])
         found: dict[int, tuple[float, float]] = {}  # item id -> (relevance, frame time or NaN)
         if whole:
             if variants is not None:
@@ -579,16 +600,33 @@ def _render_snippet(raw: str | None) -> str | None:
 
 
 def _fts_rows(conn: sqlite3.Connection, match: str, filt: _Filters, limit: int) -> list[sqlite3.Row]:
+    """(id, rank) of the candidates; snippets are made later, for the returned page only."""
     weights = ", ".join(str(w) for w in FTS_WEIGHTS)
     sql = (
-        f"SELECT items_fts.rowid AS id, bm25(items_fts, {weights}) AS rank, "
-        f"snippet(items_fts, 1, ?, ?, '...', {SNIPPET_TOKENS}) AS s_text, "
-        f"snippet(items_fts, 2, ?, ?, '...', {SNIPPET_TOKENS}) AS s_doc "
+        f"SELECT items_fts.rowid AS id, bm25(items_fts, {weights}) AS rank "
         "FROM items_fts JOIN items i ON i.id = items_fts.rowid "
         f"WHERE items_fts MATCH ? AND {filt.sql} "
         "ORDER BY rank, i.id LIMIT ?"
     )
-    return conn.execute(sql, [_OPEN, _CLOSE, _OPEN, _CLOSE, match, *filt.params, limit]).fetchall()
+    return conn.execute(sql, [match, *filt.params, limit]).fetchall()
+
+
+def _snippets(conn: sqlite3.Connection, match: str, ids: list[int]) -> dict[int, str]:
+    """Rendered snippet per id (text column, else doc column) for the query `match`."""
+    out: dict[int, str] = {}
+    for i in range(0, len(ids), _IN_CHUNK):
+        chunk = ids[i:i + _IN_CHUNK]
+        ph = ",".join("?" * len(chunk))
+        for r in conn.execute(
+            f"SELECT rowid AS id, snippet(items_fts, 1, ?, ?, '...', {SNIPPET_TOKENS}) AS s_text, "
+            f"snippet(items_fts, 2, ?, ?, '...', {SNIPPET_TOKENS}) AS s_doc "
+            f"FROM items_fts WHERE items_fts MATCH ? AND rowid IN ({ph})",
+            [_OPEN, _CLOSE, _OPEN, _CLOSE, match, *chunk],
+        ):
+            snippet = _render_snippet(r["s_text"]) or _render_snippet(r["s_doc"])
+            if snippet:
+                out[int(r["id"])] = snippet
+    return out
 
 
 def _fts_any(conn: sqlite3.Connection, match: str, filt: _Filters) -> bool:
@@ -619,18 +657,22 @@ def _filename_only_hits(conn: sqlite3.Connection, pieces: list[tuple[str, bool]]
     return [_Hit(id=int(r["id"]), score=FILENAME_ONLY_SCORE) for r in rows if int(r["id"]) not in exclude]
 
 
-def _text_hits(conn: sqlite3.Connection, q: str, filt: _Filters, limit: int = TEXT_LIMIT) -> tuple[list[_Hit], bool]:
-    """(hits best first, strong) for the query. Raises sqlite3.Error when FTS itself fails."""
+def _text_hits(conn: sqlite3.Connection, q: str, filt: _Filters,
+               limit: int = TEXT_LIMIT) -> tuple[list[_Hit], bool, str | None]:
+    """(hits best first without snippets, strong, MATCH expression the hits came from, for
+    _snippets). Raises sqlite3.Error when FTS itself fails."""
     pieces = _clean_pieces(q)
     terms = [f'"{core}"' + ("*" if prefix else "") for core, prefix in pieces]
     if not terms:
-        return [], False
+        return [], False, None
     strict = " ".join(terms)
+    match = strict
     factor = 1.0
     rows = _fts_rows(conn, strict, filt, limit)
     strong = bool(rows) and _fts_any(conn, f"{STRONG_COLUMNS} : ({strict})", filt)
     if not rows and len(terms) > 1:
-        rows = _fts_rows(conn, " OR ".join(terms), filt, limit)
+        match = " OR ".join(terms)
+        rows = _fts_rows(conn, match, filt, limit)
         factor = RELAXED_FACTOR
     hits: list[_Hit] = []
     if rows:
@@ -638,11 +680,10 @@ def _text_hits(conn: sqlite3.Connection, q: str, filt: _Filters, limit: int = TE
         top = max(goodness)
         for r, g in zip(rows, goodness):
             norm = g / top if top > 0 else 1.0
-            snippet = _render_snippet(r["s_text"]) or _render_snippet(r["s_doc"])
-            hits.append(_Hit(id=int(r["id"]), score=round(factor * min(1.0, norm), 6), snippet=snippet))
+            hits.append(_Hit(id=int(r["id"]), score=round(factor * min(1.0, norm), 6)))
     seen = {h.id for h in hits}
     hits.extend(_filename_only_hits(conn, pieces, filt, limit - len(hits), seen))
-    return hits, strong
+    return hits, strong, match
 
 
 # --------------------------------------------------------------------- search
@@ -700,6 +741,65 @@ def search(
     filt = _filters(vault=vault, category=category, kind=kind, person_ids=person_ids,
                     date_from=date_from, date_to=date_to)
 
+    key = (q, mode, filt.sql, tuple(filt.params))
+    cached = _page_cache_get(key) if offset > 0 else None
+    if cached is not None:
+        merged, match, semantic_ok = cached
+        page = [dict(h) for h in merged[offset:offset + limit]]
+        visible = _filter_ids(conn, [int(h["id"]) for h in page], filt)
+        page = [h for h in page if int(h["id"]) in visible]  # trashed or hidden since page 1
+    else:
+        merged, match, semantic_ok = _merged(conn, q, mode, filt)
+        _page_cache_put(key, (merged, match, semantic_ok))
+        page = [dict(h) for h in merged[offset:offset + limit]]
+    if match:
+        want = [int(h["id"]) for h in page if h["source"] != "semantic"]
+        if want:
+            try:
+                found = _snippets(conn, match, want)
+            except sqlite3.Error:
+                log.exception("search: snippet query failed")
+                found = {}
+            for h in page:
+                h["snippet"] = found.get(int(h["id"]), h["snippet"])
+
+    total = len(merged)
+    next_offset = offset + limit if offset + limit < total else None
+    indexed = indexed_count(conn, vault=vault) if (semantic_ok or engine_available()) else 0
+    return SearchResult(hits=page, total=total, next_offset=next_offset, indexed=indexed,
+                        indexing=indexing_pending(conn), semantic_used=semantic_ok)
+
+
+# Merged lists by (query, mode, filters): later pages of a search reuse the list page 1 built,
+# so items that move while indexing runs (or a flip from semantic-first to text-first) are not
+# skipped or repeated. A page-1 request (offset 0) always recomputes.
+_page_lock = threading.Lock()
+_page_cache: OrderedDict[tuple[Any, ...], tuple[float, tuple[list[dict[str, Any]], str | None, bool]]] = OrderedDict()
+
+
+def _page_cache_get(key: tuple[Any, ...]) -> tuple[list[dict[str, Any]], str | None, bool] | None:
+    with _page_lock:
+        entry = _page_cache.get(key)
+        if entry is None:
+            return None
+        if time.monotonic() - entry[0] > PAGE_CACHE_TTL_S:
+            del _page_cache[key]
+            return None
+        _page_cache.move_to_end(key)
+        return entry[1]
+
+
+def _page_cache_put(key: tuple[Any, ...], value: tuple[list[dict[str, Any]], str | None, bool]) -> None:
+    with _page_lock:
+        _page_cache[key] = (time.monotonic(), value)
+        _page_cache.move_to_end(key)
+        while len(_page_cache) > PAGE_CACHE_SIZE:
+            _page_cache.popitem(last=False)
+
+
+def _merged(conn: sqlite3.Connection, q: str, mode: str,
+            filt: _Filters) -> tuple[list[dict[str, Any]], str | None, bool]:
+    """(merged hits without snippets, FTS MATCH expression for the snippets, semantic used)."""
     semantic: list[_Hit] = []
     semantic_ok = False
     semantic_error: SearchUnavailable | None = None
@@ -715,9 +815,10 @@ def search(
 
     text: list[_Hit] = []
     strong = False
+    match: str | None = None
     if mode in ("auto", "text") and q:
         try:
-            text, strong = _text_hits(conn, q, filt)
+            text, strong, match = _text_hits(conn, q, filt)
         except sqlite3.Error as e:
             log.exception("search: full-text query failed")
             if mode == "text" or not semantic_ok:
@@ -729,13 +830,7 @@ def search(
         merged = _merge([], text, text_first=True)
     else:
         merged = _merge(semantic, text, text_first=strong)
-
-    total = len(merged)
-    page = merged[offset:offset + limit]
-    next_offset = offset + limit if offset + limit < total else None
-    indexed = indexed_count(conn, vault=vault) if (semantic_ok or engine_available()) else 0
-    return SearchResult(hits=page, total=total, next_offset=next_offset, indexed=indexed,
-                        indexing=indexing_pending(conn), semantic_used=semantic_ok)
+    return merged, match, semantic_ok
 
 
 # --------------------------------------------------------------------- progress

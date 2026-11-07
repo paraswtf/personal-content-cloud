@@ -51,6 +51,18 @@ export function useDebounced<T>(value: T, ms = 300): T {
   return v
 }
 
+/**
+ * A function with a fixed identity that always calls the latest `fn`. For callbacks handed to memoized
+ * children (MediaGrid tiles) whose source changes on every render, such as `viewer.open`.
+ */
+export function useStableCallback<A extends unknown[], R>(fn: (...args: A) => R): (...args: A) => R {
+  const ref = useRef(fn)
+  useEffect(() => {
+    ref.current = fn
+  })
+  return useCallback((...args: A) => ref.current(...args), [])
+}
+
 /** Query key prefixes that any change to items, people or documents can affect. */
 export const LIBRARY_KEYS = [
   'items',

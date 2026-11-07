@@ -279,3 +279,31 @@ def test_stale_challenges_are_pruned(conn):
                      (b"c", now_iso(-900), now_iso(-600)))
     passkeys.login_options(conn, make_request())
     assert conn.execute("SELECT COUNT(*) FROM challenges WHERE id = 'old'").fetchone()[0] == 0
+
+
+def test_login_challenges_are_capped(conn, monkeypatch):
+    """Regression: a flood of login options keeps at most MAX_LOGIN_CHALLENGES login rows and never
+    evicts a register/assert challenge."""
+    from app.auth import passkeys
+    from app.db import tx
+
+    monkeypatch.setattr(passkeys, "MAX_LOGIN_CHALLENGES", 5)
+    with tx(conn):
+        conn.execute("INSERT INTO challenges(id, kind, challenge, created_at, expires_at) VALUES ('keep', 'assert', ?, ?, ?)",
+                     (b"c", now_iso(-10), now_iso(290)))
+    ids = [passkeys.login_options(conn, make_request())[0] for _ in range(8)]
+    left = {r[0] for r in conn.execute("SELECT id FROM challenges WHERE kind = 'login'")}
+    assert left == set(ids[-5:])
+    assert conn.execute("SELECT COUNT(*) FROM challenges WHERE id = 'keep'").fetchone()[0] == 1
+
+
+def test_options_limiter_is_separate():
+    from app.auth import passwords
+
+    for _ in range(passwords.OPTIONS_MAX):
+        assert passwords.claim_options_request("1.2.3.4")
+    assert not passwords.claim_options_request("1.2.3.4")
+    assert passwords.claim_options_request("5.6.7.8")
+    assert passwords.claim_login_attempt("1.2.3.4")
+    passwords.reset_all()
+    assert passwords.claim_options_request("1.2.3.4")

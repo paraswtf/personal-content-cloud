@@ -7,8 +7,10 @@ Labels and groups match app.api.common.DOC_TYPE_LABELS / DOC_GROUP_OF (a test ch
 """
 from __future__ import annotations
 
+import inspect
 import logging
 from dataclasses import dataclass
+from datetime import date
 from types import ModuleType
 from typing import Callable
 
@@ -62,13 +64,20 @@ def get(doc_type: str | None) -> DocType:
 
 
 def parse(doc_type: str, text: str, pages: list[PageText] | None = None,
-          boxes: list[Box] | None = None) -> ParsedDocument:
-    """Run one type's parser; a parser that raises falls back to the 'other' parser (logged)."""
+          boxes: list[Box] | None = None, *, today: date | None = None) -> ParsedDocument:
+    """Run one type's parser; a parser that raises falls back to the 'other' parser (logged), and when
+    that raises too the result is an empty document of the type, so the item's text is still indexed.
+    today (the item's capture date) goes to parsers that take it (the boarding pass year)."""
     spec = get(doc_type)
+    kw = {"today": today} if today is not None and "today" in inspect.signature(spec.parser).parameters else {}
     try:
-        return spec.parser(text or "", pages or [], boxes or [])
+        return spec.parser(text or "", pages or [], boxes or [], **kw)
     except Exception:
         log.exception("parser %s failed", spec.type)
+    try:
         res = REGISTRY["other"].parser(text or "", pages or [], boxes or [])
-        res.doc_type = spec.type
-        return res
+    except Exception:
+        log.exception("fallback parser failed for %s", spec.type)
+        res = ParsedDocument(doc_type=spec.type, confidence=0.05, fields={})
+    res.doc_type = spec.type
+    return res

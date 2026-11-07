@@ -29,6 +29,10 @@ _COV = ["MCWOG", "MCWG", "M/CYCL.WG", "MCYCL", "LMV-NT", "LMV-TR", "LMV", "HMV",
         "LMV-TAXI", "E-RICKSHAW", "ERIKSHAW", "INVCRG", "3W-NT", "3W-T", "TRCTR", "ADPVEH", "FVG", "LDRXCV"]
 
 
+# the value after a generic 'Validity' / 'Valid till' label that is tagged as the transport one
+_TR_TAG = re.compile(r"^[\s(\[:\-]*(?:till|upto|up to)?[\s(\[:\-]*(?:tr|transport)\b", re.I)
+
+
 def parse(text: str, pages=None, boxes=None) -> ParsedDocument:
     t = normalize_text(text)
     lines = split_lines(t)
@@ -66,17 +70,21 @@ def parse(text: str, pages=None, boxes=None) -> ParsedDocument:
             sign = "+" if m.group(2).lower() in ("+", "ve", "pos") else "-"
             fs.set("blood_group", f"{m.group(1).upper()}{sign}", 0.8)
     fs.set("address", address_after(t, ["address", "permanent address", "present address"]), 0.7)
-    fs.set("issue_date", date_after(t, ["date of issue", "issue date", "doi", "issued on", "date of first issue"]), 0.85)
+    fs.set("issue_date", date_after(t, ["date of issue", "issue date", "doi", "issued on", "date of first issue"],
+                                    past=True), 0.85)
 
     nt = date_after(t, ["validity (nt)", "valid till (nt)", "validity(nt)", "non-transport", "nt validity",
-                        "valid till", "validity", "valid upto", "valid up to"])
+                        "valid till", "validity", "valid upto", "valid up to"],
+                    accept=lambda v: not _TR_TAG.match(v))
     tr = date_after(t, ["validity (tr)", "valid till (tr)", "validity(tr)", "transport validity"])
     if not nt:
-        m = re.search(r"valid(?:ity)?[^\n]{0,30}", t, re.I)
-        if m:
+        for m in re.finditer(r"valid(?:ity)?([^\n]{0,30})", t, re.I):
+            if _TR_TAG.match(m.group(1)):
+                continue  # 'Validity(TR)' is the transport validity
             ds = find_dates(t[m.start():m.start() + 60])
             if ds:
                 nt = ds[0][0]
+            break
     fs.set("valid_till", nt, 0.85)
     fs.set("valid_till_transport", tr, 0.8)
 

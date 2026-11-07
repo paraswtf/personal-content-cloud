@@ -17,6 +17,10 @@
    - 409 `setup_required`: login or passkey login before setup;
    - 400 `challenge_invalid` / `registration_failed`, 409 `credential_exists`: passkey registration;
    - 400 `password_or_passkey_required`: vault unlock with neither factor.
+   - 403 `vault_locked`: passkey register options/verify and passkey delete while the vault is locked
+     (a passkey signs in and unlocks the vault, so adding or removing one needs a recent re-auth);
+   - 429 `too_many_attempts` on `passkeys/login/options` too: its own limit of 30 calls per 60 s per IP,
+     separate from the login failure counter.
    Suggest adding these to section 13's code list.
 5. Behaviour choices worth knowing:
    - `POST /password` revokes every other session (this one stays).

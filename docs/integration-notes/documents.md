@@ -21,9 +21,11 @@ Files: `backend/app/documents/{extract,detect,fields,barcodes,photo}.py`, `backe
 
 - `api/documents.py` declares `APIRouter(prefix="/api/documents")`. Mount it without another prefix.
   `main.mount_prefix` already detects this.
-- The worker's `text` handler calls `extract_item(conn, item_id, version)`. Errors are logged, and the
-  function sets `text_status='error'` and returns normally, so the job does not retry. A stale version or
-  a trashed item is skipped.
+- The worker's `text` handler calls `extract_item(conn, item_id, version)`. Errors from the file are
+  logged, and the function sets `text_status='error'` and returns normally, so the job does not retry.
+  Database errors, MemoryError and a full disk are raised instead (also when recording 'error' fails),
+  so the worker retries with backoff or defers, and `_final_failure` marks `text_status='error'`. A stale
+  version or a trashed item is skipped.
 - `refresh_fts(conn, item_id)` works for any item (images with tags or labels only, items without text)
   and nests inside an open transaction (savepoint). `remove_fts(conn, item_id)` drops the row.
 - `extract.match_query(q)` builds a safe FTS5 MATCH expression (every word quoted, prefix match). The
