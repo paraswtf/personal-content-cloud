@@ -24,7 +24,7 @@ from app.config import settings
 from app.util import new_uid
 
 DIRS = ("originals", "thumbs", "previews", "pages", "videos", "faces", "bodies", "docphoto", "staging", "failed",
-        "wallet", "tmp")
+        "wallet", "tmp", "learned")
 # Directories the orphan sweeper walks (names must match the patterns in app.ingest).
 SWEPT_DIRS = ("originals", "thumbs", "previews", "pages", "videos", "faces", "bodies", "docphoto")
 

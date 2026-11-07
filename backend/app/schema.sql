@@ -306,6 +306,41 @@ CREATE TABLE IF NOT EXISTS documents (
 );
 CREATE INDEX IF NOT EXISTS documents_type ON documents(doc_type);
 
+-- Tags the owner adds, and that the system learns (docs/ARCHITECTURE.md section 19).
+CREATE TABLE IF NOT EXISTS tags (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  name       TEXT NOT NULL,                  -- as typed, 1..40 chars
+  name_key   TEXT NOT NULL UNIQUE,           -- util.name_key(name)
+  created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS item_user_tags (
+  item_id    INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+  tag_id     INTEGER NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
+  source     TEXT NOT NULL DEFAULT 'user' CHECK (source IN ('user','auto')),
+  score      REAL,                           -- the learner's score for auto rows
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (item_id, tag_id)
+);
+CREATE INDEX IF NOT EXISTS item_user_tags_tag ON item_user_tags(tag_id, item_id);
+CREATE TABLE IF NOT EXISTS tag_rejections (   -- a suggestion the owner removed: a counter-example
+  item_id    INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+  tag_id     INTEGER NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (item_id, tag_id)
+);
+
+-- Corrections and outcomes the learners need beyond the main tables (docs/ARCHITECTURE.md section 18).
+CREATE TABLE IF NOT EXISTS learning_events (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  kind       TEXT NOT NULL CHECK (kind IN ('guess','category','vault','misclick','doc_type','tag')),
+  label      INTEGER,                       -- 1 / 0 for outcomes, NULL for a plain correction
+  features   TEXT NOT NULL DEFAULT '{}',    -- JSON: evidence terms, or {from, to, scores}
+  item_id    INTEGER,                       -- kept after the item is gone
+  person_id  INTEGER,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS learning_events_kind ON learning_events(kind, created_at);
+
 -- Durable background jobs. Handlers must be idempotent.
 CREATE TABLE IF NOT EXISTS jobs (
   id         INTEGER PRIMARY KEY AUTOINCREMENT,

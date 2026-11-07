@@ -10,6 +10,8 @@ export interface LibraryFilters {
   category: Category | ''
   kind: ItemKind | ''
   people: number[]
+  /** Free-form tag names (URL tag=, repeated); every one is required. */
+  tags: string[]
   from: string
   to: string
   favorite: boolean
@@ -20,6 +22,24 @@ export interface LibraryFilters {
 
 const KINDS: ItemKind[] = ['image', 'video', 'pdf', 'document', 'other']
 const DATE = /^\d{4}-\d{2}-\d{2}$/
+/** Tag names are 1 to 40 characters (section 19). */
+const MAX_TAG = 40
+const MAX_TAGS = 20
+
+/** The tag= values: trimmed, non-empty, without repeats (case-insensitive), at most 20. */
+export function readTags(params: URLSearchParams): string[] {
+  const out: string[] = []
+  const seen = new Set<string>()
+  for (const raw of params.getAll('tag')) {
+    const t = raw.trim()
+    const key = t.toLowerCase()
+    if (!t || t.length > MAX_TAG || seen.has(key)) continue
+    seen.add(key)
+    out.push(t)
+    if (out.length >= MAX_TAGS) break
+  }
+  return out
+}
 
 export function readFilters(params: URLSearchParams, vault: boolean): LibraryFilters {
   const cat = params.get('cat') as Category | null
@@ -34,6 +54,7 @@ export function readFilters(params: URLSearchParams, vault: boolean): LibraryFil
     category: !vault && cat && CATEGORIES.includes(cat) && cat !== 'nsfw' ? cat : '',
     kind: kind && KINDS.includes(kind) ? kind : '',
     people: parseIds(params.get('people')),
+    tags: readTags(params),
     from: DATE.test(from) ? from : '',
     to: DATE.test(to) ? to : '',
     favorite: params.get('fav') === '1',
@@ -48,6 +69,7 @@ export function itemsQuery(f: LibraryFilters, vault: boolean): Omit<ItemsQuery, 
     category: f.category || undefined,
     kind: f.kind || undefined,
     person: f.people.length ? f.people : undefined,
+    tag: f.tags.length ? f.tags : undefined,
     from: f.from || undefined,
     to: f.to || undefined,
     favorite: f.favorite || undefined,
@@ -66,6 +88,7 @@ export function searchQuery(f: LibraryFilters, vault: boolean): Omit<SearchQuery
     category: f.category || undefined,
     kind: f.kind || undefined,
     person: f.people.length ? f.people : undefined,
+    tag: f.tags.length ? f.tags : undefined,
     from: f.from || undefined,
     to: f.to || undefined,
     vault: vault || undefined,
@@ -75,5 +98,5 @@ export function searchQuery(f: LibraryFilters, vault: boolean): Omit<SearchQuery
 
 /** Any filter beyond the category chips is set (opens the filter panel on load). */
 export function hasExtraFilters(f: LibraryFilters): boolean {
-  return !!(f.kind || f.people.length || f.from || f.to || f.favorite || f.misclicks !== 'exclude' || f.dups === 'all')
+  return !!(f.kind || f.people.length || f.tags.length || f.from || f.to || f.favorite || f.misclicks !== 'exclude' || f.dups === 'all')
 }

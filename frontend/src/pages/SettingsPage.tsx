@@ -1,13 +1,14 @@
-// /settings: Account, Passkeys, Sessions, System, Wallet and Appearance tabs (?tab=<id>, default
+// /settings: Account, Passkeys, Sessions, System, Learning, Wallet and Appearance tabs (?tab=<id>, default
 // account). The tab bodies live in components/shell/settings/.
 import { useRef, type KeyboardEvent } from 'react'
 import { useSearchParams } from 'react-router'
 import clsx from 'clsx'
-import { Fingerprint, MonitorSmartphone, Palette, Server, UserRound, Wallet } from 'lucide-react'
+import { Fingerprint, GraduationCap, MonitorSmartphone, Palette, Server, UserRound, Wallet } from 'lucide-react'
 import AccountTab from '../components/shell/settings/AccountTab'
 import PasskeysTab from '../components/shell/settings/PasskeysTab'
 import SessionsTab from '../components/shell/settings/SessionsTab'
 import SystemTab from '../components/shell/settings/SystemTab'
+import LearningTab from '../components/shell/settings/LearningTab'
 import WalletTab from '../components/shell/settings/WalletTab'
 import AppearanceTab from '../components/shell/settings/AppearanceTab'
 import { usePageTitle } from '../components/shell/title'
@@ -17,6 +18,7 @@ const TABS = [
   { id: 'passkeys', label: 'Passkeys', icon: Fingerprint, body: PasskeysTab },
   { id: 'sessions', label: 'Sessions', icon: MonitorSmartphone, body: SessionsTab },
   { id: 'system', label: 'System', icon: Server, body: SystemTab },
+  { id: 'learning', label: 'Learning', icon: GraduationCap, body: LearningTab },
   { id: 'wallet', label: 'Wallet', icon: Wallet, body: WalletTab },
   { id: 'appearance', label: 'Appearance', icon: Palette, body: AppearanceTab },
 ] as const

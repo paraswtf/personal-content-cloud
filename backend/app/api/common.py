@@ -412,3 +412,18 @@ def json_field(row: sqlite3.Row, key: str, default: Any = None) -> Any:
         return json_loads(row[key], default)
     except (IndexError, KeyError):
         return default
+
+
+def tags_filter_sql(names: list[str], alias: str = "i") -> tuple[str, list[Any]]:
+    """SQL condition: the item carries ALL the named tags (user or suggested rows; section 19)."""
+    from app.util import name_key
+
+    keys = sorted({name_key(n) for n in names if name_key(n)})
+    if not keys:
+        return "1 = 1", []
+    ph = ",".join("?" * len(keys))
+    sql = (
+        f"{alias}.id IN (SELECT ut.item_id FROM item_user_tags ut JOIN tags t ON t.id = ut.tag_id "
+        f"WHERE t.name_key IN ({ph}) GROUP BY ut.item_id HAVING COUNT(DISTINCT t.id) = ?)"
+    )
+    return sql, [*keys, len(keys)]

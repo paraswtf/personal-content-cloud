@@ -20,6 +20,8 @@ import type {
   FacePage,
   GuessIdsIn,
   GuessPage,
+  LearningApplyOut,
+  LearningStatus,
   ItemCard,
   ItemDetail,
   ItemKind,
@@ -42,6 +44,9 @@ import type {
   SuggestionList,
   SystemOut,
   TagIn,
+  TagOut,
+  ItemTagOut,
+  UserTagIn,
   UploadCreate,
   UploadList,
   UploadOut,
@@ -164,6 +169,8 @@ export interface ItemsQuery {
   dups?: 'collapse' | 'all'
   vault?: boolean
   sort?: 'taken' | 'added'
+  /** Tag names, repeated as tag=; every one is required. */
+  tag?: string[]
   cursor?: string | null
   limit?: number
 }
@@ -177,6 +184,8 @@ export interface SearchQuery {
   from?: string
   to?: string
   vault?: boolean
+  /** Tag names, repeated as tag=; every one is required. */
+  tag?: string[]
   limit?: number
   offset?: number
 }
@@ -258,9 +267,19 @@ export function uploadChunk(id: string, offset: number, data: Blob, opts: ChunkP
 export const api = {
   config: () => get<ConfigOut>('/api/config'),
   stats: () => get<Stats>('/api/stats'),
-  /** GET /api/system; `api.system.retryFailed()` queues failed uploads again (POST /api/system/retry-failed). */
+  /** GET /api/system; `api.system.retryFailed()` queues failed uploads again (POST /api/system/retry-failed).
+   *  The learning calls are /api/system/learning (section 18 of docs/ARCHITECTURE.md). */
   system: Object.assign(() => get<SystemOut>('/api/system'), {
     retryFailed: () => post<{ requeued: number }>('/api/system/retry-failed'),
+    learning: () => get<LearningStatus>('/api/system/learning'),
+    /** The Settings switch (kv flag learning_enabled). The reply body is not used: refetch the status. */
+    setLearningEnabled: (enabled: boolean) => patch<OkOut>('/api/system/learning', { enabled }),
+    /** Trains every learner now and returns the new status. */
+    trainLearning: () => post<LearningStatus>('/api/system/learning/train'),
+    /** Queues a fresh analysis of automatically decided items and documents; returns the queued counts. */
+    applyLearning: () => post<LearningApplyOut>('/api/system/learning/apply'),
+    /** Deletes the learned models (the choices themselves stay). The reply body is not used. */
+    resetLearning: () => del<OkOut>('/api/system/learning'),
   }),
   downloadModels: () => post<OkOut>('/api/system/models/download'),
   housekeeping: () => post<OkOut>('/api/system/housekeeping'),
@@ -304,6 +323,18 @@ export const api = {
     text: (uid: string, vault = false) => get<ItemTextOut>(`/api/items/${enc(uid)}/text${qs({ vault })}`),
     addTag: (uid: string, body: TagIn) => post<PersonRef[]>(`/api/items/${enc(uid)}/tags`, body),
     removeTag: (uid: string, personId: number) => del<PersonRef[]>(`/api/items/${enc(uid)}/tags/${personId}`),
+    /** Free-form tag (section 19): by id, or by name (created when new). An auto row becomes the owner's. */
+    addUserTag: (uid: string, body: UserTagIn) => post<ItemTagOut[]>(`/api/items/${enc(uid)}/user-tags`, body),
+    /** Removing a suggestion also tells the learner it was wrong. */
+    removeUserTag: (uid: string, tagId: number) => del<ItemTagOut[]>(`/api/items/${enc(uid)}/user-tags/${tagId}`),
+  },
+
+  /** Free-form tags (section 19 of docs/ARCHITECTURE.md). */
+  tags: {
+    list: (q?: string) => get<TagOut[]>(`/api/tags${qs({ q })}`),
+    create: (name: string) => post<TagOut>('/api/tags', { name }),
+    rename: (id: number, name: string) => patch<TagOut>(`/api/tags/${id}`, { name }),
+    remove: (id: number) => del<OkOut>(`/api/tags/${id}`),
   },
 
   trash: {

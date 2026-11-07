@@ -66,6 +66,7 @@ export function useStableCallback<A extends unknown[], R>(fn: (...args: A) => R)
 /** Query key prefixes that any change to items, people or documents can affect. */
 export const LIBRARY_KEYS = [
   'items',
+  'tags',
   'item',
   'item-text',
   'item-pages',

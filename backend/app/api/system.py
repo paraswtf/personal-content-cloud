@@ -28,7 +28,7 @@ from pydantic import BaseModel
 from app import jobs, storage
 from app.api.deps import get_db, require_user
 from app.config import APP_VERSION, settings
-from app.schemas import DiskStats, ModelStatus, Ok, SystemOut
+from app.schemas import DiskStats, LearningApplyOut, LearningEnabledIn, LearningStatus, ModelStatus, Ok, SystemOut
 
 log = logging.getLogger(__name__)
 
@@ -155,3 +155,64 @@ def retry_failed(conn: sqlite3.Connection = Depends(get_db)) -> RetryOut:
         n = ingest.retry_failed(conn)
     log.info("retry-failed: queued %d uploads and jobs again", n)
     return RetryOut(requeued=n)
+
+
+# ------------------------------------------------------------------ learning (section 18)
+@router.get("/learning", response_model=LearningStatus)
+def learning_status(conn: sqlite3.Connection = Depends(get_db)) -> LearningStatus:
+    from app.learning import train as learning_train
+
+    return LearningStatus(**learning_train.status(conn))
+
+
+@router.patch("/learning", response_model=LearningStatus)
+def learning_enabled(body: LearningEnabledIn, conn: sqlite3.Connection = Depends(get_db)) -> LearningStatus:
+    from app.learning import store as learning_store
+    from app.learning import train as learning_train
+
+    learning_store.set_enabled(conn, body.enabled)
+    return LearningStatus(**learning_train.status(conn))
+
+
+@router.post("/learning/train", response_model=LearningStatus)
+def learning_train_now(conn: sqlite3.Connection = Depends(get_db)) -> LearningStatus:
+    from app.learning import train as learning_train
+
+    return LearningStatus(**learning_train.train_all(conn))
+
+
+@router.post("/learning/apply", response_model=LearningApplyOut)
+def learning_apply(conn: sqlite3.Connection = Depends(get_db)) -> LearningApplyOut:
+    """Queue a fresh analysis for live photos and videos whose category, vault or mis-click decision
+    was automatic, and a fresh text stage for documents typed automatically, so the learned models
+    reach existing items. Tags learned for existing items are applied directly."""
+    from app import ingest
+
+    item_ids = [int(r["id"]) for r in conn.execute(
+        "SELECT id FROM items WHERE deleted_at IS NULL AND kind IN ('image', 'video') AND analysis_status = 'done' "
+        "AND (category_source = 'auto' OR nsfw_source = 'auto' OR misclick_source = 'auto') ORDER BY id"
+    )]
+    doc_ids = [int(r["item_id"]) for r in conn.execute(
+        "SELECT d.item_id FROM documents d JOIN items i ON i.id = d.item_id WHERE d.source = 'auto' "
+        "AND i.deleted_at IS NULL AND i.text_status = 'done' ORDER BY d.item_id"
+    )]
+    for item_id in item_ids:
+        ingest.enqueue_reprocess(conn, item_id, ["analyze"])
+    for item_id in doc_ids:
+        ingest.enqueue_reprocess(conn, item_id, ["text"])
+    tags = 0
+    try:
+        from app.learning import tags as learning_tags
+
+        tags = int(learning_tags.apply_all(conn))
+    except ImportError:
+        pass
+    return LearningApplyOut(items=len(item_ids), documents=len(doc_ids), tags=tags)
+
+
+@router.delete("/learning", response_model=Ok)
+def learning_reset() -> Ok:
+    from app.learning import train as learning_train
+
+    learning_train.reset()
+    return Ok()

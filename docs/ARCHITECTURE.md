@@ -638,3 +638,165 @@ Each area owns its files; shared contracts (`schema.sql`, `config.py`, `jobs.py`
 | search | `search/*`, `api/search.py`, FTS helpers |
 | frontend-shell | app shell, auth pages, settings, upload, PWA, theme |
 | frontend-library | library, viewer, people, documents, review, vault pages |
+
+## 18. Learning from your choices (`app/learning`)
+
+Every correction the owner makes is a training example for the next automatic decision of the same kind.
+Nothing is sent anywhere and no deep model is retrained: small models are fitted on top of the frozen
+embeddings and scores the pipeline already produces, from the choices the database records. Learned
+models live in `DATA_DIR/learned/*.json` (small, rebuilt from the database at any time) and are read by
+the pipeline with an mtime cache. `LEARNING_ENABLED` (env, default true) and the kv flag
+`learning_enabled` (Settings switch, default on) turn it off: the learners then answer "nothing learned"
+and training is skipped. Resetting deletes the learned files only, never the choices themselves.
+
+Signals (read from existing tables; `learning_events` adds what is otherwise lost):
+- category: `items.category_source = 'user'` -> (SigLIP whole-image embedding, category);
+- vault: `items.nsfw_source = 'user'` -> (embedding, nsfw) and the classifier's `nsfw_score`;
+- mis-clicks: `misclick_source = 'user' AND misclick = 0` with the reasons still stored = kept (negative),
+  `misclick = 1` with `misclick_source = 'user'`, or trashed while flagged automatically = confirmed
+  (positive); features are `quality_scores`;
+- document type: `documents.source = 'user'` -> (document text, doc_type); a field edit counts as a
+  confirmation of the type;
+- people: `faces.assigned_by = 'user'` (and bodies) per person, `guess_rejections`, and the confirm and
+  reject outcomes of guesses with their evidence (`learning_events`, kind `guess`).
+
+`learning_events(id, kind, label, features JSON, item_id, person_id, created_at)` is written by the API and
+the guess code through `learning.events.record(conn, kind, label, features, item_id=None, person_id=None)`:
+kind `guess` (label 1 confirm / 0 reject, features = the guess evidence), `category`, `vault`, `misclick`
+and `doc_type` (label None, features `{"from": .., "to": ..}` plus the scores at the time). Events also feed
+the status page ("learned from N corrections").
+
+Learners (one module each, all pure numpy, all with a `status()` and a `train(conn)` that writes the model):
+- `doc_type.py`: TF-IDF exemplars over `fields.word_tokens(normalize_text(text))` (unigrams and bigrams,
+  Devanagari-aware); `predict(text) -> (doc_type, similarity) | None` returns the nearest user-labelled
+  exemplar when cosine >= 0.35. `extract.analyze_text` uses it: the learned type wins when similarity
+  >= 0.5, or >= 0.35 when the rules say `other`; the detection score becomes max(rule score, similarity).
+- `images.py`: nearest-neighbour over SigLIP embeddings of user-labelled items. `predict_category(emb) ->
+  (category, score) | None` (weighted vote of neighbours with cosine >= 0.80; needs the best neighbour >=
+  0.85 and the winner holding >= 0.6 of the vote) overrides the rule category in `categories.decide` except
+  `documents` by kind and the vault; `predict_nsfw(emb, nsfw_score) -> bool | None` answers from a
+  user-labelled neighbour at cosine >= 0.85, else from a calibrated threshold (the cut on `nsfw_score`
+  that best separates the user's vault labels, searched in [0.5, 0.95], used only with at least 8 labels
+  and at least 3 on each side), else None (the rules decide).
+- `misclick.py`: per reason (`blurry` on blur_var, `dark` on mean_lum, `blown_out` on clipped_frac,
+  `pocket` on accident_p) the cut that best separates kept from confirmed mis-clicks, searched within
+  [0.25x, 4x] of the default and used only with at least 5 examples on each side; `thresholds() ->
+  {"blur_var_min": .., "dark_mean": .., "clipped_frac": .., "accident_min": ..}` with the defaults filled
+  in, read by `quality.decide`.
+- `people.py`: `person_threshold(person_id) -> float | None`: a per-person face threshold from the
+  similarities of the person's user-confirmed faces to the person (loosened to their 10th percentile
+  minus 0.02, floor 0.30) and raised above the closest rejected face (+0.02); `cluster._score` uses
+  max(face threshold, learned) so a person the owner confirmed often is matched more readily and one
+  they corrected is matched more carefully. `guess_probability(features) -> float | None`: a logistic
+  regression on [clothes, scene_term, face_term, same_day, has_gps] fitted on `guess` events (needs 30
+  events with both outcomes); `guess.guess_score` returns it instead of the fixed 0.5/0.3/0.2 mix.
+- `train.py`: `train_all(conn) -> dict` (every learner, writes `learned/status.json` with `trained_at`,
+  per-learner example counts and what was learned), `maybe_train(conn)` (trains when a choice is newer
+  than `trained_at`; called by worker housekeeping every 10 minutes), `pending(conn) -> int` (choices
+  newer than the last training), `reset()`.
+
+API (`/api/system/learning`, session required, CSRF on writes): `GET` ->
+`LearningStatus{enabled, trained_at, pending, learners{doc_type{examples, labels[]}, category{examples,
+labels[]}, vault{examples, threshold}, misclick{examples, thresholds{}}, people{persons, events,
+weights{} | null}}, events{category, vault, misclick, doc_type, guess}}`; `PATCH {enabled}` (kv flag);
+`POST train` -> `LearningStatus` (trains now); `POST apply` -> `{"items": n, "documents": m}` (queues a
+fresh analysis for live items whose category, vault or mis-click decision was automatic and a fresh text
+stage for documents typed automatically, so the learned models reach existing items); `DELETE` (reset:
+learned files removed, status cleared).
+
+Frontend: Settings gets a Learning tab (`components/shell/settings/LearningTab.tsx`): the switch, what each
+learner has learned in plain words with its counts, the time of the last training, buttons Train now,
+Apply to existing items (confirm; shows the counts queued) and Reset (confirm), and a short note that
+corrections are made on items, documents and people as before.
+
+Ownership for the build: `learning/*`, `schema.sql` (the `learning_events` table), `schemas.py` and
+`api/system.py` (the learning routes), the worker hook and `docs/integration-notes/learning.md` belong to
+the learning builder; the call sites in `analysis/*`, `documents/extract.py`, `api/library.py`,
+`api/documents.py` and `api/people.py` belong to the integration builder; `lib/types.ts`, `lib/api.ts`,
+the tab and `SettingsPage.tsx` belong to the frontend builder. The stub package in `app/learning` with
+the exact signatures exists before the build starts.
+
+## 19. Tags the owner adds, and that the system learns (`app/api/tags.py`, `app/learning/tags.py`)
+
+Free-form tags ("wedding", "Goa trip", "claim") on any item. The owner adds them; the tag learner then
+suggests them on look-alike photos and videos (SigLIP embeddings) and on similar documents (text), and a
+removed suggestion is a counter-example. Person tags (`item_tags`) stay what they are.
+
+Schema: `tags(id, name 1..40 chars as typed, name_key UNIQUE = util.name_key(name), created_at)`;
+`item_user_tags(item_id, tag_id, source user|auto, score REAL for auto rows, created_at, PRIMARY KEY
+(item_id, tag_id))` with an index on `(tag_id, item_id)`; `tag_rejections(item_id, tag_id, created_at,
+PRIMARY KEY (item_id, tag_id))` for suggestions the owner removed. Both item tables cascade on item
+and tag deletion.
+
+API (`/api`, session required, CSRF on writes, vault items only when the vault is open):
+- `GET tags?q=` -> `[TagOut{id, name, items, auto_items}]` (counts over live items the session may see;
+  sorted by items desc, then name); `POST tags {name}` -> `TagOut` (an existing key returns that tag);
+  `PATCH tags/{id} {name}` (a rename onto an existing key merges into it; user rows win over auto rows);
+  `DELETE tags/{id}`.
+- `POST items/{uid}/user-tags {tag_id | name}` -> `[ItemTagOut{id, name, source, score}]` (creates the tag
+  when `name` is new; an auto row becomes a user row, which also counts as a confirmation; any rejection
+  of that pair is cleared); `DELETE items/{uid}/user-tags/{tag_id}` -> the list (removing an auto row
+  writes `tag_rejections` and a `learning_events` row kind `tag`, label 0; removing a user row writes
+  nothing else).
+- `POST items/bulk {action: tag | untag, value: name}` on the selected items.
+- `GET items?tag=<name>` and `GET search?tag=<name>` (repeated, every tag required; `common.tags_filter_sql`).
+- `ItemDetail.user_tags: [ItemTagOut]` (user rows first, then auto rows by score). `ItemCard` is unchanged.
+- Tag names go into the `labels` column of `items_fts` (`refresh_fts`), so search finds them.
+
+Learner (`learning/tags.py`, trained with the others by `learning.train`): per tag, positives are the items
+with a user row, negatives the rejections; examples are SigLIP whole-image embeddings (frame 0) for images
+and videos and TF-IDF vectors of `item_text` for pdf and office documents (the same tokenisation as the
+document type learner, kept in `learning/textvec.py`). A tag is learned once it has 3 positive examples
+of a kind. `predict(emb, text, kind) -> [(tag_id, score)]` answers for each learned tag when the best
+positive cosine is >= 0.80 (images) or >= 0.45 (text) and beats the best negative cosine by 0.02; the
+score is that cosine. The pipeline writes auto rows after analysis (images and videos) and after the text
+stage (documents), skipping tags already on the item and rejected pairs. `apply_all(conn) -> int` predicts
+for every live item from stored embeddings and text (no model runs) and is part of
+`POST /api/system/learning/apply` (`{"items", "documents", "tags"}`). `LearningStatus.learners.tags =
+{tags, examples, rejections}`; `events.tag` counts the removals.
+
+Frontend: the viewer's info panel gets a Tags section (`components/viewer/TagsPanel.tsx`): user tags as
+solid chips with a remove button, suggested tags as dashed chips with an accept (adds as user) and a remove
+button, an input with existing tags offered as you type and Enter to add a new one. The library filter
+bar offers the tags with their counts (URL `tag=`), the selection bar has Add tag and Remove tag, and the
+Learning tab shows the tags card.
+
+## 20. Live Photos and motion photos (`app/media/live.py`, ingest pairing)
+
+An iPhone Live Photo arrives as two files, the still (HEIC or JPEG) and a short MOV; Android motion
+photos (Google, Samsung) are one JPEG with an MP4 appended. Both become one item that shows the still and
+can play its clip. Every uploaded byte is kept: the MOV stays a stored item of its own (a hidden
+companion) and the JPEG keeps its embedded clip.
+
+Schema (`items`): `content_id TEXT` (Apple's ContentIdentifier read from the still's MakerNote and from
+the MOV's `com.apple.quicktime.content.identifier` tag; indexed), `companion_of INTEGER REFERENCES
+items(id)` (set on the MOV: the still it belongs to; a companion is hidden everywhere), `live_video_item_id
+INTEGER REFERENCES items(id)` (set on the still: its MOV item), `live INTEGER NOT NULL DEFAULT 0` (the
+still has a clip: a paired MOV or an embedded motion clip). `uploads.pair_key TEXT` (optional, from the
+client: the iOS app sends the asset's local identifier with both files so they pair without metadata).
+
+Pairing (ingest, after the item row of the second file exists, in the same transaction): a still and a
+MOV pair when they share a `content_id`, or a `pair_key` on their uploads, or the same file stem
+(`IMG_1234`) with the MOV under 4 seconds and both uploaded within one hour of each other. Whichever
+arrives second finds the other (`live.find_partner`). The MOV gets `companion_of`, the still gets
+`live_video_item_id` and `live = 1`. A companion gets no analysis of its own (`analysis_status` done, no
+embeddings, no faces), no FTS row, no dedup group, and `visible_sql` hides it (`companion_of IS NULL`), so
+it never shows in listings, search, review, duplicates or stats; its original, thumb and web preview are
+still produced (the viewer plays the preview). Trashing or purging the still trashes or purges the
+companion with it; restoring restores both. Unpairing is not offered.
+
+Motion photos (ingest of a JPEG): `live.extract_motion_clip(path) -> bytes | None` finds the embedded
+MP4 through the XMP `GCamera:MicroVideoOffset` / `Container:Directory` (`Item:Semantic="MotionPhoto"`,
+`Item:Length`) tags or the Samsung `MotionPhoto_Data` trailer, and the clip is written to
+`videos/<shard>/<uid>.v<version>.live.mp4` (`storage.live_clip_path`, a derivative, rebuilt by a preview
+reprocess); the still gets `live = 1`. The clip is served as is (these are H.264 MP4 files).
+
+API: `ItemCard.live: bool`; `ItemDetail.live_video: {uid | null, url, duration_s} | null` (the companion's
+uid and web preview URL, or the extracted clip's URL `/files/live/{uid}?v=`) and `urls.live`; the
+download menu offers the still and the clip (`/files/original/{companion uid}?download=1` for a paired
+MOV, `/files/live/{uid}?download=1` for an extracted clip). `/files/live/{uid}` serves the extracted clip
+with the usual vault and cache rules. `GET /items?live=1` lists the live items.
+
+Frontend: tiles show a LIVE badge; the viewer shows the badge as a button that plays the clip in place
+of the still (loops while held or until tapped again, muted), and a Live Photo opened from the review or
+people pages behaves the same; the download menu lists both halves.

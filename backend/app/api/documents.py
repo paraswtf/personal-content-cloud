@@ -154,6 +154,13 @@ def update_document(uid: str, body: DocumentUpdate, session: SessionInfo = Depen
             raise HTTPException(status_code=422, detail="Invalid field name")
     doc = _doc(conn, item_id)
     if body.doc_type is not None and (doc is None or doc["doc_type"] != body.doc_type):
+        try:
+            from app.learning import events
+
+            events.record(conn, "doc_type", None, {"from": doc["doc_type"] if doc else None, "to": body.doc_type},
+                          item_id=item_id)
+        except Exception:  # noqa: BLE001 - learning never blocks an edit
+            log.exception("learning: could not record a document type change")
         extract.reparse(conn, item_id, forced_type=body.doc_type)
     doc = _doc_or_404(conn, item_id)
     from app.documents import parsers

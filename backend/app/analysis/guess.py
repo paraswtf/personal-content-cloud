@@ -41,7 +41,7 @@ import numpy as np
 
 from app.config import settings
 from app.db import bump_faces_version, faces_version, tx
-from app.util import json_dumps, local_date, now_iso, parse_iso
+from app.util import json_dumps, json_loads, local_date, now_iso, parse_iso
 
 log = logging.getLogger(__name__)
 
@@ -101,7 +101,24 @@ def face_term(face_sim: float | None) -> float:
     return 0.5 + 0.5 * min(1.0, (face_sim - FACE_WEAK) / (FACE_STRONG - FACE_WEAK))
 
 
-def guess_score(clothes: float, scene: float, face_sim: float | None) -> float:
+def guess_features(clothes: float, scene: float, face_sim: float | None, *, same_day: bool = False,
+                   has_gps: bool = False) -> dict[str, Any]:
+    return {"clothes": round(float(clothes), 4), "scene_term": round(float(scene), 4),
+            "face_term": round(face_term(face_sim), 4), "same_day": bool(same_day), "has_gps": bool(has_gps)}
+
+
+def guess_score(clothes: float, scene: float, face_sim: float | None, *, same_day: bool = False,
+                has_gps: bool = False) -> float:
+    """The fixed mix, or the probability of the weights learned from the owner's confirmations and
+    rejections once enough of them exist (section 18)."""
+    try:
+        from app.learning import people as learned_people
+
+        p = learned_people.guess_probability(guess_features(clothes, scene, face_sim, same_day=same_day, has_gps=has_gps))
+    except Exception:  # noqa: BLE001 - learning never blocks guessing
+        p = None
+    if p is not None:
+        return float(p)
     return W_CLOTHES * clothes + W_SCENE * scene + W_FACE * face_term(face_sim)
 
 
@@ -301,12 +318,13 @@ def score_box(box: Box, refs: list[Box], scene: dict[int, tuple[float, float | N
                 continue
             face_sim = face_scores.get(pid)
         scene_term, scene_cos, gps_m, same_day = scene[ref.item_id]
-        score = guess_score(clothes, scene_term, face_sim)
+        score = guess_score(clothes, scene_term, face_sim, same_day=bool(same_day), has_gps=gps_m is not None)
         prev = best_by_person.get(pid)
         if prev is not None and prev.score >= score:
             continue
         best_by_person[pid] = Candidate(pid, score, {
             "clothes": round(clothes, 4),
+            "scene_term": round(float(scene_term), 4),
             "scene": round(scene_cos, 4) if scene_cos is not None else None,
             "face": round(face_sim, 4) if face_sim is not None else None,
             "ref_face_id": ref.face_id,
@@ -507,6 +525,24 @@ def refresh_fts(conn: sqlite3.Connection, item_ids: set[int] | list[int]) -> Non
             log.warning("fts refresh failed for item %s: %s", iid, e)
 
 
+def record_outcome(conn: sqlite3.Connection, row: sqlite3.Row, person_id: int, label: int) -> None:
+    """Keep the evidence terms of a confirmed (1) or rejected (0) guess for the people learner
+    (section 18); the guess fields are cleared right after."""
+    try:
+        from app.learning import events
+
+        ev = json_loads(row["guess_evidence"], {}) or {}
+        scene_term = ev.get("scene_term")
+        if scene_term is None:
+            scene_term = ev.get("scene") if ev.get("scene") is not None else float(settings.guess_scene_sim)
+        features = guess_features(float(ev.get("clothes") or 0.0), float(scene_term), ev.get("face"),
+                                  same_day=bool(ev.get("same_day")), has_gps=ev.get("gps_m") is not None)
+        features["score"] = ev.get("score")
+        events.record(conn, "guess", label, features, item_id=int(row["item_id"]), person_id=int(person_id))
+    except Exception:  # noqa: BLE001 - learning never blocks a confirmation
+        log.exception("learning: could not record a guess outcome")
+
+
 def confirm(conn: sqlite3.Connection, face_ids: list[int], body_ids: list[int]) -> int:
     """Accept open guesses: person_id = guess_person_id, assigned_by 'user'. A body without a face
     also gets an item_tags row (source 'guess', removed again when that body is reassigned or deleted).
@@ -540,7 +576,7 @@ def confirm(conn: sqlite3.Connection, face_ids: list[int], body_ids: list[int]) 
         for chunk in _chunks(sorted({int(f) for f in face_ids})):
             marks = ",".join("?" * len(chunk))
             rows = conn.execute(
-                f"SELECT id, item_id, guess_person_id FROM faces WHERE id IN ({marks}) AND person_id IS NULL "
+                f"SELECT id, item_id, guess_person_id, guess_evidence FROM faces WHERE id IN ({marks}) AND person_id IS NULL "
                 "AND guess_person_id IS NOT NULL",
                 chunk,
             ).fetchall()
@@ -548,6 +584,7 @@ def confirm(conn: sqlite3.Connection, face_ids: list[int], body_ids: list[int]) 
                 pid = int(r["guess_person_id"])
                 if already("faces", r, pid):
                     continue
+                record_outcome(conn, r, pid, 1)
                 conn.execute(
                     "UPDATE faces SET person_id = ?, assigned_by = 'user', guess_person_id = NULL, guess_score = NULL, "
                     "guess_evidence = NULL WHERE id = ?",
@@ -563,14 +600,15 @@ def confirm(conn: sqlite3.Connection, face_ids: list[int], body_ids: list[int]) 
         for chunk in _chunks(sorted({int(b) for b in body_ids})):
             marks = ",".join("?" * len(chunk))
             rows = conn.execute(
-                f"SELECT id, item_id, face_id, guess_person_id FROM bodies WHERE id IN ({marks}) AND person_id IS NULL "
-                "AND guess_person_id IS NOT NULL",
+                f"SELECT id, item_id, face_id, guess_person_id, guess_evidence FROM bodies WHERE id IN ({marks}) "
+                "AND person_id IS NULL AND guess_person_id IS NOT NULL",
                 chunk,
             ).fetchall()
             for r in rows:
                 pid = int(r["guess_person_id"])
                 if already("bodies", r, pid):
                     continue
+                record_outcome(conn, r, pid, 1)
                 conn.execute(
                     "UPDATE bodies SET person_id = ?, assigned_by = 'user', guess_person_id = NULL, guess_score = NULL, "
                     "guess_evidence = NULL WHERE id = ?",
@@ -603,11 +641,12 @@ def reject(conn: sqlite3.Connection, face_ids: list[int], body_ids: list[int]) -
             for chunk in _chunks(sorted({int(i) for i in ids})):
                 marks = ",".join("?" * len(chunk))
                 rows = conn.execute(
-                    f"SELECT id, guess_person_id FROM {table} WHERE id IN ({marks}) AND guess_person_id IS NOT NULL "
-                    "AND person_id IS NULL",
+                    f"SELECT id, item_id, guess_person_id, guess_evidence FROM {table} WHERE id IN ({marks}) "
+                    "AND guess_person_id IS NOT NULL AND person_id IS NULL",
                     chunk,
                 ).fetchall()
                 for r in rows:
+                    record_outcome(conn, r, int(r["guess_person_id"]), 0)
                     conn.execute(
                         "INSERT OR IGNORE INTO guess_rejections(kind, ref_id, person_id, created_at) VALUES (?, ?, ?, ?)",
                         (kind, r["id"], r["guess_person_id"], now),

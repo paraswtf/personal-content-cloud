@@ -43,6 +43,7 @@ from app.api.common import (
     item_card,
     item_urls,
     people_filter_sql,
+    tags_filter_sql,
     page_sql,
     person_refs,
     url_version,
@@ -72,7 +73,7 @@ from app.schemas import (
     Stats,
 )
 from app.urls import page_url
-from app.util import decode_cursor, encode_cursor, json_loads, now_iso, safe_filename
+from app.util import decode_cursor, encode_cursor, json_loads, name_key, now_iso, safe_filename
 from app.util import local_day_start_utc as _local_day_start_utc
 
 log = logging.getLogger(__name__)
@@ -215,6 +216,9 @@ def item_detail(conn: sqlite3.Connection, row: sqlite3.Row) -> ItemDetail:
         text_status=row["text_status"], analysis_status=row["analysis_status"], preview_status=row["preview_status"],
         deleted_at=row["deleted_at"], updated_at=row["updated_at"], urls=item_urls(row, full=True),
     )
+    from app.api.tags import item_tags_out
+
+    data["user_tags"] = item_tags_out(conn, int(row["id"]))
     return ItemDetail(**data)
 
 
@@ -279,7 +283,28 @@ def _apply_update(conn: sqlite3.Connection, row: sqlite3.Row, body: ItemUpdate) 
                  [*sets.values(), int(row["id"])])
     if "nsfw" in sets:
         bump_search_version(conn)
+    _record_corrections(conn, row, sets)
     return renamed
+
+
+def _record_corrections(conn: sqlite3.Connection, row: sqlite3.Row, sets: dict[str, Any]) -> None:
+    """Learning events for the choices in this update (section 18): category, vault, mis-click."""
+    try:
+        from app.learning import events
+
+        item_id = int(row["id"])
+        if sets.get("category_source") == "user" and sets.get("category") != row["category"]:
+            events.record(conn, "category", None, {"from": row["category"], "to": sets["category"],
+                                                   "scores": json_loads(row["category_scores"], None)}, item_id=item_id)
+        if "nsfw" in sets and int(sets["nsfw"]) != int(row["nsfw"]):
+            events.record(conn, "vault", None, {"from": int(row["nsfw"]), "to": int(sets["nsfw"]),
+                                                "nsfw_score": row["nsfw_score"]}, item_id=item_id)
+        if "misclick" in sets and int(sets["misclick"]) != int(row["misclick"]):
+            events.record(conn, "misclick", None, {"from": int(row["misclick"]), "to": int(sets["misclick"]),
+                                                   "scores": json_loads(row["quality_scores"], None),
+                                                   "reasons": json_loads(row["misclick_reasons"], None)}, item_id=item_id)
+    except Exception:  # noqa: BLE001 - learning never blocks an edit
+        log.exception("learning: could not record a correction")
 
 
 # ------------------------------------------------------------------ config
@@ -301,6 +326,7 @@ def list_items(
     category: Literal[CATEGORIES] | None = None,  # type: ignore[valid-type]
     kind: Literal[ITEM_KINDS] | None = None,  # type: ignore[valid-type]
     person: list[int] = Query(default=[]),
+    tag: list[str] = Query(default=[]),
     date_from: str | None = Query(default=None, alias="from", max_length=10),
     date_to: str | None = Query(default=None, alias="to", max_length=10),
     favorite: bool | None = None,
@@ -322,6 +348,10 @@ def list_items(
         params.append(kind)
     if person:
         sql, p = people_filter_sql(person)
+        where.append(sql)
+        params.extend(p)
+    if tag:
+        sql, p = tags_filter_sql(tag[:10])
         where.append(sql)
         params.extend(p)
     sort_expr = SORT_KEYS[sort]
@@ -407,6 +437,10 @@ def bulk(body: BulkIn, session: SessionInfo = Depends(require_user),
         update = ItemUpdate(nsfw=_bulk_value_bool(body.value))
     elif action in ("favorite", "unfavorite"):
         update = ItemUpdate(favorite=action == "favorite")
+    elif action in ("tag", "untag"):
+        from app.api.tags import clean_tag_name
+
+        clean_tag_name(body.value)
     uids = list(dict.fromkeys(body.uids))
     rows: list[sqlite3.Row] = []
     for i in range(0, len(uids), 500):
@@ -433,6 +467,26 @@ def bulk(body: BulkIn, session: SessionInfo = Depends(require_user),
             if r["deleted_at"] is not None:
                 ingest.purge(conn, int(r["id"]))
                 updated += 1
+    elif action in ("tag", "untag"):
+        from app.api import tags as tags_api
+
+        changed: list[int] = []
+        with tx(conn):
+            if action == "tag":
+                tag_row = tags_api.ensure_tag(conn, tags_api.clean_tag_name(body.value))
+            else:
+                tag_row = conn.execute("SELECT * FROM tags WHERE name_key = ?", (name_key(body.value),)).fetchone()
+            for r in rows:
+                if r["deleted_at"] is not None or tag_row is None:
+                    continue
+                if action == "tag":
+                    done = tags_api.add_to_item(conn, int(r["id"]), tag_row)
+                else:
+                    done = tags_api.remove_from_item(conn, int(r["id"]), tag_row)
+                if done:
+                    changed.append(int(r["id"]))
+                    updated += 1
+        tags_api._refresh_fts(conn, changed)
     else:
         assert update is not None
         with tx(conn):

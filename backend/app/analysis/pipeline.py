@@ -564,10 +564,21 @@ def analyze_item(conn: sqlite3.Connection, item_id: int, version: int) -> None:
             if prior_scene:
                 old_scores = json_loads(cur["category_scores"], {}) or {}
                 r.category_scores = {**{k: v for k, v in old_scores.items() if k != "skipped"}, **r.category_scores}
+            # Section 18: the owner's labelled look-alikes decide before the rules do.
+            emb0 = next((e for fi, _t, e in r.embeddings if fi == 0), None)
+            learned_cat = learned_nsfw = None
+            if emb0 is not None and kind in ("image", "video"):
+                try:
+                    from app.learning import images as learned_images
+
+                    learned_cat = learned_images.predict_category(emb0)
+                    learned_nsfw = learned_images.predict_nsfw(emb0, nsfw_score)
+                except Exception:  # noqa: BLE001 - learning never blocks analysis
+                    log.exception("learning: image learner failed")
             dec = categories.decide(
                 kind, nsfw_score=nsfw_score, explicit_p=r.explicit_p, nsfw_override=nsfw_override,
                 screenshot_heur=screen_heur, screenshot_p=r.screenshot_p, doc_like=doc_like,
-                has_person=has_person, scores=r.category_scores,
+                has_person=has_person, scores=r.category_scores, learned=learned_cat, nsfw_learned=learned_nsfw,
             )
             if cur["category_source"] == "user":
                 category = cur["category"]
@@ -613,6 +624,13 @@ def analyze_item(conn: sqlite3.Connection, item_id: int, version: int) -> None:
                  json_dumps(r.quality_scores) if r.quality_scores else None, face_count, body_count, status, now,
                  item_id),
             )
+            tags_added = 0
+            try:
+                from app.learning import tags as learned_tags
+
+                tags_added = learned_tags.apply_item(conn, item_id, emb=emb0, text=None, kind=kind)
+            except Exception:  # noqa: BLE001 - learning never blocks analysis
+                log.exception("learning: tag suggestions failed for item %s", item_id)
             bump_faces_version(conn)
             bump_search_version(conn)
             final_version = faces_version(conn)
@@ -632,7 +650,7 @@ def analyze_item(conn: sqlite3.Connection, item_id: int, version: int) -> None:
         storage.safe_unlink(p)
     log.info("analyze: %s %s v%s -> %s, %d faces, %d bodies%s", kind, uid, version, category, len(r.faces),
              len(r.bodies), f", skipped {sorted(set(r.skipped))}" if r.skipped else "")
-    _after(conn, item_id, int(version), kind, doc_like, bool(r.labels) or people_changed)
+    _after(conn, item_id, int(version), kind, doc_like, bool(r.labels) or people_changed or tags_added > 0)
 
 
 def _after(conn: sqlite3.Connection, item_id: int, version: int, kind: str, doc_like: float | None,

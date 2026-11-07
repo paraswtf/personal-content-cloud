@@ -72,6 +72,7 @@ ROUTERS: tuple[tuple[str, str], ...] = (
     ("app.api.auth", "/api/auth"),
     ("app.api.library", "/api"),
     ("app.api.people", "/api"),
+    ("app.api.tags", ""),
     ("app.api.documents", "/api/documents"),
     ("app.api.search", "/api/search"),
     ("app.api.uploads", "/api/uploads"),

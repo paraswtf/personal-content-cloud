@@ -437,8 +437,9 @@ def _iso_date(value: date | str | None) -> date | None:
 
 
 def _filters(*, vault: bool, category: str | None, kind: str | None, person_ids: list[int] | None,
-             date_from: date | str | None, date_to: date | str | None) -> _Filters:
-    from app.api.common import people_filter_sql, visible_sql
+             date_from: date | str | None, date_to: date | str | None,
+             tag_names: list[str] | None = None) -> _Filters:
+    from app.api.common import people_filter_sql, tags_filter_sql, visible_sql
 
     parts = [visible_sql(vault=vault, misclicks="include", dups="collapse", alias="i")]
     params: list[Any] = []
@@ -451,6 +452,10 @@ def _filters(*, vault: bool, category: str | None, kind: str | None, person_ids:
     ids = sorted({int(p) for p in person_ids or []})
     if ids:
         sql, p = people_filter_sql(ids, alias="i")
+        parts.append(sql)
+        params.extend(p)
+    if tag_names:
+        sql, p = tags_filter_sql(list(tag_names)[:10], alias="i")
         parts.append(sql)
         params.extend(p)
     from app.util import local_day_start_utc
@@ -786,6 +791,7 @@ def search(
     vault: bool = False,
     limit: int = 60,
     offset: int = 0,
+    tag_names: list[str] | None = None,
 ) -> SearchResult:
     """Items matching the query, best first (see the module docstring). Raises SearchUnavailable
     when mode is semantic and the model is unavailable, or when every engine asked failed."""
@@ -795,7 +801,7 @@ def search(
     limit = max(1, int(limit))
     offset = max(0, int(offset))
     filt = _filters(vault=vault, category=category, kind=kind, person_ids=person_ids,
-                    date_from=date_from, date_to=date_to)
+                    date_from=date_from, date_to=date_to, tag_names=tag_names)
 
     key = (q, mode, filt.sql, tuple(filt.params))
     cached = _page_cache_get(key) if offset > 0 else None

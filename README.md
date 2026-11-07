@@ -31,6 +31,20 @@ What it does with each file:
   asks for the password or a passkey again and stays open for 15 minutes.
 - **Ways in.** Drag and drop in the browser, the camera inside the app, and the phone's Share menu
   (install the app from the browser menu first).
+- **Learning from your choices.** Corrections to categories, the vault, mis-clicks, document types
+  and people teach small local models, so the next automatic decision of the same kind follows them.
+- **Your own tags.** Add free-form tags such as "wedding" or "Goa trip" to any item, and the same
+  tags are suggested on look-alike photos, videos and similar documents for you to accept or remove.
+
+### Learning from your choices
+
+Every correction you make (a category or vault change on an item, a kept or deleted mis-click, a
+document type or field fix, a face assignment, a confirmed or rejected guess) is a training example.
+No deep model is retrained and nothing leaves the machine: small models are fitted on top of the
+embeddings and scores the pipeline already has, and kept in `DATA_DIR/learned/`. Training runs every 10
+minutes when there are new corrections, or at once from Settings, Learning, which also shows what was
+learned, applies it to items already in the library and resets it. Reset deletes only the learned
+models, never your choices. The switch there, or `LEARNING_ENABLED=false`, turns learning off.
 
 ## Running it
 

@@ -50,6 +50,7 @@ def search_items(
     category: Category | None = None,
     kind: ItemKind | None = None,
     person: list[int] = Query(default=[]),
+    tag: list[str] = Query(default=[]),
     date_from: date | None = Query(default=None, alias="from"),
     date_to: date | None = Query(default=None, alias="to"),
     limit: int = Query(default=60, ge=1, le=200),
@@ -63,7 +64,7 @@ def search_items(
     try:
         result = search_service.search(
             conn, query, mode=mode, category=category, kind=kind, person_ids=person, date_from=date_from,
-            date_to=date_to, vault=in_vault, limit=limit, offset=offset,
+            date_to=date_to, vault=in_vault, limit=limit, offset=offset, tag_names=tag or None,
         )
     except search_service.SearchUnavailable:
         raise HTTPException(status_code=503, detail="search_unavailable") from None

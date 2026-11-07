@@ -59,7 +59,7 @@ export default function Library({ vault = false, title, headerExtra }: Props) {
     setParams(p, { replace: true })
   }
   const clearSearch = () => set('q', null)
-  const filtered = !!(filters.category || filters.kind || filters.people.length || filters.from || filters.to || filters.favorite)
+  const filtered = !!(filters.category || filters.kind || filters.people.length || filters.tags.length || filters.from || filters.to || filters.favorite)
 
   const heading = title ?? (vault ? 'Vault' : 'Library')
   const countLine =

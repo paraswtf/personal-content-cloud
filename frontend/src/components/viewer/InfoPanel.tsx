@@ -1,4 +1,4 @@
-// Viewer info panel: document card, people and guesses, category with override, mis-click reasons,
+// Viewer info panel: document card, people and guesses, free-form tags (TagsPanel), category with override, mis-click reasons,
 // labels, read text, file details, and the item actions (favourite, vault, reprocess, download, trash).
 import { useState, type ReactNode } from 'react'
 import { Link } from 'react-router'
@@ -29,6 +29,7 @@ import { burstBestUid, reasonKeys, reasonLabel } from '../library/misclick'
 import PersonPicker, { choiceBody, type PersonChoice } from '../people/PersonPicker'
 import { boxKey, type BoxTarget } from './boxes'
 import GuessChip from './GuessChip'
+import TagsPanel from './TagsPanel'
 import TextPanel from './TextPanel'
 import { darkButton, useInvalidateItem } from './shared'
 
@@ -425,6 +426,10 @@ export default function InfoPanel({
           )}
         </Section>
       )}
+
+      <Section title="Tags" id="viewer-tags">
+        <TagsPanel key={detail.uid} detail={detail} />
+      </Section>
 
       {!documentFirst && documentSection}
 

@@ -218,6 +218,7 @@ class ItemDetail(ItemCard):
     bodies: list[BodyOut] = []
     tags: list[PersonRef] = []
     people: list[PersonRef] = []
+    user_tags: list[ItemTagOut] = []
     document: DocumentOut | None = None
     text_status: Literal["none", "pending", "done", "error"] = "none"
     analysis_status: Literal["pending", "done", "error"] = "pending"
@@ -242,7 +243,7 @@ class ItemUpdate(BaseModel):
 
 class BulkIn(BaseModel):
     uids: list[str] = Field(min_length=1, max_length=1000)
-    action: Literal["delete", "restore", "keep", "category", "nsfw", "favorite", "unfavorite", "purge"]
+    action: Literal["delete", "restore", "keep", "category", "nsfw", "favorite", "unfavorite", "purge", "tag", "untag"]
     value: str | None = None
 
 
@@ -529,6 +530,48 @@ class SystemOut(BaseModel):
     ffmpeg: bool
     workers: bool
     download: dict[str, Any] | None = None
+
+
+class TagOut(BaseModel):
+    id: int
+    name: str
+    items: int = 0
+    auto_items: int = 0
+
+
+class TagIn(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+
+
+class UserTagIn(BaseModel):
+    tag_id: int | None = None
+    name: str | None = Field(default=None, max_length=80)
+
+
+class ItemTagOut(BaseModel):
+    id: int
+    name: str
+    source: Literal["user", "auto"] = "user"
+    score: float | None = None
+
+
+class LearningStatus(BaseModel):
+    enabled: bool
+    trained_at: str | None = None
+    pending: int = 0
+    learners: dict[str, Any]
+    events: dict[str, int] = {}
+    errors: dict[str, str] = {}
+
+
+class LearningEnabledIn(BaseModel):
+    enabled: bool
+
+
+class LearningApplyOut(BaseModel):
+    items: int
+    documents: int
+    tags: int = 0
 
 
 class ConfigOut(BaseModel):

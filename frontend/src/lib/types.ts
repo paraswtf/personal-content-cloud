@@ -189,6 +189,29 @@ export interface TagIn {
   new_person_name?: string | null
 }
 
+// free-form tags (section 19): the owner's own tags, and the ones the tag learner suggests
+export interface TagOut {
+  id: number
+  name: string
+  /** Live items the session may see with this tag added by the owner. */
+  items: number
+  /** Live items where the tag is only suggested. */
+  auto_items: number
+}
+export type ItemTagSource = 'user' | 'auto'
+export interface ItemTagOut {
+  id: number
+  name: string
+  source: ItemTagSource
+  /** Similarity of the suggestion (auto rows); null for tags the owner added. */
+  score: number | null
+}
+/** POST /api/items/{uid}/user-tags: an existing tag by id, or a name (created when new). */
+export interface UserTagIn {
+  tag_id?: number
+  name?: string
+}
+
 // items
 export interface ItemUrls {
   thumb: string
@@ -277,6 +300,8 @@ export interface ItemDetail extends ItemCard {
   bodies: BodyOut[]
   tags: PersonRef[]
   people: PersonRef[]
+  /** Free-form tags: the owner's first, then suggestions by score. */
+  user_tags: ItemTagOut[]
   document: DocumentOut | null
   text_status: TextStatus
   analysis_status: AnalysisStatus
@@ -291,7 +316,19 @@ export interface ItemUpdate {
   favorite?: boolean
   filename?: string
 }
-export type BulkAction = 'delete' | 'restore' | 'keep' | 'category' | 'nsfw' | 'favorite' | 'unfavorite' | 'purge'
+export type BulkAction =
+  | 'delete'
+  | 'restore'
+  | 'keep'
+  | 'category'
+  | 'nsfw'
+  | 'favorite'
+  | 'unfavorite'
+  | 'purge'
+  /** value: the tag name (created when new) */
+  | 'tag'
+  /** value: the tag name */
+  | 'untag'
 export interface BulkIn {
   uids: string[]
   action: BulkAction
@@ -474,6 +511,30 @@ export interface SystemOut {
   ffmpeg: boolean
   workers: boolean
   download: { running: boolean; progress: string | null; error: string | null } | null
+}
+// learning (section 18): what the small models learned from the owner's corrections
+export type LearningEventKind = 'category' | 'vault' | 'misclick' | 'doc_type' | 'guess' | 'tag'
+export type MisclickThresholdKey = 'blur_var_min' | 'dark_mean' | 'clipped_frac' | 'accident_min'
+export interface LearningStatus {
+  enabled: boolean
+  trained_at: string | null
+  pending: number
+  learners: {
+    doc_type: { examples: number; labels: string[] }
+    category: { examples: number; labels: string[] }
+    vault: { examples: number; threshold: number | null }
+    misclick: { examples: number; thresholds: Partial<Record<MisclickThresholdKey, number>> }
+    people: { persons: number; events: number; weights: Record<string, number> | null }
+    /** Section 19: tags learned, items tagged by the owner, suggestions removed. Optional: older servers lack it. */
+    tags?: { tags: number; examples: number; rejections: number }
+  }
+  events: Partial<Record<LearningEventKind, number>>
+}
+export interface LearningApplyOut {
+  items: number
+  documents: number
+  /** Suggested tags written for existing items (section 19). */
+  tags?: number
 }
 export interface ConfigOut {
   site_title: string

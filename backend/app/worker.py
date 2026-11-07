@@ -315,6 +315,14 @@ def _housekeeping(conn: sqlite3.Connection) -> dict[str, int]:
         out["sessions"] = purge_expired(conn)
     except Exception:
         log.exception("housekeeping: session purge failed")
+    try:
+        from app.learning import train as learning_train
+
+        if learning_train.maybe_train(conn):
+            out["trained"] = 1
+    except Exception:  # noqa: BLE001 - learning never blocks housekeeping
+        log.exception("learning: training failed")
+
     return out
 
 

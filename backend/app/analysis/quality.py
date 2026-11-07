@@ -236,6 +236,17 @@ def is_misclick(reasons: dict[str, Any] | None) -> bool:
 
 
 # ------------------------------------------------------------------ decision
+def learned_cuts() -> dict[str, float]:
+    """The mis-click cuts: the defaults, moved by what the owner kept and confirmed (section 18)."""
+    try:
+        from app.learning import misclick as learned_misclick
+
+        return learned_misclick.thresholds()
+    except Exception:  # noqa: BLE001 - learning never blocks the decision
+        return {"blur_var_min": float(settings.blur_var_min), "dark_mean": DARK_MEAN, "clipped_frac": CLIPPED_FRAC,
+                "accident_min": ACCIDENT_MIN}
+
+
 def decide(kind: str, category: str | None, scores: dict[str, Any], *, good_face: bool,
            burst: dict[str, Any] | None = None) -> tuple[bool, dict[str, Any], dict[str, Any]]:
     """Mis-click decision. scores holds blur_var, mean_lum, p95_lum, clipped_frac and optionally
@@ -245,26 +256,27 @@ def decide(kind: str, category: str | None, scores: dict[str, Any], *, good_face
     reasons: dict[str, Any] = {}
     if kind not in ("image", "video") or category in ("documents", "screenshots"):
         return False, reasons, scores
+    cuts = learned_cuts()
     mean = scores.get("mean_lum")
     p95 = scores.get("p95_lum")
-    if isinstance(mean, (int, float)) and isinstance(p95, (int, float)) and mean < DARK_MEAN and p95 < DARK_P95:
+    if isinstance(mean, (int, float)) and isinstance(p95, (int, float)) and mean < cuts["dark_mean"] and p95 < DARK_P95:
         reasons["dark"] = {"mean_lum": round(float(mean), 1), "p95_lum": round(float(p95), 1)}
     if kind == "video":
         return bool(reasons), reasons, scores
     clipped = scores.get("clipped_frac")
     if (isinstance(mean, (int, float)) and mean > BRIGHT_MEAN) or (
-            isinstance(clipped, (int, float)) and clipped > CLIPPED_FRAC):
+            isinstance(clipped, (int, float)) and clipped > cuts["clipped_frac"]):
         reasons["blown_out"] = {"mean_lum": round(float(mean or 0), 1), "clipped_frac": round(float(clipped or 0), 3)}
     bv = scores.get("blur_var")
     motion = scores.get("motion_blur_p")
     if isinstance(bv, (int, float)):
-        limit = float(settings.blur_var_min)
+        limit = float(cuts["blur_var_min"])
         if bv < limit:
             reasons["blurry"] = {"blur_var": round(float(bv), 1)}
         elif isinstance(motion, (int, float)) and motion >= MOTION_BLUR_MIN and bv < 2 * limit:
             reasons["blurry"] = {"blur_var": round(float(bv), 1), "motion_blur_p": round(float(motion), 3)}
     accident = scores.get("accident_p")
-    if isinstance(accident, (int, float)) and accident >= ACCIDENT_MIN and not good_face:
+    if isinstance(accident, (int, float)) and accident >= cuts["accident_min"] and not good_face:
         reasons["pocket"] = {"accident_p": round(float(accident), 3)}
     reasons = with_burst(reasons, burst)
     return is_misclick(reasons), reasons, scores

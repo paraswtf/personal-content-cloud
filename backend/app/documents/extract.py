@@ -305,6 +305,17 @@ ANALYZE_MAX_CHARS = 400_000  # about 130 logical pages; detection and parsing re
 ANALYZE_MAX_PAGES = 150
 
 
+def learned_doc_type(text: str) -> tuple[str, float] | None:
+    """(doc_type, similarity) from the documents the owner typed by hand (section 18), or None."""
+    try:
+        from app.learning import doc_type as learned
+
+        return learned.predict(text)
+    except Exception:  # noqa: BLE001 - learning never blocks the text stage
+        log.exception("learning: document type learner failed")
+        return None
+
+
 def analyze_text(text: str, pages: list[PageText], item: Any = None, *, existing: sqlite3.Row | None = None,
                  forced_type: str | None = None) -> tuple[ParsedDocument, float] | None:
     """(parsed document, detection score) or None when the item gets no documents row."""
@@ -325,6 +336,14 @@ def analyze_text(text: str, pages: list[PageText], item: Any = None, *, existing
     else:
         det = detect(text, pages, item)
         doc_type, det_score = det.doc_type, det.score
+        hint = learned_doc_type(text)
+        if hint is not None:
+            label, sim = hint
+            from app.learning.doc_type import MIN_SIM, STRONG_SIM
+
+            if sim >= STRONG_SIM or (sim >= MIN_SIM and doc_type == "other"):
+                doc_type = label
+                det_score = max(float(det.scores.get(label, 0.0) or 0.0), float(sim))
         if doc_type == "other" and len(text.strip()) < MIN_TEXT_CHARS:
             return None
     parsed = parsers.parse(doc_type, text, pages, boxes, today=_capture_date(item))
@@ -480,6 +499,12 @@ def extract_item(conn: sqlite3.Connection, item_id: int, version: int) -> None:
             existing = conn.execute("SELECT * FROM documents WHERE item_id = ?", (item_id,)).fetchone()
             vals = merged_values(result[0], existing) if result is not None else None
             write_document(conn, item_id, vals, has_photo=has_photo)
+            try:
+                from app.learning import tags as learned_tags
+
+                learned_tags.apply_item(conn, item_id, emb=None, text=text, kind=item["kind"])
+            except Exception:  # noqa: BLE001 - learning never blocks the text stage
+                log.exception("learning: tag suggestions failed for item %s", item_id)
             refresh_fts(conn, item_id)
             if vals is not None and vals.get("doc_type") not in (None, "", "other") and item["kind"] == "image":
                 # A typed document photographed with the camera belongs with the documents (section 9 rule 4),
@@ -704,6 +729,9 @@ def refresh_fts(conn: sqlite3.Connection, item_id: int) -> None:
     )]
     labels = [r["label"] for r in conn.execute(
         "SELECT label FROM item_labels WHERE item_id = ? ORDER BY score DESC", (item_id,))]
+    labels += [r["name"] for r in conn.execute(
+        "SELECT t.name FROM item_user_tags ut JOIN tags t ON t.id = ut.tag_id WHERE ut.item_id = ? ORDER BY t.name",
+        (item_id,))]
     filename = item["original_filename"] or ""
     stem = re.sub(r"[_\-.]+", " ", filename)
     with tx(conn):

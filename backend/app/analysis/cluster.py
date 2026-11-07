@@ -216,8 +216,20 @@ def _score(idx: FaceIndex, faces: list[sqlite3.Row], exclude: frozenset[int]) ->
     out: list[list[tuple[int, float]]] = []
     for r, scores in zip(faces, idx.person_scores_many(embs, settings.cluster_topk, exclude)):
         thr = _threshold(r)
-        out.append([(pid, score) for pid, score in scores if score >= thr])
+        out.append([(pid, score) for pid, score in scores if score >= max(thr, learned_threshold(pid, thr))])
     return out
+
+
+def learned_threshold(person_id: int, default: float) -> float:
+    """The person's own match threshold from the owner's confirmations and rejections (section 18),
+    else the default."""
+    try:
+        from app.learning import people as learned_people
+
+        t = learned_people.person_threshold(int(person_id))
+    except Exception:  # noqa: BLE001 - learning never blocks clustering
+        t = None
+    return float(t) if t is not None else float(default)
 
 
 def _group_by_item(rows: list[sqlite3.Row]) -> tuple[dict[int, list[sqlite3.Row]], list[int]]:

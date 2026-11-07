@@ -31,6 +31,8 @@ from app.config import settings
 log = logging.getLogger(__name__)
 
 SCENE_GROUPS = ("places", "food", "pets", "objects")
+# What the owner's labelled look-alikes may decide (section 18): every category but the vault.
+LEARNABLE_CATEGORIES = ("documents", "screenshots", "personal", "places", "food", "pets", "objects", "misc")
 SCENE_MIN = 0.35
 NSFW_SECOND_SIGNAL = 0.4  # classifier score that, with the explicit zero-shot, still flags
 EXPLICIT_MIN = 0.5
@@ -293,18 +295,28 @@ def nsfw_decision(nsfw_score: float | None, explicit_p: float | None) -> bool:
 def decide(kind: str, *, nsfw_score: float | None = None, explicit_p: float | None = None,
            nsfw_override: bool | None = None, screenshot_heur: bool = False, screenshot_p: float | None = None,
            doc_like: float | None = None, has_person: bool = False,
-           scores: dict[str, float] | None = None) -> Decision:
+           scores: dict[str, float] | None = None, learned: tuple[str, float] | None = None,
+           nsfw_learned: bool | None = None) -> Decision:
     """Section 9 order: documents by kind, nsfw, screenshots, document-like images, people, then the
     best scene group (places, food, pets, objects; probability from the joint CATEGORY_PROMPTS softmax)
     when >= SCENE_MIN, else misc.
-    nsfw_override (the user's choice) replaces the classifier decision."""
+    nsfw_override (the user's choice) replaces the classifier decision; nsfw_learned (the vault
+    learner, section 18) replaces it when there is no override; learned (category, score) from the
+    owner's labelled look-alikes wins over the rules below, except documents by kind and the vault."""
     if kind in ("pdf", "document"):
         return Decision("documents", bool(nsfw_override) if nsfw_override is not None else False, "kind")
-    nsfw = nsfw_override if nsfw_override is not None else nsfw_decision(nsfw_score, explicit_p)
+    if nsfw_override is not None:
+        nsfw = nsfw_override
+    elif nsfw_learned is not None:
+        nsfw = nsfw_learned
+    else:
+        nsfw = nsfw_decision(nsfw_score, explicit_p)
     if nsfw:
         return Decision("nsfw", True, "nsfw")
     if kind == "other":
         return Decision("misc", False, "kind")
+    if learned is not None and learned[0] in LEARNABLE_CATEGORIES:
+        return Decision(learned[0], False, "learned", {"score": round(float(learned[1]), 4)})
     if screenshot_heur or (screenshot_p is not None and screenshot_p >= SCREENSHOT_P_MIN):
         return Decision("screenshots", False, "screenshot")
     if doc_like is not None and doc_like >= settings.doc_likeness_min:
