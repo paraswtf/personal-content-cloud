@@ -1,0 +1,24 @@
+# Python
+backend/.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/tsconfig.tsbuildinfo
+
+# Runtime data and downloaded models (large, not source)
+data/
+models/
+
+# Hub source kept on disk for porting only
+frontend/hub_reference/
+backend/app/*_hub_reference.py
+backend/app/*/*_hub_reference.py
+scripts/*_hub_reference.py
+
+# local
+.env
+.tmp/

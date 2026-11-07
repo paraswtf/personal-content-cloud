@@ -1,0 +1,325 @@
+"""In-memory face embedding index, kept in sync with the DB.
+
+CONTRACT (implemented by the faces agent). A process-wide singleton (get_index()) shared by
+the worker and API threads, guarded by an RLock. It caches (face id, person id, assigned_by,
+media id, embedding) for every face and refreshes when kv 'faces_version' changes:
+  sync(conn): if the stored version differs, re-read (id, person_id, assigned_by, media_id) for all
+  faces, drop rows that disappeared, load embeddings only for ids it has not seen, update the
+  rest. That keeps refreshes cheap (no full embedding reload) at 100k+ faces.
+
+State read inside an open write transaction may be rolled back later (and face ids reused, since
+a rolled back AUTOINCREMENT insert gives its id back). Such a sync is remembered as tentative:
+the next sync refreshes again and reloads the embeddings of the ids that sync added. A later
+transaction on the same connection is told apart by conn.total_changes. Code that syncs inside a
+write transaction calls invalidate() when that transaction rolls back.
+A sync outside a transaction reads the version, the rows and the embeddings in one read
+transaction, so they come from one snapshot.
+Callers that sync and then query (cluster.py) hold `index.lock` across both, so another
+thread cannot swap the state in between.
+"""
+from __future__ import annotations
+
+import logging
+import sqlite3
+import threading
+from pathlib import Path
+
+import numpy as np
+
+from app.db import faces_version
+
+log = logging.getLogger(__name__)
+
+DIM = 512
+MIN_SIM = 0.2  # person_scores only scores people with at least one face this similar
+_IN_CHUNK = 500  # ids per "IN (...)" query (SQLite variable limit is far above, keeps SQL small)
+_SCORE_BATCH = 64  # query embeddings per matrix product in person_scores_many
+
+
+class FaceIndex:
+    def __init__(self) -> None:
+        self.lock = threading.RLock()
+        self._version: int | None = None
+        self._ids = np.zeros(0, dtype=np.int64)
+        self._person = np.zeros(0, dtype=np.int64)  # -1 = unassigned
+        self._media = np.zeros(0, dtype=np.int64)
+        self._admin = np.zeros(0, dtype=bool)
+        self._emb = np.zeros((0, DIM), dtype=np.float32)
+        self._pos: dict[int, int] = {}
+        self._tentative_conn: int | None = None  # id(conn) of a sync made inside a transaction
+        self._tentative_changes = 0  # conn.total_changes right after that sync
+        self._tentative_ids: set[int] = set()
+        self._cache: dict[str, object] = {}  # derived data (cluster.py), dropped on every change
+        self._generation = 0  # bumped on every change of the in-memory state
+
+    # -------------------------------------------------------------- derived-data cache
+    @property
+    def generation(self) -> int:
+        return self._generation
+
+    def cache_get(self, key: str) -> object | None:
+        with self.lock:
+            return self._cache.get(key)
+
+    def cache_put(self, key: str, generation: int, value: object) -> None:
+        """Store data derived from the state at `generation`. Ignored if the state changed since,
+        or if it may still be rolled back (read inside a write transaction)."""
+        with self.lock:
+            if generation == self._generation and self._tentative_conn is None and self._version is not None:
+                self._cache[key] = value
+
+    def _changed(self) -> None:
+        self._cache = {}
+        self._generation += 1
+
+    # -------------------------------------------------------------- sync
+    def sync(self, conn: sqlite3.Connection, force: bool = False) -> None:
+        with self.lock:
+            in_tx = conn.in_transaction
+            if not in_tx:
+                # One read transaction: version, rows and embeddings from the same snapshot.
+                conn.execute("BEGIN")
+                try:
+                    self._sync(conn, force, in_tx=False)
+                except BaseException:
+                    conn.execute("ROLLBACK")
+                    raise
+                conn.execute("COMMIT")
+            else:
+                self._sync(conn, force, in_tx=True)
+
+    def _sync(self, conn: sqlite3.Connection, force: bool, in_tx: bool) -> None:
+        version = faces_version(conn)
+        if self._tentative_conn is not None:
+            same_tx = (in_tx and self._tentative_conn == id(conn)
+                       and self._tentative_changes == conn.total_changes)
+            if not (same_tx and version == self._version):
+                force = True
+        if not force and version == self._version:
+            return
+        reload_ids = self._tentative_ids
+        rows = conn.execute("SELECT id, person_id, assigned_by, media_id FROM faces ORDER BY id").fetchall()
+        n = len(rows)
+        ids = np.fromiter((r[0] for r in rows), dtype=np.int64, count=n)
+        person = np.fromiter((r[1] if r[1] is not None else -1 for r in rows), dtype=np.int64, count=n)
+        admin = np.fromiter((r[2] == "admin" for r in rows), dtype=bool, count=n)
+        media = np.fromiter((r[3] for r in rows), dtype=np.int64, count=n)
+        emb = np.zeros((n, DIM), dtype=np.float32)
+        # Carry cached embeddings over (both id arrays are sorted).
+        hit = np.zeros(n, dtype=bool)
+        if self._ids.size and n:
+            pos = np.searchsorted(self._ids, ids)
+            pos_c = np.minimum(pos, self._ids.size - 1)
+            hit = self._ids[pos_c] == ids
+            if reload_ids:
+                hit &= ~np.isin(ids, np.fromiter(reload_ids, dtype=np.int64, count=len(reload_ids)))
+            emb[hit] = self._emb[pos_c[hit]]
+        missing = np.nonzero(~hit)[0].tolist()
+        if missing:
+            self._load_embeddings(conn, ids, missing, emb)
+        self._set_state(ids, person, admin, media, emb, version)
+        self._mark(conn, in_tx, {int(ids[i]) for i in missing})
+        log.debug("face index synced: %d faces (%d loaded), version %d", n, len(missing), version)
+
+    def _set_state(self, ids, person, admin, media, emb, version: int | None) -> None:
+        self._ids, self._person, self._admin, self._media, self._emb = ids, person, admin, media, emb
+        self._pos = {fid: i for i, fid in enumerate(ids.tolist())}
+        self._version = version
+        self._changed()
+
+    def _mark(self, conn: sqlite3.Connection, in_tx: bool, loaded_ids: set[int]) -> None:
+        if in_tx:
+            # Keep ids loaded by an earlier tentative sync of this transaction: they may be rolled
+            # back too.
+            prev = self._tentative_ids if self._tentative_conn == id(conn) else set()
+            self._tentative_conn = id(conn)
+            self._tentative_changes = conn.total_changes
+            self._tentative_ids = prev | loaded_ids
+        else:
+            self._tentative_conn = None
+            self._tentative_ids = set()
+
+    def sync_media(self, conn: sqlite3.Connection, media_id: int, base_version: int) -> None:
+        """Inside a write transaction that changed only the faces of `media_id`: refresh just that
+        item's rows when the index already holds the committed state at `base_version` (the
+        version read at the start of this transaction). Otherwise a full sync."""
+        with self.lock:
+            if (not conn.in_transaction or self._tentative_conn is not None
+                    or self._version is None or self._version != int(base_version)):
+                self._sync(conn, False, in_tx=conn.in_transaction)
+                return
+            rows = conn.execute(
+                "SELECT id, person_id, assigned_by, media_id FROM faces WHERE media_id = ? ORDER BY id",
+                (int(media_id),),
+            ).fetchall()
+            n = len(rows)
+            r_ids = np.fromiter((r[0] for r in rows), dtype=np.int64, count=n)
+            r_person = np.fromiter((r[1] if r[1] is not None else -1 for r in rows), dtype=np.int64, count=n)
+            r_admin = np.fromiter((r[2] == "admin" for r in rows), dtype=bool, count=n)
+            r_media = np.full(n, int(media_id), dtype=np.int64)
+            r_emb = np.zeros((n, DIM), dtype=np.float32)
+            if n:
+                self._load_by_id(conn, r_ids, list(range(n)), r_emb)
+            keep = self._media != int(media_id)
+            ids = np.concatenate([self._ids[keep], r_ids])
+            order = np.argsort(ids, kind="stable")
+            self._set_state(
+                ids[order],
+                np.concatenate([self._person[keep], r_person])[order],
+                np.concatenate([self._admin[keep], r_admin])[order],
+                np.concatenate([self._media[keep], r_media])[order],
+                np.concatenate([self._emb[keep], r_emb])[order],
+                faces_version(conn),
+            )
+            self._mark(conn, True, {int(f) for f in r_ids.tolist()})
+            log.debug("face index: media %s refreshed (%d faces), version %d", media_id, n, self._version)
+
+    @staticmethod
+    def _load_embeddings(conn: sqlite3.Connection, ids: np.ndarray, rows: list[int], out: np.ndarray) -> None:
+        if len(rows) > len(ids) // 2:
+            # Most rows are new (first load): one scan is cheaper than many IN queries.
+            pos = {int(ids[i]): i for i in rows}
+            for fid, blob in conn.execute("SELECT id, embedding FROM faces"):
+                i = pos.get(fid)
+                if i is not None:
+                    out[i] = _decode(blob)
+            return
+        FaceIndex._load_by_id(conn, ids, rows, out)
+
+    @staticmethod
+    def _load_by_id(conn: sqlite3.Connection, ids: np.ndarray, rows: list[int], out: np.ndarray) -> None:
+        for start in range(0, len(rows), _IN_CHUNK):
+            chunk = rows[start:start + _IN_CHUNK]
+            pos = {int(ids[i]): i for i in chunk}
+            marks = ",".join("?" * len(pos))
+            for fid, blob in conn.execute(f"SELECT id, embedding FROM faces WHERE id IN ({marks})", list(pos)):
+                out[pos[fid]] = _decode(blob)
+
+    def invalidate(self) -> None:
+        """Force a full refresh (embeddings included) on the next sync. Call it when a transaction
+        that synced or called set_person rolls back."""
+        with self.lock:
+            self._set_state(
+                np.zeros(0, dtype=np.int64), np.zeros(0, dtype=np.int64), np.zeros(0, dtype=bool),
+                np.zeros(0, dtype=np.int64), np.zeros((0, DIM), dtype=np.float32), None,
+            )
+            self._tentative_conn = None
+            self._tentative_ids = set()
+
+    def set_person(self, face_id: int, person_id: int | None) -> None:
+        """Reflect an assignment made in the current transaction without a full refresh."""
+        with self.lock:
+            p = self._pos[face_id]
+            self._person[p] = -1 if person_id is None else person_id
+            self._changed()
+            if self._tentative_conn is None:
+                # The next sync refreshes the rows even if this transaction rolls back (version
+                # unchanged). 0 is never an id(conn).
+                self._tentative_conn = 0
+
+    # -------------------------------------------------------------- queries
+    def size(self) -> int:
+        with self.lock:
+            return int(self._ids.shape[0])
+
+    def person_scores(
+        self, emb: np.ndarray, topk: int, exclude_face_ids: set[int] | frozenset[int] = frozenset()
+    ) -> list[tuple[int, float]]:
+        """For each person with faces in the index: mean of the top-k cosine similarities between
+        emb and that person's faces (fewer if the person has fewer faces). Sorted desc.
+        Only people with at least one face similarity >= MIN_SIM are returned; their score uses
+        all of their faces, weak ones included."""
+        return self.person_scores_many(np.asarray(emb, dtype=np.float32)[None, :], topk, exclude_face_ids)[0]
+
+    def person_scores_many(
+        self, embs: np.ndarray, topk: int, exclude_face_ids: set[int] | frozenset[int] = frozenset()
+    ) -> list[list[tuple[int, float]]]:
+        """person_scores for each row of embs (B, 512), with one matrix product for the batch."""
+        embs = np.asarray(embs, dtype=np.float32).reshape(-1, DIM)
+        with self.lock:
+            if self._ids.shape[0] == 0 or embs.shape[0] == 0:
+                return [[] for _ in range(embs.shape[0])]
+            base = self._person >= 0
+            if exclude_face_ids:
+                base &= ~np.isin(self._ids, np.fromiter(exclude_face_ids, dtype=np.int64))
+            out: list[list[tuple[int, float]]] = []
+            for start in range(0, embs.shape[0], _SCORE_BATCH):
+                sims = self._emb @ embs[start:start + _SCORE_BATCH].T  # (N, b)
+                out.extend(_topk_means(self._person, base, sims[:, b], topk) for b in range(sims.shape[1]))
+            return out
+
+    def centroids(self, person_ids: list[int] | None = None) -> tuple[np.ndarray, np.ndarray]:
+        """(person_ids array, L2-normalised mean embeddings (P, 512)) for people with faces."""
+        with self.lock:
+            mask = self._person >= 0
+            if person_ids is not None:
+                mask &= np.isin(self._person, np.asarray(list(person_ids), dtype=np.int64))
+            sel = np.nonzero(mask)[0]
+            p, e = self._person[sel], self._emb[sel]
+        if p.size == 0:
+            return np.zeros(0, dtype=np.int64), np.zeros((0, DIM), dtype=np.float32)
+        order = np.argsort(p, kind="stable")
+        p, e = p[order], e[order]
+        pids, starts = np.unique(p, return_index=True)
+        sums = np.add.reduceat(e, starts, axis=0)
+        norms = np.linalg.norm(sums, axis=1, keepdims=True)
+        return pids.astype(np.int64), (sums / np.maximum(norms, 1e-12)).astype(np.float32)
+
+    def embeddings_of(self, face_ids: list[int]) -> np.ndarray:
+        """(n, 512) embeddings for the given face ids, in order (KeyError if unknown)."""
+        with self.lock:
+            rows = [self._pos[int(f)] for f in face_ids]
+            return self._emb[rows].copy() if rows else np.zeros((0, DIM), dtype=np.float32)
+
+
+def _topk_means(person: np.ndarray, base: np.ndarray, sims: np.ndarray, topk: int) -> list[tuple[int, float]]:
+    cand = np.unique(person[base & (sims >= MIN_SIM)])
+    if cand.size == 0:
+        return []
+    # Every face of a candidate counts: dropping the weak ones would shrink the divisor and turn
+    # the top-k mean into "best single face".
+    sel = np.nonzero(base & np.isin(person, cand))[0]
+    p, s = person[sel], sims[sel]
+    order = np.lexsort((-s, p))
+    p, s = p[order], s[order]
+    starts = np.r_[0, np.nonzero(np.diff(p))[0] + 1]
+    group = np.repeat(np.arange(starts.size), np.diff(np.r_[starts, p.size]))
+    rank = np.arange(p.size) - starts[group]
+    keep = rank < max(int(topk), 1)
+    totals = np.bincount(group[keep], weights=s[keep], minlength=starts.size)
+    counts = np.bincount(group[keep], minlength=starts.size)
+    means = totals / np.maximum(counts, 1)
+    pids = p[starts]
+    out = sorted(zip(pids.tolist(), means.tolist()), key=lambda t: (-t[1], t[0]))
+    return [(int(a), float(b)) for a, b in out]
+
+
+def _decode(blob: bytes) -> np.ndarray:
+    return np.frombuffer(blob, dtype=np.float32, count=DIM)
+
+
+_index: FaceIndex | None = None
+_index_db: Path | None = None
+_index_lock = threading.Lock()
+
+
+def get_index() -> FaceIndex:
+    """Process-wide singleton. It must also fully reload when settings.db_path changes
+    (tests point settings at a fresh database per test)."""
+    global _index, _index_db
+    from app.config import settings
+
+    db_path = settings.db_path
+    with _index_lock:
+        if _index is None or _index_db != db_path:
+            _index = FaceIndex()
+            _index_db = db_path
+        return _index
+
+
+def reset_index() -> None:
+    """Drop the singleton (tests)."""
+    global _index, _index_db
+    with _index_lock:
+        _index = None
+        _index_db = None

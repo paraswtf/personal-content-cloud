@@ -1,0 +1,178 @@
+@import "tailwindcss";
+
+/* Brand tokens from the SICSR logo set (alumni-sicsr-logos/): red mark, charcoal type, cream ground.
+   Use them as Tailwind utilities: bg-brand, text-ink, bg-cream, border-line, etc. */
+@theme {
+  --font-sans: "Inter Variable", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+
+  --color-brand: #c4161c;
+  --color-brand-dark: #9f1116;
+  --color-brand-tint: #f9e3e1;
+  --color-ink: #2c3135;
+  --color-ink-soft: #5b6268;
+  --color-ink-faint: #8a9096;
+  --color-cream: #f3e9dd;
+  --color-cream-soft: #f8f2ea;
+  --color-paper: #fffdfa;
+  --color-line: #e3d6c6;
+  --color-ok: #2f7d4f;
+  --color-warn: #a86411;
+
+  --radius-card: 1rem;
+  --shadow-card: 0 1px 2px rgb(44 49 53 / 0.06), 0 4px 16px rgb(44 49 53 / 0.06);
+}
+
+@layer base {
+  :root {
+    /* Native bits (scrollbars, date pickers, caret) stay light to match the cream and paper surfaces. */
+    color-scheme: light;
+  }
+  html {
+    -webkit-text-size-adjust: 100%;
+    -webkit-tap-highlight-color: transparent;
+  }
+  body {
+    @apply bg-cream font-sans text-ink antialiased;
+    min-height: 100dvh;
+  }
+  :focus-visible {
+    outline: 2px solid var(--color-brand);
+    outline-offset: 2px;
+  }
+  ::selection {
+    background: var(--color-brand-tint);
+  }
+
+  /* Form controls. Text inputs carry their own utility classes (height, radius, focus ring); this layer
+     covers what utilities cannot: placeholders, the native search clear button, checkboxes and radios.
+     Utilities sit above this layer, so a visually hidden radio (sr-only) keeps its 1px box. */
+  input::placeholder,
+  textarea::placeholder {
+    color: var(--color-ink-faint);
+    opacity: 1;
+  }
+  input[type="search"] {
+    -webkit-appearance: none;
+    appearance: none;
+  }
+  input[type="search"]::-webkit-search-cancel-button,
+  input[type="search"]::-webkit-search-decoration,
+  input[type="search"]::-webkit-search-results-button,
+  input[type="search"]::-webkit-search-results-decoration {
+    -webkit-appearance: none;
+    display: none;
+  }
+  input:disabled,
+  textarea:disabled {
+    cursor: not-allowed;
+    opacity: 0.6;
+  }
+
+  input[type="checkbox"],
+  input[type="radio"] {
+    -webkit-appearance: none;
+    appearance: none;
+    flex-shrink: 0;
+    width: 1rem;
+    height: 1rem;
+    margin: 0;
+    border: 1.5px solid var(--color-line);
+    background-color: var(--color-paper);
+    background-position: center;
+    background-repeat: no-repeat;
+    background-size: 100% 100%;
+    cursor: pointer;
+    vertical-align: middle;
+    transition:
+      background-color 120ms ease,
+      border-color 120ms ease,
+      box-shadow 120ms ease;
+  }
+  input[type="checkbox"] {
+    border-radius: 4px;
+  }
+  input[type="radio"] {
+    border-radius: 9999px;
+  }
+  input[type="checkbox"]:hover:not(:disabled):not(:checked),
+  input[type="radio"]:hover:not(:disabled):not(:checked) {
+    border-color: var(--color-ink-faint);
+  }
+  input[type="checkbox"]:checked,
+  input[type="checkbox"]:indeterminate,
+  input[type="radio"]:checked {
+    border-color: var(--color-brand);
+    background-color: var(--color-brand);
+  }
+  input[type="checkbox"]:checked {
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='white' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3.6 8.4l2.9 2.9 6-6.2'/%3E%3C/svg%3E");
+  }
+  input[type="checkbox"]:indeterminate {
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='white' stroke-width='2.2' stroke-linecap='round'%3E%3Cpath d='M4 8h8'/%3E%3C/svg%3E");
+  }
+  input[type="radio"]:checked {
+    background-image: radial-gradient(circle at center, #fff 0 30%, transparent 34%);
+  }
+  input[type="checkbox"]:focus-visible,
+  input[type="radio"]:focus-visible {
+    outline: none;
+    box-shadow:
+      0 0 0 2px var(--color-paper),
+      0 0 0 4px var(--color-brand);
+  }
+  input[type="checkbox"]:disabled,
+  input[type="radio"]:disabled {
+    cursor: not-allowed;
+    opacity: 0.5;
+    background-color: var(--color-cream-soft);
+  }
+  input[type="checkbox"]:checked:disabled,
+  input[type="checkbox"]:indeterminate:disabled,
+  input[type="radio"]:checked:disabled {
+    background-color: var(--color-brand);
+  }
+}
+
+/* Browser autofill would otherwise paint a blue or yellow fill. This sits outside the layers so it wins
+   over the UA style; the long background transition covers Chrome, the inset shadow covers Safari, and the
+   Tailwind ring and card shadow variables are kept so focus rings still show on autofilled fields. */
+input:-webkit-autofill,
+input:-webkit-autofill:hover,
+input:-webkit-autofill:focus,
+input:-webkit-autofill:active,
+textarea:-webkit-autofill,
+textarea:-webkit-autofill:hover,
+textarea:-webkit-autofill:focus {
+  -webkit-text-fill-color: var(--color-ink);
+  caret-color: var(--color-ink);
+  box-shadow:
+    inset 0 0 0 1000px var(--color-paper),
+    var(--tw-ring-offset-shadow, 0 0 #0000),
+    var(--tw-ring-shadow, 0 0 #0000),
+    var(--tw-shadow, 0 0 #0000);
+  transition: background-color 9999s ease-out 0s;
+}
+
+/* Dropdown menu entrance (components/Select.tsx). */
+@keyframes select-pop {
+  from {
+    opacity: 0;
+    transform: translateY(-4px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.select-pop {
+  animation: select-pop 120ms ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "servers": {
+    "web": {
+      "command": "./scripts/run.sh",
+      "port": "auto",
+      "expose": true,
+      "ready": { "http": "/api/auth/state" },
+      "env": {
+        "PORT": "{port}",
+        "HOST": "127.0.0.1",
+        "RP_ID": "{host}",
+        "ORIGIN": "{url}"
+      },
+      "description": "Personal Content Cloud: site, API and background workers (analysis, OCR, previews)"
+    }
+  }
+}
