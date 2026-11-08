@@ -39,7 +39,7 @@ private struct CreateBody: Encodable {
 /// Background transfers for the device uploads of docs/ARCHITECTURE.md section 28.
 ///
 /// Every request of the upload protocol (create, each chunk, complete) is an upload task of one
-/// background URLSession (`in.biios.pcc.upload`) whose body is a file. The system carries the
+/// background URLSession (`in.rivant.pcc.upload`) whose body is a file. The system carries the
 /// task while the app is suspended and relaunches the app into this delegate when it has to. The
 /// delegate moves the asset's `SyncRecord` one step and schedules the next request of the same file,
 /// so a file keeps flowing without the app. The state lives in the record and in each task's
@@ -54,7 +54,7 @@ private struct CreateBody: Encodable {
 /// - 413 and 507 fail the asset with the server's message.
 @MainActor
 final class BackgroundUploader: NSObject, ObservableObject {
-    static let identifier = "in.biios.pcc.upload"
+    static let identifier = "in.rivant.pcc.upload"
     static let shared = BackgroundUploader()
     static let backoff: [TimeInterval] = [1, 2, 4, 8, 16, 30]
     static let maxAttempts = 8

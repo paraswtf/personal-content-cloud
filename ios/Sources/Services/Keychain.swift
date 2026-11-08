@@ -4,7 +4,7 @@ import Security
 /// The device token, kept in the Keychain (this device only, available after first unlock so the
 /// background task can use it).
 enum Keychain {
-    private static let service = "in.biios.pcc"
+    private static let service = "in.rivant.pcc"
     private static let account = "device-token"
 
     static func token() -> String? {

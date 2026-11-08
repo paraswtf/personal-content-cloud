@@ -10,7 +10,7 @@ What it does:
 - Watches the photo library and uploads what is new: photos, videos, and both halves of a Live Photo,
   as the original files, through the server's resumable upload protocol. Nothing is re-sent after a
   reinstall: the app asks the server what it already holds, by asset and by file hash.
-- Uploads run in a background URLSession (`in.biios.pcc.upload`), so a file keeps going while the
+- Uploads run in a background URLSession (`in.rivant.pcc.upload`), so a file keeps going while the
   app is in the background, and an upload cut off by a lost connection or a killed app continues
   from where the server's copy ends instead of starting again.
 - Syncs while the app is open, when the library changes, and in the background when iOS gives it a
@@ -60,7 +60,7 @@ xcodegen generate
 open PersonalContentCloud.xcodeproj
 ```
 
-In Xcode: pick your team under Signing and Capabilities (the bundle id `in.biios.pcc` can be changed in
+In Xcode: pick your team under Signing and Capabilities (the bundle id `in.rivant.pcc` can be changed in
 `project.yml`), make sure Background Modes lists "Background fetch" and "Background processing", then run
 on your iPhone. A simulator has no real photo library to speak of, so test on a device.
 

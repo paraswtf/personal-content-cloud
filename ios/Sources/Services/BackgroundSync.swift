@@ -5,7 +5,7 @@ import Photos
 /// Background runs: a BGProcessingTask when iOS allows it (network needed, power optional), and a
 /// library change observer that queues a run while the app is open.
 enum BackgroundSync {
-    static let identifier = "in.biios.pcc.sync"
+    static let identifier = "in.rivant.pcc.sync"
     private static var observer: ChangeObserver?
 
     static func register() {

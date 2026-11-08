@@ -1204,7 +1204,7 @@ whose stored item is in the trash (they still count as known, and the app shows 
 owner decides before deleting them from the phone). `UploadCreate.pair_key` reaches the web types
 too (the PWA has no use for it beyond typing).
 
-iOS (`ios/Sources/Services/`): a background `URLSession` (identifier `in.biios.pcc.upload`,
+iOS (`ios/Sources/Services/`): a background `URLSession` (identifier `in.rivant.pcc.upload`,
 `isDiscretionary` when the charging or Wi-Fi options ask for it, `allowsCellularAccess` from the
 Wi-Fi option) carries every chunk as an upload task from a temporary file; the delegate schedules
 the next chunk of the same file when one completes, so a file keeps flowing while the app is
