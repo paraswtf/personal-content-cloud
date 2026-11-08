@@ -3,6 +3,7 @@ put back exactly, with its crop files, and undoing the undo is a redo."""
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from app import storage
 from tests.helpers import make_face, make_item, make_person
@@ -251,3 +252,43 @@ def test_older_sqlite_can_still_open_the_database(conn):
         for m in re.finditer(r"json_(object|insert)\(", sql):
             widest = max(widest, _call_args(sql, m.end() - 1))
     assert 0 < widest <= 127
+
+
+def test_the_journal_keeps_only_what_changed(client, conn):
+    """Moving a face logs its person, not its embeddings; a whole row is kept only where an undo needs it."""
+    item = make_item(conn)
+    fid = make_face(conn, item["id"], None, embedding=_unit(12), torso=_unit(13)[:512])
+    r = client.post("/api/faces/assign", json={"face_ids": [fid], "new_person_name": "Lina"})
+    rows = conn.execute("SELECT tbl, op, LENGTH(old) + LENGTH(new) AS n FROM undo_log WHERE action_id = ? AND tbl = 'faces'",
+                        (r.headers["x-action-id"],)).fetchall()
+    assert rows and all(row["op"] == "update" and row["n"] < 1000 for row in rows)  # was about 21 KB with both embeddings
+
+
+def test_blobs_come_back_on_undo_and_redo(client, conn):
+    """An insert's undo and redo bring the row back whole, and a changed BLOB is put back."""
+    from app import undo
+    from app.db import ActionContext, current_action, tx
+
+    item = make_item(conn)
+    emb = _unit(14)
+    token = current_action.set(ActionContext("test-insert-0001", "POST", "/api/test"))
+    try:
+        fid = make_face(conn, item["id"], None, embedding=emb)
+    finally:
+        current_action.reset(token)
+    out = undo.undo(conn, "test-insert-0001")
+    assert conn.execute("SELECT COUNT(*) FROM faces WHERE id = ?", (fid,)).fetchone()[0] == 0
+    undo.undo(conn, out["undo_id"])  # redo
+    back = conn.execute("SELECT embedding FROM faces WHERE id = ?", (fid,)).fetchone()[0]
+    assert np.frombuffer(back, dtype=np.float32) == pytest.approx(emb, abs=1e-7)
+
+    other = _unit(15)
+    token = current_action.set(ActionContext("test-update-0001", "POST", "/api/test"))
+    try:
+        with tx(conn):
+            conn.execute("UPDATE faces SET embedding = ? WHERE id = ?", (other.tobytes(), fid))
+    finally:
+        current_action.reset(token)
+    undo.undo(conn, "test-update-0001")
+    back = conn.execute("SELECT embedding FROM faces WHERE id = ?", (fid,)).fetchone()[0]
+    assert np.frombuffer(back, dtype=np.float32) == pytest.approx(emb, abs=1e-7)

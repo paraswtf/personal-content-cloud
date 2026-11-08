@@ -2038,7 +2038,10 @@ and the rows a foreign key cleared.
   albums, album_items, shares, share_items, tags, item_user_tags, tag_rejections, documents; made from the
   current columns by `undo.install_triggers` at every start) log each row change into `undo_log` with the row
   before and after as JSON (BLOB columns as hex), built 30 columns per function call because SQLite before
-  3.48 allows 127 arguments and cannot open a database whose trigger has more. Foreign-key actions (ON DELETE SET NULL, CASCADE) fire them
+  3.48 allows 127 arguments and cannot open a database whose trigger has more. A delete keeps the whole row,
+  an update only the columns that changed plus the key and `item_id` (moving a face logs about 650 bytes
+  instead of 21 KB of embeddings), an insert every column but the BLOBs (the undo's own delete keeps the
+  whole row, ready for a redo). Foreign-key actions (ON DELETE SET NULL, CASCADE) fire them
   too. `kv`, jobs, uploads, sessions and the derived tables are not journaled: a version counter put back
   would leave the face index stale. Measured on the API tests: no owner write happens outside a transaction.
 - `POST /api/actions/{id}/undo` -> `UndoOut {undo_id, changes, partial, items}`. Newest change first, in one
@@ -2061,4 +2064,4 @@ and the rows a foreign key cleared.
   crops, a merge and a person delete, a drawn person box, category, trash and album, a later change blocking,
   the analysis' change kept with `partial`, one action id over two requests, routes that are not actions,
   the vault, expiry and pruning, counters that never block, the triggers of every table and their argument
-  count).
+  count, the size of an update's journal, and BLOBs put back by an undo and a redo).

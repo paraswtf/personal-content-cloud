@@ -9,7 +9,8 @@ CONTRACT.
 - Journal: app.db.tx writes the undo_context row at the start of every write transaction of an action and
   removes it before COMMIT, so no other connection ever sees it. Triggers on the JOURNALED tables
   (install_triggers, from init_db) log each row change into undo_log: the row before (old) and after (new)
-  as JSON, BLOB columns as hex, found again by the table's primary key.
+  as JSON, BLOB columns as hex, found again by the table's primary key. Deletes keep the whole row,
+  updates only the columns that changed (plus the key and item_id), inserts all but the BLOBs.
 - undo(conn, action_id) -> dict: puts back what the action changed, newest change first, in one
   transaction with foreign keys deferred. Bookkeeping columns (NOISE: updated_at and the items' face, body
   and animal counts) never block it and are not put back; the counts are counted again. It is itself an action (undo_actions.undo_of), so undoing it is a
@@ -103,12 +104,20 @@ def _columns(conn: sqlite3.Connection, table: str) -> list[tuple[str, bool, int]
 JSON_PAIRS = 30
 
 
-def _json(cols: list[tuple[str, bool, int]], alias: str) -> str:
+def _json(cols: list[tuple[str, bool, int]], alias: str, op: str) -> str:
+    """The row JSON a trigger logs. A delete keeps the whole row (an undo inserts it again). An update keeps
+    the key columns and item_id, and every other column only where it changed (unchanged ones are null on
+    both sides, which the undo reads as unchanged). An insert keeps every column but the BLOBs (its undo
+    deletes by key; the undo's own delete keeps the whole row for a redo)."""
     pairs = []
-    for name, blob, _pk in cols:
+    for name, blob, pk in cols:
         value = f'hex({alias}."{name}")' if blob else f'{alias}."{name}"'
         if blob:
             value = f'CASE WHEN {alias}."{name}" IS NULL THEN NULL ELSE {value} END'
+        if op == "update" and not pk and name != "item_id":
+            value = f'CASE WHEN OLD."{name}" IS NOT NEW."{name}" THEN {value} END'
+        elif op == "insert" and blob:
+            value = "NULL"
         pairs.append((name, value))
     head, rest = pairs[:JSON_PAIRS], pairs[JSON_PAIRS:]
     expr = "json_object(" + ", ".join(f"'{n}', {v}" for n, v in head) + ")"
@@ -126,8 +135,8 @@ def install_triggers(conn: sqlite3.Connection) -> None:
             continue
         for op, event in (("insert", "INSERT"), ("update", "UPDATE"), ("delete", "DELETE")):
             name = f"undo_{table}_{op}"
-            old = _json(cols, "OLD") if op != "insert" else "NULL"
-            new = _json(cols, "NEW") if op != "delete" else "NULL"
+            old = _json(cols, "OLD", op) if op != "insert" else "NULL"
+            new = _json(cols, "NEW", op) if op != "delete" else "NULL"
             conn.execute(f"DROP TRIGGER IF EXISTS {name}")
             conn.execute(
                 f"CREATE TRIGGER {name} AFTER {event} ON {table} WHEN EXISTS (SELECT 1 FROM undo_context) BEGIN "
@@ -212,7 +221,7 @@ def _current(conn: sqlite3.Connection, table: str, pk: list[str], row: dict[str,
                          [_sql_value(row.get(k), k in blobs) for k in pk]).fetchone()
     if found is None:
         return None
-    return {k: (found[k].hex() if k in blobs and isinstance(found[k], bytes) else found[k]) for k in found.keys()}
+    return {k: (found[k].hex().upper() if k in blobs and isinstance(found[k], bytes) else found[k]) for k in found.keys()}
 
 
 def _changed(old: dict[str, Any], new: dict[str, Any], noise: bool = False) -> list[str]:
