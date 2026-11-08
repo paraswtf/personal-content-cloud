@@ -3,6 +3,8 @@
 // sends the user to /login.
 import type {
   AnimalPage,
+  AnimalSpeciesIn,
+  Species,
   AssignAnimalsIn,
   AssignBodiesIn,
   AssignFacesIn,
@@ -403,6 +405,8 @@ export const api = {
     update: (id: number, body: PersonUpdate) => patch<PersonOut>(`/api/people/${id}`, body),
     remove: (id: number) => del<OkOut>(`/api/people/${id}`),
     merge: (body: MergeIn) => post<PersonOut>('/api/people/merge', body),
+    /** Every crop of a pet takes this species, and so does the pet (section 22). */
+    setSpecies: (id: number, species: Species) => post<PersonOut>(`/api/people/${id}/species`, { species }),
     faces: (id: number, cursor?: string | null, limit = 200) => get<FacePage>(`/api/people/${id}/faces${qs({ cursor, limit })}`),
     animals: (id: number, cursor?: string | null, limit = 120) => get<AnimalPage>(`/api/people/${id}/animals${qs({ cursor, limit })}`),
     items: (id: number, cursor?: string | null, limit = 60, vault = false) =>
@@ -421,6 +425,8 @@ export const api = {
 
   animals: {
     assign: (body: AssignAnimalsIn) => post<AssignOut>('/api/animals/assign', body),
+    /** The owner's species for these boxes; look-alike crops follow (section 22). */
+    setSpecies: (body: AnimalSpeciesIn) => post<AssignOut>('/api/animals/species', body),
     remove: (id: number) => del<OkOut>(`/api/animals/${id}`),
   },
 

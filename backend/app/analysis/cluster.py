@@ -150,6 +150,20 @@ def move_rejections(conn: sqlite3.Connection, kind: str, old_id: int, new_id: in
     conn.execute("DELETE FROM guess_rejections WHERE kind = ? AND ref_id = ?", (kind, int(old_id)))
 
 
+def remove_faces(conn: sqlite3.Connection, face_ids: list[int]) -> None:
+    """Delete face rows the way DELETE /api/faces/{id} does: the rows, their rejections, and the covers
+    they were (a body's face_id clears through the schema). Counts, pruning, versions and crop files are
+    the caller's. Call inside a tx."""
+    ids = sorted({int(f) for f in face_ids})
+    if not ids:
+        return
+    for chunk in _chunks(ids):
+        marks = ",".join("?" * len(chunk))
+        conn.execute(f"UPDATE persons SET cover_face_id = NULL WHERE cover_face_id IN ({marks})", chunk)
+        conn.execute(f"DELETE FROM faces WHERE id IN ({marks})", chunk)
+    drop_rejections(conn, "face", ids)
+
+
 def drop_rejections(conn: sqlite3.Connection, kind: str, ids: list[int]) -> None:
     """Forget the rejections of deleted boxes (guess_rejections has no foreign key to them)."""
     for chunk in _chunks(sorted({int(i) for i in ids})):

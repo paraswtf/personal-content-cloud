@@ -377,6 +377,49 @@ def _run_models(item: sqlite3.Row, v: Visual, siglip: ModuleType | None, nsfw: M
 
 
 # ------------------------------------------------------------------ writes
+def _drop_animal_faces(r: Result) -> int:
+    """Section 22: a face box inside an animal box with no person box over it is the animal's face.
+    Drops those faces (with their torso vectors) and re-points the bodies' face indexes."""
+    hits = animals_mod.animal_faces(
+        [(f.x, f.y, f.w, f.h) for f in r.faces], [(a.x, a.y, a.w, a.h) for a in r.animals],
+        [(b.x, b.y, b.w, b.h) for b in r.bodies],
+    )
+    if not hits:
+        return 0
+    gone = set(hits)
+    keep = [i for i in range(len(r.faces)) if i not in gone]
+    new_index = {old: new for new, old in enumerate(keep)}
+    r.faces = [r.faces[i] for i in keep]
+    if len(r.face_torsos) > len(keep):
+        r.face_torsos = [r.face_torsos[i] for i in keep]
+    for b in r.bodies:
+        if b.face_index is not None:
+            b.face_index = new_index.get(b.face_index)
+    return len(hits)
+
+
+def _settle_species(r: Result, siglip: ModuleType | None) -> int:
+    """Section 22: each animal record's species after the owner's look-alike vote and the zero-shot
+    check; the scores are kept on the record. Returns how many records changed species."""
+    if not r.animals:
+        return 0
+    engine = None
+    if siglip is not None:
+        try:
+            engine = siglip.get_engine()
+        except Exception:  # noqa: BLE001 - no engine, the detector's class stands
+            engine = None
+    changed = 0
+    looks = list(r.animal_looks) + [None] * (len(r.animals) - len(r.animal_looks))
+    for rec, look in zip(r.animals, looks):
+        species, scores = animals_mod.settle_species(look, rec.species, engine=engine)
+        rec.species_scores = scores
+        if species != rec.species:
+            rec.species = species
+            changed += 1
+    return changed
+
+
 def _encode_face_crop(img: Image.Image) -> bytes:
     if img.size != (faces_mod.CROP_SIZE, faces_mod.CROP_SIZE):
         img = img.resize((faces_mod.CROP_SIZE, faces_mod.CROP_SIZE), Image.Resampling.LANCZOS)
@@ -495,6 +538,9 @@ def analyze_item(conn: sqlite3.Connection, item_id: int, version: int) -> None:
     keep_animals = kind in ("image", "video") and not r.animals_ran
     if keep_animals:
         r.animals, r.animal_looks = [], []
+    if kind == "image" and r.faces and r.animals:
+        _drop_animal_faces(r)
+    _settle_species(r, siglip)
     face_crops = [_encode_face_crop(f.crop) for f in r.faces]
     body_crops = [bodies_mod.encode_crop(b.crop) for b in r.bodies]
     animal_crops = [animals_mod.encode_crop(a.crop) for a in r.animals]
@@ -621,8 +667,10 @@ def analyze_item(conn: sqlite3.Connection, item_id: int, version: int) -> None:
             for rec, crop, look in zip(r.animals, animal_crops, r.animal_looks):
                 aid = int(conn.execute(
                     "INSERT INTO animals(item_id, person_id, assigned_by, x, y, w, h, det_score, species, "
-                    "frame_time_s, embedding, created_at) VALUES (?, NULL, 'auto', ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (item_id, rec.x, rec.y, rec.w, rec.h, rec.det_score, rec.species, rec.frame_time_s,
+                    "species_source, species_scores, frame_time_s, embedding, created_at) "
+                    "VALUES (?, NULL, 'auto', ?, ?, ?, ?, ?, ?, 'auto', ?, ?, ?, ?)",
+                    (item_id, rec.x, rec.y, rec.w, rec.h, rec.det_score, rec.species,
+                     json_dumps(rec.species_scores) if rec.species_scores is not None else None, rec.frame_time_s,
                      _blob(look), now),
                 ).lastrowid)
                 new_animal_ids.append(aid)

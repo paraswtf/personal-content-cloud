@@ -183,6 +183,7 @@ class AnimalOut(BaseModel):
     frame_time_s: float | None = None
     person: PersonRef | None = None
     assigned_by: Literal["auto", "user"] = "auto"
+    species_source: Literal["auto", "user"] = "auto"  # section 22: 'user' when the owner set the species
     url: str
 
 
@@ -501,6 +502,20 @@ class AssignAnimalsIn(BaseModel):
     animal_ids: list[int] = Field(min_length=1, max_length=1000)
     person_id: int | None = None
     new_person_name: str | None = Field(default=None, max_length=120)
+    # section 22: a pet of another species first becomes the boxes' species (every crop of it, as the
+    # owner's choice), then the boxes move to it
+    fix_species: bool = False
+
+
+class SpeciesIn(BaseModel):
+    """POST animals/species (section 22): the owner's species for these boxes."""
+    animal_ids: list[int] = Field(min_length=1, max_length=1000)
+    species: Species
+
+
+class PersonSpeciesIn(BaseModel):
+    """POST people/{id}/species (section 22): every crop of the pet takes this species."""
+    species: Species
 
 
 class AssignOut(BaseModel):
@@ -645,6 +660,7 @@ class SystemOut(BaseModel):
     download: dict[str, Any] | None = None
     video: dict[str, Any] | None = None  # section 27: encoder and web copy counts
     forwards: dict[str, Any] | None = None  # section 29: {enabled, unchecked, forwards, received, running}
+    pets: dict[str, Any] | None = None  # section 22: {enabled, unchecked, running}: the species backfill
 
 
 class TagOut(BaseModel):

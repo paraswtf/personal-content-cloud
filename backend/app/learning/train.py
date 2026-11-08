@@ -38,6 +38,7 @@ def signature(conn: sqlite3.Connection) -> list[Any]:
         one("SELECT COUNT(*) FROM documents WHERE source = 'user'"),
         one("SELECT COUNT(*) FROM faces WHERE assigned_by = 'user'"),
         one("SELECT COUNT(*) FROM bodies WHERE assigned_by = 'user'"),
+        one("SELECT COUNT(*) FROM animals WHERE species_source = 'user'"),
         one("SELECT COUNT(*) FROM guess_rejections"),
         one("SELECT MAX(id) FROM learning_events"),
         one("SELECT COUNT(*) FROM item_user_tags WHERE source = 'user'"),

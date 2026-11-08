@@ -88,6 +88,10 @@ def _vehicle_number(t: str, pages: list[PageText]) -> bool:
     return F.find_vehicle_number(t) is not None
 
 
+def _id_digits(t: str, pages: list[PageText]) -> bool:
+    return bool(re.search(r"(?<!\d)\d{8,14}(?!\d)", t))
+
+
 def _in_out_marks(t: str, pages: list[PageText]) -> bool:
     return bool(_IN_OUT_RE.search(t))
 
@@ -158,6 +162,22 @@ RULES: dict[str, Rule] = {
         ids=[(lambda t, p: bool(F.find_vehicle_number(t)), 0.15)],
         negative=[("insurance", 0.5), ("policy", 0.3), ("premium", 0.3), ("invoice", 0.3)],
         filename=("rc", "registration"),
+    ),
+    "id_card": Rule(
+        keywords=[("identity card", 0.5), ("id card", 0.5), ("i-card", 0.4), ("i card", 0.3), ("student id", 0.4),
+                  ("employee id", 0.4), ("membership card", 0.4), ("emp id", 0.3), ("emp no", 0.3), ("employee no", 0.3),
+                  ("enrolment no", 0.3), ("enrollment no", 0.3), ("roll no", 0.25), ("prn", 0.2), ("student", 0.15),
+                  ("designation", 0.15), ("blood group", 0.2), ("valid upto", 0.15), ("valid till", 0.15),
+                  ("director's signature", 0.2), ("principal", 0.1), ("authorised signatory", 0.15),
+                  ("institute of", 0.15), ("university", 0.1), ("college", 0.15), ("school", 0.1), ("accredited", 0.1),
+                  ("holder's signature", 0.15), ("if found", 0.15), ("please return", 0.15)],
+        ids=[(_has_barcode, 0.1), (_id_digits, 0.1)],
+        negative=[("aadhaar", 0.5), ("income tax", 0.5), ("passport", 0.5), ("election commission", 0.5),
+                  ("driving licence", 0.5), ("driving license", 0.5), ("challan", 0.4), ("invoice", 0.3),
+                  ("receipt", 0.3), ("boarding pass", 0.4), ("ticket", 0.2), ("payslip", 0.4), ("marksheet", 0.4),
+                  ("statement of marks", 0.4), ("degree of", 0.3), ("certificate", 0.3), ("policy", 0.3),
+                  ("prescription", 0.3), ("parking", 0.4)],
+        filename=("idcard", "id_card", "icard"),
     ),
     "bank_statement": Rule(
         keywords=[("statement of account", 0.5), ("account statement", 0.5), ("bank statement", 0.5),

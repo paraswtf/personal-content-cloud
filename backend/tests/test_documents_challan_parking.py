@@ -197,3 +197,65 @@ def test_reparse_gives_the_old_document_its_type(conn):
     row = conn.execute("SELECT doc_type, doc_group, title, source FROM documents WHERE item_id = ?", (item_id,)).fetchone()
     assert row["doc_type"] == "parking_receipt" and row["doc_group"] == "money" and row["source"] == "auto"
     assert row["title"].startswith("Parking P ONE INFRA")
+
+
+# ---------------------------------------------------------------- id cards (section 11)
+COLLEGE_ID = """SICSR
+Symbiosis Institute of Computer Studies & Research
+Building Future Leaders for the IT Industry Worldwide
+A Constituent of Symbiosis International University
+Re-accredited by NAAC with 'A++' grade
+Awarded Category- I by UGC
+Rohan Kulkarni
+BCA
+Director's Signature
+23030199999
+"""
+
+EMPLOYEE_ID = """Bright Tech Solutions Pvt. Ltd.
+IDENTITY CARD
+Name: Meera Nair
+Designation: Software Engineer
+Department: Platform
+Emp No: BTS-04512
+Blood Group: B+
+Valid upto: 31/12/2027
+If found please return to Bright Tech Solutions, Hinjewadi, Pune
+Authorised Signatory
+"""
+
+
+def test_detects_id_cards_and_keeps_them_apart_from_other_types():
+    c = detect(COLLEGE_ID)
+    assert c.doc_type == "id_card" and c.score >= 0.5
+    e = detect(EMPLOYEE_ID)
+    assert e.doc_type == "id_card" and e.score >= 1.0
+    for doc_type in ("aadhaar", "pan", "marksheet", "certificate", "degree", "offer_letter"):
+        assert detect(TEXTS[doc_type]).doc_type == doc_type, doc_type
+
+
+def test_college_id_card_fields():
+    d = parsers.parse("id_card", COLLEGE_ID)
+    f = {k: v.value for k, v in d.fields.items()}
+    assert f["name"] == "Rohan Kulkarni" and f["course"] == "BCA" and f["id_number"] == "23030199999"
+    assert f["organisation"].startswith("SICSR, Symbiosis Institute of Computer Studies")
+    assert d.title == "SICSR ID card" and d.person_name == "Rohan Kulkarni" and d.issuer == f["organisation"]
+
+
+def test_employee_id_card_fields():
+    d = parsers.parse("id_card", EMPLOYEE_ID)
+    f = {k: v.value for k, v in d.fields.items()}
+    assert f["name"] == "Meera Nair" and f["designation"] == "Software Engineer" and f["department"] == "Platform"
+    assert f["id_number"] == "BTS-04512" and f["blood_group"] == "B+" and f["valid_until"] == "2027-12-31"
+    assert "Bright Tech Solutions" in f["organisation"]
+    assert d.title.endswith("ID card")
+
+
+def test_startup_reparse_covers_id_cards(conn):
+    from app import ingest
+
+    assert "id_card" in ingest.DOC_RULES_NEW_TYPES and ingest.DOC_RULES_VERSION >= 3
+    card = _document(conn, COLLEGE_ID)
+    ingest.recover_on_startup(conn)
+    queued = {json.loads(r["payload"])["item_id"] for r in conn.execute("SELECT payload FROM jobs WHERE type = 'text' AND status = 'queued'")}
+    assert card in queued

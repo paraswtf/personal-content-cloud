@@ -334,6 +334,12 @@ def _housekeeping(conn: sqlite3.Connection) -> dict[str, int]:
         out["forwards"] = forwards_mod.housekeeping(conn)
     except Exception:  # noqa: BLE001 - forwards never block housekeeping
         log.exception("housekeeping: forwards failed")
+    try:
+        from app.analysis import animals as animals_mod
+
+        out["pets"] = animals_mod.housekeeping(conn)
+    except Exception:  # noqa: BLE001 - the species backfill never blocks housekeeping
+        log.exception("housekeeping: species backfill failed")
 
     return out
 

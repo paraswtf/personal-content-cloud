@@ -34,6 +34,7 @@ from pydantic import BaseModel
 
 from app import jobs, storage
 from app.db import tx
+from app.analysis import animals as animals_mod
 from app.analysis import forwards as forwards_mod
 from app.media import encoders, video
 from app.api.deps import get_db, require_user
@@ -133,6 +134,7 @@ def system(conn: sqlite3.Connection = Depends(get_db)) -> SystemOut:
         ffmpeg=shutil.which("ffmpeg") is not None and shutil.which("ffprobe") is not None,
         workers=settings.workers_enabled, download=_download_state(), video=_video_status(conn),
         forwards=forwards_mod.status(conn),
+        pets=animals_mod.status(conn),
     )
 
 

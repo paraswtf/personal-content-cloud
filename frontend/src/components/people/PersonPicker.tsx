@@ -19,7 +19,8 @@ export function choiceBody(choice: PersonChoice | null): { person_id?: number | 
 }
 
 interface Props {
-  onPick: (choice: PersonChoice) => void
+  /** The picked choice, and the person behind it when an existing one was picked. */
+  onPick: (choice: PersonChoice, person?: PersonOut) => void
   placeholder?: string
   allowCreate?: boolean
   excludeIds?: number[]
@@ -84,7 +85,8 @@ export default function PersonPicker({
     listRef.current?.querySelector<HTMLElement>(`[data-index="${active}"]`)?.scrollIntoView({ block: 'nearest' })
   }, [active])
 
-  const pick = (opt: Option) => onPick(opt.kind === 'person' ? { personId: opt.person.id } : { newName: opt.name })
+  const pick = (opt: Option) =>
+    opt.kind === 'person' ? onPick({ personId: opt.person.id }, opt.person) : onPick({ newName: opt.name })
 
   const onKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
     if (e.key === 'ArrowDown') {

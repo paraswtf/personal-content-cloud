@@ -262,6 +262,8 @@ CREATE TABLE IF NOT EXISTS animals (
   x REAL NOT NULL, y REAL NOT NULL, w REAL NOT NULL, h REAL NOT NULL,  -- normalised [0,1]
   det_score       REAL NOT NULL,
   species         TEXT NOT NULL,                -- bird, cat, dog, horse, sheep, cow, elephant, bear, zebra, giraffe
+  species_source  TEXT NOT NULL DEFAULT 'auto' CHECK (species_source IN ('auto','user')),  -- 'user': the owner said so
+  species_scores  TEXT,                         -- JSON {species: probability} from the zero-shot check (section 22)
   frame_time_s    REAL,                         -- videos: the sampled frame
   embedding       BLOB,                         -- float32[768], L2-normalised (SigLIP of the padded crop)
   created_at      TEXT NOT NULL
@@ -378,7 +380,7 @@ CREATE TABLE IF NOT EXISTS tag_rejections (   -- a suggestion the owner removed:
 -- Corrections and outcomes the learners need beyond the main tables (docs/ARCHITECTURE.md section 18).
 CREATE TABLE IF NOT EXISTS learning_events (
   id         INTEGER PRIMARY KEY AUTOINCREMENT,
-  kind       TEXT NOT NULL CHECK (kind IN ('guess','category','vault','misclick','doc_type','tag','merge','forward')),
+  kind       TEXT NOT NULL CHECK (kind IN ('guess','category','vault','misclick','doc_type','tag','merge','forward','species')),
   label      INTEGER,                       -- 1 / 0 for outcomes, NULL for a plain correction
   features   TEXT NOT NULL DEFAULT '{}',    -- JSON: evidence terms, or {from, to, scores}
   item_id    INTEGER,                       -- kept after the item is gone

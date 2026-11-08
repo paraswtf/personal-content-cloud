@@ -38,6 +38,7 @@ export const DOC_TYPE_LABELS: Record<string, string> = {
   driving_licence: 'Driving licence',
   voter_id: 'Voter ID',
   vehicle_rc: 'Vehicle RC',
+  id_card: 'ID card',
   bank_statement: 'Bank statement',
   invoice: 'Invoice',
   receipt: 'Receipt',
@@ -64,6 +65,7 @@ export function docTypeLabel(type: string | null | undefined): string {
 
 /** Icons for the types whose group icon says too little (section 30); the group's icon otherwise. */
 export const TYPE_ICONS: Record<string, LucideIcon> = {
+  id_card: IdCard,
   traffic_challan: TrafficCone,
   parking_receipt: SquareParking,
 }

@@ -220,6 +220,7 @@ The full DDL is `backend/app/schema.sql`. Summary of tables and the columns code
 - `item_tags(item_id, person_id, source CHECK ('user','guess'), created_at, PK(item_id, person_id))`.
 - `guess_rejections(kind CHECK ('face','body'), ref_id, person_id, created_at, PK(kind, ref_id, person_id))`.
 - `merge_dismissals(person_a, person_b)`.
+- `animals` (section 22) gains `species_source` (auto|user) and `species_scores` (JSON) through `MIGRATED_COLUMNS`.
 - `item_text(item_id PK, text, source CHECK ('pdf','ocr','office','plain','mixed'), lang, char_count, created_at)`.
 - `pages(id, item_id, page_no, width, height, text, text_source CHECK ('layer','ocr','render','none'), ocr_boxes JSON, UNIQUE(item_id, page_no))`.
 - `items_fts` (FTS5, `content=''` contentless is not used; external content table is not used either):
@@ -470,7 +471,7 @@ its score `>= 0.5`. Groups and types:
 
 | Group | Types | Key fields |
 |---|---|---|
-| `id` | `aadhaar` (12 digits, Verhoeff), `pan` (`[A-Z]{5}[0-9]{4}[A-Z]`), `passport` (MRZ TD3, check digits), `driving_licence`, `voter_id` (EPIC `[A-Z]{3}[0-9]{7}`), `vehicle_rc` | name, number, dob, gender, address, issue/expiry, father/spouse, issuing authority, photo |
+| `id` | `aadhaar` (12 digits, Verhoeff), `pan` (`[A-Z]{5}[0-9]{4}[A-Z]`), `passport` (MRZ TD3, check digits), `driving_licence`, `voter_id` (EPIC `[A-Z]{3}[0-9]{7}`), `vehicle_rc`, `id_card` (college, school, employee and membership cards: organisation from the heading lines, holder, number from a label, the barcode or the longest digit run, course or designation, validity, blood group) | name, number, dob, gender, address, issue/expiry, father/spouse, issuing authority, photo |
 | `money` | `bank_statement`, `invoice`, `receipt`, `salary_slip`, `traffic_challan`, `parking_receipt` (section 30) | account/IFSC, period, opening/closing balance, invoice number, GSTIN, total, parties, net pay; challan number, vehicle, violations, amount, payment status, pay portal; receipt number, vehicle, in and out times, amount, operator |
 | `education_work` | `marksheet`, `degree`, `certificate`, `offer_letter` | institution, course, roll number, grade, date, employer, designation, CTC |
 | `health` | `insurance_policy`, `prescription`, `lab_report`, `vaccination` | insurer, policy number, sum insured, validity, doctor, patient, tests, vaccine, beneficiary id |
@@ -656,6 +657,11 @@ anything else plain), hides `pay_url` from the grid and offers "Pay or check sta
 number, opens `pay_url`, else the Parivahan portal, in a new tab) and "Mark as paid" (`PATCH` fields
 `payment_status` "Paid" and `paid_on` today).
 
+Pets, species (section 22): the animal box popover (`viewer/AnimalEditor.tsx`) has "Not a {species}" with
+the ten species to pick from (POST `animals/species`; the toast counts the look-alike crops that followed),
+and picking a pet of another species in "Move to another pet" shows "Move and make {pet} a {species}"
+(assign with `fix_species`). The pet's page has a "These are {species}" picker (POST `people/{id}/species`).
+
 ## 15. Configuration (env)
 
 | Variable | Default | Meaning |
@@ -773,7 +779,8 @@ the guess code through `learning.events.record(conn, kind, label, features, item
 kind `guess` (label 1 confirm / 0 reject, features = the guess evidence), `category`, `vault`, `misclick`
 and `doc_type` (label None, features `{"from": .., "to": ..}` plus the scores at the time), and `merge` (label 1,
 features `{accepted, sources, followed}`, `person_id` the person merged into), and `forward` (label 1 set apart / 0
-kept, features = the forward signals, section 29). Events also feed
+kept, features = the forward signals, section 29), and `species` (label None, features `{from, to, score, followed}`,
+`item_id`, `person_id` the pet the crop was in; section 22). Events also feed
 the status page ("learned from N corrections").
 
 Learners (one module each, all pure numpy, all with a `status()` and a `train(conn)` that writes the model):
@@ -794,6 +801,8 @@ Learners (one module each, all pure numpy, all with a `status()` and a `train(co
   [0.25x, 4x] of the default and used only with at least 5 examples on each side; `thresholds() ->
   {"blur_var_min": .., "dark_mean": .., "clipped_frac": .., "accident_min": ..}` with the defaults filled
   in, read by `quality.decide`.
+- `images.py` also keeps the crops whose species the owner set (`animals.species_source = 'user'`) as the
+  neighbours of `species_vote(emb) -> str | None` (section 22).
 - `people.py`: `person_threshold(person_id) -> float | None`: a per-person face threshold from the
   similarities of the person's user-confirmed faces to the person (loosened to their 10th percentile
   minus 0.02, floor 0.30), from the merges the owner made into the person (loosened to the least
@@ -981,7 +990,10 @@ Routes: `GET /api/people?kind=person|pet|all` (default `all`); `PersonOut.kind`,
 `ItemDetail.animals: [AnimalOut{id, x, y, w, h, det_score, species, frame_time_s, person, assigned_by, url}]`
 and `ItemDetail.people` lists pets with kind `pet`; `POST /api/animals/assign {animal_ids, person_id |
 new_person_name}` (one species per call; a person target or a pet of another species is 400; a new name
-creates or reuses a pet of the boxes' species; null unassigns); `DELETE /api/animals/{id}`;
+creates or reuses a pet of the boxes' species; null unassigns; `fix_species` first makes a pet of another species
+the boxes' species); `DELETE /api/animals/{id}`; `POST /api/animals/species {animal_ids, species}` and
+`POST /api/people/{id}/species {species}` (species corrections; `AssignOut.followed` counts the look-alike crops
+that followed);
 `/files/animal/{id}` serves the crop with the face-crop rules (403 `vault_locked` for vault items). Pet names
 go into the `people` column of the search index. Pets have no guesses and no merge suggestions.
 
@@ -990,6 +1002,62 @@ assign popover that lists pets of that species first and never people; the item'
 with the paw; the People page requests `kind=person` and shows a Pets section below; the person page of a
 pet shows its species and a crops grid (select, move, unassign, remove) instead of faces and guesses; the
 library's person filter lists pets too.
+
+Species corrections (2026-11-08). The detector's class is the only source of a crop's species, and it is
+wrong at times (a white cat on a lap read as a dog). Three things change that:
+
+- Schema: `animals.species_source TEXT NOT NULL DEFAULT 'auto' CHECK (species_source IN ('auto','user'))` and
+  `animals.species_scores TEXT` (JSON `{species: probability}` from the zero-shot check), both through
+  `MIGRATED_COLUMNS`.
+- The zero-shot check (`animals.species_check(embedding, detected) -> (species, scores, changed)`): SigLIP
+  zero-shot over the crop's embedding with one prompt group per species in `SPECIES` ("a photo of a cat",
+  "a photo of a dog", ...); when the best species differs from the detector's, its probability is at least
+  `SPECIES_SWAP_MIN` (0.6) and the detector's species gets at most 0.25, the crop takes the zero-shot species
+  (`species_source` stays `auto`; the scores are stored either way). The check runs in the analyze stage after
+  detection and in worker housekeeping as a backfill for crops without `species_scores`
+  (`animals.housekeeping(conn, budget_s)`, 500 crops per run from the stored embeddings, never a `user`
+  row; a changed crop is unassigned from a pet of another species and offered to the pets of the new species
+  through `pets.assign_new_animals`). Without SigLIP the detector's class stands.
+- The owner's correction. `POST /api/animals/species {animal_ids, species}` (one call may carry boxes of
+  several species): each box takes the species with `species_source='user'`; a box assigned to a pet of
+  another species leaves it (an unnamed pet left empty is pruned; a named one stays for the owner) and is
+  matched to the pets of the new species like a new box (`pets.assign_new_animals` for that item, an
+  unnamed pet is made when a look-alike exists); a learning event kind `species` (label None, features
+  `{"from": .., "to": .., "score": det_score}`, item_id, person_id = the pet it was in) is recorded per box.
+  Look-alikes follow: every automatic box with the old species whose crop embedding is within
+  `SPECIES_FOLLOW_SIM` (0.85) of a corrected crop takes the new species too (source `auto`, a `species` event
+  with `"followed": true`); `AssignOut.followed` counts them. `POST /api/people/{id}/species {species}` does
+  the same for every crop of a pet and sets `persons.species` (a pet named by the owner keeps its name and
+  becomes a pet of the new species; a pet of that name and species already there gets the crops instead,
+  through `cluster.merge_persons`). The vote (`learning/images.py::species_vote(emb) -> str | None`, the
+  owner-labelled crops as the neighbours, cosine 0.85 or more, 60 percent of the weight) answers before the
+  zero-shot check for every new crop, so the owner's choices carry to crops that look like them.
+- Carry-over on re-analysis (`pets.carry_over`): a `user` species survives: the old box's species and source
+  go to the best-overlapping new box (IoU `>= CARRY_IOU`) whatever the detector said this time.
+- Frontend: the animal box's popover in the viewer gains "Not a {species}" with a species picker (the
+  `SPECIES` list with labels); the pet page gains the same picker beside the species ("These are cats"); the
+  toast says "Changed to cat" and how many look-alike crops followed; `ItemDetail.animals[]` carries
+  `species_source`. Settings > Learning counts species corrections among the corrections recorded.
+- Tests: the zero-shot swap on a hand-made score table (swap, no swap when the detector is confident, no
+  change without the model), the route on boxes of two species (events, the pet left behind, the follower
+  within 0.85 and the stranger outside it), the pet-level route (name kept, merge into an existing pet of the
+  new species), carry-over of a user species, and the backfill never touching a user row.
+- One box per animal (`animals.from_boxes`): the detector answers with several classes for one animal at
+  times (a cat read as both `cat` and `dog`); boxes of different species whose IoU is at least
+  `CROSS_SPECIES_IOU` (0.6) are one animal, and the better-scored box stays (the zero-shot check then
+  settles its species). The backfill applies the same rule to stored boxes (the dropped box's assignment
+  moves to the kept one when the kept one has none).
+- The face detector fires on animal faces: a face whose box lies inside an animal box (at least
+  `FACE_IN_ANIMAL` 0.8 of the face's area) with no person box over it is the animal's face, not a person's
+  (`faces.py` / the analyze stage drops it before clustering). The backfill removes such faces from stored
+  items (their crops and index entries too, through the same path `DELETE /api/faces/{id}` uses, with a
+  rejection for the person they were assigned to so the look-alike rule keeps them out), and the viewer
+  stops showing a person's name on a cat.
+- The assign popover: moving a box to a pet of another species is refused today ("That pet is a dog, this
+  box is a cat"); `POST /api/animals/assign` gains `fix_species: true`, which first makes the target pet
+  (and every crop in it) the box's species (`species_source='user'`, events) and then moves the box; the
+  popover offers it as "Move and make {pet} a {species}". A pet identity's species comes from its crops:
+  when every crop of a pet is corrected, `persons.species` follows.
 
 ## 23. Timeline (`app/api/timeline.py`, `components/timeline/`)
 

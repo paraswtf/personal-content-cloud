@@ -1,10 +1,13 @@
 // Popover for one animal box: name the pet (pick one of that species, or a new name), take the
-// name off, or remove the box when it is not an animal. Same shape as the face editor.
+// name off, say what species it really is (section 22: look-alike crops follow), move it to a pet
+// of another species by making that pet this species too, or remove the box when it is not an
+// animal. Same shape as the face editor.
 import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from 'react'
 import { useMutation } from '@tanstack/react-query'
-import { Ban, PawPrint, UserX, X } from 'lucide-react'
+import { Ban, PawPrint, Shuffle, UserX, X } from 'lucide-react'
 import { api } from '../../lib/api'
-import { personName, speciesLabel } from '../../lib/format'
+import { formatCount, personName, speciesLabel } from '../../lib/format'
+import { SPECIES, type PersonOut, type Species } from '../../lib/types'
 import PersonPicker, { choiceBody, type PersonChoice } from '../people/PersonPicker'
 import { Button } from '../ui'
 import type { AnimalBox } from './boxes'
@@ -19,14 +22,26 @@ interface Props {
   onDone: (message: string) => void
 }
 
+/** " 2 look-alike crops followed." after a species change, or nothing. */
+export function followedCrops(followed: number | undefined): string {
+  return followed ? ` ${formatCount(followed, 'look-alike crop')} followed.` : ''
+}
+
 export default function AnimalEditor({ uid, box, anchor, onClose, onDone }: Props) {
   const ref = useRef<HTMLDivElement>(null)
   const [style, setStyle] = useState<CSSProperties>(() => placement(anchor))
+  const [picking, setPicking] = useState(false)
+  // a pet of another species was picked: the move needs that pet to become this species first
+  const [mismatch, setMismatch] = useState<PersonOut | null>(null)
   const invalidate = useInvalidateItem(uid)
   const sheet = style.bottom === 0 && style.left === 0
   const species = speciesLabel(box.species)
 
   useLayoutEffect(() => setStyle(placement(anchor)), [anchor, box.id])
+  useEffect(() => {
+    setPicking(false)
+    setMismatch(null)
+  }, [box.id])
 
   useEffect(() => {
     const onResize = () => setStyle(placement(anchor))
@@ -46,11 +61,22 @@ export default function AnimalEditor({ uid, box, anchor, onClose, onDone }: Prop
   }, [anchor, onClose])
 
   const assign = useMutation({
-    mutationFn: (choice: PersonChoice | null) => api.animals.assign({ animal_ids: [box.id], ...choiceBody(choice) }),
-    onSuccess: (res, choice) => {
+    mutationFn: (v: { choice: PersonChoice | null; fix?: boolean }) =>
+      api.animals.assign({ animal_ids: [box.id], ...choiceBody(v.choice), ...(v.fix ? { fix_species: true } : {}) }),
+    onSuccess: (res, v) => {
       invalidate()
-      if (!choice) onDone(box.person ? `Removed from ${personName(box.person)}` : 'Unassigned')
+      setMismatch(null)
+      if (!v.choice) onDone(box.person ? `Removed from ${personName(box.person)}` : 'Unassigned')
+      else if (v.fix && res.person) onDone(`Tagged as ${personName(res.person)}, now a ${species.toLowerCase()}`)
       else onDone(res.person ? `Tagged as ${personName(res.person)}` : 'Saved')
+    },
+  })
+  const setSpecies = useMutation({
+    mutationFn: (next: Species) => api.animals.setSpecies({ animal_ids: [box.id], species: next }),
+    onSuccess: (res, next) => {
+      invalidate()
+      setPicking(false)
+      onDone(`Changed to ${speciesLabel(next).toLowerCase()}.${followedCrops(res.followed)}`)
     },
   })
   const remove = useMutation({
@@ -60,8 +86,18 @@ export default function AnimalEditor({ uid, box, anchor, onClose, onDone }: Prop
       onDone('Removed. It will not be shown as a pet again.')
     },
   })
-  const busy = assign.isPending || remove.isPending
-  const error = assign.error ?? remove.error
+  const busy = assign.isPending || remove.isPending || setSpecies.isPending
+  const error = assign.error ?? remove.error ?? setSpecies.error
+
+  const pick = (choice: PersonChoice, person?: PersonOut) => {
+    if (busy) return
+    if (person && person.species && person.species !== box.species) {
+      setMismatch(person)
+      return
+    }
+    setMismatch(null)
+    assign.mutate({ choice })
+  }
 
   return (
     <div
@@ -80,6 +116,7 @@ export default function AnimalEditor({ uid, box, anchor, onClose, onDone }: Prop
           <p className="inline-flex items-center gap-1 text-xs text-ink-faint">
             <PawPrint className="size-3" aria-hidden />
             {box.person ? `${species}, currently tagged as` : `${species}, not named yet`}
+            {box.species_source === 'user' && ' (your choice)'}
           </p>
           <p className="truncate text-sm font-semibold">{box.person ? personName({ ...box.person, species: box.species }) : 'Which pet is this?'}</p>
         </div>
@@ -100,12 +137,53 @@ export default function AnimalEditor({ uid, box, anchor, onClose, onDone }: Prop
           autoFocus={!sheet}
           placeholder={box.person ? 'Move to another pet' : 'Search pets or type a new name'}
           excludeIds={box.person ? [box.person.id] : undefined}
-          onPick={(choice) => {
-            if (!busy) assign.mutate(choice)
-          }}
+          onPick={pick}
         />
-        <p className="mt-2 text-xs text-ink-soft">Pets of the same species come first. A box can only go to a pet of its own species.</p>
+        <p className="mt-2 text-xs text-ink-soft">Pets of the same species come first. A pet of another species can take this box once it becomes a {species.toLowerCase()} too.</p>
       </div>
+
+      {mismatch && (
+        <div className="mt-2 rounded-xl bg-surface-2 p-2 text-sm" role="status">
+          <p className="text-ink-soft">
+            {personName(mismatch)} is a {speciesLabel(mismatch.species).toLowerCase()}; this box is a {species.toLowerCase()}.
+          </p>
+          <Button
+            className="mt-2"
+            variant="secondary"
+            disabled={busy}
+            loading={assign.isPending && !!assign.variables?.fix}
+            onClick={() => assign.mutate({ choice: { personId: mismatch.id }, fix: true })}
+          >
+            <Shuffle className="size-4" aria-hidden />
+            Move and make {personName(mismatch)} a {species.toLowerCase()}
+          </Button>
+        </div>
+      )}
+
+      {picking ? (
+        <div className="mt-3" role="group" aria-label="Species">
+          <p className="mb-1.5 text-xs text-ink-soft">This is a</p>
+          <div className="flex flex-wrap gap-1.5">
+            {SPECIES.map((s) => (
+              <button
+                key={s}
+                type="button"
+                disabled={busy || s === box.species}
+                aria-pressed={s === box.species}
+                onClick={() => setSpecies.mutate(s)}
+                className={
+                  'h-9 rounded-full border px-3 text-sm font-medium transition-colors disabled:cursor-default ' +
+                  (s === box.species
+                    ? 'border-ink bg-ink text-surface'
+                    : 'border-line bg-surface text-ink-soft hover:border-ink-faint hover:text-ink')
+                }
+              >
+                {speciesLabel(s)}
+              </button>
+            ))}
+          </div>
+        </div>
+      ) : null}
 
       {error && (
         <p className="mt-2 text-sm text-danger" role="alert">
@@ -114,8 +192,17 @@ export default function AnimalEditor({ uid, box, anchor, onClose, onDone }: Prop
       )}
 
       <div className="mt-3 flex flex-wrap gap-2">
+        <Button variant="secondary" disabled={busy} aria-expanded={picking} onClick={() => setPicking((v) => !v)}>
+          <PawPrint className="size-4" aria-hidden />
+          Not a {species.toLowerCase()}
+        </Button>
         {box.person && (
-          <Button variant="secondary" disabled={busy} loading={assign.isPending && assign.variables === null} onClick={() => assign.mutate(null)}>
+          <Button
+            variant="secondary"
+            disabled={busy}
+            loading={assign.isPending && assign.variables?.choice === null}
+            onClick={() => assign.mutate({ choice: null })}
+          >
             <UserX className="size-4" aria-hidden />
             Not this pet
           </Button>

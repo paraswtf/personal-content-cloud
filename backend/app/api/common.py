@@ -69,7 +69,7 @@ ITEM_CARD_COLUMNS = (
 
 DOC_TYPE_LABELS = {
     "aadhaar": "Aadhaar card", "pan": "PAN card", "passport": "Passport", "driving_licence": "Driving licence",
-    "voter_id": "Voter ID", "vehicle_rc": "Vehicle registration", "bank_statement": "Bank statement",
+    "voter_id": "Voter ID", "vehicle_rc": "Vehicle registration", "id_card": "ID card", "bank_statement": "Bank statement",
     "invoice": "Invoice", "receipt": "Receipt", "salary_slip": "Salary slip", "traffic_challan": "Traffic challan",
     "parking_receipt": "Parking receipt", "marksheet": "Marksheet",
     "degree": "Degree", "certificate": "Certificate", "offer_letter": "Offer letter",
@@ -79,6 +79,7 @@ DOC_TYPE_LABELS = {
 }
 DOC_GROUP_OF = {
     "aadhaar": "id", "pan": "id", "passport": "id", "driving_licence": "id", "voter_id": "id", "vehicle_rc": "id",
+    "id_card": "id",
     "bank_statement": "money", "invoice": "money", "receipt": "money", "salary_slip": "money",
     "traffic_challan": "money", "parking_receipt": "money",
     "marksheet": "education_work", "degree": "education_work", "certificate": "education_work",
@@ -382,8 +383,15 @@ def animal_out(conn: sqlite3.Connection, row: sqlite3.Row, refs: dict[int, Perso
     return AnimalOut(
         id=row["id"], x=row["x"], y=row["y"], w=row["w"], h=row["h"], det_score=row["det_score"],
         species=row["species"], frame_time_s=row["frame_time_s"], person=_ref(conn, row["person_id"], refs),
-        assigned_by=row["assigned_by"], url=animal_url(int(row["id"])),
+        assigned_by=row["assigned_by"], species_source=_species_source(row), url=animal_url(int(row["id"])),
     )
+
+
+def _species_source(row: sqlite3.Row) -> str:
+    try:
+        return "user" if row["species_source"] == "user" else "auto"
+    except (IndexError, KeyError):
+        return "auto"
 
 
 def document_out(row: sqlite3.Row, item_row: sqlite3.Row, *, wallet_configured: bool = False) -> DocumentOut:

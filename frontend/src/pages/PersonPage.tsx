@@ -3,11 +3,11 @@
 // A pet has no cover picker, faces or guesses: it shows its animal crops instead.
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router'
-import { useMutation, useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import clsx from 'clsx'
 import { ArrowLeft, Check, CheckCheck, GitMerge, Images, ListChecks, PawPrint, Pencil, ScanFace, Sparkles, Star, Trash2, UserMinus, X } from 'lucide-react'
 import { ApiError, api } from '../lib/api'
-import type { AnimalListItem, FaceListItem, GuessItem, PersonKind, Species } from '../lib/types'
+import { SPECIES, type AnimalListItem, type FaceListItem, type GuessItem, type PersonKind, type Species } from '../lib/types'
 import { followedTail, formatCount, personName, speciesLabel } from '../lib/format'
 import { useInfiniteSentinel, usePageTitle, useRefreshLibrary, useStableCallback } from '../lib/hooks'
 import { useItemList } from '../lib/useItemList'
@@ -96,6 +96,45 @@ function NameEditor({ id, name, kind, species }: { id: number; name: string | nu
         <X className="size-4" aria-hidden />
       </Button>
     </form>
+  )
+}
+
+/** A pet's species, changed by the owner: every crop follows and the pet itself (section 22). */
+function SpeciesEditor({ id, species }: { id: number; species: Species | null }) {
+  const toast = useToast()
+  const qc = useQueryClient()
+  const refresh = useRefreshLibrary()
+  const save = useMutation({
+    mutationFn: (next: Species) => api.people.setSpecies(id, next),
+    onSuccess: (_p, next) => {
+      toast.success(`Changed to ${speciesLabel(next).toLowerCase()}.`)
+      void qc.invalidateQueries({ queryKey: ['person', id] })
+      void qc.invalidateQueries({ queryKey: ['person-animals', id] })
+      void refresh()
+    },
+    onError: (e) => toast.error(errorMessage(e, 'Could not change the species.')),
+  })
+  return (
+    <label className="inline-flex items-center gap-1.5 text-sm text-ink-soft">
+      <span>These are</span>
+      <select
+        value={species ?? ''}
+        disabled={save.isPending}
+        onChange={(e) => {
+          const next = e.target.value as Species
+          if (next && next !== species) save.mutate(next)
+        }}
+        aria-label="Species"
+        className="h-8 rounded-full border border-line bg-surface px-2 text-sm font-medium text-ink focus:outline-none focus:ring-2 focus:ring-accent/20"
+      >
+        {!species && <option value="">Pet</option>}
+        {SPECIES.map((s) => (
+          <option key={s} value={s}>
+            {speciesLabel(s).toLowerCase()}s
+          </option>
+        ))}
+      </select>
+    </label>
   )
 }
 
@@ -474,9 +513,10 @@ function PersonView({ id }: { id: number }) {
         <div className="min-w-0 flex-1">
           <NameEditor key={p.id} id={p.id} name={p.name} kind={p.kind} species={p.species} />
           {pet ? (
-            <p className="mt-1 flex flex-wrap items-center gap-x-1.5 text-sm text-ink-soft">
+            <p className="mt-1 flex flex-wrap items-center gap-x-1.5 gap-y-1 text-sm text-ink-soft">
               <PawPrint className="size-4 shrink-0" aria-hidden />
               {speciesLabel(p.species)}, {formatCount(p.item_count, 'item')}, {formatCount(p.animal_count, 'crop')}
+              <SpeciesEditor key={`${p.id}-${p.species ?? ''}`} id={p.id} species={p.species} />
             </p>
           ) : (
             <p className="mt-1 text-sm text-ink-soft">

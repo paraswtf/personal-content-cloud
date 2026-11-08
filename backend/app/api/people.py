@@ -29,6 +29,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app import storage
 from app.analysis import cluster, guess
+from app.analysis import pets as pets_mod
 from app.api.common import (
     ITEM_CARD_COLUMNS,
     animal_out,
@@ -67,7 +68,9 @@ from app.schemas import (
     PersonOut,
     PersonPage,
     PersonRef,
+    PersonSpeciesIn,
     PersonUpdate,
+    SpeciesIn,
     Suggestion,
     SuggestionList,
     TagIn,
@@ -726,7 +729,7 @@ def assign_bodies(body: AssignBodiesIn, conn: sqlite3.Connection = Depends(get_d
 
 
 ANIMAL_SELECT = (
-    "SELECT a.id, a.person_id, a.assigned_by, a.det_score, a.species, a.frame_time_s, a.created_at, "
+    "SELECT a.id, a.person_id, a.assigned_by, a.det_score, a.species, a.species_source, a.frame_time_s, a.created_at, "
     "i.uid AS item_uid, i.kind AS item_kind, i.version AS item_version FROM animals a JOIN items i ON i.id = a.item_id"
 )
 _BOX_NAMES = {"faces": ("Face not found", "face_count"), "bodies": ("Body not found", "body_count"),
@@ -783,11 +786,57 @@ def assign_animals(body: AssignAnimalsIn, conn: sqlite3.Connection = Depends(get
         raise HTTPException(status_code=400, detail="Choose boxes of one species at a time")
     _check_boxes_vault(conn, session, "animals", ids)
     name_given = "new_person_name" in body.model_fields_set and body.new_person_name is not None
+    boxes_species = species.pop()
+    followed = 0
     with tx(conn):
-        target = _target_person(conn, body.person_id, body.new_person_name, name_given, session, species=species.pop())
+        if body.fix_species and body.person_id is not None:
+            # section 22: the target pet (every crop of it) becomes the boxes' species first
+            row = _visible_person_row(conn, session, body.person_id)
+            if row["kind"] == "pet" and row["species"] and row["species"] != boxes_species:
+                change = pets_mod.set_pet_species(conn, int(row["id"]), boxes_species)
+                followed = change.followed
+                if change.person_id is not None and change.person_id != body.person_id:
+                    body.person_id = change.person_id
+        target = _target_person(conn, body.person_id, body.new_person_name, name_given, session, species=boxes_species)
         updated, items = _move_boxes(conn, "animals", ids, target)
     _after_people_change(conn, items, set())
-    return AssignOut(updated=updated, person=_person_out(conn, target) if target is not None else None)
+    return AssignOut(updated=updated, person=_person_out(conn, target) if target is not None else None, followed=followed)
+
+
+@router.post("/animals/species", response_model=AssignOut)
+def set_animal_species(body: SpeciesIn, conn: sqlite3.Connection = Depends(get_db),
+                       session: SessionInfo = Depends(require_user)) -> AssignOut:
+    """The owner's species for these boxes (section 22): locked as their choice, recorded for learning;
+    a box in a pet of another species leaves it and is matched again; look-alike crops follow."""
+    ids = sorted({int(i) for i in body.animal_ids})
+    found = conn.execute(f"SELECT COUNT(*) FROM animals WHERE id IN ({_ids_sql(ids)})", ids).fetchone()[0]
+    if found != len(ids):
+        raise HTTPException(status_code=404, detail="Some boxes no longer exist. Reload and try again.")
+    _check_boxes_vault(conn, session, "animals", ids)
+    with tx(conn):
+        change = pets_mod.set_species(conn, ids, body.species)
+        bump_faces_version(conn)
+        bump_search_version(conn)
+    _after_people_change(conn, change.items, set())
+    return AssignOut(updated=change.updated, followed=change.followed)
+
+
+@router.post("/people/{person_id}/species", response_model=AssignOut)
+def set_person_species(person_id: int, body: PersonSpeciesIn, conn: sqlite3.Connection = Depends(get_db),
+                       session: SessionInfo = Depends(require_user)) -> AssignOut:
+    """Every crop of a pet takes this species, as the owner's choice, and so does the pet (section 22). A
+    pet of the same name and species already there takes the crops instead; the reply names the pet the
+    change ends on."""
+    row = _visible_person_row(conn, session, person_id)
+    if row["kind"] != "pet":
+        raise HTTPException(status_code=400, detail="That is a person, not a pet")
+    with tx(conn):
+        change = pets_mod.set_pet_species(conn, int(person_id), body.species)
+        bump_faces_version(conn)
+        bump_search_version(conn)
+    final = change.person_id if change.person_id is not None else int(person_id)
+    _after_people_change(conn, change.items | _items_of_person(conn, final), set())
+    return AssignOut(updated=change.updated, person=_person_out(conn, final), followed=change.followed)
 
 
 @router.delete("/animals/{animal_id}", response_model=Ok)
@@ -805,9 +854,12 @@ def _delete_box(conn: sqlite3.Connection, table: str, box_id: int, session: Sess
         _check_items_vault(conn, session, [int(row["item_id"])])
         if table == "bodies" and row["person_id"] is not None:
             _drop_body_tags(conn, [row])
-        conn.execute(f"DELETE FROM {table} WHERE id = ?", (box_id,))
-        if table != "animals":
-            cluster.drop_rejections(conn, "face" if table == "faces" else "body", [box_id])
+        if table == "faces":
+            cluster.remove_faces(conn, [box_id])
+        else:
+            conn.execute(f"DELETE FROM {table} WHERE id = ?", (box_id,))
+            if table == "bodies":
+                cluster.drop_rejections(conn, "body", [box_id])
         conn.execute(f"UPDATE items SET {count_col} = (SELECT COUNT(*) FROM {table} WHERE item_id = ?) WHERE id = ?",
                      (row["item_id"], row["item_id"]))
         if row["person_id"] is not None:

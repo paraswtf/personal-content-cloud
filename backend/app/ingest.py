@@ -1076,8 +1076,8 @@ def _rebuild_fts_if_flagged(conn: sqlite3.Connection) -> int:
     return done
 
 
-DOC_RULES_VERSION = 2  # section 30: the document detection rule set; kv doc_rules_version records the one applied
-DOC_RULES_NEW_TYPES = ("traffic_challan", "parking_receipt")  # the types rule set 2 added
+DOC_RULES_VERSION = 3  # sections 11 and 30: the document detection rule set; kv doc_rules_version records the one applied
+DOC_RULES_NEW_TYPES = ("traffic_challan", "parking_receipt", "id_card")  # the types rule sets 2 and 3 added
 
 
 def _documents_for_new_rules(conn: sqlite3.Connection) -> list[dict[str, Any]]:

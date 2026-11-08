@@ -17,6 +17,7 @@ MODEL = "images"
 CAT_ARRAY = "images_category"
 NSFW_ARRAY = "images_vault"
 FORWARD_ARRAY = "images_forward"  # section 29: the items the owner kept or set apart as forwards
+SPECIES_ARRAY = "images_species"  # section 22: the animal crops whose species the owner set
 NEIGHBOUR_MIN = 0.80   # a neighbour counts from this cosine
 BEST_MIN = 0.85        # the best neighbour must be at least this close
 VOTE_MIN = 0.6         # the winner's share of the neighbours' weight
@@ -85,6 +86,18 @@ def train(conn: sqlite3.Connection) -> dict[str, Any]:
         "SELECT id, forward FROM items WHERE forward_source = 'user' AND deleted_at IS NULL "
         "AND kind IN ('image', 'video') ORDER BY id"
     ).fetchall()
+    sp_rows = conn.execute(
+        "SELECT a.id, a.species, a.embedding FROM animals a JOIN items i ON i.id = a.item_id "
+        "WHERE a.species_source = 'user' AND a.embedding IS NOT NULL AND i.deleted_at IS NULL ORDER BY a.id"
+    ).fetchall()
+    sp_vecs: list[np.ndarray] = []
+    sp_labels: list[str] = []
+    for r in sp_rows:
+        v = np.frombuffer(r["embedding"], dtype=np.float32)
+        n = float(np.linalg.norm(v))
+        if n > 0:
+            sp_vecs.append((v / n).astype(np.float32))
+            sp_labels.append(str(r["species"]))
     embs = _embeddings(conn, sorted({int(r["id"]) for r in [*cat_rows, *nsfw_rows, *fwd_rows]}))
     fwd_x, fwd_ids = _matrix(embs, [int(r["id"]) for r in fwd_rows])
     fwd_label = {int(r["id"]): int(r["forward"]) for r in fwd_rows}
@@ -107,12 +120,17 @@ def train(conn: sqlite3.Connection) -> dict[str, Any]:
         store.save_array(FORWARD_ARRAY, fwd_x)
     else:
         store.remove(FORWARD_ARRAY)
+    if sp_vecs:
+        store.save_array(SPECIES_ARRAY, np.stack(sp_vecs))
+    else:
+        store.remove(SPECIES_ARRAY)
     labels = [cat_label[i] for i in cat_ids]
     model = {
         "category": {"ids": cat_ids, "labels": labels, "examples": len(cat_ids), "names": sorted(set(labels))},
         "vault": {"ids": nsfw_ids, "labels": [nsfw_label[i] for i in nsfw_ids], "examples": len(nsfw_rows),
                   "threshold": threshold, "scored": len(pairs), "weights": weights},
         "forward": {"ids": fwd_ids, "labels": [fwd_label[i] for i in fwd_ids], "examples": len(fwd_rows)},
+        "species": {"labels": sp_labels, "examples": len(sp_labels)},
         "trained_at": now_iso(),
     }
     store.save(MODEL, model)
@@ -212,6 +230,32 @@ def forward_vote(emb: np.ndarray | None) -> bool | None:
     return bool(winner)
 
 
+def species_vote(emb: np.ndarray | None) -> str | None:
+    """Section 22: the species the owner's corrected look-alike crops vote for (a neighbour at cosine
+    >= BEST_MIN, the winner holding VOTE_MIN of the close neighbours' weight), else None."""
+    if emb is None or not store.enabled():
+        return None
+    model = store.load(MODEL)
+    sp = (model or {}).get("species") or {}
+    labels = sp.get("labels") or []
+    if not labels:
+        return None
+    sims = _neighbours(SPECIES_ARRAY, emb)
+    if sims is None or sims.shape[0] != len(labels):
+        return None
+    order = np.argsort(-sims)[:TOP_K]
+    close = [(str(labels[i]), float(sims[i])) for i in order if sims[i] >= NEIGHBOUR_MIN]
+    if not close or close[0][1] < BEST_MIN:
+        return None
+    weight: dict[str, float] = {}
+    for label, s in close:
+        weight[label] = weight.get(label, 0.0) + s
+    winner = max(weight, key=lambda k: weight[k])
+    if weight[winner] / sum(weight.values()) < VOTE_MIN:
+        return None
+    return winner
+
+
 def predict_nsfw(emb: np.ndarray | None, signals: dict[str, Any] | float | None, *,
                  sensitivity: str = "normal") -> bool | None:
     """True/False from a very close labelled neighbour, else from the weights learned over the vault
@@ -252,4 +296,5 @@ def status() -> dict[str, Any]:
         "vault": {"examples": int(vault.get("examples", 0)), "threshold": vault.get("threshold"),
                   "weights": ((vault.get("weights") or {}).get("w") if vault.get("weights") else None)},
         "forward": {"examples": int(fwd.get("examples", 0))},
+        "species": {"examples": int((model.get("species") or {}).get("examples", 0))},
     }

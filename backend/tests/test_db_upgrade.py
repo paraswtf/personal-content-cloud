@@ -84,7 +84,8 @@ def test_the_fixture_is_the_pre_migration_shape(old_db):
     conn = sqlite3.connect(old_db)
     for table, column, _ in db.MIGRATED_COLUMNS:
         names = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
-        assert names, table
+        if not names:
+            continue  # a table added after the fixture: schema.sql creates it whole
         assert column not in names, (table, column)
     conn.close()
 

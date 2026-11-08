@@ -84,6 +84,8 @@ export interface OkOut {
 
 // people
 export type Species = 'bird' | 'cat' | 'dog' | 'horse' | 'sheep' | 'cow' | 'elephant' | 'bear' | 'zebra' | 'giraffe'
+/** The species the detector knows (section 22), in the order the pickers show them. */
+export const SPECIES: readonly Species[] = ['cat', 'dog', 'bird', 'horse', 'cow', 'sheep', 'elephant', 'bear', 'zebra', 'giraffe']
 export type PersonKind = 'person' | 'pet'
 export interface PersonRef {
   id: number
@@ -139,6 +141,8 @@ export interface AnimalOut {
   frame_time_s: number | null
   person: PersonRef | null
   assigned_by: 'auto' | 'user'
+  /** Who set the species: the detector (with the zero-shot check) or the owner (section 22). */
+  species_source?: 'auto' | 'user'
   url: string
 }
 export interface PersonOut {
@@ -228,6 +232,13 @@ export interface AssignAnimalsIn {
   animal_ids: number[]
   person_id?: number | null
   new_person_name?: string
+  /** Section 22: first make the target pet (and its crops) the boxes' species, then move them. */
+  fix_species?: boolean
+}
+/** POST /api/animals/species: the owner's species for these boxes (section 22). */
+export interface AnimalSpeciesIn {
+  animal_ids: number[]
+  species: Species
 }
 export interface AssignOut {
   updated: number
@@ -634,7 +645,7 @@ export interface SystemOut {
   forwards?: { unchecked: number; running: boolean } | null
 }
 // learning (section 18): what the small models learned from the owner's corrections
-export type LearningEventKind = 'category' | 'vault' | 'misclick' | 'doc_type' | 'guess' | 'tag' | 'forward'
+export type LearningEventKind = 'category' | 'vault' | 'misclick' | 'doc_type' | 'guess' | 'tag' | 'forward' | 'species'
 export type MisclickThresholdKey = 'blur_var_min' | 'dark_mean' | 'clipped_frac' | 'accident_min'
 /** How readily photos go to the vault: low sends fewer, high also sends suggestive but not explicit ones. */
 export type VaultSensitivity = 'low' | 'normal' | 'high'

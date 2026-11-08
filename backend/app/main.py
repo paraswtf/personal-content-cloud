@@ -214,8 +214,11 @@ class SessionCookieMiddleware:
                     if not any(v.startswith(sessions.COOKIE + "=") for v in headers.getlist("set-cookie")):
                         probe = Response()
                         sessions.set_cookie(probe, Request(scope), token)
+                        # only the cookie: a blank Response also carries "content-length: 0", and a second
+                        # Content-Length makes browsers, URLSession and h11 drop the whole response
                         for k, v in probe.raw_headers:
-                            headers.append(k.decode("latin-1"), v.decode("latin-1"))
+                            if k == b"set-cookie":
+                                headers.append(k.decode("latin-1"), v.decode("latin-1"))
             await send(message)
 
         await self.app(scope, receive, wrapped)

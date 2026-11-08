@@ -73,6 +73,7 @@ const EVENT_LABELS: Record<LearningEventKind, string> = {
   guess: 'Guesses confirmed or rejected',
   tag: 'Suggested tags removed',
   forward: 'Forward decisions',
+  species: 'Species corrections',
 }
 
 /** "Aadhaar card, PAN card, Passport and 2 more" */
