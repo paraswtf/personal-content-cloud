@@ -1,5 +1,7 @@
 # Personal Content Cloud
 
+Source: <https://github.com/paraswtf/personal-content-cloud>
+
 A private cloud for one person's photos, videos, PDFs and other documents. Everything runs on this
 machine: files stay on local disk, the models run on the local GPU (or CPU), and nothing is sent to
 outside services. Every upload is kept byte for byte and downloads return the original file; the
@@ -73,6 +75,8 @@ fresh checkout the first start installs dependencies, downloads the models and b
 which takes a few minutes. Manually:
 
 ```bash
+git clone https://github.com/paraswtf/personal-content-cloud.git
+cd personal-content-cloud
 ./scripts/run.sh                 # PORT=41010 HOST=127.0.0.1 by default
 ```
 
