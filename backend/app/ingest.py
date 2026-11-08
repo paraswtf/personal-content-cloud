@@ -1076,11 +1076,42 @@ def _rebuild_fts_if_flagged(conn: sqlite3.Connection) -> int:
     return done
 
 
+DOC_RULES_VERSION = 2  # section 30: the document detection rule set; kv doc_rules_version records the one applied
+DOC_RULES_NEW_TYPES = ("traffic_challan", "parking_receipt")  # the types rule set 2 added
+
+
+def _documents_for_new_rules(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    """Text-job payloads for the automatic 'other' documents whose text scores for a type a newer rule set
+    added (section 30), when kv doc_rules_version is below DOC_RULES_VERSION. The owner's own types
+    (documents.source = 'user') are never touched. Reads only; the caller queues and records the version."""
+    try:
+        have = int(kv_get(conn, "doc_rules_version", "1") or 1)
+    except ValueError:
+        have = 1
+    if have >= DOC_RULES_VERSION:
+        return []
+    from app.documents.detect import detect
+
+    out: list[dict[str, Any]] = []
+    for r in conn.execute(
+        "SELECT d.item_id, i.version, t.text FROM documents d JOIN items i ON i.id = d.item_id "
+        "JOIN item_text t ON t.item_id = d.item_id WHERE d.doc_type = 'other' AND d.source = 'auto' "
+        "AND i.deleted_at IS NULL ORDER BY d.item_id"
+    ).fetchall():
+        try:
+            if detect(r["text"] or "").doc_type in DOC_RULES_NEW_TYPES:
+                out.append(item_payload(int(r["item_id"]), int(r["version"])))
+        except Exception:  # noqa: BLE001 - one odd text never blocks the start
+            log.debug("startup: detection failed for item %s", r["item_id"], exc_info=True)
+    return out
+
+
 def recover_on_startup(conn: sqlite3.Connection) -> None:
     """Rebuild the full-text index when init_db asked for it (kv fts_rebuild); re-queue interrupted
     jobs; make sure every queued/processing upload has an ingest job and every item whose analysis,
-    text or streaming copy is pending has its job; apply a changed guessing window (guess.apply_window_change);
-    wipe data_dir/tmp."""
+    text or streaming copy is pending has its job; queue a reparse of the automatic 'other' documents a
+    newer detection rule set now types (kv doc_rules_version, section 30); apply a changed guessing window
+    (guess.apply_window_change); wipe data_dir/tmp."""
     _rebuild_fts_if_flagged(conn)
     n, exhausted = jobs.requeue_running(conn)
     if n:
@@ -1090,6 +1121,7 @@ def recover_on_startup(conn: sqlite3.Connection) -> None:
 
         worker.finish_exhausted(conn, exhausted)
     kinds = ",".join(f"'{k}'" for k in ANALYSED_KINDS)
+    reparse = _documents_for_new_rules(conn)
     with tx(conn):  # one transaction for every missing job
         added = jobs.enqueue_many(conn, "ingest", (
             {"upload_id": int(r["id"])}
@@ -1110,6 +1142,11 @@ def recover_on_startup(conn: sqlite3.Connection) -> None:
                 "SELECT id, version FROM items WHERE kind = 'video' AND preview_status = 'pending' ORDER BY id"
             ).fetchall()
         ), unique=True)
+        if reparse:
+            added += jobs.enqueue_many(conn, "text", reparse, unique=True)
+            log.info("startup: %d document(s) queued for a reparse under detection rule set %d", len(reparse),
+                     DOC_RULES_VERSION)
+        kv_set(conn, "doc_rules_version", str(DOC_RULES_VERSION))
     if added:
         log.info("startup: queued %d missing jobs", added)
     try:

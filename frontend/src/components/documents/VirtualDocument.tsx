@@ -1,19 +1,20 @@
 // The full virtual document of an item: every parsed field, editable in place (saved with
-// source 'user'), low-confidence values shaded, the barcode payload, Reparse, and the Apple Wallet
-// button for passes.
+// source 'user'), low-confidence values shaded, the barcode payload, Reparse, the Apple Wallet
+// button for passes, and for a traffic challan (section 30) the status chip, "Pay or check status"
+// (copies the challan number, opens the portal) and "Mark as paid".
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react'
 import { Link } from 'react-router'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import clsx from 'clsx'
-import { Barcode, Check, Copy, Loader2, Pencil, RefreshCw, Wallet } from 'lucide-react'
+import { Barcode, Check, Copy, ExternalLink, Loader2, Pencil, RefreshCw, Wallet } from 'lucide-react'
 import { api } from '../../lib/api'
 import type { DocumentOut, DocumentUpdate } from '../../lib/types'
-import { formatPercent, formatPlainDate } from '../../lib/format'
+import { formatPercent, formatPlainDate, localDateInput } from '../../lib/format'
 import { useRefreshLibrary } from '../../lib/hooks'
 import Select from '../Select'
 import { useToast } from '../Toast'
 import { errorMessage } from '../admin/adminHooks'
-import { DOC_TYPE_LABELS, LOW_CONFIDENCE, docTypeLabel, groupMeta, orderedKeys } from './docMeta'
+import { DOC_TYPE_LABELS, LOW_CONFIDENCE, PARIVAHAN_CHALLAN_URL, displayValue, docTypeIcon, docTypeLabel, fieldLabel, groupMeta, orderedKeys } from './docMeta'
 
 interface Props {
   uid: string
@@ -131,13 +132,25 @@ function EditableValue({
   )
 }
 
+/** A challan's payment status as a chip: Unpaid (or pending, due) in the warning colour, anything else plain. */
+function StatusChip({ value }: { value: string }) {
+  const v = value.trim()
+  const unpaid = /unpaid|pending|due/i.test(v)
+  return (
+    <span className={clsx('inline-flex h-6 items-center rounded-full px-2.5 text-xs font-semibold', unpaid ? 'bg-warn/20 text-warn' : 'bg-surface-2 text-ink')}>
+      {v}
+    </span>
+  )
+}
+
 export default function VirtualDocument({ uid, doc, showPhoto = true, notify }: Props) {
   const appToast = useToast()
   const toast = notify ?? appToast
   const qc = useQueryClient()
   const refresh = useRefreshLibrary()
   const meta = groupMeta(doc.doc_group)
-  const Icon = meta.icon
+  const Icon = docTypeIcon(doc.doc_type, doc.doc_group)
+  const isChallan = doc.doc_type === 'traffic_challan'
   const [savingKey, setSavingKey] = useState<string | null>(null)
 
   const types = useQuery({ queryKey: ['document-types'], queryFn: api.documents.types, staleTime: 5 * 60_000 })
@@ -172,7 +185,21 @@ export default function VirtualDocument({ uid, doc, showPhoto = true, notify }: 
   })
 
   const save = (key: string, body: DocumentUpdate) => update.mutate({ key, body })
-  const keys = orderedKeys(doc)
+  const keys = orderedKeys(doc).filter((k) => k !== 'pay_url')   // the link is the button below
+  // section 30: the challan's portal and status
+  const challanNumber = doc.fields.challan_number?.value?.trim() ?? ''
+  const payUrl = doc.fields.pay_url?.value?.trim() || PARIVAHAN_CHALLAN_URL
+  const paid = /^paid$/i.test(doc.fields.payment_status?.value?.trim() ?? '')
+  const copyChallan = async () => {
+    if (!challanNumber) return
+    try {
+      await navigator.clipboard.writeText(challanNumber)
+      toast.success('Challan number copied; the portal opens in a new tab')
+    } catch {
+      toast.error('Could not copy the challan number.')
+    }
+  }
+  const markPaid = () => save('f:payment_status', { fields: { payment_status: 'Paid', paid_on: localDateInput() } })
   const [copied, setCopied] = useState(false)
   const copyBarcode = async () => {
     if (!doc.barcode) return
@@ -243,8 +270,9 @@ export default function VirtualDocument({ uid, doc, showPhoto = true, notify }: 
               return (
                 <EditableValue
                   key={k}
-                  label={f.label || k}
+                  label={fieldLabel(doc, k)}
                   value={f.value}
+                  display={isChallan && k === 'payment_status' && f.value ? <StatusChip value={f.value} /> : displayValue(k, f.value)}
                   confidence={f.confidence}
                   saving={savingKey === `f:${k}`}
                   onSave={(v) => save(`f:${k}`, { fields: { [k]: v } })}
@@ -274,6 +302,35 @@ export default function VirtualDocument({ uid, doc, showPhoto = true, notify }: 
                 {copied ? <Check className="size-4" aria-hidden /> : <Copy className="size-4" aria-hidden />}
               </button>
             </div>
+          </div>
+        )}
+
+        {isChallan && (
+          <div className="flex flex-wrap items-center gap-2 border-t border-line pt-3">
+            <a
+              href={payUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              onClick={() => void copyChallan()}
+              className="inline-flex h-10 items-center gap-2 rounded-full bg-ink px-4 text-sm font-semibold text-surface hover:opacity-90"
+            >
+              <ExternalLink className="size-4" aria-hidden />
+              Pay or check status
+            </a>
+            {!paid && (
+              <button
+                type="button"
+                onClick={markPaid}
+                disabled={savingKey === 'f:payment_status'}
+                className="inline-flex h-10 items-center gap-2 rounded-full border border-line px-4 text-sm font-semibold text-ink hover:bg-surface-2 disabled:opacity-50"
+              >
+                <Check className="size-4" aria-hidden />
+                Mark as paid
+              </button>
+            )}
+            <p className="basis-full text-xs text-ink-soft">
+              The portal asks for the challan number and a captcha; the number is copied when you open it. The status shown is the one printed on the challan until you mark it paid.
+            </p>
           </div>
         )}
 

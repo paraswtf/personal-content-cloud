@@ -147,6 +147,7 @@ class Settings:
     geo_enabled: bool
     map_tiles: str             # offline | online
     map_tile_style: str
+    challan_portal_url: str  # section 30: another state's e-challan portal in place of the Maharashtra link
 
     # search
     search_enabled: bool
@@ -254,6 +255,7 @@ def _load(**overrides) -> Settings:
         geo_enabled=_bool("GEO_ENABLED", True),
         map_tiles=(_env("MAP_TILES", "offline") or "offline").strip().lower(),
         map_tile_style=_env("MAP_TILE_STYLE", "https://tiles.openfreemap.org/styles/liberty"),
+        challan_portal_url=_env("CHALLAN_PORTAL_URL", "") or "",
         search_enabled=_bool("SEARCH_ENABLED", True),
         search_threads=max(1, _int("SEARCH_THREADS", 2)),
         search_min_relevance=_float("SEARCH_MIN_RELEVANCE", DEFAULT_SEARCH_MIN_RELEVANCE),

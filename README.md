@@ -22,6 +22,9 @@ What it does with each file:
   grouped into people, and named once. People are also guessed from earlier photos of the same day,
   the same scene and the same clothes; guesses wait for a confirm or reject.
 - **Documents.** Text is extracted (text layer or OCR, in English, Hindi and Marathi) and searchable.
+  Traffic challans and parking receipts are read into their own cards: a challan shows its number,
+  vehicle, violations, amount and printed payment status with a button that opens the right portal to pay
+  or check it (the portals sit behind a captcha, so the status is not fetched automatically).
   Aadhaar, PAN, passport, driving licence, voter ID, vehicle RC, bank statements, invoices, receipts,
   salary slips, marksheets, degrees, certificates, offer letters, insurance policies, prescriptions,
   lab reports, vaccination certificates, event passes and boarding passes get a parsed "virtual

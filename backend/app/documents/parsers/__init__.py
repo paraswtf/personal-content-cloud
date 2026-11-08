@@ -17,8 +17,8 @@ from typing import Callable
 from app.documents.fields import Box, PageText, ParsedDocument
 from app.documents.parsers import (
     aadhaar, bank_statement, boarding_pass, certificate, degree, driving_licence, event_pass, insurance_policy,
-    invoice, lab_report, marksheet, offer_letter, other, pan, passport, prescription, receipt, salary_slip,
-    vaccination, vehicle_rc, voter_id,
+    invoice, lab_report, marksheet, offer_letter, other, pan, parking_receipt, passport, prescription, receipt,
+    salary_slip, traffic_challan, vaccination, vehicle_rc, voter_id,
 )
 
 log = logging.getLogger(__name__)
@@ -40,7 +40,8 @@ _TABLE: list[tuple[ModuleType, str, str]] = [
     (driving_licence, "id", "Driving licence"), (voter_id, "id", "Voter ID"),
     (vehicle_rc, "id", "Vehicle registration"),
     (bank_statement, "money", "Bank statement"), (invoice, "money", "Invoice"), (receipt, "money", "Receipt"),
-    (salary_slip, "money", "Salary slip"),
+    (salary_slip, "money", "Salary slip"), (traffic_challan, "money", "Traffic challan"),
+    (parking_receipt, "money", "Parking receipt"),
     (marksheet, "education_work", "Marksheet"), (degree, "education_work", "Degree"),
     (certificate, "education_work", "Certificate"), (offer_letter, "education_work", "Offer letter"),
     (insurance_policy, "health", "Insurance policy"), (prescription, "health", "Prescription"),

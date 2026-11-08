@@ -471,13 +471,15 @@ its score `>= 0.5`. Groups and types:
 | Group | Types | Key fields |
 |---|---|---|
 | `id` | `aadhaar` (12 digits, Verhoeff), `pan` (`[A-Z]{5}[0-9]{4}[A-Z]`), `passport` (MRZ TD3, check digits), `driving_licence`, `voter_id` (EPIC `[A-Z]{3}[0-9]{7}`), `vehicle_rc` | name, number, dob, gender, address, issue/expiry, father/spouse, issuing authority, photo |
-| `money` | `bank_statement`, `invoice`, `receipt`, `salary_slip` | account/IFSC, period, opening/closing balance, invoice number, GSTIN, total, parties, net pay |
+| `money` | `bank_statement`, `invoice`, `receipt`, `salary_slip`, `traffic_challan`, `parking_receipt` (section 30) | account/IFSC, period, opening/closing balance, invoice number, GSTIN, total, parties, net pay; challan number, vehicle, violations, amount, payment status, pay portal; receipt number, vehicle, in and out times, amount, operator |
 | `education_work` | `marksheet`, `degree`, `certificate`, `offer_letter` | institution, course, roll number, grade, date, employer, designation, CTC |
 | `health` | `insurance_policy`, `prescription`, `lab_report`, `vaccination` | insurer, policy number, sum insured, validity, doctor, patient, tests, vaccine, beneficiary id |
 | `pass` | `event_pass`, `boarding_pass` | event, venue, date, time, seat/section/gate, booking id, barcode; flight, pnr, from/to |
 | `other` | `other` | title, date (OCR text only) |
 
-Parsers return `ParsedDocument(doc_type, confidence, fields, title, doc_date, issuer, person_name)`.
+Parsers return `ParsedDocument(doc_type, confidence, fields, title, doc_date, issuer, person_name)`. A new
+rule set (`ingest.DOC_RULES_VERSION`, kv `doc_rules_version`) queues a reparse at startup for the automatic
+`other` documents whose text now scores for a type it added (section 30).
 Every parser is pure (text + boxes in, fields out) and unit-tested on synthetic renders.
 
 Virtual documents: `GET /api/documents/{uid}` plus the viewer's document panel render the type's
@@ -646,6 +648,14 @@ the build taken at startup (`DATA_DIR/site`, `app.main.snapshot_site`), so a lat
 cannot swap a newer site under an older running server; the banner covers the dev server (Vite
 serving sources against a stale API) and any other mix.
 
+Challan and parking receipt cards (section 30): `docMeta.ts` carries the two types' labels, icons
+(`TYPE_ICONS`, used by the card header and the tile), field order and labels (`TYPE_FIELDS`, the server's
+`field_order` wins) and tile fields (`KEY_FIELDS`); timestamp fields (`in_time`, `out_time`) are shown like
+other dates. `VirtualDocument` shows a challan's `payment_status` as a chip (Unpaid in the warning colour,
+anything else plain), hides `pay_url` from the grid and offers "Pay or check status" (copies the challan
+number, opens `pay_url`, else the Parivahan portal, in a new tab) and "Mark as paid" (`PATCH` fields
+`payment_status` "Paid" and `paid_on` today).
+
 ## 15. Configuration (env)
 
 | Variable | Default | Meaning |
@@ -671,6 +681,7 @@ serving sources against a stale API) and any other mix.
 | `BLUR_VAR_MIN`, `BURST_WINDOW_S` | 40, 3 | mis-clicks |
 | `GUESS_WINDOW_H`, `GUESS_SCENE_SIM`, `GUESS_CLOTHES_SIM`, `GUESS_GPS_M` | 1, 0.80, 0.85, 250 | person guessing: the hours before and after a photo whose tagged people are references |
 | `FORWARDS_ENABLED`, `FORWARD_MAX_SIDE`, `FORWARD_JPEG_QUALITY_MAX`, `FORWARD_MEME_MIN` | true, 1600, 82, 0.5 | forwards (section 29) |
+| `CHALLAN_PORTAL_URL` | the Maharashtra e-challan portal | the portal a challan is paid at when its issuer, number or location says Maharashtra (section 30) |
 | `SEARCH_*` | as the hub | semantic search gates |
 | `OCR_ENABLED`, `OCR_MAX_PAGES` | true, 50 | |
 | `WALLET_PASS_TYPE_ID`, `WALLET_TEAM_ID`, `WALLET_ORG_NAME`, `WALLET_DIR`, `WALLET_KEY_PASSWORD` | unset, unset, site title, `DATA_DIR/wallet`, unset | Apple Wallet (the key password only when key.pem is encrypted) |
@@ -1366,3 +1377,65 @@ decision table (received photo of people stays, meme goes apart, text without pe
 JPEG is never received); the learner (rule until 10 examples, then the fitted cut; the look-alike vote); the
 filters, the review bin and the bulk actions through the API; the backfill marks rows checked and never
 touches a user decision.
+
+## 30. Traffic challans and parking receipts (`documents/parsers/traffic_challan.py`, `documents/parsers/parking_receipt.py`)
+
+Two document types the owner meets often, both in group `money`, detected by `detect.RULES` like every
+other type and parsed by a pure parser (text and boxes in, `ParsedDocument` out), so the document learner
+of section 18 (`learning/doc_type.py`, the owner's relabels as TF-IDF exemplars) covers them as it covers
+the rest: a type the owner sets on one document carries to the ones that read alike.
+
+`traffic_challan` ("Traffic challan"): an e-challan page or its printout (state traffic police portals,
+the national Parivahan portal, a city police challan). Detection: "challan" (0.5), "e-challan" (0.5),
+"traffic police" (0.3), "challan no" (0.3), "challan details" (0.2), "comp. fee" or "compounding fee" (0.2),
+"payment status" (0.2), "violation" (0.1), "MVA" or "motor vehicles act" (0.1), a challan number (an
+identifier, 0.3: two to six capitals then 11 to 20 digits, as in `PNCCC26002934519`), a vehicle number
+(0.1, `[A-Z]{2} ?\d{1,2} ?[A-Z]{1,3} ?\d{4}`); negative "parking" (0.5). Fields, in this order:
+`challan_number`, `date` (the challan date and time), `vehicle_number`, `vehicle_owner`, `owner_address`,
+`violations` (every row of the violations table joined as "Sec 122/177 MVA: description (Rs 500)"),
+`amount` (Comp. Fee or the fines' total), `payment_status` (as printed: Unpaid, Paid, Disposed, or the
+owner's own value), `location`, `officer` (name and designation), `mobile`, `evidences` (count of image
+links). Title "Challan {challan_number}" with the vehicle number appended when known; `doc_date` the
+challan date; `issuer` the heading ("Maharashtra Traffic Police", "Pune City Police"); `person_name` the
+vehicle owner. Labels read from "Label   Value" rows and from the table rows the OCR flattens
+(`fields.after_label` with the challan's labels, local-script labels for Marathi and Hindi portals).
+
+`parking_receipt` ("Parking receipt"): a thermal or printed parking ticket. The OCR of such prints is
+rough (the example reads "U.No" for "V.No", "PUT. LTD" for "PVT. LTD", "OUNERS RISK"), so detection rests on
+several weak marks: "parking" (0.5), "parking charges" or "parking fee" (0.3), "in dt", "in tm", "out dt",
+"out tm", "in time", "out time" (0.3 together), "vehicle type" (0.2), "2 wheeler", "4 wheeler", "2w", "4w"
+(0.25), a tariff line "... hours rs N" or "rs N per hour" (0.3), "owner's risk" matched loosely (`o[uw]ners?.?s?
+risk`, 0.2), "pass not allowed" (0.1), "valet" (0.2); negatives "challan" (0.5), "traffic police" (0.5).
+Fields: `receipt_number` (BILL NO, TICKET NO, RECEIPT NO), `vehicle_number` (V.No, U.No, VEH NO, VEHICLE NO;
+often only the last four digits), `vehicle_type`, `in_time` (IN DT plus IN TM, as one ISO timestamp), `out_time`
+(OUT DT plus OUT TM when printed), `duration` (when both are known), `amount` (TOTAL, AMOUNT, PAID), `operator`
+(the company lines above the bill number: "P ONE INFRA PVT. LTD", "MANAGED BY ..."), `location` (a site name
+or address when printed), `tariff` (the rate lines joined, optional). Title "Parking {operator or location}
+{date}"; `doc_date` the in date; `issuer` the operator.
+
+Paying a challan and its status: the Maharashtra portal (`https://mahatrafficechallan.gov.in/payechallan/PaymentService.htm`)
+and the national one (`https://echallan.parivahan.gov.in/index/accused-challan`) take the challan number in
+a form behind a captcha; there is no public API, and the paid lookups that exist are business services. So
+the challan card offers "Pay or check status": it copies the challan number to the clipboard and opens the
+portal that matches the challan (Maharashtra when the issuer or the number says so, else Parivahan), the
+status shown is the one printed on the challan (`payment_status`), and the owner marks it paid on the card
+(`PATCH /api/documents/{uid}` fields `payment_status` = "Paid" and `paid_on`, `source='user'`). The backend
+exposes the portal choice as `ParsedDocument.fields['pay_url']` (label "Pay at", `traffic_challan.portal_for`),
+never fetches anything from the portals, and `CHALLAN_PORTAL_URL` (env) overrides the Maharashtra link for
+another state's portal.
+
+Existing documents: `kv doc_rules_version` records the rule set the automatic documents were detected with
+(`ingest.DOC_RULES_VERSION`, 2 for this section); at startup, when it is lower, every automatic `other`
+document whose stored text scores for a new type (`ingest.DOC_RULES_NEW_TYPES`) is queued for a `text` job
+(`ingest.recover_on_startup`, inside its one transaction), so the challans and parking tickets already in the
+library get their type without a click; the owner's own types (`documents.source = 'user'`) are never touched.
+
+Frontend (section 14): `docMeta.ts` gains both types (labels, lucide icons `TrafficCone` and
+`SquareParking`, field order and labels, key fields); the type picker lists them; the challan card shows the
+status as a chip (Unpaid in the warning colour, Paid plain), the "Pay or check status" button, "Mark as paid";
+the Documents page groups them under Money like receipts.
+
+Tests: both parsers on anonymised copies of the two OCR texts measured on 2026-11-08 (the Maharashtra
+Traffic Police challan page and the thermal parking bill), the detection scores of each against the other
+and against a receipt and an invoice, the pay-portal choice, and the startup reparse of an automatic `other`
+document.

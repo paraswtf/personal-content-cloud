@@ -70,6 +70,40 @@ def _valid_gstin(t: str, pages: list[PageText]) -> bool:
     return any(F.gstin_valid(g) for g in F.find_gstins(t))
 
 
+# section 30: the marks of a traffic challan and of a parking ticket
+_CHALLAN_NO_RE = re.compile(r"(?<![A-Z0-9])[A-Z]{2,6}\d{11,20}(?![A-Z0-9])")
+_IN_OUT_RE = re.compile(r"(?i)(?<![a-z])(?:in|out)\s*(?:dt|tm|date|time)\b|(?<![a-z])(?:entry|exit)\s*(?:date|time)\b|"
+                        r"\btime\s*(?:in|out)\b")
+_TARIFF_RE = re.compile(r"(?i)(?:hours?|hrs?\.?)\s*[:\-]?\s*(?:rs|\u20b9|inr)\.?\s*\d|\b(?:rs|\u20b9|inr)\.?\s*\d+\s*(?:/-)?\s*"
+                        r"(?:per|/)\s*(?:hour|hr|day)")
+_OWNERS_RISK_RE = re.compile(r"(?i)o[uw]ners?.?s?\s*risk")
+_WHEELER_RE = re.compile(r"(?i)(?<![a-z0-9])(?:2|4|two|four)\s*-?\s*w(?:heeler)?(?![a-z])")
+
+
+def _challan_number(t: str, pages: list[PageText]) -> bool:
+    return bool(_CHALLAN_NO_RE.search(t.upper()))
+
+
+def _vehicle_number(t: str, pages: list[PageText]) -> bool:
+    return F.find_vehicle_number(t) is not None
+
+
+def _in_out_marks(t: str, pages: list[PageText]) -> bool:
+    return bool(_IN_OUT_RE.search(t))
+
+
+def _tariff_line(t: str, pages: list[PageText]) -> bool:
+    return bool(_TARIFF_RE.search(t))
+
+
+def _owners_risk(t: str, pages: list[PageText]) -> bool:
+    return bool(_OWNERS_RISK_RE.search(t))
+
+
+def _wheeler(t: str, pages: list[PageText]) -> bool:
+    return bool(_WHEELER_RE.search(t))
+
+
 RULES: dict[str, Rule] = {
     "aadhaar": Rule(
         keywords=[("aadhaar", 0.4), ("aadhar", 0.4), ("\u0906\u0927\u093e\u0930", 0.4),
@@ -153,6 +187,23 @@ RULES: dict[str, Rule] = {
         negative=[("tax invoice", 0.25), ("statement of account", 0.4), ("policy schedule", 0.3), ("payslip", 0.4),
                   ("boarding pass", 0.4), ("ticket", 0.2)],
         filename=("receipt",),
+    ),
+    "traffic_challan": Rule(
+        keywords=[("challan", 0.5), ("e-challan", 0.5), ("echallan", 0.5), ("traffic police", 0.3), ("challan no", 0.3),
+                  ("challan number", 0.3), ("challan details", 0.2), ("comp. fee", 0.2), ("comp.fee", 0.2),
+                  ("comp fee", 0.2), ("compounding fee", 0.2), ("payment status", 0.2), ("violation", 0.1),
+                  ("mva", 0.1), ("motor vehicles act", 0.1), ("motor vehicle act", 0.1)],
+        ids=[(_challan_number, 0.3), (_vehicle_number, 0.1)],
+        # a delivery challan is a dispatch note, an invoice's cousin
+        negative=[("parking", 0.5), ("delivery challan", 0.6), ("tax invoice", 0.5), ("gstin", 0.3), ("hsn", 0.2)],
+        filename=("challan",),
+    ),
+    "parking_receipt": Rule(
+        keywords=[("parking", 0.5), ("parking charges", 0.3), ("parking fee", 0.3), ("parking fees", 0.3),
+                  ("car park", 0.3), ("vehicle type", 0.2), ("pass not allowed", 0.1), ("valet", 0.2)],
+        ids=[(_in_out_marks, 0.3), (_wheeler, 0.25), (_tariff_line, 0.3), (_owners_risk, 0.2)],
+        negative=[("challan", 0.5), ("traffic police", 0.5)],
+        filename=("parking",),
     ),
     "salary_slip": Rule(
         keywords=[("payslip", 0.6), ("pay slip", 0.6), ("salary slip", 0.6), ("net pay", 0.3), ("net salary", 0.3),
@@ -312,6 +363,15 @@ LOCAL_RULES: dict[str, tuple[list[tuple[str, float]], list[tuple[str, float]]]] 
          ("फीस रसीद", 0.3), ("शुल्क पावती", 0.3), ("भुगतान", 0.05), ("सशुल्क", 0.05)],
         [("कर बीजक", 0.25), ("खाता विवरण", 0.4), ("पगार पावती", 0.5), ("वेतन पर्ची", 0.4), ("वेतन पत्रक", 0.4),
          ("पगार पत्रक", 0.4), *_MARKSHEET_LOCAL, *_RENT],
+    ),
+    "traffic_challan": (
+        [("ई-चलन", 0.5), ("ई चलन", 0.5), ("ईचलन", 0.5), ("वाहतूक पोलीस", 0.3), ("यातायात पुलिस", 0.3), ("ट्रैफिक पुलिस", 0.3),
+         ("चलन क्रमांक", 0.3), ("चालान संख्या", 0.3), ("दंड", 0.1)],
+        [("पार्किंग", 0.5), ("वाहनतळ", 0.5)],
+    ),
+    "parking_receipt": (
+        [("पार्किंग", 0.5), ("वाहनतळ", 0.5), ("पार्किंग शुल्क", 0.3)],
+        [("चलन", 0.3), ("चालान", 0.3)],
     ),
     "salary_slip": (
         [("वेतन पर्ची", 0.6), ("पगार पावती", 0.6), ("वेतन पत्रक", 0.6), ("पगार पत्रक", 0.6), ("पगार स्लिप", 0.6),

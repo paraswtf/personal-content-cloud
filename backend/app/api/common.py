@@ -70,7 +70,8 @@ ITEM_CARD_COLUMNS = (
 DOC_TYPE_LABELS = {
     "aadhaar": "Aadhaar card", "pan": "PAN card", "passport": "Passport", "driving_licence": "Driving licence",
     "voter_id": "Voter ID", "vehicle_rc": "Vehicle registration", "bank_statement": "Bank statement",
-    "invoice": "Invoice", "receipt": "Receipt", "salary_slip": "Salary slip", "marksheet": "Marksheet",
+    "invoice": "Invoice", "receipt": "Receipt", "salary_slip": "Salary slip", "traffic_challan": "Traffic challan",
+    "parking_receipt": "Parking receipt", "marksheet": "Marksheet",
     "degree": "Degree", "certificate": "Certificate", "offer_letter": "Offer letter",
     "insurance_policy": "Insurance policy", "prescription": "Prescription", "lab_report": "Lab report",
     "vaccination": "Vaccination certificate", "event_pass": "Event pass", "boarding_pass": "Boarding pass",
@@ -79,6 +80,7 @@ DOC_TYPE_LABELS = {
 DOC_GROUP_OF = {
     "aadhaar": "id", "pan": "id", "passport": "id", "driving_licence": "id", "voter_id": "id", "vehicle_rc": "id",
     "bank_statement": "money", "invoice": "money", "receipt": "money", "salary_slip": "money",
+    "traffic_challan": "money", "parking_receipt": "money",
     "marksheet": "education_work", "degree": "education_work", "certificate": "education_work",
     "offer_letter": "education_work",
     "insurance_policy": "health", "prescription": "health", "lab_report": "health", "vaccination": "health",

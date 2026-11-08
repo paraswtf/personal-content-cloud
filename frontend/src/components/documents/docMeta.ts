@@ -6,10 +6,13 @@ import {
   GraduationCap,
   HeartPulse,
   IdCard,
+  SquareParking,
   Ticket,
+  TrafficCone,
   type LucideIcon,
 } from 'lucide-react'
 import type { DocumentOut } from '../../lib/types'
+import { formatDate } from '../../lib/format'
 
 export type DocGroup = DocumentOut['doc_group']
 
@@ -38,6 +41,8 @@ export const DOC_TYPE_LABELS: Record<string, string> = {
   bank_statement: 'Bank statement',
   invoice: 'Invoice',
   receipt: 'Receipt',
+  traffic_challan: 'Traffic challan',
+  parking_receipt: 'Parking receipt',
   salary_slip: 'Salary slip',
   marksheet: 'Marksheet',
   degree: 'Degree',
@@ -55,6 +60,71 @@ export const DOC_TYPE_LABELS: Record<string, string> = {
 export function docTypeLabel(type: string | null | undefined): string {
   if (!type) return 'Document'
   return DOC_TYPE_LABELS[type] ?? type.replace(/_/g, ' ').replace(/^./, (c) => c.toUpperCase())
+}
+
+/** Icons for the types whose group icon says too little (section 30); the group's icon otherwise. */
+export const TYPE_ICONS: Record<string, LucideIcon> = {
+  traffic_challan: TrafficCone,
+  parking_receipt: SquareParking,
+}
+
+export function docTypeIcon(type: string | null | undefined, group: string | null | undefined): LucideIcon {
+  return (type && TYPE_ICONS[type]) || groupMeta(group).icon
+}
+
+/** Field order and labels the frontend knows on its own (section 30); the server's field_order and
+ *  labels win when they are there. */
+export const TYPE_FIELDS: Record<string, { key: string; label: string }[]> = {
+  traffic_challan: [
+    { key: 'challan_number', label: 'Challan number' },
+    { key: 'date', label: 'Date' },
+    { key: 'vehicle_number', label: 'Vehicle number' },
+    { key: 'vehicle_owner', label: 'Vehicle owner' },
+    { key: 'owner_address', label: 'Owner address' },
+    { key: 'violations', label: 'Violations' },
+    { key: 'amount', label: 'Amount' },
+    { key: 'payment_status', label: 'Payment status' },
+    { key: 'location', label: 'Location' },
+    { key: 'officer', label: 'Officer' },
+    { key: 'mobile', label: 'Mobile' },
+    { key: 'evidences', label: 'Evidences' },
+    { key: 'pay_url', label: 'Pay at' },
+  ],
+  parking_receipt: [
+    { key: 'receipt_number', label: 'Receipt number' },
+    { key: 'vehicle_number', label: 'Vehicle number' },
+    { key: 'vehicle_type', label: 'Vehicle type' },
+    { key: 'in_time', label: 'In' },
+    { key: 'out_time', label: 'Out' },
+    { key: 'duration', label: 'Duration' },
+    { key: 'amount', label: 'Amount' },
+    { key: 'operator', label: 'Operator' },
+    { key: 'location', label: 'Location' },
+    { key: 'tariff', label: 'Tariff' },
+  ],
+}
+
+/** The fields a tile shows first for these types. */
+export const KEY_FIELDS: Record<string, string[]> = {
+  traffic_challan: ['challan_number', 'amount', 'payment_status'],
+  parking_receipt: ['receipt_number', 'amount', 'in_time'],
+}
+
+/** The portal a challan without a pay_url opens (section 30). */
+export const PARIVAHAN_CHALLAN_URL = 'https://echallan.parivahan.gov.in/index/accused-challan'
+
+/** A field's label: the server's, else the type's own, else the key. */
+export function fieldLabel(doc: Pick<DocumentOut, 'fields' | 'doc_type'>, key: string): string {
+  return doc.fields[key]?.label || TYPE_FIELDS[doc.doc_type]?.find((f) => f.key === key)?.label || key
+}
+
+/** Timestamp fields (in_time, out_time) are shown like other dates, with the time. */
+const TIME_FIELDS = new Set(['in_time', 'out_time'])
+
+/** The value as the card shows it: a timestamp field formatted, anything else as stored. */
+export function displayValue(key: string, value: string): string {
+  if (TIME_FIELDS.has(key)) return formatDate(value, true) || value
+  return value
 }
 
 /** Short file-type label for a document tile without a parsed type ("PDF", "DOCX"). */
@@ -79,24 +149,26 @@ export function maskValue(value: string): string {
   return value.replace(/[A-Za-z0-9]/g, (c) => (++seen <= total - 4 ? 'X' : c))
 }
 
-/** Field keys in display order: the type's order first, then any others. */
-export function orderedKeys(doc: Pick<DocumentOut, 'fields' | 'field_order'>): string[] {
-  const keys = doc.field_order.filter((k) => k in doc.fields)
+/** Field keys in display order: the server's order (else the type's own, section 30) first, then any others. */
+export function orderedKeys(doc: Pick<DocumentOut, 'fields' | 'field_order'> & { doc_type?: string }): string[] {
+  const order = doc.field_order.length ? doc.field_order : (TYPE_FIELDS[doc.doc_type ?? ''] ?? []).map((f) => f.key)
+  const keys = order.filter((k) => k in doc.fields)
   for (const k of Object.keys(doc.fields)) if (!keys.includes(k)) keys.push(k)
   return keys
 }
 
-const SKIP_ON_TILE = new Set(['name', 'full_name', 'holder_name', 'address'])
+const SKIP_ON_TILE = new Set(['name', 'full_name', 'holder_name', 'address', 'pay_url'])
 
 /** Up to `n` key fields for a tile: the identifier (masked) first, then the next fields in order. */
 export function keyFields(doc: DocumentOut, n = 3): { key: string; label: string; value: string }[] {
   const keys = orderedKeys(doc).filter((k) => doc.fields[k]?.value && !SKIP_ON_TILE.has(k))
+  const wanted = (KEY_FIELDS[doc.doc_type] ?? []).filter((k) => keys.includes(k))
   const num = keys.find(isNumberField)
-  const picked = num ? [num, ...keys.filter((k) => k !== num)] : keys
+  const picked = wanted.length ? [...wanted, ...keys.filter((k) => !wanted.includes(k))] : num ? [num, ...keys.filter((k) => k !== num)] : keys
   return picked.slice(0, n).map((k) => ({
     key: k,
-    label: doc.fields[k].label || k,
-    value: isNumberField(k) && doc.doc_group === 'id' ? maskValue(doc.fields[k].value) : doc.fields[k].value,
+    label: fieldLabel(doc, k),
+    value: isNumberField(k) && doc.doc_group === 'id' ? maskValue(doc.fields[k].value) : displayValue(k, doc.fields[k].value),
   }))
 }
 

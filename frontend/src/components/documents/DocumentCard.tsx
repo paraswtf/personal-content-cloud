@@ -3,7 +3,7 @@
 import clsx from 'clsx'
 import type { DocumentOut, ItemCard } from '../../lib/types'
 import { formatPlainDate } from '../../lib/format'
-import { docTypeLabel, groupMeta, keyFields } from './docMeta'
+import { docTypeIcon, docTypeLabel, groupMeta, keyFields } from './docMeta'
 
 interface Props {
   item: ItemCard
@@ -14,7 +14,7 @@ interface Props {
 
 export default function DocumentCard({ item, doc, onOpen, className }: Props) {
   const meta = groupMeta(doc.doc_group)
-  const Icon = meta.icon
+  const Icon = docTypeIcon(doc.doc_type, doc.doc_group)
   const fields = keyFields(doc, 3)
   const title = doc.title || doc.label || docTypeLabel(doc.doc_type)
   const body = (
