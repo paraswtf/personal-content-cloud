@@ -17,6 +17,8 @@ import { useInvalidateItem } from './shared'
 interface Props {
   uid: string
   box: AnimalBox
+  /** Whole-video editing (section 10): every track of this pet in the video, the box among them. */
+  tracks?: AnimalBox[]
   anchor: HTMLElement | null
   onClose: () => void
   onDone: (message: string) => void
@@ -27,7 +29,7 @@ export function followedCrops(followed: number | undefined): string {
   return followed ? ` ${formatCount(followed, 'look-alike crop')} followed.` : ''
 }
 
-export default function AnimalEditor({ uid, box, anchor, onClose, onDone }: Props) {
+export default function AnimalEditor({ uid, box, anchor, onClose, onDone, tracks }: Props) {
   const ref = useRef<HTMLDivElement>(null)
   const [style, setStyle] = useState<CSSProperties>(() => placement(anchor))
   const [picking, setPicking] = useState(false)
@@ -36,6 +38,10 @@ export default function AnimalEditor({ uid, box, anchor, onClose, onDone }: Prop
   const invalidate = useInvalidateItem(uid)
   const sheet = style.bottom === 0 && style.left === 0
   const species = speciesLabel(box.species)
+  const trackList = tracks && tracks.length > 1 ? tracks : null
+  const [onlyTrack, setOnlyTrack] = useState(false)
+  const ids = trackList && !onlyTrack ? trackList.map((b) => b.id) : [box.id]
+  const trackTail = ids.length > 1 ? ` (${ids.length} tracks)` : ''
 
   useLayoutEffect(() => setStyle(placement(anchor)), [anchor, box.id])
   useEffect(() => {
@@ -62,17 +68,17 @@ export default function AnimalEditor({ uid, box, anchor, onClose, onDone }: Prop
 
   const assign = useMutation({
     mutationFn: (v: { choice: PersonChoice | null; fix?: boolean }) =>
-      api.animals.assign({ animal_ids: [box.id], ...choiceBody(v.choice), ...(v.fix ? { fix_species: true } : {}) }),
+      api.animals.assign({ animal_ids: ids, ...choiceBody(v.choice), ...(v.fix ? { fix_species: true } : {}) }),
     onSuccess: (res, v) => {
       invalidate()
       setMismatch(null)
-      if (!v.choice) onDone(box.person ? `Removed from ${personName(box.person)}` : 'Unassigned')
-      else if (v.fix && res.person) onDone(`Tagged as ${personName(res.person)}, now a ${species.toLowerCase()}`)
-      else onDone(res.person ? `Tagged as ${personName(res.person)}` : 'Saved')
+      if (!v.choice) onDone((box.person ? `Removed from ${personName(box.person)}` : 'Unassigned') + trackTail)
+      else if (v.fix && res.person) onDone(`Tagged as ${personName(res.person)}, now a ${species.toLowerCase()}${trackTail}`)
+      else onDone((res.person ? `Tagged as ${personName(res.person)}` : 'Saved') + trackTail)
     },
   })
   const setSpecies = useMutation({
-    mutationFn: (next: Species) => api.animals.setSpecies({ animal_ids: [box.id], species: next }),
+    mutationFn: (next: Species) => api.animals.setSpecies({ animal_ids: ids, species: next }),
     onSuccess: (res, next) => {
       invalidate()
       setPicking(false)
@@ -80,10 +86,12 @@ export default function AnimalEditor({ uid, box, anchor, onClose, onDone }: Prop
     },
   })
   const remove = useMutation({
-    mutationFn: () => api.animals.remove(box.id),
+    mutationFn: async () => {
+      for (const id of ids) await api.animals.remove(id)
+    },
     onSuccess: () => {
       invalidate()
-      onDone('Removed. It will not be shown as a pet again.')
+      onDone(`Removed. It will not be shown as a pet again.${trackTail}`)
     },
   })
   const busy = assign.isPending || remove.isPending || setSpecies.isPending
@@ -140,6 +148,15 @@ export default function AnimalEditor({ uid, box, anchor, onClose, onDone }: Prop
           onPick={pick}
         />
         <p className="mt-2 text-xs text-ink-soft">Pets of the same species come first. A pet of another species can take this box once it becomes a {species.toLowerCase()} too.</p>
+        {trackList && (
+          <div className="mt-2 rounded-xl bg-surface-2 p-2 text-xs text-ink-soft" role="status">
+            <p>{onlyTrack ? 'Applies to this track only.' : `Applies to all ${trackList.length} tracks of this pet in the video.`}</p>
+            <label className="mt-1 flex min-h-10 cursor-pointer items-center gap-2 text-sm">
+              <input type="checkbox" checked={onlyTrack} onChange={(e) => setOnlyTrack(e.target.checked)} />
+              Only this track
+            </label>
+          </div>
+        )}
       </div>
 
       {mismatch && (

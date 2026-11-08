@@ -54,3 +54,26 @@ export function findBox(detail: ItemDetail, kind: BoxKind, id: number): BoxTarge
   const box = detail.animals.find((a) => a.id === id)
   return box ? { kind, box } : null
 }
+
+/** The tracks of a video gathered by their group (section 10): one entry per person or look-alike, in order
+ *  of first appearance, with the tracks sorted by time. A track without a group stands alone. */
+export interface VideoGroup {
+  key: string
+  targets: BoxTarget[]
+  first: BoxTarget
+}
+
+export function groupVideoBoxes(targets: BoxTarget[]): VideoGroup[] {
+  const groups = new Map<string, BoxTarget[]>()
+  for (const t of targets) {
+    const g = t.box.group
+    const key = g === null || g === undefined ? `solo:${boxKey(t)}` : `group:${g}`
+    const list = groups.get(key)
+    if (list) list.push(t)
+    else groups.set(key, [t])
+  }
+  return [...groups.entries()].map(([key, list]) => {
+    const sorted = [...list].sort((a, b) => (a.box.frame_time_s ?? 0) - (b.box.frame_time_s ?? 0))
+    return { key, targets: sorted, first: sorted[0] }
+  })
+}

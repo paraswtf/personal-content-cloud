@@ -5,6 +5,7 @@ import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from
 import { useMutation, useQuery } from '@tanstack/react-query'
 import { Ban, Check, UserX, X } from 'lucide-react'
 import { api } from '../../lib/api'
+import type { AssignOut } from '../../lib/types'
 import { formatCount, formatPercent, personName } from '../../lib/format'
 import PersonPicker, { choiceBody, type PersonChoice } from '../people/PersonPicker'
 import { evidenceLine } from '../people/evidence'
@@ -15,6 +16,8 @@ import { useInvalidateItem } from './shared'
 interface Props {
   uid: string
   target: PersonBoxTarget
+  /** Whole-video editing (section 10): every track of this person in the video, the target among them. */
+  tracks?: PersonBoxTarget[]
   anchor: HTMLElement | null
   onClose: () => void
   onDone: (message: string) => void
@@ -35,7 +38,7 @@ export function placement(anchor: HTMLElement | null): CSSProperties {
   return { left: side, top: Math.max(8, (vh - need) / 2), width: WIDTH }
 }
 
-export default function FaceEditor({ uid, target, anchor, onClose, onDone }: Props) {
+export default function FaceEditor({ uid, target, anchor, onClose, onDone, tracks }: Props) {
   const ref = useRef<HTMLDivElement>(null)
   const [style, setStyle] = useState<CSSProperties>(() => placement(anchor))
   const invalidate = useInvalidateItem(uid)
@@ -69,14 +72,30 @@ export default function FaceEditor({ uid, target, anchor, onClose, onDone }: Pro
   const [onlyThis, setOnlyThis] = useState(false)
   const groupScope = !!group && !onlyThis
 
+  // whole-video editing: the group's tracks unless the owner narrows it to this one
+  const trackList = tracks && tracks.length > 1 ? tracks : null
+  const [onlyTrack, setOnlyTrack] = useState(false)
+  const scopeTargets: PersonBoxTarget[] = trackList && !onlyTrack ? trackList : [target]
+  const faceIds = scopeTargets.filter((t) => t.kind === 'face').map((t) => t.box.id)
+  const bodyIds = scopeTargets.filter((t) => t.kind === 'body').map((t) => t.box.id)
+  const trackTail = scopeTargets.length > 1 ? ` (${scopeTargets.length} tracks)` : ''
+
   const assign = useMutation({
-    mutationFn: (choice: PersonChoice | null) =>
-      isFace ? api.people.assignFaces({ face_ids: [box.id], ...choiceBody(choice) }) : api.people.assignBodies({ body_ids: [box.id], ...choiceBody(choice) }),
+    mutationFn: async (choice: PersonChoice | null) => {
+      const body = choiceBody(choice)
+      let res: AssignOut | null = null
+      if (faceIds.length) res = await api.people.assignFaces({ face_ids: faceIds, ...body })
+      if (bodyIds.length) {
+        const r2 = await api.people.assignBodies({ body_ids: bodyIds, ...body })
+        res = res ? { ...res, updated: res.updated + r2.updated, followed: (res.followed ?? 0) + (r2.followed ?? 0), person: res.person ?? r2.person } : r2
+      }
+      return res as AssignOut
+    },
     onSuccess: (res, choice) => {
       invalidate()
       const tail = res.followed ? `, with ${formatCount(res.followed, 'look-alike face')}` : ''
-      if (!choice) onDone(box.person ? `Removed from ${personName(box.person)}${tail}` : 'Unassigned')
-      else onDone(res.person ? `Tagged as ${personName(res.person)}${tail}` : 'Saved')
+      if (!choice) onDone((box.person ? `Removed from ${personName(box.person)}${tail}` : 'Unassigned') + trackTail)
+      else onDone((res.person ? `Tagged as ${personName(res.person)}${tail}` : 'Saved') + trackTail)
     },
   })
   const nameGroup = useMutation({
@@ -95,20 +114,22 @@ export default function FaceEditor({ uid, target, anchor, onClose, onDone }: Pro
   })
   const guessAct = useMutation({
     mutationFn: (action: 'confirm' | 'reject') => {
-      const body = isFace ? { faces: [box.id] } : { bodies: [box.id] }
+      const body = { faces: faceIds, bodies: bodyIds }
       return action === 'confirm' ? api.people.confirmGuesses(body) : api.people.rejectGuesses(body)
     },
     onSuccess: (_r, action) => {
       invalidate()
       const n = box.guess ? personName(box.guess.person) : ''
-      onDone(action === 'confirm' ? `Tagged as ${n}` : `Not ${n}`)
+      onDone((action === 'confirm' ? `Tagged as ${n}` : `Not ${n}`) + trackTail)
     },
   })
   const remove = useMutation({
-    mutationFn: () => (isFace ? api.people.deleteFace(box.id) : api.people.deleteBody(box.id)),
+    mutationFn: async () => {
+      for (const t of scopeTargets) await (t.kind === 'face' ? api.people.deleteFace(t.box.id) : api.people.deleteBody(t.box.id))
+    },
     onSuccess: () => {
       invalidate()
-      onDone(`Removed. It will not be shown as a ${noun} again.`)
+      onDone(`Removed. It will not be shown as a ${noun} again.${trackTail}`)
     },
   })
   const busy = assign.isPending || remove.isPending || nameGroup.isPending || guessAct.isPending
@@ -195,6 +216,15 @@ export default function FaceEditor({ uid, target, anchor, onClose, onDone }: Pro
             <input type="checkbox" checked={onlyThis} onChange={(e) => setOnlyThis(e.target.checked)} />
             Only change this face
           </label>
+        )}
+        {trackList && (
+          <div className="mt-2 rounded-xl bg-surface-2 p-2 text-xs text-ink-soft" role="status">
+            <p>{onlyTrack ? 'Applies to this track only.' : `Applies to all ${trackList.length} tracks of this person in the video.`}</p>
+            <label className="mt-1 flex min-h-10 cursor-pointer items-center gap-2 text-sm">
+              <input type="checkbox" checked={onlyTrack} onChange={(e) => setOnlyTrack(e.target.checked)} />
+              Only this track
+            </label>
+          </div>
         )}
       </div>
 

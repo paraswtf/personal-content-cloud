@@ -6,6 +6,8 @@ the caller may see the vault, and mis-clicks and duplicate copies filtered as as
 from __future__ import annotations
 
 import sqlite3
+
+import numpy as np
 from collections.abc import Iterable
 from typing import Any
 
@@ -357,6 +359,58 @@ def guess_out(conn: sqlite3.Connection, row: sqlite3.Row, refs: dict[int, Person
     if ref is None:
         return None
     return GuessOut(person=ref, score=float(row["guess_score"] or 0), evidence=json_loads(row["guess_evidence"], {}) or {})
+
+
+VIDEO_GROUP_SIM = 0.5  # section 10: two tracks of a video this alike are one person for whole-video editing
+
+
+def _track_vec(blob: bytes | None) -> "np.ndarray | None":
+    if not blob:
+        return None
+    v = np.frombuffer(blob, dtype=np.float32)
+    n = float(np.linalg.norm(v))
+    return v / n if n > 0 else None
+
+
+def video_groups(faces: list[sqlite3.Row], bodies: list[sqlite3.Row], animals: list[sqlite3.Row]) -> dict[tuple[str, int], int]:
+    """{(kind, id): group} for the tracks of a video (section 10): tracks assigned to a person share that
+    person's group across kinds; among the rest (unassigned and guessed), a track joins the group of the
+    most similar earlier track of its kind at cosine >= VIDEO_GROUP_SIM (faces by face embedding, bodies by
+    torso, animals by crop), else starts one. Groups are numbered in order of first appearance."""
+    groups: dict[tuple[str, int], int] = {}
+    person_group: dict[int, int] = {}
+    counter = 0
+
+    def fresh() -> int:
+        nonlocal counter
+        counter += 1
+        return counter
+
+    for kind, rows, col in (("face", faces, "embedding"), ("body", bodies, "torso_embedding"), ("animal", animals, "embedding")):
+        reps: list[tuple[int, "np.ndarray"]] = []
+        for r in sorted(rows, key=lambda r: (float(r["frame_time_s"] or 0.0), int(r["id"]))):
+            pid = r["person_id"]
+            if pid is not None:
+                g = person_group.get(int(pid))
+                if g is None:
+                    g = person_group[int(pid)] = fresh()
+            else:
+                emb = _track_vec(r[col]) if col in r.keys() else None
+                g = None
+                if emb is not None:
+                    best_sim = VIDEO_GROUP_SIM
+                    for gid, e in reps:
+                        if e.shape == emb.shape:
+                            sim = float(e @ emb)
+                            if sim >= best_sim:
+                                g, best_sim = gid, sim
+                    if g is None:
+                        g = fresh()
+                    reps.append((g, emb))
+                else:
+                    g = fresh()
+            groups[(kind, int(r["id"]))] = g
+    return groups
 
 
 def face_out(conn: sqlite3.Connection, row: sqlite3.Row, refs: dict[int, PersonRef] | None = None) -> FaceOut:

@@ -444,6 +444,27 @@ Guessing (`analysis/guess.py`). For an unassigned face or body D in item I:
 - People routes and the vault: with the vault locked, tagging or untagging an NSFW item and box actions on
   NSFW boxes answer 403 `vault_locked`; a person seen only in vault items answers 404 by id outside the vault.
 
+Whole-video editing (2026-11-08). A video's faces are tracks (one row per run of frames, `spans`), and a
+person who leaves the frame and comes back, or whose track breaks, is several tracks; naming them one by one
+is tedious. So the item detail of a video groups its tracks and the viewer edits a group at once:
+- `FaceOut.group`, `BodyOut.group` and `AnimalOut.group` (an integer, videos only, null for photos) computed
+  on read (`library.item_detail` through `common.video_groups(faces, bodies, animals)`): tracks assigned to a
+  person share that person's group; among the rest (unassigned and guessed), tracks join the group of the
+  most similar earlier track when the cosine between their embeddings is at least `VIDEO_GROUP_SIM` (0.5)
+  (faces by face embedding, bodies by torso, animals by crop embedding, never across kinds), else start one.
+  Groups are numbered in order of first appearance.
+- The viewer's strip ("People and pets in this video") shows one chip per group with the number of tracks
+  ("Paras, 4 tracks"; "Not tagged, 3 tracks"), seeks to the group's first track, and its edit control opens
+  the editor in group scope: assign to a person, name, not this person, confirm or reject a guess and remove
+  apply to every track of the group (`POST /api/faces/assign`, `/api/bodies/assign`, `/api/animals/assign`,
+  the guess routes and the delete routes already take lists or are called per id). The editor says "Applies to
+  all N tracks in this video" with a switch "Only this track" that narrows it to the one the chip was opened
+  from; a group chip expands to its tracks ("Show tracks") so a mis-detected track can be edited, seeked to or
+  removed alone. Photos are unchanged.
+- Tests: `video_groups` on hand-made embeddings (assigned tracks grouped by person, look-alikes joined at 0.5,
+  strangers apart, kinds never mixed, photos get null), the item detail of a video carrying the groups, and
+  the assign route with several face ids of a group.
+
 ## 11. Documents (`app/documents`)
 
 Text extraction order: text layer (pdf) -> OCR (rapidocr; English, Hindi and Marathi: each detected line is
@@ -671,6 +692,12 @@ and picking a pet of another species in "Move to another pet" shows "Move and ma
 A photo without an animal box offers "Add a pet box" (draw mode on the photo stage: drag over the pet, or
 "Whole photo", then "What is it?" picks the species; POST `items/{uid}/animals`) and "Find pets again"
 (POST `items/{uid}/animals/detect`); a photo with boxes keeps both under "More" in the People and pets section.
+
+The video strip ("People and pets in this video") shows one chip per group of tracks (section 10, whole-video
+editing): the name or species with "N tracks", seeking to the first track; its edit control opens the face or pet
+editor in group scope ("Applies to all N tracks of this person in the video", a switch "Only this track"), so a
+person who leaves and comes back is named, moved, unassigned, confirmed or removed in one go; a chevron shows the
+single tracks for a mis-detection.
 
 ## 15. Configuration (env)
 

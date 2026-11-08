@@ -7,7 +7,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type TouchEvent } fr
 import { createPortal } from 'react-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import clsx from 'clsx'
-import { ChevronLeft, ChevronRight, Info, Loader2, Pencil, PawPrint, ScanFace, Star, X } from 'lucide-react'
+import { ChevronDown, ChevronLeft, ChevronRight, Info, Loader2, Pencil, PawPrint, ScanFace, Star, X } from 'lucide-react'
 import { api, ApiError } from '../lib/api'
 import type { ItemDetail } from '../lib/types'
 import { formatDuration, personName } from '../lib/format'
@@ -27,7 +27,7 @@ import LiveButton from './viewer/LiveButton'
 import PhotoStage from './viewer/PhotoStage'
 import VideoPreparing from './viewer/VideoPreparing'
 import VideoStage, { currentFrameTime, posterTime } from './viewer/VideoStage'
-import { animalLabel, boxKey, findBox, videoBoxes, type BoxKind, type BoxTarget } from './viewer/boxes'
+import { animalLabel, boxKey, findBox, groupVideoBoxes, videoBoxes, type AnimalBox, type BoxKind, type BoxTarget, type PersonBoxTarget } from './viewer/boxes'
 import { useGuessActions } from './viewer/useGuessActions'
 import { useOnScreenFaces } from './viewer/useOnScreenFaces'
 import { seekToFrame } from './viewer/videoSeek'
@@ -68,49 +68,87 @@ function VideoChips({
   editingKey: string | null
   activeKey: string | null
   onSeek: (t: BoxTarget) => void
-  onEdit: (t: BoxTarget, anchor: HTMLElement) => void
+  onEdit: (t: BoxTarget, anchor: HTMLElement, group?: boolean) => void
 }) {
+  // One chip per person or look-alike (section 10): editing it applies to every track of the group;
+  // "Show tracks" opens the group so one track can be handled alone.
+  const [expanded, setExpanded] = useState<Set<string>>(() => new Set())
   if (!targets.length) return null
+  const groups = groupVideoBoxes(targets)
+  const toggle = (key: string) =>
+    setExpanded((cur) => {
+      const next = new Set(cur)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      return next
+    })
+  const chip = (t: BoxTarget, count: number, groupKey: string | null, inner = false) => {
+    const key = boxKey(t)
+    const b = t.box
+    const isAnimal = t.kind === 'animal'
+    const name = isAnimal ? animalLabel(t.box) : b.person ? personName(b.person) : b.guess ? `${personName(b.guess.person)}?` : 'Not tagged'
+    const whole = count > 1 && groupKey !== null
+    return (
+      <li
+        key={(whole ? 'group:' : '') + key}
+        className={clsx(
+          'flex shrink-0 items-center rounded-full',
+          inner && 'ml-1 scale-95',
+          activeKey === key ? 'bg-white/25' : 'bg-white/10',
+          editingKey === key ? 'ring-2 ring-accent' : activeKey === key && 'ring-2 ring-white/80',
+          !b.person && (b.guess ? 'outline outline-1 outline-amber-300' : 'outline outline-1 outline-dashed outline-amber-300/70'),
+        )}
+      >
+        <button
+          type="button"
+          onClick={() => onSeek(t)}
+          aria-pressed={activeKey === key}
+          className="flex h-10 items-center gap-2 rounded-full pl-1 pr-3 text-sm text-white hover:bg-white/10"
+          aria-label={whole ? `Show the first of ${count} tracks of ${name}` : `Show the frame at ${formatDuration(b.frame_time_s)}, ${name}`}
+        >
+          <img src={b.url} alt="" className="size-8 rounded-full object-cover" />
+          {isAnimal && <PawPrint className="-mr-1 size-3.5 shrink-0 text-white/70" aria-hidden />}
+          <span className={clsx('max-w-[9rem] truncate', b.guess && !b.person && 'text-amber-200')}>{name}</span>
+          <span className="text-xs tabular-nums text-white/55">{whole ? `${count} tracks` : formatDuration(b.frame_time_s)}</span>
+        </button>
+        <button
+          type="button"
+          onClick={(e) => onEdit(t, e.currentTarget, whole)}
+          className="-ml-1 flex size-10 items-center justify-center rounded-full text-white/60 hover:bg-white/10 hover:text-white"
+          aria-label={
+            whole
+              ? `Edit all ${count} tracks of ${name}`
+              : b.person
+                ? `Edit, tagged as ${name}`
+                : isAnimal
+                  ? 'Name this pet'
+                  : 'Tag this person'
+          }
+        >
+          <Pencil className="size-4" aria-hidden />
+        </button>
+        {whole && (
+          <button
+            type="button"
+            onClick={() => toggle(groupKey)}
+            aria-expanded={expanded.has(groupKey)}
+            className="-ml-1 flex size-10 items-center justify-center rounded-full text-white/60 hover:bg-white/10 hover:text-white"
+            aria-label={expanded.has(groupKey) ? `Hide the tracks of ${name}` : `Show the ${count} tracks of ${name}`}
+          >
+            <ChevronDown className={clsx('size-4 transition-transform', expanded.has(groupKey) && 'rotate-180')} aria-hidden />
+          </button>
+        )}
+      </li>
+    )
+  }
   return (
     <div className="shrink-0 border-t border-white/10 px-2 py-2">
       <ul className="flex gap-2 overflow-x-auto overscroll-x-contain px-1 pb-1" aria-label="People and pets in this video" data-no-swipe>
-        {targets.map((t) => {
-          const key = boxKey(t)
-          const b = t.box
-          const isAnimal = t.kind === 'animal'
-          const name = isAnimal ? animalLabel(t.box) : b.person ? personName(b.person) : b.guess ? `${personName(b.guess.person)}?` : 'Not tagged'
-          return (
-            <li
-              key={key}
-              className={clsx(
-                'flex shrink-0 items-center rounded-full',
-                activeKey === key ? 'bg-white/25' : 'bg-white/10',
-                editingKey === key ? 'ring-2 ring-accent' : activeKey === key && 'ring-2 ring-white/80',
-                !b.person && (b.guess ? 'outline outline-1 outline-amber-300' : 'outline outline-1 outline-dashed outline-amber-300/70'),
-              )}
-            >
-              <button
-                type="button"
-                onClick={() => onSeek(t)}
-                aria-pressed={activeKey === key}
-                className="flex h-10 items-center gap-2 rounded-full pl-1 pr-3 text-sm text-white hover:bg-white/10"
-                aria-label={`Show the frame at ${formatDuration(b.frame_time_s)}, ${name}`}
-              >
-                <img src={b.url} alt="" className="size-8 rounded-full object-cover" />
-                {isAnimal && <PawPrint className="-mr-1 size-3.5 shrink-0 text-white/70" aria-hidden />}
-                <span className={clsx('max-w-[9rem] truncate', b.guess && !b.person && 'text-amber-200')}>{name}</span>
-                <span className="text-xs tabular-nums text-white/55">{formatDuration(b.frame_time_s)}</span>
-              </button>
-              <button
-                type="button"
-                onClick={(e) => onEdit(t, e.currentTarget)}
-                className="-ml-1 flex size-10 items-center justify-center rounded-full text-white/60 hover:bg-white/10 hover:text-white"
-                aria-label={b.person ? `Edit, tagged as ${name}` : isAnimal ? 'Name this pet' : 'Tag this person'}
-              >
-                <Pencil className="size-4" aria-hidden />
-              </button>
-            </li>
-          )
+        {groups.flatMap((g) => {
+          const whole = g.targets.length > 1
+          const items = [chip(g.first, g.targets.length, whole ? g.key : null)]
+          if (whole && expanded.has(g.key)) items.push(...g.targets.map((t) => chip(t, 1, null, true)))
+          return items
         })}
       </ul>
     </div>
@@ -152,7 +190,7 @@ function ViewerInner({ uid, onClose, onPrev, onNext, position, startAt = null, v
   const [showInfo, setShowInfo] = useState<boolean>(
     () => mode === 'document' || (rememberInfo ?? (typeof window !== 'undefined' && window.matchMedia('(min-width: 1024px)').matches)),
   )
-  const [editing, setEditing] = useState<{ kind: BoxKind; id: number; anchor: HTMLElement } | null>(null)
+  const [editing, setEditing] = useState<{ kind: BoxKind; id: number; anchor: HTMLElement; group?: boolean } | null>(null)
   const [tagging, setTagging] = useState(false)
   const [drawing, setDrawing] = useState(false) // section 22: a pet box the owner draws
   const [confirmDelete, setConfirmDelete] = useState(false)
@@ -274,6 +312,12 @@ function ViewerInner({ uid, onClose, onPrev, onNext, position, startAt = null, v
   }, [showFaces, dismissSeekFace])
 
   const editingTarget = editing && detail ? findBox(detail, editing.kind, editing.id) : null
+  // whole-video editing (section 10): the tracks of the group the chip was opened from
+  const editingTracks = useMemo(() => {
+    if (!editing?.group || !detail || !editingTarget || detail.kind !== 'video') return undefined
+    const key = boxKey(editingTarget)
+    return groupVideoBoxes(videoBoxes(detail)).find((g) => g.targets.some((t) => boxKey(t) === key))?.targets
+  }, [editing, detail, editingTarget])
   useEffect(() => {
     if (editing && detail && !editingTarget) setEditing(null)
   }, [editing, detail, editingTarget])
@@ -310,8 +354,8 @@ function ViewerInner({ uid, onClose, onPrev, onNext, position, startAt = null, v
     })
   }, [])
   const editBox = useCallback(
-    (t: BoxTarget, anchor: HTMLElement) =>
-      setEditing((cur) => (cur && cur.kind === t.kind && cur.id === t.box.id ? null : { kind: t.kind, id: t.box.id, anchor })),
+    (t: BoxTarget, anchor: HTMLElement, group = false) =>
+      setEditing((cur) => (cur && cur.kind === t.kind && cur.id === t.box.id ? null : { kind: t.kind, id: t.box.id, anchor, group })),
     [],
   )
 
@@ -728,6 +772,7 @@ function ViewerInner({ uid, onClose, onPrev, onNext, position, startAt = null, v
           <AnimalEditor
             uid={uid}
             box={editingTarget.box}
+            tracks={editingTracks?.filter((t): t is { kind: 'animal'; box: AnimalBox } => t.kind === 'animal').map((t) => t.box)}
             anchor={editing.anchor}
             onClose={closeEditor}
             onDone={(msg) => {
@@ -739,6 +784,7 @@ function ViewerInner({ uid, onClose, onPrev, onNext, position, startAt = null, v
           <FaceEditor
             uid={uid}
             target={editingTarget}
+            tracks={editingTracks?.filter((t): t is PersonBoxTarget => t.kind !== 'animal')}
             anchor={editing.anchor}
             onClose={closeEditor}
             onDone={(msg) => {

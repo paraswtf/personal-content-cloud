@@ -54,7 +54,7 @@ from app.api.common import (
     person_refs,
     url_version,
     valid_cursor_scalar,
-    visible_sql,
+    visible_sql, video_groups,
 )
 from app.api.deps import get_db, require_user, want_vault
 from app.auth.sessions import SessionInfo
@@ -184,6 +184,12 @@ def _people_ids(conn: sqlite3.Connection, item_id: int) -> list[int]:
     return [int(r["id"]) for r in rows]
 
 
+def _grouped(out, groups: dict[tuple[str, int], int], kind: str):
+    """Sets the video group of a box (section 10); photos have none."""
+    out.group = groups.get((kind, int(out.id)))
+    return out
+
+
 def item_detail(conn: sqlite3.Connection, row: sqlite3.Row) -> ItemDetail:
     """ItemDetail of a row selected with DETAIL_COLUMNS."""
     item_id = int(row["id"])
@@ -197,6 +203,7 @@ def item_detail(conn: sqlite3.Connection, row: sqlite3.Row) -> ItemDetail:
     animals = conn.execute(
         "SELECT * FROM animals WHERE item_id = ? ORDER BY frame_time_s IS NOT NULL, frame_time_s, x, id", (item_id,)
     ).fetchall()
+    groups = video_groups(faces, bodies, animals) if row["kind"] == "video" else {}
     tags = conn.execute(
         "SELECT p.id FROM item_tags t JOIN persons p ON p.id = t.person_id "
         "WHERE t.item_id = ? ORDER BY p.name IS NULL, p.name_key, p.id",
@@ -220,8 +227,9 @@ def item_detail(conn: sqlite3.Connection, row: sqlite3.Row) -> ItemDetail:
         category_scores=_float_scores(row["category_scores"]), nsfw_score=row["nsfw_score"],
         quality_scores=json_loads(row["quality_scores"]) if row["quality_scores"] else None,
         labels=[LabelOut(label=r["label"], score=float(r["score"])) for r in labels],
-        faces=[face_out(conn, f, refs) for f in faces], bodies=[body_out(conn, b, refs) for b in bodies],
-        animals=[animal_out(conn, a, refs) for a in animals],
+        faces=[_grouped(face_out(conn, f, refs), groups, "face") for f in faces],
+        bodies=[_grouped(body_out(conn, b, refs), groups, "body") for b in bodies],
+        animals=[_grouped(animal_out(conn, a, refs), groups, "animal") for a in animals],
         tags=[refs[int(t["id"])] for t in tags if int(t["id"]) in refs],
         people=[refs[p] for p in people_ids if p in refs],
         document=document_out(doc, row, wallet_configured=_wallet_configured()) if doc is not None else None,

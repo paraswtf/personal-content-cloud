@@ -114,6 +114,8 @@ export interface FaceOut {
   assigned_by: AssignedBy
   guess: GuessOut | null
   url: string
+  /** Videos: tracks of one person, or of one look-alike, share a number (section 10). */
+  group?: number | null
 }
 export interface BodyOut {
   id: number
@@ -128,6 +130,8 @@ export interface BodyOut {
   guess: GuessOut | null
   frame_time_s: number | null
   url: string
+  /** Videos: tracks of one person, or of one look-alike, share a number (section 10). */
+  group?: number | null
 }
 /** An animal box (section 22): a pet found by its look, assigned to a pet identity. */
 export interface AnimalOut {
@@ -144,6 +148,8 @@ export interface AnimalOut {
   /** Who set the species: the detector (with the zero-shot check) or the owner (section 22). */
   species_source?: 'auto' | 'user'
   url: string
+  /** Videos: tracks of one person, or of one look-alike, share a number (section 10). */
+  group?: number | null
 }
 export interface PersonOut {
   id: number

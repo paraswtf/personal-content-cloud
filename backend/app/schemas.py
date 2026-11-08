@@ -154,6 +154,7 @@ class FaceOut(BaseModel):
     assigned_by: AssignedBy = "auto"
     guess: GuessOut | None = None
     url: str
+    group: int | None = None    # videos: the tracks of one person or look-alike share a number (section 10)
 
 
 class BodyOut(BaseModel):
@@ -169,6 +170,7 @@ class BodyOut(BaseModel):
     guess: GuessOut | None = None
     frame_time_s: float | None = None
     url: str
+    group: int | None = None    # videos: the tracks of one person or look-alike share a number (section 10)
 
 
 class AnimalOut(BaseModel):
@@ -186,6 +188,7 @@ class AnimalOut(BaseModel):
     species_source: Literal["auto", "user"] = "auto"  # section 22: 'user' when the owner set the species
     source: Literal["detector", "user"] = "detector"  # section 22: 'user' when the owner drew the box
     url: str
+    group: int | None = None    # videos: the tracks of one person or look-alike share a number (section 10)
 
 
 class ItemUrls(BaseModel):
