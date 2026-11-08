@@ -175,3 +175,11 @@ BACKEND_URL=http://127.0.0.1:41010 npm run dev                            # Vite
 Layout: `backend/app` (FastAPI app; `api/` routes, `auth/`, `media/`, `ml/`, `analysis/`, `documents/`,
 `search/`, `wallet/`, `ingest.py`, `worker.py`), `frontend/src` (React pages and components),
 `docs/ARCHITECTURE.md` (the contract), `docs/alumni-hub-reuse-map.md` (what came from the alumni hub).
+
+## License
+
+[PolyForm Noncommercial License 1.0.0](LICENSE). You may use, copy, change and share this software
+for any noncommercial purpose: personal use, research, education, hobby projects, and use by
+charities, educational institutions and other noncommercial organizations. Commercial use of any
+kind needs the author's written permission. The models and data the server downloads (section
+Models above) keep their own licences, as do the GeoNames and Natural Earth data.
