@@ -63,6 +63,24 @@ function offlineStyle(): StyleSpecification {
   }
 }
 
+/** The points source, or undefined while the map has no style (none given yet, or the map was removed):
+ * MapLibre's getSource and isSourceLoaded throw then instead of answering. */
+function pointsSource(map: maplibregl.Map): GeoJSONSource | undefined {
+  try {
+    return map.getSource(SOURCE) as GeoJSONSource | undefined
+  } catch {
+    return undefined
+  }
+}
+
+function sourceReady(map: maplibregl.Map): boolean {
+  try {
+    return !!map.getSource(SOURCE) && map.isSourceLoaded(SOURCE)
+  } catch {
+    return false
+  }
+}
+
 function featureCollection(points: MapPoint[]): FeatureCollection {
   return {
     type: 'FeatureCollection',
@@ -128,7 +146,7 @@ export default function MapView({ points, tiles, styleUrl, focus, onSelect }: Pr
     const initial = focusRef.current
     const map = new maplibregl.Map({
       container: el,
-      style: tiles === 'online' ? styleUrl : offlineStyle(),
+      style: tiles === 'online' && styleUrl ? styleUrl : offlineStyle(),
       center: initial ? [initial.lon, initial.lat] : [20, 15],
       zoom: initial ? initial.zoom : 1.4,
       attributionControl: false,
@@ -142,7 +160,7 @@ export default function MapView({ points, tiles, styleUrl, focus, onSelect }: Pr
     const select = async (feature: Feature) => {
       const props = feature.properties as Record<string, unknown>
       const coords = (feature.geometry as Point).coordinates
-      const source = map.getSource(SOURCE) as GeoJSONSource | undefined
+      const source = pointsSource(map)
       if (props.cluster && source) {
         const id = props.cluster_id as number
         const count = Number(props.point_count ?? 0)
@@ -166,7 +184,7 @@ export default function MapView({ points, tiles, styleUrl, focus, onSelect }: Pr
     }
 
     const sync = () => {
-      if (!map.getSource(SOURCE) || !map.isSourceLoaded(SOURCE)) return
+      if (!sourceReady(map)) return
       const feats = map.querySourceFeatures(SOURCE)
       // right after setData the source reports loaded while its tiles are still being rebuilt and the
       // query answers nothing; keep the markers until the idle event (below) runs sync again
@@ -213,7 +231,7 @@ export default function MapView({ points, tiles, styleUrl, focus, onSelect }: Pr
     }
 
     const addPoints = () => {
-      if (map.getSource(SOURCE)) return
+      if (pointsSource(map)) return
       map.addSource(SOURCE, { type: 'geojson', data: featureCollection(pointsRef.current), cluster: true, clusterRadius: 60, clusterMaxZoom: 17 })
       map.addLayer({
         id: 'points-dots',
@@ -287,7 +305,7 @@ export default function MapView({ points, tiles, styleUrl, focus, onSelect }: Pr
       firstStyle.current = false
       return
     }
-    map.setStyle(tiles === 'online' ? styleUrl : offlineStyle())
+    map.setStyle(tiles === 'online' && styleUrl ? styleUrl : offlineStyle())
   }, [tiles, styleUrl])
 
   // data; a refetch that brings the same points back must not rebuild the clusters
@@ -303,7 +321,7 @@ export default function MapView({ points, tiles, styleUrl, focus, onSelect }: Pr
     }
     const signature = `${points.length}:${lat.toFixed(4)}:${lon.toFixed(4)}:${points[0]?.[2] ?? ''}:${points[points.length - 1]?.[2] ?? ''}`
     const apply = () => {
-      const source = map.getSource(SOURCE) as GeoJSONSource | undefined
+      const source = pointsSource(map)
       if (!source) return
       if (applied.current === signature) return
       applied.current = signature
@@ -321,7 +339,7 @@ export default function MapView({ points, tiles, styleUrl, focus, onSelect }: Pr
         map.fitBounds(bounds, { padding: 48, maxZoom: 11, duration: 0 })
       }
     }
-    if (map.getSource(SOURCE)) {
+    if (pointsSource(map)) {
       apply()
       return
     }

@@ -51,11 +51,14 @@ export default function MapPage() {
   )
   const clearAll = () => setParams(new URLSearchParams(), { replace: true })
 
-  // the basemap: the browser's choice, else the server's default
+  // the basemap: the browser's choice, else the server's default. The detailed map needs the style URL
+  // from the config; until it is known (right after a reload) the plain map is drawn, so the map never
+  // starts without a style (MapLibre then has no style object and every source lookup throws).
   const config = useConfig()
   const [choice, setChoice] = useState<Tiles | null>(() => readTilesChoice())
-  const tiles: Tiles = choice ?? config.data?.map?.tiles ?? 'offline'
+  const wanted: Tiles = choice ?? config.data?.map?.tiles ?? 'offline'
   const styleUrl = config.data?.map?.style_url ?? ''
+  const tiles: Tiles = wanted === 'online' && !styleUrl ? 'offline' : wanted
   const pickTiles = (v: Tiles) => {
     setChoice(v)
     writeTilesChoice(v)
@@ -139,11 +142,11 @@ export default function MapPage() {
           <div className="flex items-center gap-2" role="group" aria-label="Basemap">
             <button
               type="button"
-              aria-pressed={tiles === 'online'}
-              onClick={() => pickTiles(tiles === 'online' ? 'offline' : 'online')}
+              aria-pressed={wanted === 'online'}
+              onClick={() => pickTiles(wanted === 'online' ? 'offline' : 'online')}
               className={
                 'inline-flex h-10 items-center gap-1.5 rounded-full border px-4 text-sm font-semibold transition-colors ' +
-                (tiles === 'online' ? 'border-ink bg-ink text-surface' : 'border-line bg-surface text-ink-soft hover:border-ink-faint hover:text-ink')
+                (wanted === 'online' ? 'border-ink bg-ink text-surface' : 'border-line bg-surface text-ink-soft hover:border-ink-faint hover:text-ink')
               }
             >
               <Globe className="size-4" aria-hidden />
