@@ -175,6 +175,15 @@ hour that no row references (names parsed by regex; `_is_referenced` guards ever
 
 ## 5. Database schema
 
+Schema changes after the first release are additive. A new column goes into its `CREATE TABLE` in
+schema.sql and into `db.MIGRATED_COLUMNS`; `db.init_db` adds the columns an existing table lacks
+(`ALTER TABLE ... ADD COLUMN`) before it applies schema.sql, so an index in schema.sql may cover a
+migrated column and a database from any earlier build upgrades in place at startup. New tables and
+indexes need nothing more than their `CREATE ... IF NOT EXISTS` in schema.sql.
+`tests/test_db_upgrade.py` starts from the schema of the last build before the first migrated column
+(`tests/fixtures/schema_before_migrations.sql`) and checks that the upgraded database has the same
+tables, columns, foreign keys and indexes as a fresh one.
+
 The full DDL is `backend/app/schema.sql`. Summary of tables and the columns code depends on:
 
 - `kv(key, value)`: `schema_version`, `faces_version`, `search_version`, `item_id_mark`, `vmark:<id>`,

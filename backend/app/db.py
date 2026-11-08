@@ -6,6 +6,8 @@
 - Rows are sqlite3.Row (index by column name).
 - init_db recreates items_fts when its stored tokenizer differs from FTS_TOKENIZE and sets kv
   fts_rebuild = 1; ingest.recover_on_startup then indexes every item again.
+- init_db adds the MIGRATED_COLUMNS an older database lacks before it applies schema.sql, so a
+  database from any earlier build upgrades in place at startup.
 """
 from __future__ import annotations
 
@@ -19,8 +21,11 @@ from typing import Any, Iterator
 from app.config import settings
 
 SCHEMA_VERSION = 1
-# Columns added after the first release: (table, column, SQL type). init_db adds the missing ones,
-# so an existing database upgrades in place on the next start without losing data.
+# Columns added after the first release: (table, column, SQL type). init_db adds the ones an
+# existing table lacks before schema.sql runs, so a database from any earlier build upgrades in
+# place on the next start without losing data, and an index in schema.sql may cover any of them.
+# A new column goes here and into its CREATE TABLE in schema.sql; tests/test_db_upgrade.py checks
+# that a database from before the first of these ends up identical to a fresh one.
 MIGRATED_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("items", "content_id", "TEXT"),
     ("items", "companion_of", "INTEGER REFERENCES items(id) ON DELETE SET NULL"),
@@ -39,12 +44,6 @@ MIGRATED_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("items", "gps_checked", "INTEGER NOT NULL DEFAULT 0"),
     ("uploads", "session_id", "INTEGER"),
     ("uploads", "resource", "TEXT"),
-)
-# Indexes on migrated columns: schema.sql runs before the columns exist on an old database, so
-# these are created after _add_missing_columns.
-MIGRATED_INDEXES: tuple[str, ...] = (
-    "CREATE INDEX IF NOT EXISTS uploads_asset ON uploads(session_id, pair_key, resource)",
-    "CREATE INDEX IF NOT EXISTS uploads_pair ON uploads(pair_key)",  # the sync check looks assets up by key
 )
 _SCHEMA_FILE = Path(__file__).with_name("schema.sql")
 # Full-text tokenizer of items_fts. unicode61 treats combining marks (Unicode Mn, Mc) as separators,
@@ -85,16 +84,17 @@ def connect() -> sqlite3.Connection:
 
 
 def init_db() -> None:
-    """Create the database and tables if needed. Safe to call repeatedly."""
+    """Create the database and tables if needed, and upgrade an older one. Safe to call repeatedly."""
     conn = connect()
     try:
         conn.execute("PRAGMA journal_mode = WAL")
         schema = _SCHEMA_FILE.read_text(encoding="utf-8")
-        conn.executescript(schema)
+        # Missing columns first: schema.sql has indexes on some of them (items_content on content_id,
+        # for one), and CREATE INDEX on a column the table lacks fails the start.
         with tx(conn):
             _add_missing_columns(conn)
-            for stmt in MIGRATED_INDEXES:
-                conn.execute(stmt)
+        conn.executescript(schema)
+        with tx(conn):
             _upgrade_fts(conn, schema)
             conn.execute("INSERT OR IGNORE INTO kv(key, value) VALUES ('schema_version', ?)", (str(SCHEMA_VERSION),))
             conn.execute(
@@ -130,15 +130,18 @@ def _upgrade_fts(conn: sqlite3.Connection, schema: str) -> bool:
 
 
 def _add_missing_columns(conn: sqlite3.Connection) -> list[tuple[str, str]]:
+    """ALTER TABLE ... ADD COLUMN for every MIGRATED_COLUMNS entry an existing table lacks. A table
+    that is not there yet is skipped: schema.sql creates it with every column. Returns what it added."""
     added: list[tuple[str, str]] = []
     existing: dict[str, set[str]] = {}
     for table, column, sql_type in MIGRATED_COLUMNS:
         if table not in existing:
             existing[table] = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
-        if column in existing[table]:
+        columns = existing[table]
+        if not columns or column in columns:  # no columns at all: the table does not exist yet
             continue
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {sql_type}")
-        existing[table].add(column)
+        columns.add(column)
         added.append((table, column))
     return added
 

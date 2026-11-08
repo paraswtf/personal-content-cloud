@@ -81,8 +81,8 @@ CREATE TABLE IF NOT EXISTS uploads (
 CREATE INDEX IF NOT EXISTS uploads_status  ON uploads(status, updated_at);
 CREATE INDEX IF NOT EXISTS uploads_client  ON uploads(client_id, id);
 CREATE INDEX IF NOT EXISTS uploads_created ON uploads(created_at, id);
--- uploads_asset(session_id, pair_key, resource) and uploads_pair(pair_key) are created by db.MIGRATED_INDEXES
--- after the migrated columns exist (section 28).
+CREATE INDEX IF NOT EXISTS uploads_asset   ON uploads(session_id, pair_key, resource);  -- device resume (section 28)
+CREATE INDEX IF NOT EXISTS uploads_pair    ON uploads(pair_key);                        -- the sync check looks assets up by key
 
 -- One row per stored file. The original is kept byte for byte.
 CREATE TABLE IF NOT EXISTS items (
