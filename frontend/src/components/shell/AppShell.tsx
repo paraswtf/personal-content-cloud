@@ -4,7 +4,9 @@
 // missing session to /login?next=<path>. A 401 from any API call (api.ts onUnauthorized) marks the
 // state as logged out, which triggers the same redirect. Inside: the header (desktop navigation), the routed page in <main id="main"> and the bottom tab bar on phones. Pages bring
 // their own width and gutters (mx-auto max-w-7xl px-4). ToastProvider wraps the whole router in
-// App.tsx, so toasts work here, on the auth pages and in portals alike.
+// App.tsx, so toasts work here, on the auth pages and in portals alike. The page renders inside an
+// ErrorBoundary keyed by the location, so a crash shows a message under the header and navigating
+// away clears it; a BuildBanner appears when the server and the site were started from different code.
 import { Suspense, useCallback, useEffect, useRef, useState } from 'react'
 import { Navigate, Outlet, useLocation, useNavigate } from 'react-router'
 import { useQueryClient } from '@tanstack/react-query'
@@ -13,6 +15,8 @@ import { setUnauthorizedHandler } from '../../lib/api'
 import { AUTH_KEY, clearPrivateCache, loggedOutState, useAuth } from '../../lib/auth'
 import type { AuthState } from '../../lib/types'
 import { ErrorState, PageSpinner } from '../ui'
+import ErrorBoundary from '../ErrorBoundary'
+import BuildBanner from './BuildBanner'
 import { useToast } from '../Toast'
 import Header from './Header'
 import { BottomTabBar } from './Nav'
@@ -101,11 +105,17 @@ export default function AppShell() {
         Skip to content
       </a>
       <Header onLogout={() => void onLogout()} loggingOut={loggingOut} />
+      {state.api_build && __API_BUILD__ && state.api_build !== __API_BUILD__ && (
+        <BuildBanner server={state.api_build} site={__API_BUILD__} />
+      )}
       <main id="main" className="flex-1 pb-[calc(var(--tabbar-h)+env(safe-area-inset-bottom))] md:pb-0">
-        {/* pages are lazy chunks: suspend inside main so the header stays while one loads */}
-        <Suspense fallback={<PageSpinner />}>
-          <Outlet />
-        </Suspense>
+        {/* pages are lazy chunks: suspend inside main so the header stays while one loads; the
+            boundary sits outside Suspense so a chunk that fails to load is caught too */}
+        <ErrorBoundary resetKey={location.pathname + location.search}>
+          <Suspense fallback={<PageSpinner />}>
+            <Outlet />
+          </Suspense>
+        </ErrorBoundary>
       </main>
       <BottomTabBar onLogout={() => void onLogout()} />
     </div>

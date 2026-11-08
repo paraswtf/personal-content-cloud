@@ -62,6 +62,11 @@ which takes a few minutes. Manually:
 ./scripts/run.sh                 # PORT=41010 HOST=127.0.0.1 by default
 ```
 
+The server serves a copy of the frontend build taken when it started (`DATA_DIR/site`), so building
+the frontend again does not change a running server. After pulling or editing code, restart the
+server from the portal: it rebuilds the frontend when sources changed. If a page ever shows
+"This site and the server were started from different versions", that restart is what it needs.
+
 Requirements: Python 3.12 via [uv](https://docs.astral.sh/uv/), Node 20+, `ffmpeg` and `ffprobe` on
 the PATH. An NVIDIA GPU with a current driver is used when present (CUDA libraries come from pip);
 otherwise everything runs on the CPU.

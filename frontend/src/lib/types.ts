@@ -48,6 +48,8 @@ export interface AuthState {
   vault_until: string | null
   session_id: number | null
   site_title: string
+  /** The server's API build id; the shell compares it with __API_BUILD__ (older servers omit it). */
+  api_build?: string
 }
 export interface SessionOut {
   id: number

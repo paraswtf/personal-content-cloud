@@ -1,10 +1,12 @@
 // Routes (docs/ARCHITECTURE.md section 14). /setup and /login stand alone; every other page renders
 // inside AppShell, which guards the session and draws the header and navigation. Pages are lazy
-// chunks; ToastProvider wraps everything so any page or portal can raise a toast.
+// chunks; ToastProvider wraps everything so any page or portal can raise a toast. The outer
+// ErrorBoundary catches a crash in the shell or the auth pages; AppShell has its own around the page.
 import { lazy, Suspense } from 'react'
 import { BrowserRouter, Route, Routes } from 'react-router'
 import { PageSpinner } from './components/ui'
 import { ToastProvider } from './components/Toast'
+import ErrorBoundary from './components/ErrorBoundary'
 import AppShell from './components/shell/AppShell'
 
 const SetupPage = lazy(() => import('./pages/SetupPage'))
@@ -25,6 +27,7 @@ export default function App() {
   return (
     <BrowserRouter>
       <ToastProvider>
+        <ErrorBoundary>
         <Suspense fallback={<PageSpinner />}>
           <Routes>
             <Route path="/setup" element={<SetupPage />} />
@@ -44,6 +47,7 @@ export default function App() {
             </Route>
           </Routes>
         </Suspense>
+        </ErrorBoundary>
       </ToastProvider>
     </BrowserRouter>
   )

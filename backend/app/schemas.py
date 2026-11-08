@@ -21,6 +21,8 @@ class AuthState(BaseModel):
     vault_until: str | None = None
     session_id: int | None = None
     site_title: str
+    # app.build_id.API_BUILD of the running server; the site compares it with its own (section 14)
+    api_build: str = ""
 
 
 class SetupIn(BaseModel):

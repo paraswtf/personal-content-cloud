@@ -131,6 +131,7 @@ docs/
 | `failed/<uid>.part` | uploads whose ingest failed for good; deleted after `TRASH_DAYS`; Settings > System > Retry failed uploads queues them again |
 | `wallet/` | `cert.pem`, `key.pem`, `wwdr.pem` placed by the owner (never written by the app) |
 | `tmp/` | wiped at startup |
+| `site/` | copy of the frontend build taken at startup, the site that is served (section 14) |
 
 Staging, originals, tmp share one filesystem (hard link placement). The orphan sweeper walks
 originals, thumbs, previews, pages, videos, faces, bodies, docphoto and deletes files older than an
@@ -593,6 +594,21 @@ redirecting to `/upload?shared=1`; the upload page drains that store into the up
 worker caches nothing else.
 Theme: neutral tokens in `index.css` with light and dark (`prefers-color-scheme` and a toggle stored in
 localStorage), 16 px gutters, 40 px tap targets, no em dashes or exclamation marks in copy.
+
+Errors and versions. React unmounts the whole tree on an uncaught render error, so three error
+boundaries (`components/ErrorBoundary.tsx`) keep that from showing as a blank page: one around the
+router in `App.tsx`, one around the routed page in `AppShell` (keyed by the location, so navigating
+away clears it; it sits outside Suspense, so a lazy chunk that fails to load is caught too) and one
+around the viewer (shows the error over the page with Close). The panel shows the message, Reload,
+Try again and a link to the library. The site and the server each carry an API build id: sha256 of
+`backend/app/schemas.py`, `urls.py` and `api/*.py` (first 12 hex digits), computed by
+`app/build_id.py` at import (so it describes the code the process runs) and by
+`frontend/scripts/api-build.mjs` at build time (`__API_BUILD__` from `vite.config.ts`).
+`GET /api/auth/state` reports the server's as `api_build`; when both are present and differ, the shell
+shows `BuildBanner` ("restart the server from the portal, then reload"). The server serves a copy of
+the build taken at startup (`DATA_DIR/site`, `app.main.snapshot_site`), so a later `npm run build`
+cannot swap a newer site under an older running server; the banner covers the dev server (Vite
+serving sources against a stale API) and any other mix.
 
 ## 15. Configuration (env)
 

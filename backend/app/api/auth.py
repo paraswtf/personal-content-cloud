@@ -25,6 +25,7 @@ from app.api.deps import check_csrf, get_db, optional_user, require_user, requir
 from app.auth import account as accounts
 from app.auth import passkeys, passwords, sessions
 from app.auth.sessions import SessionInfo, client_ip, vault_open
+from app.build_id import API_BUILD
 from app.config import settings
 from app.schemas import (
     AuthState,
@@ -62,6 +63,7 @@ def _state(conn: sqlite3.Connection, session: SessionInfo | None, vault_until: s
         vault_until=vault_until if (session is not None and vault_open(vault_until)) else None,
         session_id=session.id if session is not None else None,
         site_title=settings.site_title,
+        api_build=API_BUILD,
     )
 
 

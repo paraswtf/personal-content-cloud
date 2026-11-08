@@ -14,6 +14,7 @@ import { formatDuration, personName } from '../lib/format'
 import { useAuth } from '../lib/auth'
 import { useConfig } from '../lib/hooks'
 import { vaultify, withVault } from '../lib/preview'
+import ErrorBoundary, { ErrorPanel } from './ErrorBoundary'
 import { ConfirmModal, lockScroll } from './ui'
 import { errorMessage } from './admin/adminHooks'
 import DocumentStage, { FileCard } from './viewer/DocumentStage'
@@ -115,7 +116,26 @@ function VideoChips({
   )
 }
 
-export default function Viewer({ uid, onClose, onPrev, onNext, position, startAt = null, vault = false, mode = null }: ViewerProps) {
+/** The viewer inside an ErrorBoundary: a crash while drawing an item shows the error over the page
+ *  with Close, instead of unmounting the whole app; opening another item clears it. */
+export default function Viewer(props: ViewerProps) {
+  return (
+    <ErrorBoundary
+      resetKey={props.uid}
+      fallback={(error, reset) => (
+        <div role="dialog" aria-modal="true" aria-label="Viewer error" className="fixed inset-0 z-40 flex items-center justify-center bg-bg/95 p-4">
+          <div className="w-full max-w-md rounded-2xl bg-surface shadow-lg">
+            <ErrorPanel error={error} title="The viewer hit an error" onRetry={reset} onClose={props.onClose} />
+          </div>
+        </div>
+      )}
+    >
+      <ViewerInner {...props} />
+    </ErrorBoundary>
+  )
+}
+
+function ViewerInner({ uid, onClose, onPrev, onNext, position, startAt = null, vault = false, mode = null }: ViewerProps) {
   const qc = useQueryClient()
   const config = useConfig()
   const auth = useAuth()

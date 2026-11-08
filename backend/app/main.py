@@ -140,6 +140,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             log.error("%s not found on PATH: videos cannot be processed until it is installed",
                       " and ".join(missing))
         try:
+            snapshot_site()
             precompress_assets()
         except Exception:  # never block startup: the plain assets are served then
             log.exception("Could not precompress the frontend assets")
@@ -276,11 +277,44 @@ def _gz_fresh(src: Path, gz: Path) -> bool:
         return False
 
 
+# The site served: DATA_DIR/site, a copy of frontend_dist taken at startup (snapshot_site), or
+# frontend_dist itself when the copy could not be made. A later `npm run build` then changes
+# frontend/dist without swapping the site under a running server whose API it may not match.
+_site_dir: Path | None = None
+
+
+def site_dir() -> Path:
+    return _site_dir or settings.frontend_dist
+
+
+def snapshot_site() -> Path | None:
+    """Copy settings.frontend_dist to DATA_DIR/site and serve from there; None (serve the build
+    directly) when there is no build or the copy fails. Called once per startup, after the lock."""
+    global _site_dir
+    _site_dir = None
+    src = settings.frontend_dist
+    if not (src / "index.html").is_file():
+        return None
+    dest = settings.data_dir / "site"
+    tmp = dest.with_name(f".site.{uuid.uuid4().hex}.tmp")
+    try:
+        shutil.copytree(src, tmp, symlinks=False, ignore=shutil.ignore_patterns("*.gz", ".*.tmp"))
+        if dest.exists():
+            shutil.rmtree(dest)
+        os.replace(tmp, dest)
+    except OSError:
+        log.exception("Could not copy the frontend build to %s; serving %s directly", dest, src)
+        shutil.rmtree(tmp, ignore_errors=True)
+        return None
+    _site_dir = dest
+    return dest
+
+
 def precompress_assets() -> int:
-    """Write <file>.gz (level 9) next to every compressible file under frontend_dist/assets that has
+    """Write <file>.gz (level 9) next to every compressible file under the site's assets that has
     none or an outdated one. A failed write is logged and skipped: the plain file is served then.
     Files that do not get smaller are left without a .gz. Returns the number written."""
-    assets = settings.frontend_dist / "assets"
+    assets = site_dir() / "assets"
     if not assets.is_dir():
         return 0
     written = 0
@@ -346,8 +380,8 @@ def _asset_response(static: Path, request: Request) -> FileResponse:
 
 
 def _dist_file(rel_path: str) -> Path | None:
-    """Existing file inside settings.frontend_dist for a URL path, or None (no escaping)."""
-    dist = settings.frontend_dist.resolve()
+    """Existing file inside the served site for a URL path, or None (no escaping)."""
+    dist = site_dir().resolve()
     if not rel_path or rel_path.endswith("/"):
         return None
     try:
@@ -373,7 +407,7 @@ def _register_spa(app: FastAPI) -> None:
     def spa(full_path: str, request: Request) -> Response:
         if full_path == "api" or full_path.startswith("files/") or full_path == "files":
             raise HTTPException(status_code=404, detail="Not found")
-        dist = settings.frontend_dist
+        dist = site_dir()
         index = dist / "index.html"
         if not index.is_file():
             if full_path in ("", "index.html"):
