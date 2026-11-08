@@ -22,6 +22,12 @@ Species corrections (section 22):
 - animal_faces(faces, animals, bodies) -> list[int]: indices of face boxes that sit inside an animal box
   (FACE_IN_ANIMAL of their area) with no person box over them: an animal's face, dropped before clustering.
 - housekeeping(conn, budget_s) -> int and status(conn): the backfill for stored crops without species_scores
+- add_box(conn, item, (x, y, w, h), *, species=None, engine=None) -> int: a box the owner drew on a photo
+  (section 22, boxes the owner adds): crop, look embedding, species (the owner's, else the zero-shot's, else
+  SpeciesNeeded), the row with source 'user', the pet match. redetect(conn, item, threshold) -> list[int]:
+  the detector once more at a lower threshold; boxes over a stored one are left out; ModelsUnavailable
+  without the detector. drawn_ids(rows) and drop_over_drawn(conn, item_id, new_ids): what a re-analysis
+  keeps and what it must not duplicate. look_engine() -> the SigLIP engine or None (tests patch it).
   (never a user row), the cross-species duplicates and the faces inside animal boxes of stored items.
 """
 from __future__ import annotations
@@ -37,8 +43,10 @@ from typing import Any
 import numpy as np
 from PIL import Image
 
+from app import storage
 from app.analysis import bodies as bodies_mod
 from app.config import settings
+from app.db import tx
 from app.util import json_dumps, json_loads, now_iso
 
 log = logging.getLogger(__name__)
@@ -301,7 +309,8 @@ def dedup_item(conn: sqlite3.Connection, item_id: int) -> list[int]:
     a tx. Returns the dropped ids (their crop files are the caller's to remove)."""
     rows = conn.execute(
         "SELECT id, person_id, assigned_by, species, species_source, det_score, frame_time_s, x, y, w, h FROM animals "
-        "WHERE item_id = ? ORDER BY CASE WHEN species_source = 'user' THEN 0 ELSE 1 END, det_score DESC, id",
+        "WHERE item_id = ? ORDER BY CASE WHEN source = 'user' THEN 0 ELSE 1 END, "
+        "CASE WHEN species_source = 'user' THEN 0 ELSE 1 END, det_score DESC, id",
         (item_id,),
     ).fetchall()
     kept: list[sqlite3.Row] = []
@@ -436,3 +445,197 @@ def status(conn: sqlite3.Connection) -> dict[str, Any]:
     ).fetchone()
     return {"enabled": bool(settings.pets_enabled), "unchecked": int(row["unchecked"]),
             "corrected": int(row["corrected"]), "running": running()}
+
+
+# ------------------------------------------------------------------ boxes the owner adds (section 22)
+MIN_BOX_SHARE = 0.005   # an owner-drawn box covers at least this share of the frame
+REDETECT_DEFAULT = 0.2  # the second look's detector threshold
+REDETECT_FLOOR = 0.1
+EXISTING_IOU = 0.5      # a box over a stored one by this much is the same animal
+SOURCES = ("detector", "user")
+
+
+class SpeciesNeeded(Exception):
+    """No species given and no model to tell one: the owner has to pick."""
+
+
+class NoImage(Exception):
+    """The item is not a photo, or its original cannot be opened."""
+
+
+class ModelsUnavailable(Exception):
+    """The detector is not loaded on this server."""
+
+
+def look_engine() -> Any | None:
+    """The SigLIP engine when its model is present and allowed, else None."""
+    return _engine()
+
+
+def open_photo(item: sqlite3.Row) -> tuple[Image.Image, np.ndarray]:
+    """The photo as the analyze stage sees it (oriented, at most ANALYSIS_SIDE px): (PIL RGB, BGR array)."""
+    from app.analysis.pipeline import ANALYSIS_SIDE, _to_bgr
+    from app.media.images import load_oriented
+
+    if item["kind"] != "image":
+        raise NoImage("photos only")
+    try:
+        img = load_oriented(storage.original_path(item["uid"], int(item["version"]), item["ext"]), max_side=ANALYSIS_SIDE)
+    except Exception as e:  # noqa: BLE001 - a missing or broken original
+        raise NoImage(str(e)) from e
+    if img is None:
+        raise NoImage("no image")
+    img = img.convert("RGB")
+    return img, _to_bgr(img)
+
+
+def embed_look(engine: Any | None, look: np.ndarray | None) -> np.ndarray | None:
+    """The L2-normalised SigLIP vector of a padded crop, or None without an engine or a crop."""
+    if engine is None or look is None or not getattr(look, "size", 0):
+        return None
+    v = np.asarray(engine.embed_images([look])[0], dtype=np.float32)
+    n = float(np.linalg.norm(v))
+    return (v / n).astype(np.float32) if n > 0 else None
+
+
+def drawn_ids(rows: list[sqlite3.Row]) -> list[int]:
+    """The owner-drawn boxes (source 'user') among animal rows: a re-analysis keeps them untouched."""
+    out: list[int] = []
+    for r in rows:
+        try:
+            src = r["source"]
+        except (IndexError, KeyError):
+            src = "detector"
+        if src == "user":
+            out.append(int(r["id"]))
+    return out
+
+
+def _store(conn: sqlite3.Connection, item_id: int, *, box: tuple[float, float, float, float], det_score: float,
+           species: str, species_source: str, scores: dict[str, float] | None, frame_time_s: float | None,
+           crop: Image.Image, embedding: np.ndarray | None, source: str, now: str) -> int:
+    aid = int(conn.execute(
+        "INSERT INTO animals(item_id, person_id, assigned_by, x, y, w, h, det_score, species, species_source, "
+        "species_scores, frame_time_s, embedding, source, created_at) "
+        "VALUES (?, NULL, 'auto', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (item_id, *box, float(det_score), species, species_source, json_dumps(scores) if scores else None,
+         frame_time_s, None if embedding is None else embedding.astype(np.float32).tobytes(), source, now),
+    ).lastrowid)
+    storage.write_bytes_atomic(storage.animal_crop_path(aid), encode_crop(crop))
+    return aid
+
+
+def _count_animals(conn: sqlite3.Connection, item_id: int) -> None:
+    conn.execute("UPDATE items SET animal_count = (SELECT COUNT(*) FROM animals WHERE item_id = ?) WHERE id = ?",
+                 (item_id, item_id))
+
+
+def add_box(conn: sqlite3.Connection, item: sqlite3.Row, box: tuple[float, float, float, float], *,
+            species: str | None = None, engine: Any | None = None) -> int:
+    """A box the owner drew on a photo (x, y, w, h normalised, inside the frame, at least MIN_BOX_SHARE of
+    it): the padded crop is embedded when SigLIP is loaded, the species is the owner's (species_source
+    'user') or the zero-shot's best answer, else SpeciesNeeded; the row carries det_score 1.0 and source
+    'user'; items.animal_count follows and pets.assign_new_animals matches the box. Returns the box id.
+    Raises NoImage for a video or an unreadable original. Opens its own transaction."""
+    from app.analysis import pets
+
+    x, y, w, h = (float(v) for v in box)
+    if not (0.0 <= x <= 1.0 and 0.0 <= y <= 1.0 and 0.0 < w <= 1.0 and 0.0 < h <= 1.0
+            and x + w <= 1.0005 and y + h <= 1.0005 and w * h >= MIN_BOX_SHARE):
+        raise ValueError("The box must lie inside the photo and cover at least half a percent of it")
+    if species is not None and species not in SPECIES:
+        raise ValueError(f"Unknown species {species!r}")
+    img, bgr = open_photo(item)
+    H, W = bgr.shape[:2]
+    px = (x * W, y * H, min(float(W), (x + w) * W), min(float(H), (y + h) * H))
+    look = padded_crop(bgr, px)
+    crop = bodies_mod._crop_rgb(img, px)
+    engine = engine if engine is not None else look_engine()
+    emb = embed_look(engine, look)
+    scores: dict[str, float] | None = None
+    try:
+        scores = species_scores_of(engine, emb) if emb is not None else None
+    except Exception:  # noqa: BLE001 - the box still stores without the table
+        log.exception("species scores for a drawn box failed")
+        scores = None
+    if species is None:
+        if not scores:
+            raise SpeciesNeeded()
+        species = max(scores, key=lambda k: float(scores[k]))
+        species_source = "auto"
+    else:
+        species_source = "user"
+    item_id = int(item["id"])
+    now = now_iso()
+    with tx(conn):
+        aid = _store(conn, item_id, box=(x, y, w, h), det_score=1.0, species=species, species_source=species_source,
+                     scores=scores, frame_time_s=None, crop=crop, embedding=emb, source="user", now=now)
+        _count_animals(conn, item_id)
+        try:
+            pets.assign_new_animals(conn, item_id)
+        except Exception:  # noqa: BLE001 - the box stays even when matching fails
+            log.exception("pets: matching a drawn box of item %s failed", item_id)
+    return aid
+
+
+def redetect(conn: sqlite3.Connection, item: sqlite3.Row, threshold: float = REDETECT_DEFAULT, *,
+             engine: Any | None = None) -> list[int]:
+    """The detector once more on a photo, with `threshold` (floor REDETECT_FLOOR) for the animal classes.
+    Boxes over a stored box (IoU >= EXISTING_IOU) are left out; the rest are stored like the pipeline
+    stores them (source 'detector', the detector's species settled by the zero-shot check and the look-alike
+    vote, the look embedding) and matched to pets. Returns the new ids. Raises ModelsUnavailable without the
+    detector and NoImage for a video or an unreadable original. Opens its own transaction."""
+    from app.analysis import pets
+    from app.ml import persons
+
+    if not available():
+        raise ModelsUnavailable()
+    img, bgr = open_photo(item)
+    thr = max(REDETECT_FLOOR, min(0.9, float(threshold)))
+    found = persons.detect_classes(bgr, {c: thr for c in persons.ANIMAL_CLASSES})
+    recs = from_boxes(img, bgr, found)
+    item_id = int(item["id"])
+    existing = [(float(r["x"]), float(r["y"]), float(r["w"]), float(r["h"]))
+                for r in conn.execute("SELECT x, y, w, h FROM animals WHERE item_id = ?", (item_id,))]
+    engine = engine if engine is not None else look_engine()
+    new_ids: list[int] = []
+    now = now_iso()
+    with tx(conn):
+        for rec in recs:
+            box = (rec.x, rec.y, rec.w, rec.h)
+            if any(iou(box, e) >= EXISTING_IOU for e in existing):
+                continue
+            emb = embed_look(engine, rec.look)
+            species, scores = settle_species(emb, rec.species, engine=engine)
+            aid = _store(conn, item_id, box=box, det_score=rec.det_score, species=species, species_source="auto",
+                         scores=scores, frame_time_s=rec.frame_time_s, crop=rec.crop, embedding=emb,
+                         source="detector", now=now)
+            existing.append(box)
+            new_ids.append(aid)
+        if new_ids:
+            _count_animals(conn, item_id)
+            try:
+                pets.assign_new_animals(conn, item_id)
+            except Exception:  # noqa: BLE001
+                log.exception("pets: matching re-detected boxes of item %s failed", item_id)
+    return new_ids
+
+
+def drop_over_drawn(conn: sqlite3.Connection, item_id: int, new_ids: list[int]) -> list[int]:
+    """After a re-analysis: new detector boxes that sit over an owner-drawn box (IoU >= EXISTING_IOU) are
+    the same animal and are dropped (the drawn box stays). Call inside a tx; returns the dropped ids
+    (their crop files are the caller's to remove)."""
+    if not new_ids:
+        return []
+    drawn = conn.execute("SELECT x, y, w, h FROM animals WHERE item_id = ? AND source = 'user'", (item_id,)).fetchall()
+    if not drawn:
+        return []
+    marks = ",".join("?" * len(new_ids))
+    dropped: list[int] = []
+    for r in conn.execute(f"SELECT id, x, y, w, h FROM animals WHERE id IN ({marks}) AND source = 'detector'", new_ids):
+        if any(iou((r["x"], r["y"], r["w"], r["h"]), (d["x"], d["y"], d["w"], d["h"])) >= EXISTING_IOU for d in drawn):
+            conn.execute("DELETE FROM animals WHERE id = ?", (int(r["id"]),))
+            dropped.append(int(r["id"]))
+    if dropped:
+        _count_animals(conn, item_id)
+    return dropped

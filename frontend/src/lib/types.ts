@@ -690,3 +690,13 @@ export interface ConfigOut {
   /** Map defaults (section 25). */
   map: { tiles: 'offline' | 'online'; style_url: string }
 }
+
+/** A pet box the owner draws (section 22): normalised to the picture, with the species when the owner picks one. */
+export interface AddAnimalIn {
+  x: number
+  y: number
+  w: number
+  h: number
+  species?: Species
+}
+/** The boxes a second detector run added (section 22). */

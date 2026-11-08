@@ -416,7 +416,7 @@ function GuessesTab({ id }: { id: number }) {
         <ul className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
           {mine.map((g) => (
             <li key={guessKey(g)}>
-              <GuessCard g={g} busy={review.busyFor(g)} onConfirm={() => review.confirm([g])} onReject={() => review.reject([g])} onOpenItem={(uid) => viewer.open(uid)} />
+              <GuessCard g={g} busy={review.busyFor(g)} onConfirm={() => review.confirm([g])} onReject={() => review.reject([g])} onOpenItem={(uid, t) => viewer.open(uid, t)} />
             </li>
           ))}
         </ul>

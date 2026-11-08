@@ -154,6 +154,7 @@ function ViewerInner({ uid, onClose, onPrev, onNext, position, startAt = null, v
   )
   const [editing, setEditing] = useState<{ kind: BoxKind; id: number; anchor: HTMLElement } | null>(null)
   const [tagging, setTagging] = useState(false)
+  const [drawing, setDrawing] = useState(false) // section 22: a pet box the owner draws
   const [confirmDelete, setConfirmDelete] = useState(false)
   const [sharing, setSharing] = useState(false) // the Share dialog (section 26): the keyboard steps aside like for the delete confirm
   const [exitAfter, setExitAfter] = useState<'next' | 'close' | null>(null)
@@ -194,6 +195,7 @@ function ViewerInner({ uid, onClose, onPrev, onNext, position, startAt = null, v
   useEffect(() => {
     setEditing(null)
     setTagging(false)
+    setDrawing(false)
     setPage(0)
   }, [uid])
 
@@ -291,6 +293,16 @@ function ViewerInner({ uid, onClose, onPrev, onNext, position, startAt = null, v
       return !v
     })
   }, [])
+  /** Draw mode for a pet box (section 22): the boxes show, the editor and the tagging form close, and
+   *  on a phone the details sheet goes down so the photo is in reach. */
+  const startDrawing = useCallback(() => {
+    setEditing(null)
+    setTagging(false)
+    setShowFaces(true)
+    setDrawing(true)
+    if (typeof window !== 'undefined' && !window.matchMedia('(min-width: 1024px)').matches) setShowInfo(false)
+  }, [])
+
   const closeEditor = useCallback(() => {
     setEditing((cur) => {
       if (cur?.anchor.isConnected) setTimeout(() => cur.anchor.focus({ preventScroll: true }), 0)
@@ -359,6 +371,13 @@ function ViewerInner({ uid, onClose, onPrev, onNext, position, startAt = null, v
         }
         return
       }
+      if (drawing) {
+        if (e.key === 'Escape') {
+          e.preventDefault()
+          setDrawing(false)
+        }
+        return
+      }
       if (editing) {
         if (e.key === 'Escape') {
           e.preventDefault()
@@ -420,7 +439,7 @@ function ViewerInner({ uid, onClose, onPrev, onNext, position, startAt = null, v
     }
     document.addEventListener('keydown', onKey)
     return () => document.removeEventListener('keydown', onKey)
-  }, [confirmDelete, sharing, editing, tagging, livePlaying, onClose, onPrev, onNext, closeEditor, toggleInfo, toggleFaces, detail, favorite, isDocKind, pageCount])
+  }, [confirmDelete, sharing, editing, drawing, tagging, livePlaying, onClose, onPrev, onNext, closeEditor, toggleInfo, toggleFaces, detail, favorite, isDocKind, pageCount])
 
   const onTouchStart = (e: TouchEvent) => {
     const t = e.touches[0]
@@ -509,6 +528,9 @@ function ViewerInner({ uid, onClose, onPrev, onNext, position, startAt = null, v
           liveSrc={livePlaying ? liveUrl : null}
           onLiveStop={stopLive}
           onLiveError={onLiveError}
+          drawing={drawing}
+          onDrawEnd={() => setDrawing(false)}
+          onToast={showToast}
         />
       )
     }
@@ -693,6 +715,7 @@ function ViewerInner({ uid, onClose, onPrev, onNext, position, startAt = null, v
                 setTagging={setTagging}
                 guesses={guesses}
                 onEditBox={editBox}
+                onAddPetBox={startDrawing}
                 documentFirst={mode === 'document'}
               />
             </aside>

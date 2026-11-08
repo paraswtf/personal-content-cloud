@@ -56,6 +56,8 @@ import type {
   UploadList,
   UploadOut,
   VaultSensitivity,
+  AddAnimalIn,
+  AnimalOut,
 } from './types'
 
 export const CSRF_HEADER = 'X-Requested-With'
@@ -357,6 +359,11 @@ export const api = {
   items: {
     list: (q: ItemsQuery = {}, signal?: AbortSignal) => get<ItemPage>(`/api/items${qs({ ...q })}`, signal),
     detail: (uid: string, vault = false) => get<ItemDetail>(`/api/items/${enc(uid)}${qs({ vault })}`),
+    /** A pet box the owner drew (section 22): the server cuts the crop, takes or picks the species, and matches it. */
+    addAnimal: (uid: string, body: AddAnimalIn) => post<AnimalOut>(`/api/items/${enc(uid)}/animals`, body),
+    /** The detector looks once more at a lower threshold; 409 models_unavailable when it is not loaded. */
+    detectAnimals: (uid: string, threshold?: number) =>
+      post<AnimalOut[]>(`/api/items/${enc(uid)}/animals/detect`, threshold === undefined ? {} : { threshold }),
     update: (uid: string, body: ItemUpdate) => patch<ItemDetail>(`/api/items/${enc(uid)}`, body),
     remove: (uid: string) => del<OkOut>(`/api/items/${enc(uid)}`),
     restore: (uid: string) => post<ItemDetail>(`/api/items/${enc(uid)}/restore`),

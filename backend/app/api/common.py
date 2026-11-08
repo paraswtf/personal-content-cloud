@@ -383,8 +383,16 @@ def animal_out(conn: sqlite3.Connection, row: sqlite3.Row, refs: dict[int, Perso
     return AnimalOut(
         id=row["id"], x=row["x"], y=row["y"], w=row["w"], h=row["h"], det_score=row["det_score"],
         species=row["species"], frame_time_s=row["frame_time_s"], person=_ref(conn, row["person_id"], refs),
-        assigned_by=row["assigned_by"], species_source=_species_source(row), url=animal_url(int(row["id"])),
+        assigned_by=row["assigned_by"], species_source=_species_source(row), source=_box_source(row),
+        url=animal_url(int(row["id"])),
     )
+
+
+def _box_source(row: sqlite3.Row) -> str:
+    try:
+        return "user" if row["source"] == "user" else "detector"
+    except (IndexError, KeyError):
+        return "detector"
 
 
 def _species_source(row: sqlite3.Row) -> str:

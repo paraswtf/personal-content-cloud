@@ -13,6 +13,7 @@ import {
   Forward,
   Loader2,
   Lock,
+  MoreHorizontal,
   PawPrint,
   RefreshCw,
   Star,
@@ -23,9 +24,9 @@ import {
   UserPlus,
   X,
 } from 'lucide-react'
-import { api } from '../../lib/api'
+import { ApiError, api } from '../../lib/api'
 import { CATEGORIES, CATEGORY_LABELS, type Category, type ItemDetail, type PersonRef } from '../../lib/types'
-import { formatBytes, formatDate, formatDuration, formatPercent, formatResolution, personName } from '../../lib/format'
+import { formatBytes, formatCount, formatDate, formatDuration, formatPercent, formatResolution, personName } from '../../lib/format'
 import Select from '../Select'
 import { errorMessage } from '../admin/adminHooks'
 import VirtualDocument from '../documents/VirtualDocument'
@@ -56,6 +57,8 @@ interface Props {
     pendingKey: string | null
   }
   onEditBox: (target: BoxTarget, anchor: HTMLElement) => void
+  /** Draw mode for a pet the detector missed (section 22): the photo stage takes a box from the owner. */
+  onAddPetBox?: () => void
   /** Opened from the documents page: the document card comes first. */
   documentFirst?: boolean
 }
@@ -164,12 +167,25 @@ export default function InfoPanel({
   setTagging,
   guesses,
   onEditBox,
+  onAddPetBox,
   documentFirst = false,
 }: Props) {
   const invalidate = useInvalidateItem(detail.uid)
   const [removingId, setRemovingId] = useState<number | null>(null)
   const isVideo = detail.kind === 'video'
   const isDoc = detail.kind === 'pdf' || detail.kind === 'document'
+  // section 22: a pet box the owner draws, and a second look by the detector (photos only)
+  const canAddBoxes = detail.kind === 'image' && !!onAddPetBox
+  const [moreBoxes, setMoreBoxes] = useState(false)
+  const findPets = useMutation({
+    mutationFn: () => api.items.detectAnimals(detail.uid),
+    onSuccess: (r) => {
+      invalidate()
+      onToast(r.length ? `Added ${formatCount(r.length, 'pet box', 'pet boxes')}` : 'No pet found')
+    },
+    onError: (e) =>
+      onToast(e instanceof ApiError && e.status === 409 ? 'The models are not loaded' : errorMessage(e, 'Could not look for pets')),
+  })
 
   const thumbs = new Map<number, string>()
   for (const f of detail.faces) if (f.person && !thumbs.has(f.person.id)) thumbs.set(f.person.id, f.url)
@@ -484,6 +500,34 @@ export default function InfoPanel({
               <UserPlus className="size-4" aria-hidden />
               Tag someone
             </button>
+          )}
+
+          {canAddBoxes && (
+            <div className="mt-3">
+              {detail.animals.length > 0 && (
+                <button type="button" aria-expanded={moreBoxes} onClick={() => setMoreBoxes((v) => !v)} className={darkButton('default')}>
+                  <MoreHorizontal className="size-4" aria-hidden />
+                  More
+                </button>
+              )}
+              {(detail.animals.length === 0 || moreBoxes) && (
+                <div className={clsx('flex flex-wrap gap-2', detail.animals.length > 0 && 'mt-2')}>
+                  <button type="button" onClick={onAddPetBox} className={darkButton('default')}>
+                    <PawPrint className="size-4" aria-hidden />
+                    Add a pet box
+                  </button>
+                  <button type="button" onClick={() => findPets.mutate()} disabled={findPets.isPending} className={darkButton('default')}>
+                    <RefreshCw className={clsx('size-4', findPets.isPending && 'animate-spin')} aria-hidden />
+                    Find pets again
+                  </button>
+                </div>
+              )}
+              {detail.animals.length === 0 && (
+                <p className="mt-2 text-xs text-white/55">
+                  No pet box here. Draw one over the pet, or let the detector look again more closely.
+                </p>
+              )}
+            </div>
           )}
         </Section>
       )}

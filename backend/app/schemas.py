@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 Category = Literal["documents", "screenshots", "personal", "places", "food", "pets", "objects", "misc", "nsfw"]
 ItemKind = Literal["image", "video", "pdf", "document", "other"]
@@ -184,6 +184,7 @@ class AnimalOut(BaseModel):
     person: PersonRef | None = None
     assigned_by: Literal["auto", "user"] = "auto"
     species_source: Literal["auto", "user"] = "auto"  # section 22: 'user' when the owner set the species
+    source: Literal["detector", "user"] = "detector"  # section 22: 'user' when the owner drew the box
     url: str
 
 
@@ -505,6 +506,35 @@ class AssignAnimalsIn(BaseModel):
     # section 22: a pet of another species first becomes the boxes' species (every crop of it, as the
     # owner's choice), then the boxes move to it
     fix_species: bool = False
+
+
+SPECIES_NAMES = ("bird", "cat", "dog", "horse", "sheep", "cow", "elephant", "bear", "zebra", "giraffe")
+MIN_BOX_SHARE = 0.005  # analysis.animals.MIN_BOX_SHARE
+
+
+class AnimalBoxIn(BaseModel):
+    """A box the owner draws on a photo (section 22): normalised, inside the frame, at least half a percent
+    of it; the species when the owner picked one (else the zero-shot answers, else 400 species_needed)."""
+    x: float = Field(ge=0.0, le=1.0)
+    y: float = Field(ge=0.0, le=1.0)
+    w: float = Field(gt=0.0, le=1.0)
+    h: float = Field(gt=0.0, le=1.0)
+    species: str | None = Field(default=None, max_length=20)
+
+    @model_validator(mode="after")
+    def _inside_and_large_enough(self) -> "AnimalBoxIn":
+        if self.x + self.w > 1.0005 or self.y + self.h > 1.0005:
+            raise ValueError("The box must lie inside the photo")
+        if self.w * self.h < MIN_BOX_SHARE:
+            raise ValueError("The box is too small")
+        if self.species is not None and self.species not in SPECIES_NAMES:
+            raise ValueError("Unknown species")
+        return self
+
+
+class RedetectIn(BaseModel):
+    """The second look's detector threshold (section 22), lower than the pipeline's 0.45."""
+    threshold: float = Field(default=0.2, ge=0.1, le=0.9)
 
 
 class SpeciesIn(BaseModel):

@@ -1,9 +1,11 @@
-// One person guess for review: the face or body crop, the item it is in, the guessed person with
-// the score and the evidence ("25 min apart, same scene 0.86, same clothes 0.91"), confirm and reject.
+// One person guess for review: the face or body crop, the item it is in (for a box in a video, the frame at
+// the box's time with the box outlined, not the poster), the guessed person with the score and the
+// evidence ("25 min apart, same scene 0.86, same clothes 0.91"), confirm and reject.
 import { Link } from 'react-router'
 import { Check, Shirt, X } from 'lucide-react'
 import type { GuessItem } from '../../lib/types'
-import { formatPercent, personName } from '../../lib/format'
+import { frameUrl } from '../../lib/api'
+import { formatDuration, formatPercent, personName } from '../../lib/format'
 import { Avatar, Button } from '../ui'
 import { evidenceLine } from './evidence'
 
@@ -18,26 +20,40 @@ export default function GuessCard({
   busy: 'confirm' | 'reject' | null
   onConfirm: () => void
   onReject: () => void
-  onOpenItem: (uid: string) => void
+  onOpenItem: (uid: string, t?: number | null) => void
 }) {
   const name = personName(g.guess.person)
   const why = evidenceLine(g.guess)
+  const t = g.box.frame_time_s
+  const inVideo = g.item.kind === 'video' && t !== null && t !== undefined
+  const scene = inVideo ? frameUrl(g.item.uid, g.item.version, t, 'preview', false, g.item.nsfw) : g.item.urls.thumb
   return (
     <article className="flex flex-col gap-3 rounded-2xl border border-line bg-surface p-3">
       <div className="flex items-center gap-3">
         <img src={g.box.url} alt={g.kind === 'face' ? 'Face' : 'Person'} className="size-20 shrink-0 rounded-xl bg-surface-2 object-cover ring-1 ring-line" />
         <button
           type="button"
-          onClick={() => onOpenItem(g.item.uid)}
-          className="size-20 shrink-0 overflow-hidden rounded-xl bg-surface-2 ring-1 ring-line hover:ring-ink-faint focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
-          aria-label={`Open the ${g.item.kind === 'video' ? 'video' : 'photo'}`}
+          onClick={() => onOpenItem(g.item.uid, inVideo ? t : null)}
+          className="relative h-20 shrink-0 overflow-hidden rounded-xl bg-surface-2 ring-1 ring-line hover:ring-ink-faint focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+          aria-label={inVideo ? `Open the video at ${formatDuration(t)}` : `Open the ${g.item.kind === 'video' ? 'video' : 'photo'}`}
         >
-          <img src={g.item.urls.thumb} alt="" loading="lazy" className="size-full object-cover" />
+          {inVideo ? (
+            <span className="relative block h-full">
+              <img src={scene} alt="" loading="lazy" className="h-full w-auto max-w-36 object-contain" />
+              <span
+                aria-hidden
+                className="pointer-events-none absolute rounded-sm ring-2 ring-accent"
+                style={{ left: `${g.box.x * 100}%`, top: `${g.box.y * 100}%`, width: `${g.box.w * 100}%`, height: `${g.box.h * 100}%` }}
+              />
+            </span>
+          ) : (
+            <img src={scene} alt="" loading="lazy" className="size-20 object-cover" />
+          )}
         </button>
         <div className="min-w-0 flex-1">
           <p className="flex items-center gap-1 text-xs text-ink-faint">
             {g.kind === 'body' && <Shirt className="size-3.5" aria-hidden />}
-            {g.kind === 'face' ? 'Face' : 'By clothes'}, {formatPercent(g.guess.score)} sure
+            {g.kind === 'face' ? 'Face' : 'By clothes'}, {formatPercent(g.guess.score)} sure{inVideo ? `, at ${formatDuration(t)}` : ''}
           </p>
           <Link to={`/people/${g.guess.person.id}`} className="mt-1 flex min-w-0 items-center gap-2 hover:underline">
             <Avatar src={g.guess.person.cover_url} name={g.guess.person.name} size={28} />

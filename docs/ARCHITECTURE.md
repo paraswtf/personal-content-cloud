@@ -220,7 +220,8 @@ The full DDL is `backend/app/schema.sql`. Summary of tables and the columns code
 - `item_tags(item_id, person_id, source CHECK ('user','guess'), created_at, PK(item_id, person_id))`.
 - `guess_rejections(kind CHECK ('face','body'), ref_id, person_id, created_at, PK(kind, ref_id, person_id))`.
 - `merge_dismissals(person_a, person_b)`.
-- `animals` (section 22) gains `species_source` (auto|user) and `species_scores` (JSON) through `MIGRATED_COLUMNS`.
+- `animals` (section 22) gains `species_source` (auto|user), `species_scores` (JSON) and `source` (detector|user: a box
+  the owner drew) through `MIGRATED_COLUMNS`.
 - `item_text(item_id PK, text, source CHECK ('pdf','ocr','office','plain','mixed'), lang, char_count, created_at)`.
 - `pages(id, item_id, page_no, width, height, text, text_source CHECK ('layer','ocr','render','none'), ocr_boxes JSON, UNIQUE(item_id, page_no))`.
 - `items_fts` (FTS5, `content=''` contentless is not used; external content table is not used either):
@@ -431,6 +432,8 @@ Guessing (`analysis/guess.py`). For an unassigned face or body D in item I:
   `guess_rejections` and clears the guess. A confirmed body without a face adds an `item_tags` row with
   `source='guess'`, removed again when that body is moved or deleted.
 - Propagation (`guess` job) runs the same scoring from the newly tagged face outward over the window.
+- A guess card for a box in a video shows the frame at the box's time (`/files/frame`, preview size) with the
+  box outlined, says "at 0:42", and opens the video there; the poster frame is a different moment.
 - A changed `GUESS_WINDOW_H` takes effect at the next start: `guess.apply_window_change` (from
   `ingest.recover_on_startup`) withdraws every open guess whose reference photo lies outside the window now and
   queues a `guess` job for its item; `kv guess_window_h` records the value in force.
@@ -574,7 +577,11 @@ People (`/api`): `GET people?q&filter=all|named|unnamed&sort=items|name|recent&c
 `POST people {name, face_ids?}`; `GET|PATCH|DELETE people/{id}` (`PATCH {name?, cover_face_id?}`; 422 when the
 cover face's photo is in the trash or the vault; `PersonRef.cover_url` skips such a chosen cover and uses the
 automatic one);
-`POST people/merge {target_id, source_ids}` (PersonOut with `followed`: the look-alikes merged along, section 10); `GET people/{id}/faces`; `GET people/{id}/items` (faces, bodies and tags);
+`POST people/merge {target_id, source_ids}` (PersonOut with `followed`: the look-alikes merged along, section 10);
+`POST items/{uid}/animals {x, y, w, h, species?}` (an owner-drawn pet box, 201 AnimalOut; 400 `species_needed` without a
+species or a model, 422 for a box outside the photo or under half a percent of it, photos only) and
+`POST items/{uid}/animals/detect {threshold?}` (the detector once more at a lower threshold, the new boxes; 409
+`models_unavailable`), section 22; `GET people/{id}/faces`; `GET people/{id}/items` (faces, bodies and tags);
 `GET faces/unassigned`; `POST faces/assign {face_ids, person_id | new_person_name | null}`; `DELETE faces/{id}`;
 `POST bodies/assign {body_ids, person_id | new_person_name | null}`; `DELETE bodies/{id}`;
 `POST guesses/confirm {faces: [id], bodies: [id]}`; `POST guesses/reject {faces, bodies}`;
@@ -661,6 +668,9 @@ Pets, species (section 22): the animal box popover (`viewer/AnimalEditor.tsx`) h
 the ten species to pick from (POST `animals/species`; the toast counts the look-alike crops that followed),
 and picking a pet of another species in "Move to another pet" shows "Move and make {pet} a {species}"
 (assign with `fix_species`). The pet's page has a "These are {species}" picker (POST `people/{id}/species`).
+A photo without an animal box offers "Add a pet box" (draw mode on the photo stage: drag over the pet, or
+"Whole photo", then "What is it?" picks the species; POST `items/{uid}/animals`) and "Find pets again"
+(POST `items/{uid}/animals/detect`); a photo with boxes keeps both under "More" in the People and pets section.
 
 ## 15. Configuration (env)
 
@@ -1058,6 +1068,36 @@ wrong at times (a white cat on a lap read as a dog). Three things change that:
   (and every crop in it) the box's species (`species_source='user'`, events) and then moves the box; the
   popover offers it as "Move and make {pet} a {species}". A pet identity's species comes from its crops:
   when every crop of a pet is corrected, `persons.species` follows.
+
+Boxes the owner adds (2026-11-08). The detector misses an animal at times (a cat filling the frame), and
+without a box there is nothing to name:
+- `POST /api/items/{uid}/animals {x, y, w, h, species?}` (a normalised box inside [0, 1] covering at least
+  0.5 percent of the frame; photos only, a video answers 400): the server cuts the padded crop from the
+  original (`animals.padded_crop`), writes the crop file (`storage.animal_crop_path`), embeds it with SigLIP
+  when the model is loaded (`pipeline._model("siglip")`, `embed_images`), and decides the species: the
+  owner's `species` when given (`species_source='user'`), else the zero-shot answer over `SPECIES_PROMPTS`
+  on the embedding, else 400 `species_needed`. The row is stored with `det_score 1.0`, `assigned_by 'auto'`
+  and `animals.source = 'user'` (a new migrated column, `CHECK (source IN ('detector','user'))`, default
+  `detector`); `items.animal_count` follows; `pets.assign_new_animals(conn, item_id)` matches the box to an
+  existing pet of that species. The reply is the item's `AnimalOut` for the new box (with `person` when it
+  matched) and the viewer opens the popover on it so the owner names the pet.
+- `POST /api/items/{uid}/animals/detect {threshold?}` (default 0.2, floor 0.1; photos only): the detector
+  runs once more on the photo with that threshold for the animal classes (`persons.detect_classes` with
+  `animals.thresholds()` scaled), boxes that overlap no stored box (IoU under 0.5) are kept, stored like the
+  pipeline stores them (`source 'detector'`, species by the detector then the zero-shot check, SigLIP
+  embedding), assigned, and returned; 409 `models_unavailable` when the detector is not loaded.
+- `pets.carry_over` keeps an owner-drawn box across a re-analysis untouched (the detector never produced
+  it), with its assignment; `DELETE /api/animals/{id}` removes one as before.
+- Frontend: the viewer's "People and pets" section (and the photo stage) offers "Add a pet box" and "Find
+  pets again" whenever a photo has no animal box, and under a "More" control otherwise. "Add a pet box"
+  puts the stage in draw mode (hint "Drag over the pet"; Escape cancels): a drag with mouse or touch draws a
+  rectangle (at least 24 px), "Whole photo" takes the frame minus a 3 percent margin; on release a species
+  picker ("What is it?", Cat first) confirms and posts; the new box appears and its popover opens. "Find pets
+  again" calls the detect route and toasts how many boxes were added ("No pet found" when none, "The
+  models are not loaded" on 409).
+- Tests: the create route with models off (crop file written, species from the body, 400 without one, the
+  box matched to a pet of that species when a look-alike pet exists, `animal_count`), the detect route with
+  models off (409), a user-drawn box surviving `carry_over`, the box inside the frame and large enough.
 
 ## 23. Timeline (`app/api/timeline.py`, `components/timeline/`)
 

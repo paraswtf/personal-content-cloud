@@ -264,6 +264,7 @@ CREATE TABLE IF NOT EXISTS animals (
   species         TEXT NOT NULL,                -- bird, cat, dog, horse, sheep, cow, elephant, bear, zebra, giraffe
   species_source  TEXT NOT NULL DEFAULT 'auto' CHECK (species_source IN ('auto','user')),  -- 'user': the owner said so
   species_scores  TEXT,                         -- JSON {species: probability} from the zero-shot check (section 22)
+  source          TEXT NOT NULL DEFAULT 'detector' CHECK (source IN ('detector','user')),  -- 'user': the owner drew it
   frame_time_s    REAL,                         -- videos: the sampled frame
   embedding       BLOB,                         -- float32[768], L2-normalised (SigLIP of the padded crop)
   created_at      TEXT NOT NULL

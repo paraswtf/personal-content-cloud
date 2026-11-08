@@ -29,6 +29,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app import storage
 from app.analysis import cluster, guess
+from app.analysis import animals as animals_mod
 from app.analysis import pets as pets_mod
 from app.api.common import (
     ITEM_CARD_COLUMNS,
@@ -74,6 +75,9 @@ from app.schemas import (
     Suggestion,
     SuggestionList,
     TagIn,
+    AnimalBoxIn,
+    AnimalOut,
+    RedetectIn,
 )
 from app.urls import animal_url, face_url, thumb_url
 from app.util import clean_name, decode_cursor, encode_cursor, now_iso
@@ -837,6 +841,61 @@ def set_person_species(person_id: int, body: PersonSpeciesIn, conn: sqlite3.Conn
     final = change.person_id if change.person_id is not None else int(person_id)
     _after_people_change(conn, change.items | _items_of_person(conn, final), set())
     return AssignOut(updated=change.updated, person=_person_out(conn, final), followed=change.followed)
+
+
+@router.post("/items/{uid}/animals", response_model=AnimalOut, status_code=201)
+def add_animal_box(uid: str, body: AnimalBoxIn, conn: sqlite3.Connection = Depends(get_db),
+                   session: SessionInfo = Depends(require_user)) -> AnimalOut:
+    """A box the owner drew on a photo (section 22, boxes the owner adds): crop, look embedding, species
+    (the owner's, else the zero-shot's, else 400 species_needed), the pet match; photos only (400)."""
+    item = _photo_or_400(conn, session, uid)
+    try:
+        aid = animals_mod.add_box(conn, item, (body.x, body.y, body.w, body.h), species=body.species)
+    except animals_mod.SpeciesNeeded:
+        raise HTTPException(status_code=400, detail="species_needed") from None
+    except animals_mod.NoImage:
+        raise HTTPException(status_code=409, detail="The photo could not be opened") from None
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
+    with tx(conn):
+        bump_faces_version(conn)
+        bump_search_version(conn)
+    _after_people_change(conn, {int(item["id"])}, set())
+    return animal_out(conn, conn.execute("SELECT * FROM animals WHERE id = ?", (aid,)).fetchone())
+
+
+@router.post("/items/{uid}/animals/detect", response_model=list[AnimalOut])
+def redetect_animals(uid: str, body: RedetectIn | None = None, conn: sqlite3.Connection = Depends(get_db),
+                     session: SessionInfo = Depends(require_user)) -> list[AnimalOut]:
+    """The detector once more on a photo at a lower threshold (section 22): the boxes it adds, matched to
+    pets; 409 models_unavailable without the detector; photos only (400)."""
+    item = _photo_or_400(conn, session, uid)
+    if not animals_mod.available():
+        raise HTTPException(status_code=409, detail="models_unavailable")
+    threshold = body.threshold if body is not None else animals_mod.REDETECT_DEFAULT
+    try:
+        ids = animals_mod.redetect(conn, item, threshold)
+    except animals_mod.ModelsUnavailable:
+        raise HTTPException(status_code=409, detail="models_unavailable") from None
+    except animals_mod.NoImage:
+        raise HTTPException(status_code=409, detail="The photo could not be opened") from None
+    if ids:
+        with tx(conn):
+            bump_faces_version(conn)
+            bump_search_version(conn)
+        _after_people_change(conn, {int(item["id"])}, set())
+    rows = conn.execute(f"SELECT * FROM animals WHERE id IN ({_ids_sql(ids)}) ORDER BY det_score DESC, id", ids).fetchall() if ids else []
+    return [animal_out(conn, r) for r in rows]
+
+
+def _photo_or_400(conn: sqlite3.Connection, session: SessionInfo, uid: str) -> sqlite3.Row:
+    item = conn.execute("SELECT * FROM items WHERE uid = ? AND deleted_at IS NULL", (uid,)).fetchone()
+    if item is None:
+        raise HTTPException(status_code=404, detail="Item not found")
+    _check_items_vault(conn, session, [int(item["id"])])
+    if item["kind"] != "image":
+        raise HTTPException(status_code=400, detail="Boxes can be drawn on photos only")
+    return item
 
 
 @router.delete("/animals/{animal_id}", response_model=Ok)

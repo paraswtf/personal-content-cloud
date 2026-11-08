@@ -661,6 +661,8 @@ def analyze_item(conn: sqlite3.Connection, item_id: int, version: int) -> None:
                 has_animal = has_animal or conn.execute(
                     "SELECT 1 FROM animals WHERE item_id = ? AND w * h >= ? LIMIT 1", (item_id, ANIMAL_MIN_AREA)
                 ).fetchone() is not None
+            drawn = set(animals_mod.drawn_ids(old_animals))   # section 22: the owner's boxes stay
+            old_animals = [a for a in old_animals if int(a["id"]) not in drawn]
             old_animal_ids = [int(a["id"]) for a in old_animals]
             old_people |= {int(a["person_id"]) for a in old_animals if a["person_id"] is not None}
             new_animal_ids: list[int] = []
@@ -683,6 +685,10 @@ def analyze_item(conn: sqlite3.Connection, item_id: int, version: int) -> None:
                 marks = ",".join("?" * len(old_animal_ids))
                 conn.execute(f"DELETE FROM animals WHERE id IN ({marks})", old_animal_ids)
                 trash.extend(storage.animal_crop_path(a) for a in old_animal_ids)
+            if new_animal_ids and drawn:
+                for dropped in animals_mod.drop_over_drawn(conn, item_id, new_animal_ids):
+                    new_animal_ids.remove(dropped)
+                    trash.append(storage.animal_crop_path(dropped))
             if new_animal_ids:
                 try:
                     pets_mod.assign_new_animals(conn, item_id)

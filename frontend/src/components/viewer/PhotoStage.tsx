@@ -1,14 +1,25 @@
 // The picture with face and body boxes drawn in percent of the rendered image box. A box with a
 // person shows the name; a box with a guess shows "Name?" with confirm and reject; a tap on a box
 // opens the editor. A Live Photo's clip plays over the still, in the same box, while `liveSrc` is set.
-import { useEffect, useRef, useState } from 'react'
+// Draw mode (section 22): the owner drags a box over a pet the detector missed (or takes the whole
+// photo), picks the species, and the new box's popover opens so the pet can be named.
+import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
+import { useMutation } from '@tanstack/react-query'
 import clsx from 'clsx'
 import { Loader2, PawPrint } from 'lucide-react'
-import type { ItemDetail } from '../../lib/types'
-import { personName } from '../../lib/format'
+import { api } from '../../lib/api'
+import { SPECIES, type AnimalOut, type ItemDetail, type Species } from '../../lib/types'
+import { personName, speciesLabel } from '../../lib/format'
 import { previewSrcSet } from '../../lib/preview'
+import { errorMessage } from '../admin/adminHooks'
 import { animalLabel, boxKey, stillBoxes, type BoxTarget } from './boxes'
 import GuessChip from './GuessChip'
+import { darkButton, useInvalidateItem } from './shared'
+
+/** The smallest box the owner can draw, in screen pixels. */
+const MIN_DRAW_PX = 24
+/** "Whole photo": the frame minus this margin on every side. */
+const WHOLE_MARGIN = 0.03
 
 interface Props {
   detail: ItemDetail
@@ -26,6 +37,24 @@ interface Props {
   onLiveStop?: () => void
   /** The clip could not be loaded or played. */
   onLiveError?: () => void
+  /** Draw mode (section 22): a box for a pet the detector missed. */
+  drawing?: boolean
+  /** Draw mode ended (cancelled, or the box was added). */
+  onDrawEnd?: () => void
+  onToast?: (message: string) => void
+}
+
+interface Drag {
+  x0: number
+  y0: number
+  x1: number
+  y1: number
+}
+interface NormBox {
+  x: number
+  y: number
+  w: number
+  h: number
 }
 
 /** The clip over the still. Mounted only while playing, so it never starts on its own. */
@@ -79,10 +108,71 @@ export default function PhotoStage({
   liveSrc,
   onLiveStop,
   onLiveError,
+  drawing = false,
+  onDrawEnd,
+  onToast,
 }: Props) {
   const [loaded, setLoaded] = useState(false)
   const [failed, setFailed] = useState(false)
   const [natural, setNatural] = useState<{ w: number; h: number } | null>(null)
+  const rootRef = useRef<HTMLDivElement>(null)
+  const boxRefs = useRef(new Map<string, HTMLButtonElement>())
+  const [drag, setDrag] = useState<Drag | null>(null)
+  const [pending, setPending] = useState<NormBox | null>(null)
+  // the box just added: its popover opens once the fresh detail draws it
+  const [pendingEdit, setPendingEdit] = useState<number | null>(null)
+  const invalidate = useInvalidateItem(detail.uid)
+
+  useEffect(() => {
+    if (!drawing) {
+      setDrag(null)
+      setPending(null)
+    }
+  }, [drawing])
+
+  const add = useMutation({
+    mutationFn: (species: Species) => api.items.addAnimal(detail.uid, { ...(pending as NormBox), species }),
+    onSuccess: (box: AnimalOut) => {
+      setPending(null)
+      setPendingEdit(box.id)
+      invalidate()
+      onDrawEnd?.()
+    },
+    onError: (e) => onToast?.(errorMessage(e, 'Could not add the box')),
+  })
+
+  const point = (e: ReactPointerEvent<HTMLDivElement>) => {
+    const r = e.currentTarget.getBoundingClientRect()
+    return {
+      x: Math.min(Math.max(e.clientX - r.left, 0), r.width),
+      y: Math.min(Math.max(e.clientY - r.top, 0), r.height),
+      cw: r.width,
+      ch: r.height,
+    }
+  }
+  const onDrawDown = (e: ReactPointerEvent<HTMLDivElement>) => {
+    if (e.button !== 0 && e.pointerType === 'mouse') return
+    e.preventDefault()
+    e.currentTarget.setPointerCapture(e.pointerId)
+    const p = point(e)
+    setDrag({ x0: p.x, y0: p.y, x1: p.x, y1: p.y })
+  }
+  const onDrawMove = (e: ReactPointerEvent<HTMLDivElement>) => {
+    if (!drag) return
+    const p = point(e)
+    setDrag((d) => (d ? { ...d, x1: p.x, y1: p.y } : d))
+  }
+  const onDrawUp = (e: ReactPointerEvent<HTMLDivElement>) => {
+    if (!drag) return
+    const p = point(e)
+    const x0 = Math.min(drag.x0, p.x)
+    const y0 = Math.min(drag.y0, p.y)
+    const wpx = Math.abs(p.x - drag.x0)
+    const hpx = Math.abs(p.y - drag.y0)
+    setDrag(null)
+    if (wpx < MIN_DRAW_PX || hpx < MIN_DRAW_PX || !p.cw || !p.ch) return
+    setPending({ x: x0 / p.cw, y: y0 / p.ch, w: wpx / p.cw, h: hpx / p.ch })
+  }
 
   const w = natural?.w || detail.width || 4
   const h = natural?.h || detail.height || 3
@@ -90,8 +180,23 @@ export default function PhotoStage({
   const boxes = src ? [] : stillBoxes(detail)
   const names = detail.people.map((p) => personName(p)).join(', ')
 
+  useEffect(() => {
+    if (pendingEdit === null) return
+    const t = boxes.find((b) => b.kind === 'animal' && b.box.id === pendingEdit)
+    const el = t ? boxRefs.current.get(boxKey(t)) : undefined
+    if (t && el) {
+      setPendingEdit(null)
+      onEditBox(t, el)
+    }
+  })
+
+  const dragRect = drag
+    ? { left: Math.min(drag.x0, drag.x1), top: Math.min(drag.y0, drag.y1), width: Math.abs(drag.x1 - drag.x0), height: Math.abs(drag.y1 - drag.y0) }
+    : null
+
   return (
     <div
+      ref={rootRef}
       className="relative bg-center bg-no-repeat"
       style={{
         aspectRatio: `${w} / ${h}`,
@@ -148,6 +253,10 @@ export default function PhotoStage({
             <div key={key} className="group absolute" style={pos}>
               <button
                 type="button"
+                ref={(el) => {
+                  if (el) boxRefs.current.set(key, el)
+                  else boxRefs.current.delete(key)
+                }}
                 className={clsx(
                   'absolute inset-0 rounded-md border-2 shadow-[0_0_0_1px_rgba(0,0,0,0.45)] transition-colors focus-visible:outline-none',
                   (isBody || isAnimal) && 'rounded-lg border-[1.5px]',
@@ -198,6 +307,87 @@ export default function PhotoStage({
             </div>
           )
         })}
+
+      {drawing && loaded && !pending && (
+        <div
+          data-no-swipe
+          role="application"
+          aria-label="Draw a box over the pet"
+          className="absolute inset-0 z-20 cursor-crosshair touch-none select-none"
+          onPointerDown={onDrawDown}
+          onPointerMove={onDrawMove}
+          onPointerUp={onDrawUp}
+          onPointerCancel={() => setDrag(null)}
+        >
+          {dragRect && (
+            <div
+              className="pointer-events-none absolute rounded-lg border-2 border-dashed border-emerald-300 bg-emerald-300/10"
+              style={dragRect}
+            />
+          )}
+        </div>
+      )}
+
+      {drawing && (
+        <div data-no-swipe className="absolute inset-x-0 top-0 z-30 flex flex-wrap items-center justify-center gap-2 p-2">
+          {!pending && (
+            <span role="status" className="rounded-full bg-black/70 px-3 py-1.5 text-sm font-semibold text-white">
+              Drag over the pet
+            </span>
+          )}
+          {!pending && (
+            <button
+              type="button"
+              onClick={() => setPending({ x: WHOLE_MARGIN, y: WHOLE_MARGIN, w: 1 - 2 * WHOLE_MARGIN, h: 1 - 2 * WHOLE_MARGIN })}
+              className={darkButton('default', 'bg-black/60')}
+            >
+              Whole photo
+            </button>
+          )}
+          <button type="button" onClick={() => onDrawEnd?.()} className={darkButton('default', 'bg-black/60')}>
+            Cancel
+          </button>
+        </div>
+      )}
+
+      {drawing && pending && (
+        <>
+          <div
+            className="pointer-events-none absolute z-20 rounded-lg border-2 border-emerald-300 bg-emerald-300/10"
+            style={{ left: `${pending.x * 100}%`, top: `${pending.y * 100}%`, width: `${pending.w * 100}%`, height: `${pending.h * 100}%` }}
+          />
+          <div
+            data-no-swipe
+            role="dialog"
+            aria-label="What is it?"
+            className="absolute left-1/2 top-1/2 z-30 w-[min(22rem,92%)] -translate-x-1/2 -translate-y-1/2 rounded-2xl bg-[#1b1b1b] p-3 text-white shadow-2xl"
+          >
+            <p className="mb-2 text-sm font-semibold">What is it?</p>
+            <div className="flex flex-wrap gap-1.5" role="group" aria-label="Species">
+              {SPECIES.map((sp) => (
+                <button
+                  key={sp}
+                  type="button"
+                  disabled={add.isPending}
+                  onClick={() => add.mutate(sp)}
+                  className="rounded-full border border-white/15 px-3 py-1.5 text-sm font-semibold text-white hover:bg-white/10 disabled:opacity-50"
+                >
+                  {speciesLabel(sp)}
+                </button>
+              ))}
+            </div>
+            {add.isPending && <p className="mt-2 text-xs text-white/60">Adding the box</p>}
+            <div className="mt-3 flex gap-2">
+              <button type="button" disabled={add.isPending} onClick={() => setPending(null)} className={darkButton('default')}>
+                Draw again
+              </button>
+              <button type="button" disabled={add.isPending} onClick={() => onDrawEnd?.()} className={darkButton('default')}>
+                Cancel
+              </button>
+            </div>
+          </div>
+        </>
+      )}
     </div>
   )
 }
