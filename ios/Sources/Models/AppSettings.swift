@@ -24,6 +24,16 @@ enum AppSettings {
         set { defaults.set(newValue, forKey: "includeVideos") }
     }
 
+    /// The most files the sync sends at once (the setting's top, and the session's connections per host).
+    static let maxParallelUploads = 4
+
+    /// How many files the sync sends at once (1 to maxParallelUploads, 3 by default). Exports still
+    /// happen one at a time, so at most this many assets wait exported on the phone.
+    static var parallelUploads: Int {
+        get { min(maxParallelUploads, max(1, defaults.object(forKey: "parallelUploads") as? Int ?? 3)) }
+        set { defaults.set(min(maxParallelUploads, max(1, newValue)), forKey: "parallelUploads") }
+    }
+
     static var autoSync: Bool {
         get { defaults.object(forKey: "autoSync") as? Bool ?? true }
         set { defaults.set(newValue, forKey: "autoSync") }

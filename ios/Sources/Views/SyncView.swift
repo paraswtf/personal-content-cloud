@@ -26,15 +26,18 @@ struct SyncView: View {
                             ProgressView(value: engine.progress).frame(width: 80)
                         }
                     }
-                    if let file = uploader.current {
+                    if uploader.sending.count > 1 {
+                        Text("Sending \(uploader.sending.count) files at once").font(.footnote).foregroundStyle(.secondary)
+                    }
+                    ForEach(uploader.sendingList) { file in
                         VStack(alignment: .leading, spacing: 4) {
-                            Text("Sending \(file)").font(.footnote).lineLimit(1)
-                            ProgressView(value: uploader.fileProgress)
+                            Text("Sending \(file.filename)").font(.footnote).lineLimit(1)
+                            ProgressView(value: file.progress)
                         }
                     }
                     HStack {
-                        Button(engine.running || uploader.current != nil ? "Stop" : "Sync now") {
-                            if engine.running || uploader.current != nil { engine.stop() } else { engine.start(manual: true) }
+                        Button(engine.running || !uploader.sending.isEmpty ? "Stop" : "Sync now") {
+                            if engine.running || !uploader.sending.isEmpty { engine.stop() } else { engine.start(manual: true) }
                         }
                         .buttonStyle(.borderedProminent)
                         Spacer()

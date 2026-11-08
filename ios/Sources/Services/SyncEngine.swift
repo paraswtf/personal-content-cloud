@@ -6,7 +6,9 @@ import UIKit
 
 /// The sync run (docs/ARCHITECTURE.md sections 21 and 28): ask the server what it holds, continue
 /// the uploads that were interrupted from the server's offset, then export, hash and upload the
-/// rest through the background uploader, and record every outcome. One run at a time.
+/// rest through the background uploader, and record every outcome. One run at a time. Assets are
+/// exported one after another, while up to AppSettings.parallelUploads of them transfer at once
+/// (UploadSlots): the next export starts as soon as a slot is free.
 @MainActor
 final class SyncEngine: ObservableObject {
     static let shared = SyncEngine()
@@ -140,19 +142,27 @@ final class SyncEngine: ObservableObject {
             }
         }
 
-        // 2. Continue the interrupted uploads from the server's offset.
-        let live = await uploader.liveAssets()
+        // Up to this many assets transfer at once; the slots watch each one until it ends.
+        let slots = UploadSlots(limit: AppSettings.parallelUploads, deadline: deadline)
+        defer { slots.stop() }
+
+        // 2. Continue the interrupted uploads from the server's offset. The session is asked again for
+        // each asset: transfers already run in parallel, so a snapshot taken once goes stale.
         var handled = Set<String>()
         for rec in unfinished {
             if Task.isCancelled { return }
             if let deadline, Date() > deadline { SyncStore.shared.log("Background time is up, continuing later"); return }
             handled.insert(rec.assetId)
             statusLine = "Continuing \(rec.filename.isEmpty ? "an upload" : rec.filename)"
-            if !live.contains(rec.assetId) {
+            let live = await uploader.liveAssets()
+            if live.contains(rec.assetId) || uploader.isDriving(rec.assetId) {
+                uploader.showSending(rec)
+            } else {
                 let asset = inLibrary[rec.assetId] ?? PhotoLibrary.assets(ids: [rec.assetId]).first
                 await resume(rec, asset: asset, server: server, api: api)
             }
-            await uploader.wait(for: rec.assetId, until: deadline)
+            slots.watch(rec.assetId)
+            await slots.waitForSlot()
         }
 
         // 3. The rest, newest first.
@@ -198,9 +208,12 @@ final class SyncEngine: ObservableObject {
                     try? ctx.save()
                     continue
                 }
+                if Task.isCancelled { break }   // Stop was pressed during the export: the next run sends it
                 uploader.start(rec)
                 time.end()
-                await uploader.wait(for: id, until: deadline)
+                slots.watch(id)
+                try? ctx.save()
+                await slots.waitForSlot()
             } catch {
                 rec.status = "failed"
                 rec.error = error.localizedDescription
@@ -209,6 +222,10 @@ final class SyncEngine: ObservableObject {
                 SyncStore.shared.log("\(rec.filename.isEmpty ? id : rec.filename): \(error.localizedDescription)", level: "error")
             }
             try? ctx.save()
+        }
+        if slots.count > 0 && !Task.isCancelled && allowedNow(manual: manual) == nil {
+            statusLine = "Finishing \(slots.count) upload\(slots.count == 1 ? "" : "s")"
+            await slots.drain()
         }
         progress = 1
     }
@@ -249,6 +266,7 @@ final class SyncEngine: ObservableObject {
                 return
             }
         }
+        if Task.isCancelled { return }   // Stop: the next run continues it
         guard let id = rec.uploadId else {
             uploader.start(rec)          // the create was never answered: it is idempotent, ask again
             return
@@ -259,6 +277,7 @@ final class SyncEngine: ObservableObject {
         }
         do {
             let up = try await api.upload(id: id)
+            if Task.isCancelled { return }
             uploader.resume(rec, with: up)
         } catch {
             rec.status = "pending"
@@ -423,6 +442,81 @@ final class SyncEngine: ObservableObject {
         let ctx = SyncStore.shared.container.mainContext
         for r in records { r.deletedFromLibrary = true; r.updatedAt = Date() }
         try? ctx.save()
+    }
+}
+
+/// The uploads of one run that are on the wire, at most `limit` at a time. Each started asset is
+/// watched by BackgroundUploader.wait(for:) on a task of its own (the watchdog that keeps it moving);
+/// the run waits for a free slot before it exports the next asset, and for all of them at the end.
+/// Everything runs on the main actor. stop() ends the watching, never the transfers: they go on in
+/// the background session, and the next run continues whatever is left.
+@MainActor
+private final class UploadSlots {
+    let limit: Int
+    private let deadline: Date?
+    private var watchers: [String: Task<Void, Never>] = [:]
+    private var waiter: CheckedContinuation<Void, Never>?
+
+    init(limit: Int, deadline: Date?) {
+        self.limit = max(1, limit)
+        self.deadline = deadline
+    }
+
+    /// Uploads being watched now.
+    var count: Int { watchers.count }
+
+    /// Watches a started (or resumed) asset until its upload ends.
+    func watch(_ assetId: String) {
+        guard watchers[assetId] == nil else { return }
+        let deadline = self.deadline
+        watchers[assetId] = Task { @MainActor [weak self] in
+            await BackgroundUploader.shared.wait(for: assetId, until: deadline)
+            self?.ended(assetId)
+        }
+    }
+
+    /// Returns once fewer than `limit` uploads are on the wire, or the run is cancelled.
+    func waitForSlot() async {
+        await waitUntil { $0.watchers.count < $0.limit }
+    }
+
+    /// Returns once every watched upload has ended, or the run is cancelled.
+    func drain() async {
+        await waitUntil { $0.watchers.isEmpty }
+    }
+
+    /// Stops watching; the transfers go on in the background session.
+    func stop() {
+        for task in watchers.values { task.cancel() }
+        watchers.removeAll()
+        wake()
+    }
+
+    private func ended(_ assetId: String) {
+        watchers[assetId] = nil
+        wake()
+    }
+
+    private func wake() {
+        let w = waiter
+        waiter = nil
+        w?.resume()
+    }
+
+    private func waitUntil(_ ready: @escaping (UploadSlots) -> Bool) async {
+        while !ready(self) && !Task.isCancelled {
+            await withTaskCancellationHandler {
+                await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+                    if ready(self) || Task.isCancelled {
+                        cont.resume()
+                    } else {
+                        waiter = cont
+                    }
+                }
+            } onCancel: {
+                Task { @MainActor [weak self] in self?.wake() }
+            }
+        }
     }
 }
 

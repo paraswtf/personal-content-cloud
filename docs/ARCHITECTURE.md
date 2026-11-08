@@ -1511,6 +1511,25 @@ Create, chunk and complete calls retry with backoff (1, 2, 4, 8, 16, 30 s, at mo
 waits for an asset, the uploader watches the session every 30 s: a lost hand-off (no request of the asset
 in flight) is sent again, at most three times before the asset stalls for this run, and a request with no
 progress for 120 s is cancelled and tried again with the backoff, so one asset can never hold a run.
+Parallel transfers (2026-11-08): the engine exports and hashes assets one after another but lets up to
+`AppSettings.parallelUploads` of them (Settings > Sync > Files at a time, 1 to 4, default 3) transfer at
+once. `UploadSlots` watches each started or resumed asset with `wait(for:)` on a task of its own; the run
+waits for a free slot before the next export, so at most that many assets sit exported on the phone, and
+waits for the rest at the end ("Finishing N uploads"). Every piece of transfer state is per asset (the
+record, the uploader's `sending` entry and its stall clock), the session allows
+`AppSettings.maxParallelUploads` connections per host, and the Sync screen lists each file being sent
+with its own progress. Stop cancels every task in flight; the deadline of a background run ends the
+watching, never the transfers. The server needs nothing new: uploads are independent rows with their own
+locks, and the ingest queue stores them one at a time as before. The web upload queue already sends three
+files at once (`MAX_IN_FLIGHT` in `lib/uploader.ts`). With several assets in flight: while the session is
+replaced (a Wi-Fi or charging option change; `finishTasksAndInvalidate` waits for the other assets'
+requests) an idle asset is not kicked and `sessionInvalidated()` sends its next request, skipping assets
+whose chunk is being cut (their own task hands it over); on a relaunch into the delegate the completion
+handler is called only once every chunk being cut is in the session; the engine asks the session again
+for each interrupted asset and never resumes one this process is still moving (`isDriving`); and Stop
+during an export no longer puts that asset on the wire. Tests: `tests/test_uploads_parallel.py` (four
+assets from one device token, chunks interleaved from four connections, every byte in place, the sync
+check lists all four).
 Assets sent in an earlier run that the sync check now lists are marked synced before anything else, so
 the "sent, waiting for the server" count is right from the start of a run. The sync
 check sends asset ids, and hashes for assets without a record (after a reinstall or when the photo

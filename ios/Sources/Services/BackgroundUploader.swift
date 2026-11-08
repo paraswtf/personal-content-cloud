@@ -45,8 +45,11 @@ private struct CreateBody: Encodable {
 /// so a file keeps flowing without the app. The state lives in the record and in each task's
 /// description, never only in memory, because a relaunched process starts with nothing else.
 ///
-/// One asset is in flight at a time, one request at a time. wait(for:) watches the session while
-/// the engine waits, so a lost hand-off or a transfer iOS never starts cannot hold a run. Errors:
+/// Several assets can be in flight at once (the engine starts up to AppSettings.parallelUploads),
+/// each one request at a time; every piece of transfer state is the asset's own (its record, its
+/// entry in `sending` and its stall clock), so the assets never wait for each other. wait(for:)
+/// watches one asset's tasks while the engine waits, so a lost hand-off or a transfer iOS never starts
+/// cannot hold a run. Errors:
 /// - transport failures, 408, 429 and 5xx retry the same request after 1, 2, 4, 8, 16, 30 s
 ///   (`earliestBeginDate`), at most eight attempts in a row;
 /// - 409 offset_mismatch continues from the server's offset; another 409 reads the upload's state;
@@ -64,9 +67,21 @@ final class BackgroundUploader: NSObject, ObservableObject {
     static let stuckSeconds: TimeInterval = 120   // a request with no progress for this long is tried again
     static let maxKicks = 3                       // lost hand-offs sent again before the asset stalls
 
-    /// The file being sent and how far it got, for the Sync screen.
-    @Published private(set) var current: String?
-    @Published private(set) var fileProgress: Double = 0
+    /// A file being sent, for the Sync screen: one per asset in flight.
+    struct Sending: Identifiable, Equatable {
+        let id: String          // the asset id
+        var filename: String
+        var bytes: Int64
+        var progress: Double
+    }
+
+    /// The files being sent now, by asset id.
+    @Published private(set) var sending: [String: Sending] = [:]
+
+    /// The files being sent, in a steady order for the Sync screen.
+    var sendingList: [Sending] {
+        sending.values.sorted { $0.filename == $1.filename ? $0.id < $1.id : $0.filename < $1.filename }
+    }
 
     /// Handed over by the AppDelegate when iOS relaunches the app for this session's events; called
     /// once the delegate has seen them all.
@@ -92,9 +107,9 @@ final class BackgroundUploader: NSObject, ObservableObject {
     private var invalidating = false
     private var bodies: [Int: Data] = [:]                       // task id -> response body so far
     private var waiters: [String: [UUID: Waiter]] = [:]
-    private var currentBytes: Int64 = 0
     private var cutting: Set<String> = []                       // assets whose next chunk is being cut
-    private var lastProgress = Date()                           // a request handed over, bytes sent or a reply
+    private var lastProgress: [String: Date] = [:]              // asset -> a request handed over, bytes sent or a reply
+    private var eventsDelivered = false                         // urlSessionDidFinishEvents came; see completeEventsIfIdle()
 
     /// One wait(for:) slice: released by the uploader when the record moves on, or by its timer.
     private final class Waiter {
@@ -118,6 +133,7 @@ final class BackgroundUploader: NSObject, ObservableObject {
         cfg.httpCookieAcceptPolicy = .never
         cfg.timeoutIntervalForRequest = 120
         cfg.timeoutIntervalForResource = 7 * 24 * 3600
+        cfg.httpMaximumConnectionsPerHost = AppSettings.maxParallelUploads   // one connection per asset in flight
         applied = want
         return URLSession(configuration: cfg, delegate: self, delegateQueue: .main)
     }
@@ -175,8 +191,10 @@ final class BackgroundUploader: NSObject, ObservableObject {
     private func sessionInvalidated() {
         session = makeSession()
         invalidating = false
-        // continue what was waiting for the new session
-        for rec in records(status: "uploading") { scheduleNext(rec) }
+        // Continue what was waiting for the new session. An asset whose next chunk is being cut hands it
+        // to the new session itself (its task checks `invalidating` when the cut is done), so it is not
+        // scheduled twice.
+        for rec in records(status: "uploading") where !cutting.contains(rec.assetId) { scheduleNext(rec) }
     }
 
     // MARK: what the engine calls
@@ -186,6 +204,22 @@ final class BackgroundUploader: NSObject, ObservableObject {
         let tasks = await session.allTasks
         return Set(tasks.filter { $0.state == .running || $0.state == .suspended }
             .compactMap { UploadTaskTag.from($0.taskDescription)?.asset })
+    }
+
+    /// True while this process is moving the asset between two requests (a chunk being cut, or a
+    /// request scheduled in this run): the engine must not resume it a second time.
+    func isDriving(_ assetId: String) -> Bool {
+        if cutting.contains(assetId) { return true }
+        return sending[assetId] != nil && record(assetId)?.status == "uploading"
+    }
+
+    /// Lists an asset whose request is already in the session (a run that finds it live after a
+    /// relaunch) on the Sync screen until its next request updates the row.
+    func showSending(_ rec: SyncRecord) {
+        guard rec.status == "uploading", sending[rec.assetId] == nil,
+              let file = rec.files.first(where: { !$0.done }) else { return }
+        let share = file.bytes > 0 ? min(1, Double(rec.nextOffset) / Double(file.bytes)) : 0
+        sending[rec.assetId] = Sending(id: rec.assetId, filename: file.filename, bytes: file.bytes, progress: share)
     }
 
     /// Starts the upload of a prepared record (its `files` are exported and hashed), or continues
@@ -222,7 +256,15 @@ final class BackgroundUploader: NSObject, ObservableObject {
     /// tried again with the usual backoff. So one asset can never hold a run for ever.
     func wait(for assetId: String, until deadline: Date?) async {
         var kicks = 0
+        defer {
+            // The engine failed or paused the record itself (not through ended()): off the Sync screen.
+            if let rec = record(assetId), rec.status != "uploading" {
+                sending[assetId] = nil
+                lastProgress[assetId] = nil
+            }
+        }
         while !Task.isCancelled, let rec = record(assetId), rec.status == "uploading" {
+            if lastProgress[assetId] == nil { lastProgress[assetId] = Date() }
             if let deadline, Date() > deadline { return }
             let slice = deadline.map { min(Self.watchSeconds, max(0, $0.timeIntervalSinceNow)) } ?? Self.watchSeconds
             if await waitSlice(assetId, seconds: slice) { continue }   // released: the record moved on
@@ -230,6 +272,9 @@ final class BackgroundUploader: NSObject, ObservableObject {
             if cutting.contains(assetId) { continue }
             let tasks = await session.allTasks.filter { UploadTaskTag.from($0.taskDescription)?.asset == assetId }
             if tasks.isEmpty {
+                // The session is being replaced (the Wi-Fi or charging option changed) and waits for the
+                // other assets' requests: sessionInvalidated() sends this one's next request.
+                if invalidating || reconfigurePending { continue }
                 kicks += 1
                 if kicks > Self.maxKicks {
                     stall(rec, "The transfer did not start; it continues on the next sync")
@@ -237,10 +282,10 @@ final class BackgroundUploader: NSObject, ObservableObject {
                 }
                 SyncStore.shared.log("No request in flight for \(rec.filename); sending the next one")
                 scheduleNext(rec)
-            } else if Date().timeIntervalSince(lastProgress) > Self.stuckSeconds {
+            } else if Date().timeIntervalSince(lastProgress[assetId] ?? Date()) > Self.stuckSeconds {
                 SyncStore.shared.log("No progress on \(rec.filename) for \(Int(Self.stuckSeconds)) s; trying again")
                 tasks.forEach { $0.cancel() }
-                lastProgress = Date()
+                lastProgress[assetId] = Date()
                 retry(rec, reason: "no progress for \(Int(Self.stuckSeconds)) s")
             } else {
                 for t in tasks where t.state == .suspended { t.resume() }
@@ -279,7 +324,8 @@ final class BackgroundUploader: NSObject, ObservableObject {
             releaseAll(rec.assetId)
         }
         save()
-        current = nil
+        sending.removeAll()
+        lastProgress.removeAll()
     }
 
     // MARK: the state machine
@@ -324,8 +370,8 @@ final class BackgroundUploader: NSObject, ObservableObject {
             stall(rec, "The exported file is gone; the next sync exports it again")
             return
         }
-        current = file.filename
-        currentBytes = file.bytes
+        let sentShare = file.bytes > 0 ? min(1, Double(rec.nextOffset) / Double(file.bytes)) : 0
+        sending[rec.assetId] = Sending(id: rec.assetId, filename: file.filename, bytes: file.bytes, progress: sentShare)
 
         var req: URLRequest
         let bodyURL: URL
@@ -353,7 +399,10 @@ final class BackgroundUploader: NSObject, ObservableObject {
                     cutting.insert(rec.assetId)
                     Task { @MainActor [weak self] in
                         guard let self else { return }
-                        defer { self.cutting.remove(rec.assetId) }
+                        defer {
+                            self.cutting.remove(rec.assetId)
+                            self.completeEventsIfIdle()
+                        }
                         do {
                             try await Task.detached(priority: .utility) {
                                 try Self.writeChunk(from: source, offset: offset, length: length, to: chunkURL)
@@ -405,7 +454,7 @@ final class BackgroundUploader: NSObject, ObservableObject {
         rec.files = files
         rec.updatedAt = Date()
         save()
-        lastProgress = Date()
+        lastProgress[rec.assetId] = Date()
         task.resume()
     }
 
@@ -449,13 +498,15 @@ final class BackgroundUploader: NSObject, ObservableObject {
 
     private func succeeded(_ rec: SyncRecord, _ tag: UploadTaskTag, _ body: Data) {
         rec.attempts = 0
-        lastProgress = Date()
+        lastProgress[rec.assetId] = Date()
         switch tag.step {
         case "chunk":
             // A lost body (rare) still means the whole chunk was written: the server answers 200 only then.
             let received = (try? JSONDecoder().decode(ChunkOut.self, from: body))?.received_bytes ?? tag.offset + tag.length
             rec.nextOffset = received
-            if currentBytes > 0 { fileProgress = Double(received) / Double(currentBytes) }
+            if let total = sending[rec.assetId]?.bytes, total > 0 {
+                sending[rec.assetId]?.progress = min(1, Double(received) / Double(total))
+            }
             scheduleNext(rec)
         default:
             guard let up = try? JSONDecoder().decode(UploadOut.self, from: body) else {
@@ -546,7 +597,7 @@ final class BackgroundUploader: NSObject, ObservableObject {
         }
         rec.files = files
         rec.clearTransfer()
-        fileProgress = 0
+        sending[rec.assetId]?.progress = 0
     }
 
     /// Every file is on the server. 'uploaded' until the sync check confirms the item ('synced').
@@ -560,8 +611,7 @@ final class BackgroundUploader: NSObject, ObservableObject {
         UploadPaths.removeAsset(rec.assetId)
         save()
         SyncStore.shared.log("Sent \(rec.filename)")
-        current = nil
-        releaseAll(rec.assetId)
+        ended(rec.assetId)
     }
 
     /// The asset fails with a message; the next run starts it again (a fresh export, and a create
@@ -575,8 +625,7 @@ final class BackgroundUploader: NSObject, ObservableObject {
         rec.files = rec.files.map { var f = $0; if !f.done { f.uploadId = nil }; return f }
         save()
         SyncStore.shared.log("\(rec.filename.isEmpty ? rec.assetId : rec.filename): \(message)", level: "error")
-        current = nil
-        releaseAll(rec.assetId)
+        ended(rec.assetId)
     }
 
     /// Stops for now, keeping the state: the next run continues from the server's offset.
@@ -586,8 +635,14 @@ final class BackgroundUploader: NSObject, ObservableObject {
         rec.updatedAt = Date()
         save()
         SyncStore.shared.log("\(rec.filename.isEmpty ? rec.assetId : rec.filename): \(message)", level: "error")
-        current = nil
-        releaseAll(rec.assetId)
+        ended(rec.assetId)
+    }
+
+    /// The asset left the wire (sent, failed or stalled): off the Sync screen, its waits return.
+    private func ended(_ assetId: String) {
+        sending[assetId] = nil
+        lastProgress[assetId] = nil
+        releaseAll(assetId)
     }
 
     // MARK: helpers
@@ -641,9 +696,10 @@ final class BackgroundUploader: NSObject, ObservableObject {
     }
 
     fileprivate func sent(_ tag: UploadTaskTag?, total: Int64) {
-        lastProgress = Date()
-        guard let tag, tag.step == "chunk", currentBytes > 0 else { return }
-        fileProgress = min(1, Double(tag.offset + total) / Double(currentBytes))
+        guard let tag else { return }
+        lastProgress[tag.asset] = Date()
+        guard tag.step == "chunk", let bytes = sending[tag.asset]?.bytes, bytes > 0 else { return }
+        sending[tag.asset]?.progress = min(1, Double(tag.offset + total) / Double(bytes))
     }
 
     fileprivate func completed(_ task: URLSessionTask, error: Error?) {
@@ -653,6 +709,16 @@ final class BackgroundUploader: NSObject, ObservableObject {
     }
 
     fileprivate func eventsFinished() {
+        eventsDelivered = true
+        completeEventsIfIdle()
+    }
+
+    /// Tells iOS the session's events are handled (it may suspend the app then), but only once every
+    /// chunk being cut has been handed to the session: with several assets in flight one wake can
+    /// finish several requests, and a cut still running would otherwise be lost to the suspension.
+    private func completeEventsIfIdle() {
+        guard eventsDelivered, cutting.isEmpty else { return }
+        eventsDelivered = false
         let done = backgroundCompletion
         backgroundCompletion = nil
         done?()
