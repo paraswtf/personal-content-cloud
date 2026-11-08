@@ -7,7 +7,8 @@
 - init_db recreates items_fts when its stored tokenizer differs from FTS_TOKENIZE and sets kv
   fts_rebuild = 1; ingest.recover_on_startup then indexes every item again.
 - init_db adds the MIGRATED_COLUMNS an older database lacks before it applies schema.sql, so a
-  database from any earlier build upgrades in place at startup.
+  database from any earlier build upgrades in place at startup, and recreates the CHECKED_TABLES
+  whose CHECK constraint changed (rows copied).
 """
 from __future__ import annotations
 
@@ -96,6 +97,7 @@ def init_db() -> None:
         conn.executescript(schema)
         with tx(conn):
             _upgrade_fts(conn, schema)
+            _upgrade_checks(conn, schema)
             conn.execute("INSERT OR IGNORE INTO kv(key, value) VALUES ('schema_version', ?)", (str(SCHEMA_VERSION),))
             conn.execute(
                 "UPDATE kv SET value = ? WHERE key = 'schema_version' AND CAST(value AS INTEGER) < ?",
@@ -127,6 +129,43 @@ def _upgrade_fts(conn: sqlite3.Connection, schema: str) -> bool:
     conn.execute(m.group(0))
     kv_set(conn, FTS_REBUILD_KEY, 1)
     return True
+
+
+# Tables whose CHECK constraint grows over time (SQLite cannot alter a CHECK): recreated from
+# schema.sql when the stored definition differs, rows copied, indexes made again.
+CHECKED_TABLES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("learning_events", ("CREATE INDEX IF NOT EXISTS learning_events_kind ON learning_events(kind, created_at)",)),
+)
+
+
+def _check_clause(sql: str | None) -> str | None:
+    m = re.search(r"CHECK \(kind IN \(([^)]*)\)\)", sql or "")
+    return m.group(1) if m else None
+
+
+def _upgrade_checks(conn: sqlite3.Connection, schema: str) -> list[str]:
+    """Recreate each CHECKED_TABLES table whose stored CHECK on `kind` differs from schema.sql's (a
+    new kind, for one), copying every row and creating its indexes again. Runs inside init_db's
+    transaction. Returns the tables rebuilt."""
+    rebuilt: list[str] = []
+    for table, index_sql in CHECKED_TABLES:
+        row = conn.execute("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?", (table,)).fetchone()
+        m = re.search(rf"CREATE TABLE IF NOT EXISTS {table} \(.*?\n\);", schema, re.DOTALL)
+        if row is None or m is None:
+            continue
+        wanted, have = _check_clause(m.group(0)), _check_clause(row["sql"])
+        if wanted is None or have == wanted:
+            continue
+        cols = [r["name"] for r in conn.execute(f"PRAGMA table_info({table})")]
+        conn.execute(f"ALTER TABLE {table} RENAME TO {table}_old")
+        conn.execute(m.group(0))
+        names = ", ".join(cols)
+        conn.execute(f"INSERT INTO {table}({names}) SELECT {names} FROM {table}_old")
+        conn.execute(f"DROP TABLE {table}_old")
+        for stmt in index_sql:
+            conn.execute(stmt)
+        rebuilt.append(table)
+    return rebuilt
 
 
 def _add_missing_columns(conn: sqlite3.Connection) -> list[tuple[str, str]]:

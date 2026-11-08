@@ -6,7 +6,7 @@ import { useMutation } from '@tanstack/react-query'
 import { GitMerge, PawPrint, ScanFace, Users } from 'lucide-react'
 import { api } from '../lib/api'
 import type { PersonOut } from '../lib/types'
-import { formatCount, personName } from '../lib/format'
+import { followedTail, formatCount, personName } from '../lib/format'
 import { useDebounced, useInfiniteSentinel, usePageTitle, useRefreshLibrary } from '../lib/hooks'
 import { useItemList } from '../lib/useItemList'
 import MergeModal from '../components/people/MergeModal'
@@ -93,7 +93,7 @@ export default function PeoplePage() {
   const merge = useMutation({
     mutationFn: (v: { target: number; sources: number[] }) => api.people.merge({ target_id: v.target, source_ids: v.sources }),
     onSuccess: (p) => {
-      toast.success(`Merged into ${personName(p)}.`)
+      toast.success(`Merged into ${personName(p)}.${followedTail(p.followed)}`)
       setMerging(false)
       sel.clear()
       setSelecting(false)

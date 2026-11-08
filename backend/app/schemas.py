@@ -413,6 +413,7 @@ class PersonOut(BaseModel):
     species: str | None = None    # pets only
     animal_count: int = 0         # pets: crops in visible items
     confirmed_faces: int = 0      # faces (or crops) the owner assigned: the anchors of the reference
+    followed: int = 0             # merge responses (section 10): unnamed look-alikes merged along with the owner's merge
 
 
 class PersonPage(BaseModel):

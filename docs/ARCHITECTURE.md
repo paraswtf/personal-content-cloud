@@ -401,6 +401,17 @@ unnamed person; bodies around them follow. `AssignOut.followed` counts them for 
 person's own faces do, so look-alikes of a rejected face never return to that person, in new photos or in a
 recluster.
 
+Merging pulls look-alikes along (`cluster.merge_and_follow`, behind `POST people/merge` and behind renaming a
+person to a name that exists). The similarity the owner accepted is measured first (`merge_similarity`: for each
+merged person, the mean over its faces of the top-3 mean to the target's faces; the least of those), the merge
+happens, and then every unnamed person whose faces are all automatic and who matches the merged person at
+`>= max(accepted, 0.30, the person's learned threshold)`, ahead of any other person by 0.05, with the rejected
+look-alikes rule applied, is merged in too (`follow_merge`): never a named person, one with a face, body or tag
+the owner assigned, one dismissed against the target (`merge_dismissals`), or one seen in the same photo.
+`PersonOut.followed` counts them for the toast. The merge is a learning event (section 18, kind `merge`), so the
+person is matched down to that similarity from then on; taking a face away again (`POST faces/assign`) records a
+rejection that raises the threshold above it and keeps its look-alikes out of the next pull.
+
 Guessing (`analysis/guess.py`). For an unassigned face or body D in item I:
 - Candidates: faces (and bodies) of named or unnamed persons with `assigned_by in ('user','auto')` in items J
   taken within `GUESS_WINDOW_H` (1 h) before or after I, never further whatever the calendar day (clothes are
@@ -556,7 +567,7 @@ People (`/api`): `GET people?q&filter=all|named|unnamed&sort=items|name|recent&c
 `POST people {name, face_ids?}`; `GET|PATCH|DELETE people/{id}` (`PATCH {name?, cover_face_id?}`; 422 when the
 cover face's photo is in the trash or the vault; `PersonRef.cover_url` skips such a chosen cover and uses the
 automatic one);
-`POST people/merge {target_id, source_ids}`; `GET people/{id}/faces`; `GET people/{id}/items` (faces, bodies and tags);
+`POST people/merge {target_id, source_ids}` (PersonOut with `followed`: the look-alikes merged along, section 10); `GET people/{id}/faces`; `GET people/{id}/items` (faces, bodies and tags);
 `GET faces/unassigned`; `POST faces/assign {face_ids, person_id | new_person_name | null}`; `DELETE faces/{id}`;
 `POST bodies/assign {body_ids, person_id | new_person_name | null}`; `DELETE bodies/{id}`;
 `POST guesses/confirm {faces: [id], bodies: [id]}`; `POST guesses/reject {faces, bodies}`;
@@ -741,7 +752,8 @@ Signals (read from existing tables; `learning_events` adds what is otherwise los
 `learning_events(id, kind, label, features JSON, item_id, person_id, created_at)` is written by the API and
 the guess code through `learning.events.record(conn, kind, label, features, item_id=None, person_id=None)`:
 kind `guess` (label 1 confirm / 0 reject, features = the guess evidence), `category`, `vault`, `misclick`
-and `doc_type` (label None, features `{"from": .., "to": ..}` plus the scores at the time). Events also feed
+and `doc_type` (label None, features `{"from": .., "to": ..}` plus the scores at the time), and `merge` (label 1,
+features `{accepted, sources, followed}`, `person_id` the person merged into). Events also feed
 the status page ("learned from N corrections").
 
 Learners (one module each, all pure numpy, all with a `status()` and a `train(conn)` that writes the model):
@@ -763,9 +775,12 @@ Learners (one module each, all pure numpy, all with a `status()` and a `train(co
   in, read by `quality.decide`.
 - `people.py`: `person_threshold(person_id) -> float | None`: a per-person face threshold from the
   similarities of the person's user-confirmed faces to the person (loosened to their 10th percentile
-  minus 0.02, floor 0.30) and raised above the closest rejected face (+0.02); `cluster._score` uses
-  max(face threshold, learned) so a person the owner confirmed often is matched more readily and one
-  they corrected is matched more carefully. `guess_probability(features) -> float | None`: a logistic
+  minus 0.02, floor 0.30), from the merges the owner made into the person (loosened to the least
+  similarity accepted, `learning_events` kind `merge`, minus 0.02, floor 0.30) and raised above the
+  closest rejected face (+0.02; the reference is the confirmed faces, else the person's 200 best faces;
+  a rejection wins over any loosening). `cluster._score` uses the learned threshold in place of the
+  good-face default (a weaker face keeps its extra margin on top), so a person the owner confirmed or
+  merged often is matched more readily and one they corrected is matched more carefully. `guess_probability(features) -> float | None`: a logistic
   regression on [clothes, scene_term, face_term, same_day, has_gps] fitted on `guess` events (needs 30
   events with both outcomes); `guess.guess_score` returns it instead of the fixed 0.5/0.3/0.2 mix.
 - `train.py`: `train_all(conn) -> dict` (every learner, writes `learned/status.json` with `trained_at`,
@@ -1207,16 +1222,22 @@ whose stored item is in the trash (they still count as known, and the app shows 
 owner decides before deleting them from the phone). `UploadCreate.pair_key` reaches the web types
 too (the PWA has no use for it beyond typing).
 
-iOS (`ios/Sources/Services/`): a background `URLSession` (identifier `in.rivant.pcc.upload`,
-`isDiscretionary` when the charging or Wi-Fi options ask for it, `allowsCellularAccess` from the
-Wi-Fi option) carries every chunk as an upload task from a temporary file; the delegate schedules
+iOS (`ios/Sources/Services/`): a background `URLSession` (identifier `in.rivant.pcc.upload`, never
+`isDiscretionary`: iOS may otherwise hold a transfer back for many minutes, even during a sync the
+owner started by hand; `allowsCellularAccess` from the Wi-Fi option, and the engine does not start a
+run against the Wi-Fi or charging options) carries every chunk as an upload task from a temporary file; the delegate schedules
 the next chunk of the same file when one completes, so a file keeps flowing while the app is
 suspended and the system relaunches the app into the delegate when it has to. The upload state
 (upload id, resource, next offset, chunk file) lives in the `SyncRecord`; on launch and on every run
 the engine first asks the sync check and continues the `pending` uploads from the server's offset
 (a lost chunk reply is resolved by `GET /api/uploads/{id}`), then hashes and creates the rest.
 Create, chunk and complete calls retry with backoff (1, 2, 4, 8, 16, 30 s, at most eight attempts),
-`offset_mismatch` resyncs, and a 507 or 413 fails the asset with the server's message. The sync
+`offset_mismatch` resyncs, and a 507 or 413 fails the asset with the server's message. While the engine
+waits for an asset, the uploader watches the session every 30 s: a lost hand-off (no request of the asset
+in flight) is sent again, at most three times before the asset stalls for this run, and a request with no
+progress for 120 s is cancelled and tried again with the backoff, so one asset can never hold a run.
+Assets sent in an earlier run that the sync check now lists are marked synced before anything else, so
+the "sent, waiting for the server" count is right from the start of a run. The sync
 check sends asset ids, and hashes for assets without a record (after a reinstall or when the photo
 was uploaded from the web), so nothing is sent twice. Delete synced lists only assets the server
 confirms as stored and not trashed; trashed ones sit under their own heading. The PWA's drop zone

@@ -489,11 +489,13 @@ def merge_people(body: MergeIn, conn: sqlite3.Connection = Depends(get_db),
     if found != len(ids) or any(_hidden_person(conn, session, int(i)) for i in ids):
         raise HTTPException(status_code=404, detail="Person not found")
     try:
-        cluster.merge_persons(conn, body.target_id, sources)
+        _, followers = cluster.merge_and_follow(conn, body.target_id, sources)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e) or "Cannot merge these people") from e
     _after_people_change(conn, _items_of_person(conn, body.target_id), {(body.target_id, None)})
-    return _person_out(conn, body.target_id)
+    out = _person_out(conn, body.target_id)
+    out.followed = len(followers)
+    return out
 
 
 @router.get("/people/{person_id}", response_model=PersonOut)
@@ -508,6 +510,7 @@ def update_person(person_id: int, body: PersonUpdate, conn: sqlite3.Connection =
     fields = body.model_fields_set
     result = person_id
     renamed = False
+    followed = 0
     with tx(conn):
         row = _visible_person_row(conn, session, person_id)
         now = now_iso()
@@ -535,7 +538,8 @@ def update_person(person_id: int, body: PersonUpdate, conn: sqlite3.Connection =
                 if other_row["species"] and row["species"] and other_row["species"] != row["species"]:
                     other = None  # a cat and a dog may share a name
             if other is not None:
-                cluster.merge_persons(conn, other, [person_id])
+                _, followers = cluster.merge_and_follow(conn, other, [person_id])
+                followed = len(followers)
                 result = other
             else:
                 conn.execute("UPDATE persons SET name = ?, name_key = ?, updated_at = ? WHERE id = ?",
@@ -544,7 +548,9 @@ def update_person(person_id: int, body: PersonUpdate, conn: sqlite3.Connection =
         bump_faces_version(conn)
     if "name" in fields:
         _after_people_change(conn, _items_of_person(conn, result), {(result, None)} if renamed else set())
-    return _person_out(conn, result)
+    out = _person_out(conn, result)
+    out.followed = followed
+    return out
 
 
 @router.delete("/people/{person_id}", response_model=Ok)

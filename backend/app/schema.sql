@@ -370,7 +370,7 @@ CREATE TABLE IF NOT EXISTS tag_rejections (   -- a suggestion the owner removed:
 -- Corrections and outcomes the learners need beyond the main tables (docs/ARCHITECTURE.md section 18).
 CREATE TABLE IF NOT EXISTS learning_events (
   id         INTEGER PRIMARY KEY AUTOINCREMENT,
-  kind       TEXT NOT NULL CHECK (kind IN ('guess','category','vault','misclick','doc_type','tag')),
+  kind       TEXT NOT NULL CHECK (kind IN ('guess','category','vault','misclick','doc_type','tag','merge')),
   label      INTEGER,                       -- 1 / 0 for outcomes, NULL for a plain correction
   features   TEXT NOT NULL DEFAULT '{}',    -- JSON: evidence terms, or {from, to, scores}
   item_id    INTEGER,                       -- kept after the item is gone

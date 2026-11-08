@@ -136,6 +136,29 @@ def test_an_upgraded_database_has_the_shape_of_a_fresh_one(old_db, tmp_path):
         fresh.close()
 
 
+def test_a_grown_check_constraint_is_rebuilt_with_its_rows(old_db):
+    """learning_events gained the kind 'merge' after the fixture: the table is recreated from the
+    current schema with its rows and index, and the new kind can be stored."""
+    from app import db
+
+    conn = sqlite3.connect(old_db)
+    conn.execute("INSERT INTO learning_events(kind, label, features, item_id, person_id, created_at) "
+                 "VALUES ('guess', 1, '{}', NULL, NULL, ?)", (T0,))
+    conn.commit()
+    conn.close()
+    db.init_db()
+    conn = db.connect()
+    try:
+        assert conn.execute("SELECT kind, label FROM learning_events").fetchall()[0][:2] == ("guess", 1)
+        conn.execute("INSERT INTO learning_events(kind, label, features, item_id, person_id, created_at) "
+                     "VALUES ('merge', 1, '{}', NULL, NULL, ?)", (T0,))
+        assert conn.execute("SELECT COUNT(*) FROM learning_events").fetchone()[0] == 2
+        assert conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'learning_events_kind'").fetchone()
+        assert not conn.execute("SELECT 1 FROM sqlite_master WHERE name LIKE '%_old'").fetchone()
+    finally:
+        conn.close()
+
+
 def test_the_server_starts_on_an_old_database(old_db):
     """The whole startup path (lifespan: init_db, recovery, the site snapshot) on the old shape."""
     from fastapi.testclient import TestClient

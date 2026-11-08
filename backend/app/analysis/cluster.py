@@ -215,17 +215,32 @@ def _threshold(row: sqlite3.Row) -> float:
 
 
 def _score(idx: FaceIndex, faces: list[sqlite3.Row], exclude: frozenset[int],
-           conn: sqlite3.Connection | None = None) -> list[list[tuple[int, float]]]:
-    """For each face: the people it may join, best first (score >= the face's threshold). A person
-    whose rejected examples (faces the owner took away from them, section 18) look more like the
-    face than the person's own faces do is left out. Call with idx.lock held, after idx.sync."""
+           conn: sqlite3.Connection | None = None, threshold: float | None = None) -> list[list[tuple[int, float]]]:
+    """For each face: the people it may join, best first (score >= the face's cut, or `threshold`
+    for every face when given). The cut is the default for the face's quality, moved by what the
+    owner taught about the person (section 18): a learned threshold replaces the good-face default
+    (lower after confirmations and merges, higher after rejections) and a weaker face keeps its
+    extra margin on top. A person whose rejected examples (faces the owner took away from them)
+    look more like the face than the person's own faces do is left out. Call with idx.lock held,
+    after idx.sync."""
     if not faces:
         return []
     embs = idx.embeddings_of([r["id"] for r in faces])
     out: list[list[tuple[int, float]]] = []
+    good = float(settings.cluster_match_threshold)
     for r, scores in zip(faces, idx.person_scores_many(embs, settings.cluster_topk, exclude)):
         thr = _threshold(r)
-        out.append([(pid, score) for pid, score in scores if score >= max(thr, learned_threshold(pid, thr))])
+        margin = thr - good  # 0 for a good face, the low-quality extra otherwise
+        kept: list[tuple[int, float]] = []
+        for pid, score in scores:
+            if threshold is not None:
+                cut = float(threshold)
+            else:
+                learned = _learned(pid)
+                cut = thr if learned is None else learned + margin
+            if score >= cut:
+                kept.append((pid, score))
+        out.append(kept)
     if conn is not None:
         out = _drop_rejected_lookalikes(conn, embs, out)
     return out
@@ -317,15 +332,21 @@ def record_rejections(conn: sqlite3.Connection, face_ids: list[int], person_id: 
 FOLLOW_SIM = 0.55  # a face this close to a face the owner took away looks like the same wrong person
 
 
-def learned_threshold(person_id: int, default: float) -> float:
-    """The person's own match threshold from the owner's confirmations and rejections (section 18),
-    else the default."""
+def _learned(person_id: int) -> float | None:
+    """The person's own match threshold from the owner's confirmations, merges and rejections
+    (section 18), or None when nothing was learned for them."""
     try:
         from app.learning import people as learned_people
 
         t = learned_people.person_threshold(int(person_id))
     except Exception:  # noqa: BLE001 - learning never blocks clustering
-        t = None
+        return None
+    return float(t) if t is not None else None
+
+
+def learned_threshold(person_id: int, default: float) -> float:
+    """_learned, else the default."""
+    t = _learned(person_id)
     return float(t) if t is not None else float(default)
 
 
@@ -667,6 +688,7 @@ def merge_persons(conn: sqlite3.Connection, target_id: int, source_ids: list[int
             ") WHERE other != ? AND other NOT IN ({s}) GROUP BY other".format(s=s),
             [target_id, target_id, *sources, *sources, *sources, target_id, *sources],
         )
+        conn.execute(f"UPDATE learning_events SET person_id = ? WHERE person_id IN ({s})", [target_id, *sources])
         target = found[target_id]
         now = now_iso()
         if target["name"] is None:
@@ -687,6 +709,109 @@ def merge_persons(conn: sqlite3.Connection, target_id: int, source_ids: list[int
 
 
 # ------------------------------------------------------------------ suggestions
+PULL_FLOOR = 0.30   # a look-alike is never pulled along below this similarity, whatever the owner accepted
+PULL_MARGIN = 0.05  # the merged person must lead the runner-up by this much for a look-alike to be pulled along
+
+
+def merge_similarity(conn: sqlite3.Connection, target_id: int, source_ids: list[int]) -> float | None:
+    """How alike the people being merged are, as the matching sees it: for each source, the mean over
+    its faces of the top-k mean similarity to the target's faces (0 for a face below the index's
+    MIN_SIM); the least of those. None when the target or every source has no face."""
+    idx = get_index()
+    worst: float | None = None
+    with idx.lock:
+        idx.sync(conn)
+        if not conn.execute("SELECT 1 FROM faces WHERE person_id = ? AND embedding IS NOT NULL LIMIT 1", (target_id,)).fetchone():
+            return None
+        for sid in source_ids:
+            ids = [int(r["id"]) for r in conn.execute(
+                "SELECT id FROM faces WHERE person_id = ? AND embedding IS NOT NULL", (sid,))]
+            if not ids:
+                continue
+            sims = []
+            for scores in idx.person_scores_many(idx.embeddings_of(ids), settings.cluster_topk, frozenset(ids)):
+                sims.append(next((sc for pid, sc in scores if pid == int(target_id)), 0.0))
+            mean = float(np.mean(sims))
+            worst = mean if worst is None else min(worst, mean)
+    return worst
+
+
+def follow_merge(conn: sqlite3.Connection, target_id: int, accepted: float) -> list[int]:
+    """The unnamed, automatically grouped people who look like `target_id` at least as much as the
+    people the owner just merged into them (section 10): every face of such a person matches the
+    target first, at >= max(accepted, PULL_FLOOR, the target's learned threshold), ahead of any other
+    person by PULL_MARGIN, with the rejected look-alikes rule applied. Never a named person, one with a
+    face, body or tag the owner assigned, one dismissed against the target, or one seen in the same
+    photo as the target. Merges them into the target; returns their ids."""
+    target_id = int(target_id)
+    cut = max(float(accepted), PULL_FLOOR)
+    learned = _learned(target_id)
+    if learned is not None:
+        cut = max(cut, float(learned))
+    dismissed = {int(r[0]) for r in conn.execute(
+        "SELECT CASE WHEN person_a = ? THEN person_b ELSE person_a END FROM merge_dismissals "
+        "WHERE person_a = ? OR person_b = ?", (target_id, target_id, target_id))}
+    together = {int(r[0]) for r in conn.execute(
+        "WITH present AS ("
+        "  SELECT item_id, person_id FROM faces WHERE person_id IS NOT NULL UNION "
+        "  SELECT item_id, person_id FROM bodies WHERE person_id IS NOT NULL UNION "
+        "  SELECT item_id, person_id FROM item_tags), "
+        "mine AS (SELECT p.item_id FROM present p JOIN items i ON i.id = p.item_id AND i.kind != 'video' "
+        "         WHERE p.person_id = ?) "
+        "SELECT DISTINCT person_id FROM present WHERE item_id IN (SELECT item_id FROM mine) AND person_id != ?",
+        (target_id, target_id))}
+    candidates = [int(r["id"]) for r in conn.execute(
+        "SELECT p.id FROM persons p WHERE p.kind = 'person' AND p.name IS NULL AND p.id != ? "
+        "AND NOT EXISTS (SELECT 1 FROM faces f WHERE f.person_id = p.id AND f.assigned_by = 'user') "
+        "AND NOT EXISTS (SELECT 1 FROM bodies b WHERE b.person_id = p.id AND b.assigned_by = 'user') "
+        "AND NOT EXISTS (SELECT 1 FROM item_tags t WHERE t.person_id = p.id) "
+        "AND EXISTS (SELECT 1 FROM faces f WHERE f.person_id = p.id AND f.embedding IS NOT NULL) ORDER BY p.id",
+        (target_id,))]
+    followers: list[int] = []
+    idx = get_index()
+    with idx.lock:
+        idx.sync(conn)
+        for cid in candidates:
+            if cid in dismissed or cid in together:
+                continue
+            ids = [int(r["id"]) for r in conn.execute(
+                "SELECT id FROM faces WHERE person_id = ? AND embedding IS NOT NULL", (cid,))]
+            rows = _face_rows(conn, ids)
+            if not rows:
+                continue
+            ok = True
+            for opts in _score(idx, rows, frozenset(ids), conn, threshold=cut):
+                if not opts or opts[0][0] != target_id or (len(opts) > 1 and opts[0][1] - opts[1][1] < PULL_MARGIN):
+                    ok = False
+                    break
+            if ok:
+                followers.append(cid)
+    if followers:
+        merge_persons(conn, target_id, followers)
+        log.info("merge into person %s pulled %d look-alike(s) along at >= %.2f", target_id, len(followers), cut)
+    return followers
+
+
+def merge_and_follow(conn: sqlite3.Connection, target_id: int, source_ids: list[int]) -> tuple[float | None, list[int]]:
+    """The owner's merge (merge_persons), then the look-alikes it justifies (follow_merge), and a
+    'merge' learning event for the target with the similarity the owner accepted (section 18: the
+    person's threshold loosens to it). Returns (accepted similarity, follower ids)."""
+    sources = list(dict.fromkeys(int(s) for s in source_ids))
+    accepted = merge_similarity(conn, int(target_id), sources) if sources else None
+    merge_persons(conn, target_id, sources)
+    followers = follow_merge(conn, int(target_id), accepted) if accepted is not None else []
+    try:
+        from app.learning import events
+
+        events.record(conn, "merge", 1, {
+            "accepted": None if accepted is None else round(float(accepted), 4),
+            "sources": len(sources), "followed": len(followers),
+        }, person_id=int(target_id))
+    except Exception:  # noqa: BLE001 - learning never blocks the action
+        log.exception("could not record the merge for learning")
+    return accepted, followers
+
+
 def _co_occurring(conn: sqlite3.Connection) -> set[tuple[int, int]]:
     """Pairs (a < b) of people who are both in the same photo or document (faces, bodies or tags)."""
     return {

@@ -2,8 +2,10 @@
 
 Per-person face thresholds: a person the owner confirmed faces for is matched more readily (the
 threshold drops towards the 10th percentile of those faces' similarity to the person, floor FLOOR),
-and one the owner rejected a guess for is matched more carefully (the threshold rises above the
-closest rejected face). Guess weights: a logistic regression on the evidence terms of confirmed and
+a person the owner merged others into is matched down to the similarity they accepted in the least
+alike of those merges (learning_events kind 'merge', features.accepted, minus LOOSEN, floor FLOOR),
+and one the owner rejected a guess for or took faces away from is matched more carefully (the
+threshold rises above the closest rejected face, which wins over any loosening). Guess weights: a logistic regression on the evidence terms of confirmed and
 rejected guesses (learning_events kind 'guess'), used instead of the fixed 0.5/0.3/0.2 mix once
 MIN_GUESS_EVENTS outcomes with both labels exist.
 """
@@ -53,7 +55,23 @@ def person_thresholds(conn: sqlite3.Connection) -> dict[int, float]:
         v = _vec(r["embedding"])
         if v is not None:
             rejected.setdefault(int(r["person_id"]), []).append(v)
-    out = _thresholds(by_person, rejected, float(settings.cluster_match_threshold))
+    merged: dict[int, float] = {}
+    for r in conn.execute("SELECT person_id, features FROM learning_events WHERE kind = 'merge' AND person_id IS NOT NULL"):
+        a = (json_loads(r["features"], {}) or {}).get("accepted")
+        if isinstance(a, (int, float)):
+            pid = int(r["person_id"])
+            merged[pid] = min(merged.get(pid, 1.0), float(a))
+    # A person without confirmed faces still needs a reference for the rejection rule: their faces.
+    reference: dict[int, np.ndarray] = {}
+    for pid in (set(rejected) | set(merged)) - set(by_person):
+        vs = [v for v in (_vec(r["embedding"]) for r in conn.execute(
+            "SELECT embedding FROM faces WHERE person_id = ? ORDER BY quality DESC LIMIT 200", (pid,))) if v is not None]
+        if vs:
+            c = np.stack(vs).mean(axis=0)
+            n = float(np.linalg.norm(c))
+            if n > 0:
+                reference[pid] = (c / n).astype(np.float32)
+    out = _thresholds(by_person, rejected, float(settings.cluster_match_threshold), merged, reference)
     by_pet: dict[int, list[np.ndarray]] = {}
     for r in conn.execute(
         "SELECT a.person_id, a.embedding FROM animals a JOIN persons p ON p.id = a.person_id "
@@ -67,12 +85,15 @@ def person_thresholds(conn: sqlite3.Connection) -> dict[int, float]:
 
 
 def _thresholds(by_person: dict[int, list[np.ndarray]], rejected: dict[int, list[np.ndarray]],
-                default: float) -> dict[int, float]:
+                default: float, merged: dict[int, float] | None = None,
+                reference: dict[int, np.ndarray] | None = None) -> dict[int, float]:
     out: dict[int, float] = {}
-    for pid in set(by_person) | set(rejected):
+    merged = merged or {}
+    reference = reference or {}
+    for pid in set(by_person) | set(rejected) | set(merged):
         confirmed = by_person.get(pid, [])
         t: float | None = None
-        centroid: np.ndarray | None = None
+        centroid: np.ndarray | None = reference.get(pid)
         if confirmed:
             x = np.stack(confirmed)
             centroid = x.mean(axis=0)
@@ -91,6 +112,9 @@ def _thresholds(by_person: dict[int, list[np.ndarray]], rejected: dict[int, list
                 sims = [1.0]
             p10 = float(np.percentile(sims, 10))
             t = max(FLOOR, min(default, p10 - LOOSEN))
+        if pid in merged:
+            loose = max(FLOOR, min(default, merged[pid] - LOOSEN))
+            t = loose if t is None else min(t, loose)
         if centroid is not None and rejected.get(pid):
             worst = max(float(v @ centroid) for v in rejected[pid])
             t = min(CEIL, max(t if t is not None else default, worst + TIGHTEN))

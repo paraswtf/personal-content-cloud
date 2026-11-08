@@ -156,6 +156,8 @@ export interface PersonOut {
   created_at: string
   /** Faces (or crops) the owner assigned: the anchors of the person's reference. */
   confirmed_faces?: number
+  /** Merge responses: unnamed look-alikes merged along with the owner's merge (section 10). */
+  followed?: number
 }
 export interface PersonPage {
   items: PersonOut[]

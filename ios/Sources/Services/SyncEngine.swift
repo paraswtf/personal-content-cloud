@@ -132,6 +132,14 @@ final class SyncEngine: ObservableObject {
             }
         }
 
+        // 1b. Assets sent earlier that the server lists now are synced, whatever the run does next, so
+        // the "sent, waiting for the server" count on the Sync screen is right from the start.
+        for rec in records where rec.status == "uploaded" {
+            if let uid = server.assets[rec.assetId], rec.files.allSatisfy({ $0.done }) {
+                markSynced(rec, uid: uid, trashed: server.trashed.contains(rec.assetId))
+            }
+        }
+
         // 2. Continue the interrupted uploads from the server's offset.
         let live = await uploader.liveAssets()
         var handled = Set<String>()

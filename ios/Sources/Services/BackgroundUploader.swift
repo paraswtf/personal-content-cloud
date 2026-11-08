@@ -45,7 +45,8 @@ private struct CreateBody: Encodable {
 /// so a file keeps flowing without the app. The state lives in the record and in each task's
 /// description, never only in memory, because a relaunched process starts with nothing else.
 ///
-/// One asset is in flight at a time, one request at a time. Errors:
+/// One asset is in flight at a time, one request at a time. wait(for:) watches the session while
+/// the engine waits, so a lost hand-off or a transfer iOS never starts cannot hold a run. Errors:
 /// - transport failures, 408, 429 and 5xx retry the same request after 1, 2, 4, 8, 16, 30 s
 ///   (`earliestBeginDate`), at most eight attempts in a row;
 /// - 409 offset_mismatch continues from the server's offset; another 409 reads the upload's state;
@@ -59,6 +60,9 @@ final class BackgroundUploader: NSObject, ObservableObject {
     static let backoff: [TimeInterval] = [1, 2, 4, 8, 16, 30]
     static let maxAttempts = 8
     static let defaultChunk = 8 * 1024 * 1024
+    static let watchSeconds: TimeInterval = 30    // wait(for:) looks at the session this often
+    static let stuckSeconds: TimeInterval = 120   // a request with no progress for this long is tried again
+    static let maxKicks = 3                       // lost hand-offs sent again before the asset stalls
 
     /// The file being sent and how far it got, for the Sync screen.
     @Published private(set) var current: String?
@@ -74,7 +78,11 @@ final class BackgroundUploader: NSObject, ObservableObject {
         let discretionary: Bool
 
         static var wanted: Options {
-            Options(cellular: !AppSettings.wifiOnly, discretionary: AppSettings.wifiOnly || AppSettings.chargingOnly)
+            // Never discretionary: iOS may then hold a transfer back for many minutes, even during a
+            // sync the owner started by hand. The Wi-Fi only and charging only options are kept by
+            // the engine (it does not start a run against them) and by each request's
+            // allowsCellularAccess.
+            Options(cellular: !AppSettings.wifiOnly, discretionary: false)
         }
     }
 
@@ -83,8 +91,17 @@ final class BackgroundUploader: NSObject, ObservableObject {
     private var reconfigurePending = false
     private var invalidating = false
     private var bodies: [Int: Data] = [:]                       // task id -> response body so far
-    private var waiters: [String: [UUID: CheckedContinuation<Void, Never>]] = [:]
+    private var waiters: [String: [UUID: Waiter]] = [:]
     private var currentBytes: Int64 = 0
+    private var cutting: Set<String> = []                       // assets whose next chunk is being cut
+    private var lastProgress = Date()                           // a request handed over, bytes sent or a reply
+
+    /// One wait(for:) slice: released by the uploader when the record moves on, or by its timer.
+    private final class Waiter {
+        let cont: CheckedContinuation<Void, Never>
+        var byUploader = false
+        init(_ cont: CheckedContinuation<Void, Never>) { self.cont = cont }
+    }
 
     private override init() {
         super.init()
@@ -198,24 +215,58 @@ final class BackgroundUploader: NSObject, ObservableObject {
     }
 
     /// Waits until the asset's upload ends (sent, failed or interrupted), the deadline passes or the
-    /// calling task is cancelled. The transfer itself goes on in the background either way.
+    /// calling task is cancelled. The transfer itself goes on in the background either way. Every
+    /// watchSeconds the wait looks at the session: when no request of the asset is in flight it
+    /// sends the next one again (a hand-off that was lost), at most maxKicks times before the asset
+    /// stalls for this run; when a request has made no progress for stuckSeconds it is cancelled and
+    /// tried again with the usual backoff. So one asset can never hold a run for ever.
     func wait(for assetId: String, until deadline: Date?) async {
-        guard !Task.isCancelled, let rec = record(assetId), rec.status == "uploading" else { return }
+        var kicks = 0
+        while !Task.isCancelled, let rec = record(assetId), rec.status == "uploading" {
+            if let deadline, Date() > deadline { return }
+            let slice = deadline.map { min(Self.watchSeconds, max(0, $0.timeIntervalSinceNow)) } ?? Self.watchSeconds
+            if await waitSlice(assetId, seconds: slice) { continue }   // released: the record moved on
+            guard !Task.isCancelled, let rec = record(assetId), rec.status == "uploading" else { return }
+            if cutting.contains(assetId) { continue }
+            let tasks = await session.allTasks.filter { UploadTaskTag.from($0.taskDescription)?.asset == assetId }
+            if tasks.isEmpty {
+                kicks += 1
+                if kicks > Self.maxKicks {
+                    stall(rec, "The transfer did not start; it continues on the next sync")
+                    return
+                }
+                SyncStore.shared.log("No request in flight for \(rec.filename); sending the next one")
+                scheduleNext(rec)
+            } else if Date().timeIntervalSince(lastProgress) > Self.stuckSeconds {
+                SyncStore.shared.log("No progress on \(rec.filename) for \(Int(Self.stuckSeconds)) s; trying again")
+                tasks.forEach { $0.cancel() }
+                lastProgress = Date()
+                retry(rec, reason: "no progress for \(Int(Self.stuckSeconds)) s")
+            } else {
+                for t in tasks where t.state == .suspended { t.resume() }
+            }
+        }
+    }
+
+    /// One slice of wait(for:): true when the uploader released it (the record moved on), false
+    /// when `seconds` passed first or the calling task was cancelled.
+    private func waitSlice(_ assetId: String, seconds: TimeInterval) async -> Bool {
         let token = UUID()
+        var waiter: Waiter?
         await withTaskCancellationHandler {
             await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
-                waiters[assetId, default: [:]][token] = cont
-                if let deadline {
-                    let wait = max(0, deadline.timeIntervalSinceNow)
-                    Task { @MainActor [weak self] in
-                        try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000))
-                        self?.release(assetId, token: token)
-                    }
+                let w = Waiter(cont)
+                waiter = w
+                waiters[assetId, default: [:]][token] = w
+                Task { @MainActor [weak self] in
+                    try? await Task.sleep(nanoseconds: UInt64(max(0, seconds) * 1_000_000_000))
+                    self?.release(assetId, token: token)
                 }
             }
         } onCancel: {
             Task { @MainActor [weak self] in self?.release(assetId, token: token) }
         }
+        return waiter?.byUploader ?? false
     }
 
     /// The Stop button: cancels the tasks in flight. The records keep their state, and the next run
@@ -290,7 +341,7 @@ final class BackgroundUploader: NSObject, ObservableObject {
                     let chunk = Int64(rec.chunkSize > 0 ? rec.chunkSize : Self.defaultChunk)
                     let offset = rec.nextOffset
                     let length = min(chunk, file.bytes - offset)
-                    let chunkURL = UploadPaths.chunks.appendingPathComponent("\(id)-\(offset).part")
+                    let chunkURL = UploadPaths.chunks.appendingPathComponent("\(id)-\(offset)-\(UUID().uuidString.prefix(8)).part")
                     var chunkReq = APIClient.makeRequest(base: base, token: token, method: "PUT", path: "/api/uploads/\(id)/chunk",
                                                          query: ["offset": String(offset)])
                     chunkReq.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
@@ -299,8 +350,10 @@ final class BackgroundUploader: NSObject, ObservableObject {
                     let resource = file.resource
                     // The chunk file (up to 8 MiB) is cut off the main actor; the task is made once it
                     // is ready, and only if nothing moved the upload meanwhile (a pause, a resync).
+                    cutting.insert(rec.assetId)
                     Task { @MainActor [weak self] in
                         guard let self else { return }
+                        defer { self.cutting.remove(rec.assetId) }
                         do {
                             try await Task.detached(priority: .utility) {
                                 try Self.writeChunk(from: source, offset: offset, length: length, to: chunkURL)
@@ -352,6 +405,7 @@ final class BackgroundUploader: NSObject, ObservableObject {
         rec.files = files
         rec.updatedAt = Date()
         save()
+        lastProgress = Date()
         task.resume()
     }
 
@@ -395,6 +449,7 @@ final class BackgroundUploader: NSObject, ObservableObject {
 
     private func succeeded(_ rec: SyncRecord, _ tag: UploadTaskTag, _ body: Data) {
         rec.attempts = 0
+        lastProgress = Date()
         switch tag.step {
         case "chunk":
             // A lost body (rare) still means the whole chunk was written: the server answers 200 only then.
@@ -569,12 +624,16 @@ final class BackgroundUploader: NSObject, ObservableObject {
     }
 
     private func release(_ assetId: String, token: UUID) {
-        waiters[assetId]?.removeValue(forKey: token)?.resume()
+        waiters[assetId]?.removeValue(forKey: token)?.cont.resume()
     }
 
+    /// The record moved on (sent, failed or stalled): every wait(for:) of the asset returns.
     private func releaseAll(_ assetId: String) {
         let all = waiters.removeValue(forKey: assetId) ?? [:]
-        for cont in all.values { cont.resume() }
+        for w in all.values {
+            w.byUploader = true
+            w.cont.resume()
+        }
     }
 
     fileprivate func received(_ data: Data, task: Int) {
@@ -582,6 +641,7 @@ final class BackgroundUploader: NSObject, ObservableObject {
     }
 
     fileprivate func sent(_ tag: UploadTaskTag?, total: Int64) {
+        lastProgress = Date()
         guard let tag, tag.step == "chunk", currentBytes > 0 else { return }
         fileProgress = min(1, Double(tag.offset + total) / Double(currentBytes))
     }

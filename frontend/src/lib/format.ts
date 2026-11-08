@@ -35,6 +35,11 @@ export function formatDate(iso: string | null | undefined, withTime = false): st
   })
 }
 
+/** The tail of a merge toast: the look-alikes merged along with the owner's merge (section 10). */
+export function followedTail(followed: number | undefined): string {
+  return followed ? ` ${formatCount(followed, 'look-alike')} came along.` : ''
+}
+
 export function formatCount(n: number, singular: string, plural = `${singular}s`): string {
   return `${n.toLocaleString()} ${n === 1 ? singular : plural}`
 }

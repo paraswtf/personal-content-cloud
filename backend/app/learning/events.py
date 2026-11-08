@@ -12,7 +12,7 @@ from typing import Any
 from app.db import tx
 from app.util import json_dumps, now_iso
 
-KINDS = ("guess", "category", "vault", "misclick", "doc_type", "tag")
+KINDS = ("guess", "category", "vault", "misclick", "doc_type", "tag", "merge")
 
 
 def record(conn: sqlite3.Connection, kind: str, label: int | None, features: dict[str, Any] | None,

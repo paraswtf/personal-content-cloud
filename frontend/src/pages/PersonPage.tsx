@@ -8,7 +8,7 @@ import clsx from 'clsx'
 import { ArrowLeft, Check, CheckCheck, GitMerge, Images, ListChecks, PawPrint, Pencil, ScanFace, Sparkles, Star, Trash2, UserMinus, X } from 'lucide-react'
 import { ApiError, api } from '../lib/api'
 import type { AnimalListItem, FaceListItem, GuessItem, PersonKind, Species } from '../lib/types'
-import { formatCount, personName, speciesLabel } from '../lib/format'
+import { followedTail, formatCount, personName, speciesLabel } from '../lib/format'
 import { useInfiniteSentinel, usePageTitle, useRefreshLibrary, useStableCallback } from '../lib/hooks'
 import { useItemList } from '../lib/useItemList'
 import MediaGrid from '../components/MediaGrid'
@@ -47,7 +47,7 @@ function NameEditor({ id, name, kind, species }: { id: number; name: string | nu
       setEditing(false)
       // A name someone else already has merges this person into them; the server returns that person.
       if (p.id !== id) {
-        toast.success(`Merged into ${personName(p)}.`)
+        toast.success(`Merged into ${personName(p)}.${followedTail(p.followed)}`)
         void refresh()
         navigate(`/people/${p.id}`, { replace: true })
         return
@@ -406,7 +406,7 @@ function PersonView({ id }: { id: number }) {
   const merge = useMutation({
     mutationFn: (target: number) => api.people.merge({ target_id: target, source_ids: [id] }),
     onSuccess: (t) => {
-      toast.success(`Merged into ${personName(t)}.`)
+      toast.success(`Merged into ${personName(t)}.${followedTail(t.followed)}`)
       setMergeTarget(null)
       void refresh()
       navigate(`/people/${t.id}`, { replace: true })
