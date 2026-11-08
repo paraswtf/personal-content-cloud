@@ -95,14 +95,67 @@ def test_outside_window(conn):
     assert guess.guess_item(conn, b["id"]) == 0
 
 
-def test_same_local_day_beyond_window(conn, monkeypatch):
+def test_same_local_day_beyond_window_is_not_enough(conn):
+    # 10:00 and 15:00 UTC are both 2026-05-01 in Asia/Kolkata, but five hours apart: clothes are
+    # evidence only within the hour.
+    _, _, b, _, body_b, _ = _world(conn, t_b="2026-05-01T15:00:00.000Z")
+    assert guess.guess_item(conn, b["id"]) == 0
+    assert _body_row(conn, body_b)["guess_person_id"] is None
+
+
+def test_window_is_one_hour_each_way(conn):
     from app.config import settings
 
-    monkeypatch.setattr(settings, "guess_window_h", 1.0)
-    # 10:00 and 15:00 UTC are both 2026-05-01 in Asia/Kolkata.
-    p, _, b, _, body_b, _ = _world(conn, t_b="2026-05-01T15:00:00.000Z")
+    assert settings.guess_window_h == 1.0
+    # 30 minutes after the reference
+    p, _, b, _, body_b, _ = _world(conn, t_b="2026-05-01T10:30:00.000Z")
     assert guess.guess_item(conn, b["id"]) == 1
+    ev = json.loads(_body_row(conn, body_b)["guess_evidence"])
+    assert ev["minutes_apart"] == 30 and ev["same_day"] is True
+
+
+def test_before_the_reference_counts_too(conn):
+    p, _, b, _, body_b, _ = _world(conn, t_b="2026-05-01T09:10:00.000Z")
+    assert guess.guess_item(conn, b["id"]) == 1
+    assert json.loads(_body_row(conn, body_b)["guess_evidence"])["minutes_apart"] == 50
+
+
+def test_just_over_an_hour_is_outside(conn):
+    # exactly one hour (the _world default, 11:00) is inside; 11:01 is not
+    _, _, b, _, body_b, _ = _world(conn, t_b="2026-05-01T11:01:00.000Z")
+    assert guess.guess_item(conn, b["id"]) == 0
+    assert _body_row(conn, body_b)["guess_person_id"] is None
+
+
+def test_window_change_withdraws_far_guesses_and_queues_them_again(conn, monkeypatch):
+    from app.config import settings
+
+    # a guess made under the old 12-hour rule, five hours from its reference
+    monkeypatch.setattr(settings, "guess_window_h", 12.0)
+    p, a, b, _, body_b, _ = _world(conn, t_b="2026-05-01T15:00:00.000Z")
+    assert guess.guess_item(conn, b["id"]) == 1
+    assert guess.apply_window_change(conn) == 0  # records 12 h; the guess is inside it
+    assert conn.execute("SELECT value FROM kv WHERE key = 'guess_window_h'").fetchone()[0] == "12"
+    monkeypatch.setattr(settings, "guess_window_h", 1.0)
+    assert guess.apply_window_change(conn) == 1
+    row = _body_row(conn, body_b)
+    assert row["guess_person_id"] is None and row["guess_evidence"] is None and row["assigned_by"] == "auto"
+    job = conn.execute("SELECT payload FROM jobs WHERE type = 'guess' AND status = 'queued'").fetchone()
+    assert job is not None and json.loads(job["payload"]) == {"person_id": p, "item_id": b["id"]}
+    assert conn.execute("SELECT value FROM kv WHERE key = 'guess_window_h'").fetchone()[0] == "1"
+    assert guess.apply_window_change(conn) == 0  # nothing more to do
+
+
+def test_window_change_keeps_near_guesses(conn, monkeypatch):
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "guess_window_h", 12.0)
+    p, _, b, _, body_b, _ = _world(conn, t_b="2026-05-01T10:20:00.000Z")
+    assert guess.guess_item(conn, b["id"]) == 1
+    monkeypatch.setattr(settings, "guess_window_h", 1.0)
+    assert guess.apply_window_change(conn) == 0
     assert _body_row(conn, body_b)["guess_person_id"] == p
+    assert conn.execute("SELECT COUNT(*) FROM jobs WHERE type = 'guess'").fetchone()[0] == 0
 
 
 def test_rejected_and_present_people_are_skipped(conn):

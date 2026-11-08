@@ -83,7 +83,7 @@ backend/
       categories.py    zero-shot category scoring and the decision rules
       faces.py         face records, video tracking (from hub faces/pipeline.py)
       bodies.py        person boxes, torso crops, clothes embeddings
-      guess.py         person guessing from same day + same scene + same clothes
+      guess.py         person guessing from the same hour + same scene + same clothes
       cluster.py       face clustering, merge, suggestions (from hub faces/cluster.py)
       index.py         in-memory face index (from hub faces/index.py)
     documents/
@@ -403,19 +403,22 @@ recluster.
 
 Guessing (`analysis/guess.py`). For an unassigned face or body D in item I:
 - Candidates: faces (and bodies) of named or unnamed persons with `assigned_by in ('user','auto')` in items J
-  with `|taken_at(I) - taken_at(J)| <= GUESS_WINDOW_H` (12 h) or the same local calendar date (`LOCAL_TIMEZONE`),
-  excluding persons already present in I and pairs in `guess_rejections`.
+  taken within `GUESS_WINDOW_H` (1 h) before or after I, never further whatever the calendar day (clothes are
+  evidence only close in time), excluding persons already present in I and pairs in `guess_rejections`.
 - Scene: `cos(emb(I), emb(J)) >= GUESS_SCENE_SIM` (0.80), or both items have GPS within `GUESS_GPS_M` (250 m).
 - Clothes: `cos(torso(D), torso(F)) >= GUESS_CLOTHES_SIM` (0.85).
 - Face: when D has a face embedding, it must not match any other person at `>= 0.40`; a weak match with the
   candidate (`>= 0.20`) raises the score.
 - Score `= 0.5 * clothes + 0.3 * scene + 0.2 * face_or_0.5`; the best candidate wins when it leads the runner-up
   by `>= 0.05`; the result is stored as `guess_person_id`, `guess_score`, `guess_evidence` (`{clothes, scene,
-  face, ref_face_id, ref_item_uid, same_day, gps_m}`) with `assigned_by='guess'`.
+  face, ref_face_id, ref_item_uid, same_day, minutes_apart, gps_m}`) with `assigned_by='guess'`.
 - Confirming sets `person_id`, `assigned_by='user'` and enqueues `guess` for that person; rejecting writes
   `guess_rejections` and clears the guess. A confirmed body without a face adds an `item_tags` row with
   `source='guess'`, removed again when that body is moved or deleted.
 - Propagation (`guess` job) runs the same scoring from the newly tagged face outward over the window.
+- A changed `GUESS_WINDOW_H` takes effect at the next start: `guess.apply_window_change` (from
+  `ingest.recover_on_startup`) withdraws every open guess whose reference photo lies outside the window now and
+  queues a `guess` job for its item; `kv guess_window_h` records the value in force.
 - A person is guessed for at most one box per photo (the best score wins, the other boxes are scored again
   without that person; videos are exempt), and confirming skips a box whose person is already in the item.
   Rejections follow a face across a reprocess (carried to the new face by position). Vault items are never
@@ -649,7 +652,7 @@ serving sources against a stale API) and any other mix.
 | `NSFW_THRESHOLD` | 0.7 | |
 | `DOC_LIKENESS_MIN` | 0.55 | triggers OCR for images |
 | `BLUR_VAR_MIN`, `BURST_WINDOW_S` | 40, 3 | mis-clicks |
-| `GUESS_WINDOW_H`, `GUESS_SCENE_SIM`, `GUESS_CLOTHES_SIM`, `GUESS_GPS_M` | 12, 0.80, 0.85, 250 | person guessing |
+| `GUESS_WINDOW_H`, `GUESS_SCENE_SIM`, `GUESS_CLOTHES_SIM`, `GUESS_GPS_M` | 1, 0.80, 0.85, 250 | person guessing: the hours before and after a photo whose tagged people are references |
 | `SEARCH_*` | as the hub | semantic search gates |
 | `OCR_ENABLED`, `OCR_MAX_PAGES` | true, 50 | |
 | `WALLET_PASS_TYPE_ID`, `WALLET_TEAM_ID`, `WALLET_ORG_NAME`, `WALLET_DIR`, `WALLET_KEY_PASSWORD` | unset, unset, site title, `DATA_DIR/wallet`, unset | Apple Wallet (the key password only when key.pem is encrypted) |

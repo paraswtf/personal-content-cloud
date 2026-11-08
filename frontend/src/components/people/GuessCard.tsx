@@ -1,5 +1,5 @@
 // One person guess for review: the face or body crop, the item it is in, the guessed person with
-// the score and the evidence ("same day, same scene 0.86, same clothes 0.91"), confirm and reject.
+// the score and the evidence ("25 min apart, same scene 0.86, same clothes 0.91"), confirm and reject.
 import { Link } from 'react-router'
 import { Check, Shirt, X } from 'lucide-react'
 import type { GuessItem } from '../../lib/types'

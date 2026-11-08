@@ -253,7 +253,7 @@ function GuessesTab() {
   return (
     <div>
       <p className="mb-3 text-sm text-ink-soft">
-        People guessed from someone tagged on the same day, in the same scene and wearing the same clothes. Confirming tags them; rejecting stops that guess.
+        People guessed from someone tagged within an hour, in the same scene and wearing the same clothes. Confirming tags them; rejecting stops that guess.
       </p>
       {list.items.length > 1 && (
         <div className="mb-3 flex flex-wrap gap-2">
@@ -273,7 +273,7 @@ function GuessesTab() {
         </ul>
       ) : list.items.length === 0 ? (
         <EmptyState icon={<Sparkles className="size-8" aria-hidden />} title="No guesses to review">
-          Tag someone in a photo and other photos from that day with the same clothes get a guess.
+          Tag someone in a photo and other photos within an hour with the same clothes get a guess.
         </EmptyState>
       ) : (
         <ul className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">

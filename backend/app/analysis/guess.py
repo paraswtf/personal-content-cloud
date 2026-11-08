@@ -1,4 +1,4 @@
-"""Person guessing from same day, same scene and same clothes (docs/ARCHITECTURE.md section 10).
+"""Person guessing from the same hour, same scene and same clothes (docs/ARCHITECTURE.md section 10).
 
 CONTRACT.
 - guess_item(conn, item_id) -> int: (re)computes guesses for the item's open boxes: faces with no
@@ -14,10 +14,14 @@ CONTRACT.
   confirmed and its guess is cleared; reject: guess_rejections row and the guess cleared).
 - enqueue_guess(conn, person_id, item_id) and refresh_fts(conn, item_ids): small helpers shared with
   the people API (lazy imports of app.jobs and app.documents.extract).
+- apply_window_change(conn) -> int: at startup (ingest.recover_on_startup). When settings.guess_window_h
+  differs from the value the open guesses were made with (kv guess_window_h), every guess whose reference
+  photo now lies outside the window is withdrawn and its item queued for guessing again.
 
 Scoring for an open box D in item I against a reference box F (face or body of a person with
 assigned_by user or auto) in item J:
-- J within settings.guess_window_h hours of I, or the same local calendar date (settings.local_timezone);
+- J taken within settings.guess_window_h hours (1 h) before or after I, never further, whatever the
+  calendar day: clothes are evidence only close in time;
 - scene: cos(frame-0 embeddings of I and J) >= settings.guess_scene_sim, or both have GPS within
   settings.guess_gps_m metres;
 - clothes: cos(torso(D), torso(F)) >= settings.guess_clothes_sim;
@@ -40,7 +44,7 @@ from typing import Any
 import numpy as np
 
 from app.config import settings
-from app.db import bump_faces_version, faces_version, tx
+from app.db import bump_faces_version, faces_version, kv_get, kv_set, tx
 from app.util import json_dumps, json_loads, local_date, now_iso, parse_iso
 
 log = logging.getLogger(__name__)
@@ -140,31 +144,29 @@ WINDOW_AFTER_SQL = (
 
 
 def window_items(conn: sqlite3.Connection, item: sqlite3.Row) -> list[sqlite3.Row]:
-    """Live library items (other than `item`, never vault items) taken within the guess window or on the
-    same local date: the MAX_WINDOW_ITEMS closest in time, ordered by taken_at."""
+    """Live library items (other than `item`, never vault items) taken within settings.guess_window_h
+    hours before or after it, never further whatever the calendar day: the MAX_WINDOW_ITEMS closest in
+    time, ordered by taken_at."""
     t0 = parse_iso(item["taken_at"])
     if t0 is None:
         return []
     hours = float(settings.guess_window_h)
-    lo = t0 - timedelta(hours=max(hours, 24.0)) - timedelta(seconds=1)
-    hi = t0 + timedelta(hours=max(hours, 24.0)) + timedelta(seconds=1)
+    lo = t0 - timedelta(hours=hours) - timedelta(seconds=1)
+    hi = t0 + timedelta(hours=hours) + timedelta(seconds=1)
     limit = MAX_WINDOW_ITEMS
-    # Before and from t0 separately, each nearest first, so a dense day cannot crowd out the
+    # Before and from t0 separately, each nearest first, so a dense hour cannot crowd out the
     # neighbours on one side.
     rows = [
         *conn.execute(WINDOW_BEFORE_SQL, (_iso(lo)[:19], item["taken_at"], item["id"], limit)).fetchall(),
         *conn.execute(WINDOW_AFTER_SQL, (item["taken_at"], _iso(hi), item["id"], limit)).fetchall(),
     ]
-    day0 = local_date(item["taken_at"], settings.local_timezone)
     out: list[tuple[float, sqlite3.Row]] = []
     for r in rows:
         t = parse_iso(r["taken_at"])
         if t is None:
             continue
         dt = abs((t - t0).total_seconds())
-        close = dt <= hours * 3600.0
-        same_day = local_date(r["taken_at"], settings.local_timezone) == day0
-        if close or same_day:
+        if dt <= hours * 3600.0:
             out.append((dt, r))
     out.sort(key=lambda x: (x[0], int(x[1]["id"])))
     nearest = [r for _, r in out[:limit]]
@@ -295,11 +297,12 @@ def _face_scores(conn: sqlite3.Connection, boxes: list[Box]) -> dict[int, dict[i
 
 
 # ------------------------------------------------------------------ scoring
-def score_box(box: Box, refs: list[Box], scene: dict[int, tuple[float, float | None, float | None, bool]],
+def score_box(box: Box, refs: list[Box], scene: dict[int, tuple[float, float | None, float | None, bool, int | None]],
               face_scores: dict[int, float] | None, rejected: set[int],
               item_uids: dict[int, str]) -> tuple[Candidate | None, list[Candidate]]:
     """Best qualifying candidate (or None) and the per-person ranking.
-    scene: {item_id: (scene_term, scene_cos, gps_m, same_day)} for the items that passed the scene test."""
+    scene: {item_id: (scene_term, scene_cos, gps_m, same_day, minutes_apart)} for the items that passed the
+    scene test."""
     if box.torso is None:
         return None, []
     best_by_person: dict[int, Candidate] = {}
@@ -317,7 +320,7 @@ def score_box(box: Box, refs: list[Box], scene: dict[int, tuple[float, float | N
             if any(other != pid and s >= FACE_CONTRADICTION for other, s in face_scores.items()):
                 continue
             face_sim = face_scores.get(pid)
-        scene_term, scene_cos, gps_m, same_day = scene[ref.item_id]
+        scene_term, scene_cos, gps_m, same_day, minutes_apart = scene[ref.item_id]
         score = guess_score(clothes, scene_term, face_sim, same_day=bool(same_day), has_gps=gps_m is not None)
         prev = best_by_person.get(pid)
         if prev is not None and prev.score >= score:
@@ -331,6 +334,7 @@ def score_box(box: Box, refs: list[Box], scene: dict[int, tuple[float, float | N
             "ref_body_id": ref.id if ref.kind == "body" else None,
             "ref_item_uid": item_uids.get(ref.item_id),
             "same_day": same_day,
+            "minutes_apart": minutes_apart,
             "gps_m": round(gps_m, 1) if gps_m is not None else None,
         })
     ranked = sorted(best_by_person.values(), key=lambda c: (-c.score, c.person_id))
@@ -356,7 +360,8 @@ def _compute(conn: sqlite3.Connection, item: sqlite3.Row, boxes: list[Box],
     embs = _scene_embeddings(conn, [int(item["id"]), *[int(r["id"]) for r in window]], cache)
     e0 = embs.get(int(item["id"]))
     day0 = local_date(item["taken_at"], settings.local_timezone)
-    scene: dict[int, tuple[float, float | None, float | None, bool]] = {}
+    t0 = parse_iso(item["taken_at"])
+    scene: dict[int, tuple[float, float | None, float | None, bool, int | None]] = {}
     for r in window:
         jid = int(r["id"])
         cos = float(np.dot(e0, embs[jid])) if e0 is not None and jid in embs and embs[jid].shape == e0.shape else None
@@ -369,7 +374,9 @@ def _compute(conn: sqlite3.Connection, item: sqlite3.Row, boxes: list[Box],
             continue
         term = cos if scene_ok else max(float(cos or 0.0), float(settings.guess_scene_sim))
         same_day = local_date(r["taken_at"], settings.local_timezone) == day0
-        scene[jid] = (float(term), cos, gps_m, bool(same_day))
+        t = parse_iso(r["taken_at"])
+        minutes = int(round(abs((t - t0).total_seconds()) / 60.0)) if t is not None and t0 is not None else None
+        scene[jid] = (float(term), cos, gps_m, bool(same_day), minutes)
     if not scene:
         return results
     refs = _reference_boxes(conn, list(scene), present, cache)
@@ -499,6 +506,53 @@ def propagate(conn: sqlite3.Connection, person_id: int, item_id: int | None) -> 
         total += guess_item(conn, jid, cache)
     log.info("guess propagation for person %s: %d box(es) changed over %d item(s)", person_id, total, len(targets))
     return total
+
+
+WINDOW_KEY = "guess_window_h"  # kv: the window the open guesses were made with
+
+
+def apply_window_change(conn: sqlite3.Connection) -> int:
+    """Startup check (ingest.recover_on_startup). When settings.guess_window_h differs from the value
+    recorded in kv, every open guess whose reference photo now lies outside the window is withdrawn (the
+    box goes back to 'auto' with no guess) and a 'guess' job is queued for its item, so the worker
+    proposes a nearer reference when one exists. Records the value in force. Returns how many guesses
+    were withdrawn."""
+    current = f"{float(settings.guess_window_h):g}"
+    if kv_get(conn, WINDOW_KEY) == current:
+        return 0
+    limit_s = float(settings.guess_window_h) * 3600.0
+    withdrawn = 0
+    with tx(conn):
+        for table in ("faces", "bodies"):
+            rows = conn.execute(
+                f"SELECT b.id, b.item_id, b.guess_person_id, b.guess_evidence, i.taken_at FROM {table} b "
+                "JOIN items i ON i.id = b.item_id WHERE b.assigned_by = 'guess' AND b.guess_person_id IS NOT NULL "
+                "AND b.person_id IS NULL"
+            ).fetchall()
+            for r in rows:
+                try:
+                    ev = json_loads(r["guess_evidence"]) or {}
+                except Exception:
+                    ev = {}
+                ref_uid = ev.get("ref_item_uid") if isinstance(ev, dict) else None
+                ref = conn.execute("SELECT taken_at FROM items WHERE uid = ?", (ref_uid,)).fetchone() if ref_uid else None
+                t0 = parse_iso(r["taken_at"])
+                t1 = parse_iso(ref["taken_at"]) if ref is not None else None
+                if t0 is not None and t1 is not None and abs((t1 - t0).total_seconds()) <= limit_s:
+                    continue
+                conn.execute(
+                    f"UPDATE {table} SET assigned_by = 'auto', guess_person_id = NULL, guess_score = NULL, "
+                    "guess_evidence = NULL WHERE id = ? AND person_id IS NULL AND assigned_by = 'guess'",
+                    (r["id"],),
+                )
+                enqueue_guess(conn, int(r["guess_person_id"]), int(r["item_id"]))
+                withdrawn += 1
+        if withdrawn:
+            bump_faces_version(conn)
+        kv_set(conn, WINDOW_KEY, current)
+    if withdrawn:
+        log.info("guess window is now %s h: withdrew %d guess(es) made against a reference further away", current, withdrawn)
+    return withdrawn
 
 
 # ------------------------------------------------------------------ review actions

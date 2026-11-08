@@ -1,4 +1,4 @@
-// The evidence of a person guess as one readable line: "same day, same scene 0.86, same clothes 0.91".
+// The evidence of a person guess as one readable line: "25 min apart, same scene 0.86, same clothes 0.91".
 import type { GuessOut } from '../../lib/types'
 
 function num(v: unknown): number | null {
@@ -8,7 +8,9 @@ function num(v: unknown): number | null {
 export function evidenceLine(guess: Pick<GuessOut, 'evidence'>): string {
   const e = guess.evidence ?? {}
   const parts: string[] = []
-  if (e.same_day === true) parts.push('same day')
+  const minutes = num(e.minutes_apart)
+  if (minutes !== null) parts.push(minutes < 1 ? 'same minute' : `${Math.round(minutes)} min apart`)
+  else if (e.same_day === true) parts.push('same day') // guesses made before the one-hour window
   else if (e.same_day === false) parts.push('within hours')
   const scene = num(e.scene)
   if (scene !== null) parts.push(`same scene ${scene.toFixed(2)}`)

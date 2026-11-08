@@ -373,7 +373,7 @@ export default function InfoPanel({
 
           {guessTargets.length > 0 && (
             <div className="mt-3">
-              <p className="mb-1.5 text-xs text-white/55">Guessed from the same day, scene and clothes:</p>
+              <p className="mb-1.5 text-xs text-white/55">Guessed from the same hour, scene and clothes:</p>
               <ul className="flex flex-col gap-2">
                 {guessTargets.map((t) => (
                   <li key={boxKey(t)} className="flex items-center gap-2">

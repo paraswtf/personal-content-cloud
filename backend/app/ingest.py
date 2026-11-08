@@ -1060,7 +1060,8 @@ def _rebuild_fts_if_flagged(conn: sqlite3.Connection) -> int:
 def recover_on_startup(conn: sqlite3.Connection) -> None:
     """Rebuild the full-text index when init_db asked for it (kv fts_rebuild); re-queue interrupted
     jobs; make sure every queued/processing upload has an ingest job and every item whose analysis,
-    text or streaming copy is pending has its job; wipe data_dir/tmp."""
+    text or streaming copy is pending has its job; apply a changed guessing window (guess.apply_window_change);
+    wipe data_dir/tmp."""
     _rebuild_fts_if_flagged(conn)
     n, exhausted = jobs.requeue_running(conn)
     if n:
@@ -1092,6 +1093,14 @@ def recover_on_startup(conn: sqlite3.Connection) -> None:
         ), unique=True)
     if added:
         log.info("startup: queued %d missing jobs", added)
+    try:
+        from app.analysis import guess  # local import: guess needs nothing from ingest
+
+        withdrawn = guess.apply_window_change(conn)
+        if withdrawn:
+            log.info("startup: withdrew %d guess(es) outside the guessing window", withdrawn)
+    except Exception:
+        log.exception("startup: the guess window check failed")
     tmp = storage.root() / "tmp"
     if tmp.is_dir():
         for p in tmp.iterdir():

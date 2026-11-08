@@ -371,7 +371,7 @@ function GuessesTab({ id }: { id: number }) {
         <PageSpinner />
       ) : mine.length === 0 && !list.hasMore ? (
         <EmptyState icon={<Sparkles className="size-8" aria-hidden />} title="No guesses for this person">
-          When this person is tagged, other photos from that day with the same clothes get a guess here.
+          When this person is tagged, other photos within an hour with the same clothes get a guess here.
         </EmptyState>
       ) : (
         <ul className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">

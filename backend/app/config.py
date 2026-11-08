@@ -223,7 +223,7 @@ def _load(**overrides) -> Settings:
         doc_likeness_min=_float("DOC_LIKENESS_MIN", 0.55),
         blur_var_min=_float("BLUR_VAR_MIN", 40.0),
         burst_window_s=_float("BURST_WINDOW_S", 3.0),
-        guess_window_h=_float("GUESS_WINDOW_H", 12.0),
+        guess_window_h=_float("GUESS_WINDOW_H", 1.0),  # clothes are evidence only close in time
         guess_scene_sim=_float("GUESS_SCENE_SIM", 0.80),
         guess_clothes_sim=_float("GUESS_CLOTHES_SIM", 0.85),
         guess_gps_m=_float("GUESS_GPS_M", 250.0),

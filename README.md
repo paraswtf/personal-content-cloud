@@ -118,7 +118,7 @@ Environment variables (all optional):
 | `VAULT_SENSITIVITY` | `normal` | `low`, `normal` or `high`: how readily photos go to the vault (also set in Settings > Learning). |
 | `DOC_LIKENESS_MIN` | `0.55` | Images at or above this are sent to OCR. |
 | `BLUR_VAR_MIN`, `BURST_WINDOW_S` | `40`, `3` | Mis-click thresholds. |
-| `GUESS_WINDOW_H`, `GUESS_SCENE_SIM`, `GUESS_CLOTHES_SIM`, `GUESS_GPS_M` | `12`, `0.80`, `0.85`, `250` | Person guessing. |
+| `GUESS_WINDOW_H`, `GUESS_SCENE_SIM`, `GUESS_CLOTHES_SIM`, `GUESS_GPS_M` | `1`, `0.80`, `0.85`, `250` | Person guessing by clothes: only photos taken within this many hours before or after a tagged one. |
 | `PETS_ENABLED`, `ANIMAL_DET_THRESHOLD` | `true`, `0.45` | Pet identities (section 22) and the animal detection cut. |
 | `PET_MATCH_THRESHOLD`, `PET_NEW_THRESHOLD` | `0.82`, `0.86` | Cosine cuts for matching a crop to a known pet and for pairing two crops into a new pet. |
 | `WALLET_PASS_TYPE_ID`, `WALLET_TEAM_ID`, `WALLET_ORG_NAME` | unset | Apple Wallet passes (see below). |

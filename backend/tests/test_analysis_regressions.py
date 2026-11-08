@@ -355,7 +355,10 @@ def test_merge_does_not_repoint_a_guess_to_a_rejected_person(conn):
 
 # ------------------------------------------------------------------ 11. dense days
 def test_window_keeps_the_nearest_items_on_both_sides(conn, monkeypatch):
+    from app.config import settings
+
     monkeypatch.setattr(guess, "MAX_WINDOW_ITEMS", 3)
+    monkeypatch.setattr(settings, "guess_window_h", 12.0)  # a wide window: the limit is what is tested here
     early = [_item(conn, taken_at=f"2026-05-01T0{h}:00:00.000Z") for h in range(1, 9)]
     anchor = _item(conn, taken_at="2026-05-01T09:00:00.000Z")
     after = _item(conn, taken_at="2026-05-01T09:30:00.000Z")
