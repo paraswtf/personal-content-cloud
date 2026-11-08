@@ -622,6 +622,20 @@ def analyze_item(conn: sqlite3.Connection, item_id: int, version: int) -> None:
             bump_faces_version(conn)
             if old_faces and new_face_ids:
                 cluster.carry_over(conn, old_faces, new_face_ids)
+            if old_faces:
+                # A face the owner named stays when its person reached no new face (a video tracked again
+                # may not find that moment, or may join it to someone else): the owner's choice is never lost.
+                kept_people: set[int] = set()
+                if new_face_ids:
+                    marks = ",".join("?" * len(new_face_ids))
+                    kept_people = {int(r[0]) for r in conn.execute(
+                        f"SELECT DISTINCT person_id FROM faces WHERE id IN ({marks}) AND person_id IS NOT NULL",
+                        new_face_ids)}
+                stay = {int(f["id"]) for f in old_faces if f["assigned_by"] == "user" and f["person_id"] is not None
+                        and int(f["person_id"]) not in kept_people}
+                if stay:
+                    old_faces = [f for f in old_faces if int(f["id"]) not in stay]
+                    old_ids = [i for i in old_ids if i not in stay]
 
             # Bodies (after the faces, so face_id can point at the new rows); drawn ones stay.
             old_bodies = conn.execute("SELECT * FROM bodies WHERE item_id = ? AND source != 'user' ORDER BY id",

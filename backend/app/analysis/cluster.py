@@ -563,9 +563,11 @@ def plan_carry(old_boxes: list[tuple[float, float, float, float]], old_emb: np.n
 
 def carry_over(conn: sqlite3.Connection, old_faces: list[sqlite3.Row], new_face_ids: list[int]) -> int:
     """After re-detecting faces on a reanalysed item, the old faces' decisions move to the matching
-    new faces (same item) as plan_carry pairs them: person_id + assigned_by for each pair, and the
-    rejected guesses of every paired or following old face (the old tracks of one person in a video
-    tracked again all hand theirs to its new track). An automatic person carried onto a face that now
+    new faces (same item). plan_carry pairs them; every old face that pairs with or follows a new face
+    is one of its claimants, and the new face takes the person and assigned_by of its best claimant:
+    one the owner locked first, then one with a named person, then the most alike (a video tracked
+    again has fewer, longer tracks, and the owner may have named only one of the old pieces). The
+    rejected guesses of every claimant move to it. An automatic person carried onto a face that now
     holds a rejection of that person is dropped, so the face is assigned afresh. Only old faces that
     had a person, were user-locked or had rejected guesses take part. Returns the number of faces
     whose person was carried."""
@@ -591,17 +593,32 @@ def carry_over(conn: sqlite3.Connection, old_faces: list[sqlite3.Row], new_face_
     )
     if not pairs and not follows:
         return 0
+    claims: dict[int, list[int]] = {}
+    for i, j in [*pairs, *follows]:
+        claims.setdefault(j, []).append(i)
+    pids = sorted({int(o["person_id"]) for o in olds if o["person_id"] is not None})
+    named: set[int] = set()
+    for chunk in _chunks(pids):
+        marks = ",".join("?" * len(chunk))
+        named |= {int(r[0]) for r in conn.execute(
+            f"SELECT id FROM persons WHERE id IN ({marks}) AND name IS NOT NULL AND TRIM(name) != ''", chunk)}
+    old_e = np.stack([np.frombuffer(o["embedding"], dtype=np.float32) for o in olds])
+    new_e = np.stack([np.frombuffer(n["embedding"], dtype=np.float32) for n in news])
     carried = 0
     took_rejections: set[int] = set()
     with tx(conn):
-        for i, j in pairs:
-            o = olds[i]
-            if o["person_id"] is not None or o["assigned_by"] == "user":
-                conn.execute(
-                    "UPDATE faces SET person_id = ?, assigned_by = ? WHERE id = ?",
-                    (o["person_id"], o["assigned_by"], news[j]["id"]),
-                )
-                carried += 1
+        for j, members in claims.items():
+            deciding = [i for i in members if olds[i]["person_id"] is not None or olds[i]["assigned_by"] == "user"]
+            if not deciding:
+                continue
+            o = olds[max(deciding, key=lambda i: (olds[i]["assigned_by"] == "user",
+                                                    olds[i]["person_id"] is not None and int(olds[i]["person_id"]) in named,
+                                                    float(old_e[i] @ new_e[j])))]
+            conn.execute(
+                "UPDATE faces SET person_id = ?, assigned_by = ? WHERE id = ?",
+                (o["person_id"], o["assigned_by"], news[j]["id"]),
+            )
+            carried += 1
         for i, j in [*pairs, *follows]:
             if int(olds[i]["id"]) in rejected:
                 move_rejections(conn, "face", int(olds[i]["id"]), int(news[j]["id"]))
@@ -614,7 +631,7 @@ def carry_over(conn: sqlite3.Connection, old_faces: list[sqlite3.Row], new_face_
                 "SELECT 1 FROM guess_rejections g WHERE g.kind = 'face' AND g.ref_id = faces.id "
                 "AND g.person_id = faces.person_id)", chunk,
             ).rowcount
-        if pairs:
+        if claims:
             bump_faces_version(conn)
     return carried
 

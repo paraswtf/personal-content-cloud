@@ -171,3 +171,47 @@ def test_plan_carry_pairs_one_to_one_and_lists_followers():
     pairs, follows = cluster.plan_carry(boxes, np.stack(old), [False, True, False], [(0.5, 0.5, 0.1, 0.1)], np.stack(new))
     assert pairs == [(1, 0)]  # the user-locked one first
     assert follows == [(0, 0)]  # the unrelated third face follows nobody
+
+
+def test_a_named_piece_names_the_whole_new_track(conn):
+    """Two old tracks of one person become one: the clustering's unnamed group was the closer one, but the
+    person the owner named wins the new track."""
+    item = make_item(conn, kind="video", ext=".mp4", mime="video/mp4")
+    unnamed, asha = make_person(conn), make_person(conn, "Asha")
+    who = _rand(60)
+    near = make_face(conn, item["id"], unnamed, embedding=_near(who, 61, 0.1), box=(0.1, 0.1, 0.1, 0.1))
+    named = make_face(conn, item["id"], asha, embedding=_near(who, 62, 0.4), box=(0.6, 0.1, 0.1, 0.1))
+    old = _rows(conn, [near, named])
+    new = make_face(conn, item["id"], None, embedding=who, box=(0.3, 0.6, 0.1, 0.1))
+    assert cluster.carry_over(conn, old, [new]) == 1
+    assert conn.execute("SELECT person_id FROM faces WHERE id = ?", (new,)).fetchone()[0] == asha
+
+
+def test_a_reanalysis_never_drops_a_face_the_owner_named(conn, monkeypatch):
+    """The new tracking finds nothing like the face the owner named: that face stays, with its person."""
+    from app.analysis import pipeline
+    from app.analysis.faces import FaceRecord
+    from PIL import Image
+
+    item = make_item(conn, kind="video", ext=".mp4", mime="video/mp4", duration_s=10.0)
+    kabir = make_person(conn, "Kabir")
+    mine = make_face(conn, item["id"], kabir, embedding=_rand(70), assigned_by="user", frame_time_s=2.0)
+    auto = make_face(conn, item["id"], None, embedding=_rand(71), box=(0.6, 0.2, 0.2, 0.3), frame_time_s=4.0)
+    with tx(conn):
+        conn.execute("UPDATE items SET analysis_status = 'pending' WHERE id = ?", (item["id"],))
+    real_run = pipeline._run_models
+
+    def run(item_row, v, siglip, nsfw, faces_engine, not_face=None):
+        r = real_run(item_row, v, siglip, nsfw, faces_engine, not_face=not_face)
+        r.faces = [FaceRecord(x=0.4, y=0.4, w=0.1, h=0.1, det_score=0.9, size_px=120, quality=0.7, frame_time_s=5.0,
+                              embedding=_rand(72), crop=Image.new("RGB", (192, 192)), spans=[(4.0, 6.0)])]
+        r.face_torsos = [None]
+        r.faces_ran = True
+        return r
+
+    monkeypatch.setattr(pipeline, "_run_models", run)
+    pipeline.analyze_item(conn, item["id"], 1)
+    rows = conn.execute("SELECT id, person_id, assigned_by FROM faces WHERE item_id = ? ORDER BY id", (item["id"],)).fetchall()
+    assert [(r["id"], r["person_id"], r["assigned_by"]) for r in rows][0] == (mine, kabir, "user")
+    assert auto not in [r["id"] for r in rows]  # an automatic face is replaced as before
+    assert len(rows) == 2

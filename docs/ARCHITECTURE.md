@@ -569,8 +569,11 @@ known from all their good views.
   `>= 0.3` with similarity `>= 0.3`, then similarity `>= 0.6`, then for the owner's faces `>= 0.4`, or IoU
   `>= 0.1` with `>= 0.3`), the owner's locked faces through all three passes before any other face takes a new
   one. A video tracked again has fewer, longer tracks, so old faces left without a pair follow the new face they
-  match by the first two passes and hand it their rejected guesses; an automatic person carried onto a face that
-  now holds a rejection of that person is dropped, and the face is assigned afresh.
+  match by the first two passes. Every old face that pairs with or follows a new face is one of its claimants: the
+  new face takes the person of its best claimant (one the owner locked first, then one with a named person, then
+  the most alike) and the rejected guesses of all of them; an automatic person carried onto a face that now holds
+  a rejection of that person is dropped, and the face is assigned afresh. A face the owner named whose person
+  reached no new face stays as it is (`analyze_item`), so a re-analysis never loses the owner's choice.
 
 Not a face (2026-11-08). "Not a face" (`DELETE /api/faces/{id}`) teaches detection instead of only deleting
 (`app/learning/not_faces.py`):
