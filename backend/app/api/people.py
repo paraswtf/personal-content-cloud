@@ -37,6 +37,7 @@ from typing import Any, Literal, NamedTuple
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app import storage
+from app import undo as undo_mod
 from app.analysis import cluster, guess
 from app.analysis import animals as animals_mod
 from app.analysis import person_boxes
@@ -1065,7 +1066,7 @@ def _delete_box(conn: sqlite3.Connection, table: str, box_id: int, session: Sess
         bump_faces_version(conn)
         bump_search_version(conn)
     for gone in (box_id, *followed):
-        storage.safe_unlink(_CROP_PATHS[table](gone))
+        undo_mod.discard(_CROP_PATHS[table](gone))  # kept for undo (section 33)
     guess.refresh_fts(conn, touched)
     if followed:
         log.info("not a face: face %s and %d look-alike(s) removed", box_id, len(followed))

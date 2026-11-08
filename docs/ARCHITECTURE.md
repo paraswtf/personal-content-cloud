@@ -989,6 +989,20 @@ and flies out to the left when there is no room on the right; a click outside or
 Phones keep the bottom tab bar; its More sheet lists the same groups under headings (Browse, Tidy up,
 Account), then the theme switch and Sign out.
 
+Undo (2026-11-09; the server side is section 33). Every write `lib/api.ts` sends carries `X-Action-Id`: the
+MutationCache in `main.tsx` gives each mutation one id for all its requests (a bulk loop or a whole-video group
+edit undoes as one), and a write outside a mutation gets its own. An answer with `X-Action-Id` means the change
+can be undone, and `lib/undo.ts` records it in the undo history, which lives in this browser only
+(localStorage `pcc.undo.v1`, newest first, at most 200, shared between tabs). A success toast that describes the
+action just recorded (the running mutation's, or one that ended under 2.5 s ago) labels it and shows Undo; the
+viewer's own messages do the same. Undo (`lib/undoRun.ts`) posts `/api/actions/{id}/undo`, refreshes every
+query and says "Undone: ..." with Redo, which undoes the undo; refusals read as plain sentences (later changes
+to the same things, offering to undo those first when this browser made them; too old; vault locked; something
+in the way). Ctrl+Z or Cmd+Z undoes the newest change and Ctrl+Shift+Z, Cmd+Shift+Z or Ctrl+Y redoes the change
+undone last, never while typing or while a dialog other than the viewer is open. "Undo history" in the account
+menu, and in the More sheet on phones, opens a dialog listing every change with its time, Undo or Redo, and
+"Clear history" (this browser only).
+
 ## 15. Configuration (env)
 
 | Variable | Default | Meaning |
@@ -2000,3 +2014,48 @@ type's total, mean duration and current rate; "Show as table" lists the same num
 Tests: bucketing of the last hour (placement, failed counts, mean duration, the ten-minute rate), day and
 week buckets aligned to Asia/Kolkata hours, pruning, the worker recording completed and failed runs, and the
 route (including 422 for an unknown range).
+
+## 33. Undo (`app/undo.py`, `app/api/actions.py`)
+
+Every change the owner makes can be undone, and the undo redone (2026-11-09). The history the owner sees is
+kept in the browser (section 14); what each action changed is kept by the server, so an undo puts back
+exactly what happened, including the look-alikes a move pulled along, the faces a "Not a face" took with it,
+and the rows a foreign key cleared.
+
+- An action is one API write (POST, PUT, PATCH, DELETE under `/api/`) outside the routes that are not owner
+  content or cannot come back: `/api/auth`, `/api/uploads`, `/api/system`, `/api/actions`, `/api/trash` (a
+  purge deletes the originals), `/api/search`, `/api/s`, reprocess, recluster, map refresh and document
+  reparse; the bulk purge runs inside `undo.not_undoable()`. `ActionMiddleware` names the action from the
+  client's `X-Action-Id` header (`[A-Za-z0-9_-]{8,64}`; every request of one action in the app carries the
+  same id, so a bulk loop undoes as one), else a new id, and keeps it in `db.current_action` (a ContextVar
+  that reaches the endpoint threads). The response carries `X-Action-Id` when the action changed something.
+- Journal: `db.tx` writes the `undo_context` row at BEGIN of every write transaction of an action and removes
+  it before COMMIT, so no other connection (the worker) ever sees it. Triggers on the journaled tables (items,
+  faces, bodies, animals, persons, item_tags, guess_rejections, merge_dismissals, learning_events, not_faces,
+  albums, album_items, shares, share_items, tags, item_user_tags, tag_rejections, documents; made from the
+  current columns by `undo.install_triggers` at every start) log each row change into `undo_log` with the row
+  before and after as JSON (BLOB columns as hex), built 30 columns per function call because SQLite before
+  3.48 allows 127 arguments and cannot open a database whose trigger has more. Foreign-key actions (ON DELETE SET NULL, CASCADE) fire them
+  too. `kv`, jobs, uploads, sessions and the derived tables are not journaled: a version counter put back
+  would leave the face index stale. Measured on the API tests: no owner write happens outside a transaction.
+- `POST /api/actions/{id}/undo` -> `UndoOut {undo_id, changes, partial, items}`. Newest change first, in one
+  transaction with foreign keys deferred: a row the action inserted is deleted, a row it deleted is inserted
+  again, an update puts back only the columns it changed and only where the column still holds what the
+  action wrote (when the analysis changed one since, it stays and `partial` is true). Bookkeeping columns
+  (`updated_at` and the items' face, body and animal counts) never block an undo and are not put back; the
+  counts of the items touched are counted again. The undo is an action
+  itself (`undo_actions.undo_of`), so undoing `undo_id` is a redo. Answers: 404 `not_found`, 410 `expired`
+  (older than 30 days), 409 `already_undone`, 409 `{detail: "later_changes", blocking: [ids]}` when a later
+  action still in effect changed the same rows and columns (undo those first), 409 `conflict` when the old
+  row no longer fits (a name taken since), 403 `vault_locked` when the action touched a vault item and the
+  vault is locked. Afterwards `faces_version` and `search_version` move and the items' full-text rows are
+  rewritten.
+- Files: a crop the action removes (`undo.discard`, used by the box deletes) moves to `DATA_DIR/undo/<action>/`
+  instead of being deleted; an undo that puts the row back puts the crop back, and the crops of rows an undo
+  removes go to the undo's own folder, ready for a redo.
+- Housekeeping drops actions older than 30 days with their journal and files (`undo.prune`).
+- Tests: `tests/test_undo.py` (a face named then undone and redone, "Not a face" with a look-alike and their
+  crops, a merge and a person delete, a drawn person box, category, trash and album, a later change blocking,
+  the analysis' change kept with `partial`, one action id over two requests, routes that are not actions,
+  the vault, expiry and pruning, counters that never block, the triggers of every table and their argument
+  count).

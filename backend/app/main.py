@@ -85,6 +85,7 @@ ROUTERS: tuple[tuple[str, str], ...] = (
     ("app.api.map", "/api/map"),
     ("app.api.shares", "/api/shares"),
     ("app.api.share", ""),  # public share routes carry their own /api/s and /files/s paths (section 26)
+    ("app.api.actions", ""),  # undo (section 33)
 )
 
 
@@ -489,6 +490,9 @@ def create_app() -> FastAPI:
         redoc_url=None,
         openapi_url=None,  # served by the session-protected route below
     )
+    from app.undo import ActionMiddleware  # section 33: each owner write is one undoable action
+
+    app.add_middleware(ActionMiddleware)
     app.add_middleware(BodyLimitMiddleware)
     app.add_middleware(ApiGZipMiddleware)
     app.add_middleware(SessionCookieMiddleware)

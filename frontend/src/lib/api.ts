@@ -1,6 +1,7 @@
 // Typed client for the backend API (backend/app/api/*). All calls are same-origin and carry the
 // CSRF header. A 401 anywhere means the session is gone: `onUnauthorized` (set by the app shell)
-// sends the user to /login.
+// sends the user to /login. Every write carries X-Action-Id (lib/undo.ts: one id per user action), and
+// an answer with X-Action-Id is recorded in the undo history.
 import type {
   AnimalPage,
   AnimalSpeciesIn,
@@ -36,6 +37,7 @@ import type {
   MergeIn,
   OkOut,
   FaceDeleteOut,
+  UndoOut,
   PageOut,
   PasskeyOut,
   PersonCreate,
@@ -69,6 +71,7 @@ import type {
   PeopleRemoveIn,
   PeopleTagIn,
 } from './types'
+import { actionIdForRequest, recordAction } from './undo'
 
 export const CSRF_HEADER = 'X-Requested-With'
 export const CSRF_VALUE = 'pcc'
@@ -121,8 +124,12 @@ function messageFrom(status: number, body: unknown): { message: string; detail: 
 
 const AUTH_PREFIX = '/api/auth/'
 
+const WRITE_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE'])
+
 async function request<T>(method: string, url: string, body?: unknown, signal?: AbortSignal): Promise<T> {
   const headers: Record<string, string> = { [CSRF_HEADER]: CSRF_VALUE, Accept: 'application/json' }
+  const write = WRITE_METHODS.has(method)
+  if (write) headers['X-Action-Id'] = actionIdForRequest()
   let payload: BodyInit | undefined
   if (body instanceof FormData) {
     payload = body
@@ -144,6 +151,10 @@ async function request<T>(method: string, url: string, body?: unknown, signal?: 
     const { message, detail } = messageFrom(res.status, data)
     if (res.status === 401 && !url.startsWith(AUTH_PREFIX)) onUnauthorized?.()
     throw new ApiError(res.status, message, detail, data)
+  }
+  if (write) {
+    const action = res.headers.get('X-Action-Id')
+    if (action) recordAction(action, method, url)
   }
   return data as T
 }
@@ -495,6 +506,10 @@ export const api = {
       fd.append('source', source)
       return post<UploadOut>('/api/uploads/simple', fd)
     },
+  },
+  /** Undo (section 33): put back what an action changed. Undoing the answer's undo_id is a redo. */
+  actions: {
+    undo: (id: string) => post<UndoOut>(`/api/actions/${enc(id)}/undo`),
   },
 }
 

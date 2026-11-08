@@ -20,6 +20,7 @@ import BuildBanner from './BuildBanner'
 import { useToast } from '../Toast'
 import Header from './Header'
 import { BottomTabBar } from './Nav'
+import UndoHistoryHost from '../undo/UndoHistory'
 
 /** Where /login should send the user back to; only same-app paths, never the auth pages. */
 export function safeNext(raw: string | null | undefined): string {
@@ -118,6 +119,7 @@ export default function AppShell() {
         </ErrorBoundary>
       </main>
       <BottomTabBar onLogout={() => void onLogout()} />
+      <UndoHistoryHost />
     </div>
   )
 }

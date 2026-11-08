@@ -570,10 +570,13 @@ def bulk(body: BulkIn, session: SessionInfo = Depends(require_user),
                 ingest.restore(conn, int(r["id"]))
                 updated += 1
     elif action == "purge":
-        for r in rows:
-            if r["deleted_at"] is not None:
-                ingest.purge(conn, int(r["id"]))
-                updated += 1
+        from app.undo import not_undoable
+
+        with not_undoable():  # the originals are deleted: nothing to undo (section 33)
+            for r in rows:
+                if r["deleted_at"] is not None:
+                    ingest.purge(conn, int(r["id"]))
+                    updated += 1
     elif action in ("tag", "untag"):
         from app.api import tags as tags_api
 

@@ -12,9 +12,11 @@ import { api, ApiError } from '../lib/api'
 import type { ItemDetail } from '../lib/types'
 import { formatDuration, personName } from '../lib/format'
 import { useAuth } from '../lib/auth'
+import { claimForToast } from '../lib/undo'
 import { useConfig } from '../lib/hooks'
 import { vaultify, withVault } from '../lib/preview'
 import ErrorBoundary, { ErrorPanel } from './ErrorBoundary'
+import { useToast } from './Toast'
 import { ConfirmModal, lockScroll } from './ui'
 import { errorMessage } from './admin/adminHooks'
 import DocumentStage, { FileCard } from './viewer/DocumentStage'
@@ -196,7 +198,9 @@ function ViewerInner({ uid, onClose, onPrev, onNext, position, startAt = null, v
   const [confirmDelete, setConfirmDelete] = useState(false)
   const [sharing, setSharing] = useState(false) // the Share dialog (section 26): the keyboard steps aside like for the delete confirm
   const [exitAfter, setExitAfter] = useState<'next' | 'close' | null>(null)
-  const [toast, setToast] = useState<string | null>(null)
+  // The viewer's own message; `entry` is the undo history entry it describes, when it offers Undo.
+  const [toast, setToast] = useState<{ text: string; entry: string | null } | null>(null)
+  const appToast = useToast()
   const [seekFace, setSeekFace] = useState<{ key: string; shown: boolean } | null>(null)
   const [page, setPage] = useState(0)
   const [livePlaying, setLivePlaying] = useState(false)
@@ -244,7 +248,7 @@ function ViewerInner({ uid, onClose, onPrev, onNext, position, startAt = null, v
   const stopLive = useCallback(() => setLivePlaying(false), [])
   const onLiveError = useCallback(() => {
     setLivePlaying(false)
-    setToast('The clip could not be played')
+    setToast({ text: 'The clip could not be played', entry: null })
   }, [])
   useEffect(() => {
     return () => {
@@ -254,10 +258,10 @@ function ViewerInner({ uid, onClose, onPrev, onNext, position, startAt = null, v
     }
   }, [uid, detailVersion])
 
-  const showToast = useCallback((msg: string) => setToast(msg), [])
+  const showToast = useCallback((msg: string) => setToast({ text: msg, entry: claimForToast(msg) }), [])
   useEffect(() => {
     if (!toast) return
-    const t = setTimeout(() => setToast(null), 2800)
+    const t = setTimeout(() => setToast(null), toast.entry ? 7000 : 2800)
     return () => clearTimeout(t)
   }, [toast])
 
@@ -642,6 +646,7 @@ function ViewerInner({ uid, onClose, onPrev, onNext, position, startAt = null, v
       ref={rootRef}
       role="dialog"
       aria-modal="true"
+      data-undo-keys=""
       aria-label={isVideo ? 'Video viewer' : isDocKind ? 'Document viewer' : 'Photo viewer'}
       tabIndex={-1}
       className="fixed inset-0 z-40 flex flex-col bg-[#111] text-white outline-none"
@@ -803,7 +808,29 @@ function ViewerInner({ uid, onClose, onPrev, onNext, position, startAt = null, v
       )}
 
       <div aria-live="polite" className="pointer-events-none absolute inset-x-0 bottom-6 z-50 flex justify-center px-4">
-        {toast && <span className="rounded-full bg-white px-4 py-2 text-sm font-semibold text-[#111] shadow-lg">{toast}</span>}
+        {toast && (
+          <span
+            className={clsx(
+              'flex max-w-full items-center gap-1 rounded-full bg-white text-sm font-semibold text-[#111] shadow-lg',
+              toast.entry ? 'py-1 pl-4 pr-1' : 'px-4 py-2',
+            )}
+          >
+            <span className="min-w-0">{toast.text}</span>
+            {toast.entry && (
+              <button
+                type="button"
+                className="pointer-events-auto shrink-0 rounded-full px-3 py-1 text-[#0a58ca] hover:bg-black/5 focus-visible:outline-2 focus-visible:outline-[#0a58ca]"
+                onClick={() => {
+                  const entry = toast.entry
+                  setToast(null)
+                  if (entry) void appToast.undo(entry)
+                }}
+              >
+                Undo
+              </button>
+            )}
+          </span>
+        )}
       </div>
 
       <ConfirmModal

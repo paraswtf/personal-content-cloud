@@ -85,6 +85,14 @@ export interface OkOut {
 export interface FaceDeleteOut extends OkOut {
   followed: number
 }
+/** POST /api/actions/{id}/undo (section 33): undo_id is the undo's own action (undo it to redo); partial
+ *  when some of the change had been changed again since and stays; items are the uids it touched. */
+export interface UndoOut {
+  undo_id: string
+  changes: number
+  partial: boolean
+  items: string[]
+}
 
 // people
 export type Species = 'bird' | 'cat' | 'dog' | 'horse' | 'sheep' | 'cow' | 'elephant' | 'bear' | 'zebra' | 'giraffe'

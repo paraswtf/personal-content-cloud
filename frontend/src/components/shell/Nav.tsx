@@ -2,17 +2,18 @@
 // Documents menu (all documents and each document group) and a More menu (Browse: Albums, Map, Vault;
 // Tidy up: Review with its count, Trash), icon only below lg; the header adds Upload and the account menu
 // (Header.tsx). Phones: a bottom tab bar with the four most used sections and a More sheet with the same
-// groups, theme and sign out.
+// groups, theme, the undo history and sign out.
 import { useEffect, useState, type ComponentType } from 'react'
 import { Link, useLocation } from 'react-router'
 import { useQuery } from '@tanstack/react-query'
 import clsx from 'clsx'
-import { ClipboardCheck, Ellipsis, FileText, Images, Lock, LockOpen, LogOut, Menu, Settings, Trash2, Upload, Users, BookImage, Map } from 'lucide-react'
+import { ClipboardCheck, Ellipsis, FileText, History, Images, Lock, LockOpen, LogOut, Menu, Settings, Trash2, Upload, Users, BookImage, Map } from 'lucide-react'
 import { GROUP_META, GROUP_ORDER } from '../documents/docMeta'
 import HeaderMenu, { type MenuEntry } from './HeaderMenu'
 import { api } from '../../lib/api'
 import { useAuth } from '../../lib/auth'
 import { THEME_CHOICES, useTheme } from '../../lib/theme'
+import { openUndoHistory } from '../../lib/undo'
 import { Modal } from '../ui'
 
 type Icon = ComponentType<{ className?: string; 'aria-hidden'?: boolean }>
@@ -269,9 +270,20 @@ export function BottomTabBar({ onLogout }: { onLogout: () => void }) {
             type="button"
             onClick={() => {
               setMore(false)
+              openUndoHistory()
+            }}
+            className="mt-4 flex h-12 w-full items-center gap-3 rounded-xl px-3 text-base font-medium text-ink hover:bg-ink/5"
+          >
+            <History className="size-5 text-ink-soft" aria-hidden />
+            Undo history
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setMore(false)
               onLogout()
             }}
-            className="mt-4 flex h-12 w-full items-center gap-3 rounded-xl px-3 text-base font-medium text-danger hover:bg-danger/10"
+            className="mt-1 flex h-12 w-full items-center gap-3 rounded-xl px-3 text-base font-medium text-danger hover:bg-danger/10"
           >
             <LogOut className="size-5" aria-hidden />
             Sign out

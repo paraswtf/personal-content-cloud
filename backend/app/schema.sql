@@ -313,6 +313,31 @@ CREATE TABLE IF NOT EXISTS not_faces (
   created_at TEXT NOT NULL
 );
 
+-- Undo (section 33, app/undo.py): what each owner action changed. undo_context holds the running action
+-- only inside its own write transaction; the journal triggers are made by app.undo.install_triggers.
+CREATE TABLE IF NOT EXISTS undo_actions (
+  id          TEXT PRIMARY KEY,
+  method      TEXT NOT NULL,
+  path        TEXT NOT NULL,
+  created_at  TEXT NOT NULL,
+  undo_of     TEXT,                          -- this action undid that one
+  undone_by   TEXT                           -- the action that undid this one
+);
+CREATE INDEX IF NOT EXISTS undo_actions_created ON undo_actions(created_at);
+CREATE TABLE IF NOT EXISTS undo_log (
+  seq        INTEGER PRIMARY KEY AUTOINCREMENT,
+  action_id  TEXT NOT NULL,
+  tbl        TEXT NOT NULL,
+  op         TEXT NOT NULL CHECK (op IN ('insert','update','delete')),
+  old        TEXT,                           -- JSON of the row before (update, delete); BLOBs as hex
+  new        TEXT                            -- JSON of the row after (insert, update)
+);
+CREATE INDEX IF NOT EXISTS undo_log_action ON undo_log(action_id, seq);
+CREATE TABLE IF NOT EXISTS undo_context (
+  id         INTEGER PRIMARY KEY CHECK (id = 1),
+  action_id  TEXT NOT NULL
+);
+
 -- "These two are different people": hides a merge suggestion.
 CREATE TABLE IF NOT EXISTS merge_dismissals (
   person_a   INTEGER NOT NULL REFERENCES persons(id) ON DELETE CASCADE,

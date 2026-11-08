@@ -16,6 +16,8 @@ import itertools
 import re
 import sqlite3
 from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -108,6 +110,10 @@ def init_db() -> None:
         with tx(conn):
             _add_missing_columns(conn)
         conn.executescript(schema)
+        from app.undo import install_triggers  # section 33: the journal follows the current columns
+
+        with tx(conn):
+            install_triggers(conn)
         with tx(conn):
             _upgrade_fts(conn, schema)
             _upgrade_checks(conn, schema)
@@ -199,9 +205,44 @@ def _add_missing_columns(conn: sqlite3.Connection) -> list[tuple[str, str]]:
     return added
 
 
+@dataclass
+class ActionContext:
+    """The owner action a request belongs to (section 33, app.undo): tx() journals its writes."""
+
+    id: str
+    method: str
+    path: str
+    undo_of: str | None = None
+    logged: bool = False  # some journaled row changed (the response then carries X-Action-Id)
+
+
+current_action: ContextVar[ActionContext | None] = ContextVar("pcc_action", default=None)
+
+
+def _begin_action(conn: sqlite3.Connection, act: ActionContext) -> None:
+    conn.execute("INSERT OR REPLACE INTO undo_context(id, action_id) VALUES (1, ?)", (act.id,))
+    conn.execute("INSERT OR IGNORE INTO undo_actions(id, method, path, created_at, undo_of) VALUES (?, ?, ?, ?, ?)",
+                 (act.id, act.method, act.path, _now(), act.undo_of))
+
+
+def _end_action(conn: sqlite3.Connection, act: ActionContext) -> None:
+    if not act.logged:
+        act.logged = conn.execute("SELECT 1 FROM undo_log WHERE action_id = ? LIMIT 1", (act.id,)).fetchone() is not None
+        if not act.logged:  # a read, or a write the journal leaves out: nothing to undo
+            conn.execute("DELETE FROM undo_actions WHERE id = ? AND undo_of IS NULL", (act.id,))
+    conn.execute("DELETE FROM undo_context")
+
+
+def _now() -> str:
+    from app.util import now_iso
+
+    return now_iso()
+
+
 @contextmanager
 def tx(conn: sqlite3.Connection) -> Iterator[sqlite3.Connection]:
-    """Write transaction. Nested use becomes a savepoint."""
+    """Write transaction. Nested use becomes a savepoint. Inside an owner action (current_action) the
+    transaction is journaled for undo: the undo_context row lives only inside it (section 33)."""
     if conn.in_transaction:
         name = f"sp_{next(_savepoints)}"
         conn.execute(f"SAVEPOINT {name}")
@@ -215,8 +256,13 @@ def tx(conn: sqlite3.Connection) -> Iterator[sqlite3.Connection]:
         conn.execute(f"RELEASE {name}")
         return
     conn.execute("BEGIN IMMEDIATE")
+    act = current_action.get()
     try:
+        if act is not None:
+            _begin_action(conn, act)
         yield conn
+        if act is not None:
+            _end_action(conn, act)
     except BaseException:
         if conn.in_transaction:
             conn.execute("ROLLBACK")

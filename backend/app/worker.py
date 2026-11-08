@@ -321,6 +321,12 @@ def _housekeeping(conn: sqlite3.Connection) -> dict[str, int]:
     except Exception:
         log.exception("housekeeping: session purge failed")
     try:
+        from app import undo
+
+        out["undo"] = undo.prune(conn)
+    except Exception:  # noqa: BLE001 - an old journal never blocks housekeeping
+        log.exception("housekeeping: undo journal prune failed")
+    try:
         from app.learning import train as learning_train
 
         if learning_train.maybe_train(conn):

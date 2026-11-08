@@ -1,12 +1,13 @@
 // Sticky top bar: the cloud's name, the main navigation on desktop (Library, People, the Documents menu and
 // the More menu, Nav.tsx), then on the right the vault countdown while it is unlocked, Upload and the
-// account menu (Settings and Theme as submenus, Sign out). On phones the navigation lives in the bottom
+// account menu (Settings and Theme as submenus, Undo history, Sign out). On phones the navigation lives in the bottom
 // tab bar instead (Nav.tsx) and the header keeps the theme toggle.
 import { Link, useLocation } from 'react-router'
 import clsx from 'clsx'
-import { Cloud, LogOut, Monitor, Moon, Settings, Sun, Upload } from 'lucide-react'
+import { Cloud, History, LogOut, Monitor, Moon, Settings, Sun, Upload } from 'lucide-react'
 import { useAuth } from '../../lib/auth'
 import { THEME_CHOICES, useTheme } from '../../lib/theme'
+import { openUndoHistory } from '../../lib/undo'
 import { Avatar } from '../ui'
 import HeaderMenu, { type MenuEntry } from './HeaderMenu'
 import { DesktopNav } from './Nav'
@@ -56,6 +57,7 @@ function AccountMenu({ onLogout, loggingOut }: { onLogout: () => void; loggingOu
         }),
       ),
     },
+    { kind: 'action', label: 'Undo history', icon: History, onSelect: openUndoHistory },
     { kind: 'separator' },
     { kind: 'action', label: 'Sign out', icon: LogOut, danger: true, disabled: loggingOut, onSelect: onLogout },
   ]

@@ -120,6 +120,15 @@ class Ok(BaseModel):
     ok: bool = True
 
 
+class UndoOut(BaseModel):
+    """POST /api/actions/{id}/undo (section 33): undo_id undoes the undo (a redo); partial when some changes
+    were left as they are now because something else changed them since; items = the uids touched."""
+    undo_id: str
+    changes: int
+    partial: bool
+    items: list[str]
+
+
 class FaceDeleteOut(Ok):
     """DELETE /faces/{id} ("Not a face", section 10): followed = unassigned look-alikes removed with it."""
     followed: int = 0

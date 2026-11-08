@@ -1,18 +1,31 @@
-// Entry: theme first (so the first paint has the right colours), then React with one QueryClient.
+// Entry: theme first (so the first paint has the right colours), then React with one QueryClient. Its
+// MutationCache gives every mutation one undo action id for all the requests it sends (lib/undo.ts).
 // The service worker exists only for the PWA share target (public/sw.js); it is registered in secure
 // contexts only, as browsers require.
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { MutationCache, QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import '@fontsource-variable/inter'
 import './index.css'
 import App from './App'
 import { ApiError } from './lib/api'
 import { initTheme } from './lib/theme'
+import { beginAction, endAction } from './lib/undo'
 
 initTheme()
 
+const actionOf = new WeakMap<object, string>()
+
 const queryClient = new QueryClient({
+  mutationCache: new MutationCache({
+    onMutate: (_variables, mutation) => {
+      actionOf.set(mutation, beginAction())
+    },
+    onSettled: (_data, _error, _variables, _result, mutation) => {
+      const id = actionOf.get(mutation)
+      if (id) endAction(id)
+    },
+  }),
   defaultOptions: {
     queries: {
       staleTime: 15_000,
