@@ -322,6 +322,12 @@ def _housekeeping(conn: sqlite3.Connection) -> dict[str, int]:
             out["trained"] = 1
     except Exception:  # noqa: BLE001 - learning never blocks housekeeping
         log.exception("learning: training failed")
+    try:
+        from app.geo import places as geo_places
+
+        out["geo"] = geo_places.housekeeping(conn)
+    except Exception:  # noqa: BLE001 - places never block housekeeping
+        log.exception("housekeeping: places failed")
 
     return out
 

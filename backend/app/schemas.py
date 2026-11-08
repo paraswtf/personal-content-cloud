@@ -68,6 +68,9 @@ class SyncCheckIn(BaseModel):
 class SyncCheckOut(BaseModel):
     known: dict[str, str] = {}   # sha256 -> item uid (live or in the trash)
     assets: dict[str, str] = {}  # asset id (the upload pair key) -> item uid
+    # section 28: the caller's unfinished uploads per asset, and the assets whose item is in the trash
+    pending: dict[str, list[dict[str, Any]]] = {}
+    trashed: list[str] = []
 
 
 class PasskeyOut(BaseModel):
@@ -250,6 +253,11 @@ class LabelOut(BaseModel):
     score: float
 
 
+class AlbumRef(BaseModel):
+    id: int
+    name: str
+
+
 class ItemDetail(ItemCard):
     mime: str
     size_bytes: int
@@ -268,6 +276,7 @@ class ItemDetail(ItemCard):
     faces: list[FaceOut] = []
     bodies: list[BodyOut] = []
     animals: list[AnimalOut] = []
+    albums: list[AlbumRef] = []  # section 24
     tags: list[PersonRef] = []
     people: list[PersonRef] = []
     user_tags: list[ItemTagOut] = []
@@ -296,7 +305,8 @@ class ItemUpdate(BaseModel):
 
 class BulkIn(BaseModel):
     uids: list[str] = Field(min_length=1, max_length=1000)
-    action: Literal["delete", "restore", "keep", "category", "nsfw", "favorite", "unfavorite", "purge", "tag", "untag"]
+    action: Literal["delete", "restore", "keep", "category", "nsfw", "favorite", "unfavorite", "purge", "tag", "untag",
+                    "album", "unalbum"]
     value: str | None = None
 
 
@@ -564,6 +574,7 @@ class UploadCreate(BaseModel):
     sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     source: Literal["web", "share", "camera", "api"] = "web"
     pair_key: str | None = Field(default=None, max_length=128)  # both halves of a Live Photo carry the same key
+    resource: Literal["still", "video", "file"] = "file"  # which half of a Live Photo (section 28)
 
 
 class UploadOut(BaseModel):
@@ -615,6 +626,7 @@ class SystemOut(BaseModel):
     ffmpeg: bool
     workers: bool
     download: dict[str, Any] | None = None
+    video: dict[str, Any] | None = None  # section 27: encoder and web copy counts
 
 
 class TagOut(BaseModel):
@@ -674,3 +686,4 @@ class ConfigOut(BaseModel):
     categories: list[str]
     vault_unlock_min: int
     trash_days: int
+    map: dict[str, str] = {}  # section 25: {tiles, style_url}

@@ -226,6 +226,13 @@ def item_detail(conn: sqlite3.Connection, row: sqlite3.Row) -> ItemDetail:
     from app.api.tags import item_tags_out
 
     data["user_tags"] = item_tags_out(conn, int(row["id"]))
+    data["albums"] = [
+        {"id": int(a["id"]), "name": a["name"]}
+        for a in conn.execute(
+            "SELECT a.id, a.name FROM albums a JOIN album_items ai ON ai.album_id = a.id WHERE ai.item_id = ? ORDER BY a.name_key",
+            (int(row["id"]),),
+        )
+    ]
     live_video = live_video_out(conn, row)
     data["live_video"] = live_video
     if live_video is not None:
@@ -330,29 +337,31 @@ def get_config() -> ConfigOut:
         site_title=settings.site_title, max_upload_bytes=settings.max_upload_bytes,
         simple_upload_max_bytes=settings.simple_upload_max_bytes, chunk_size=settings.chunk_size,
         accept=ACCEPT_ATTR, categories=list(CATEGORIES), vault_unlock_min=settings.vault_unlock_min,
-        trash_days=settings.trash_days,
+        trash_days=settings.trash_days, map={"tiles": settings.map_tiles, "style_url": settings.map_tile_style},
     )
 
 
 # ------------------------------------------------------------------ items
-@router.get("/items", response_model=ItemPage)
-def list_items(
-    category: Literal[CATEGORIES] | None = None,  # type: ignore[valid-type]
-    kind: Literal[ITEM_KINDS] | None = None,  # type: ignore[valid-type]
-    person: list[int] = Query(default=[]),
-    tag: list[str] = Query(default=[]),
+def item_filters(
+    conn: sqlite3.Connection,
+    *,
+    category: str | None = None,
+    kind: str | None = None,
+    person: list[int] | None = None,
+    tag: list[str] | None = None,
     live: bool | None = None,
-    date_from: str | None = Query(default=None, alias="from", max_length=10),
-    date_to: str | None = Query(default=None, alias="to", max_length=10),
+    date_from: str | None = None,
+    date_to: str | None = None,
     favorite: bool | None = None,
-    misclicks: Literal["exclude", "include", "only"] = "exclude",
-    dups: Literal["collapse", "all"] = "collapse",
-    sort: Literal["taken", "added"] = "taken",
-    cursor: str | None = Query(default=None, max_length=512),
-    limit: int = Query(default=60, ge=1, le=200),
-    vault: bool = Depends(want_vault),
-    conn: sqlite3.Connection = Depends(get_db),
-) -> ItemPage:
+    misclicks: str = "exclude",
+    dups: str = "collapse",
+    sort: str = "taken",
+    vault: bool = False,
+    album: int | None = None,
+) -> tuple[list[str], list[Any], str]:
+    """The WHERE parts, their parameters and the sort expression for a library query (alias i).
+    Shared by GET /items, the timeline buckets (section 23), the map (section 25) and shares, so a
+    filter added here applies everywhere. An unknown album is 404."""
     where = [visible_sql(vault=vault, misclicks=misclicks, dups=dups)]
     params: list[Any] = []
     if category is not None:
@@ -382,6 +391,37 @@ def list_items(
     if favorite is not None:
         where.append("i.favorite = ?")
         params.append(1 if favorite else 0)
+    if album is not None:
+        if conn.execute("SELECT 1 FROM albums WHERE id = ?", (album,)).fetchone() is None:
+            raise HTTPException(status_code=404, detail="No such album")
+        where.append("i.id IN (SELECT ai.item_id FROM album_items ai WHERE ai.album_id = ?)")
+        params.append(album)
+    return where, params, sort_expr
+
+
+@router.get("/items", response_model=ItemPage)
+def list_items(
+    category: Literal[CATEGORIES] | None = None,  # type: ignore[valid-type]
+    kind: Literal[ITEM_KINDS] | None = None,  # type: ignore[valid-type]
+    person: list[int] = Query(default=[]),
+    tag: list[str] = Query(default=[]),
+    live: bool | None = None,
+    date_from: str | None = Query(default=None, alias="from", max_length=10),
+    date_to: str | None = Query(default=None, alias="to", max_length=10),
+    favorite: bool | None = None,
+    misclicks: Literal["exclude", "include", "only"] = "exclude",
+    dups: Literal["collapse", "all"] = "collapse",
+    sort: Literal["taken", "added"] = "taken",
+    album: int | None = Query(default=None, ge=1),
+    cursor: str | None = Query(default=None, max_length=512),
+    limit: int = Query(default=60, ge=1, le=200),
+    vault: bool = Depends(want_vault),
+    conn: sqlite3.Connection = Depends(get_db),
+) -> ItemPage:
+    where, params, sort_expr = item_filters(
+        conn, category=category, kind=kind, person=person, tag=tag, live=live, date_from=date_from,
+        date_to=date_to, favorite=favorite, misclicks=misclicks, dups=dups, sort=sort, vault=vault, album=album,
+    )
     return _page(conn, where, params, sort_expr, cursor, limit)
 
 
@@ -426,6 +466,13 @@ def restore_item(uid: str, session: SessionInfo = Depends(require_user),
     _guard(row, session)
     ingest.restore(conn, int(row["id"]))
     return item_detail(conn, _item_row(conn, uid))
+
+
+def _bulk_value_int(value: str | None) -> int:
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=422, detail="value must be an id") from None
 
 
 def _bulk_value_bool(value: str | None) -> bool:
@@ -504,6 +551,25 @@ def bulk(body: BulkIn, session: SessionInfo = Depends(require_user),
                     changed.append(int(r["id"]))
                     updated += 1
         tags_api._refresh_fts(conn, changed)
+    elif action in ("album", "unalbum"):
+        album_id = _bulk_value_int(body.value)
+        if conn.execute("SELECT 1 FROM albums WHERE id = ?", (album_id,)).fetchone() is None:
+            raise HTTPException(status_code=404, detail="No such album")
+        now = now_iso()
+        with tx(conn):
+            for r in rows:
+                if r["deleted_at"] is not None:
+                    continue
+                if action == "album":
+                    cur = conn.execute(
+                        "INSERT OR IGNORE INTO album_items(album_id, item_id, added_at) VALUES (?, ?, ?)",
+                        (album_id, int(r["id"]), now),
+                    )
+                else:
+                    cur = conn.execute("DELETE FROM album_items WHERE album_id = ? AND item_id = ?", (album_id, int(r["id"])))
+                updated += max(0, cur.rowcount)
+            if updated:
+                conn.execute("UPDATE albums SET updated_at = ? WHERE id = ?", (now, album_id))
     else:
         assert update is not None
         with tx(conn):

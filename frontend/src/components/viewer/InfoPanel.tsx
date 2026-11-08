@@ -1,5 +1,7 @@
 // Viewer info panel: document card, people and guesses, free-form tags (TagsPanel), category with override, mis-click reasons,
 // labels, read text, file details, and the item actions (favourite, vault, reprocess, download, trash).
+import AlbumsSection from '../albums/AlbumsSection'
+import LocationRow from '../map/LocationRow'
 import { useState, type ReactNode } from 'react'
 import { Link } from 'react-router'
 import { useMutation } from '@tanstack/react-query'
@@ -65,7 +67,7 @@ function Section({ title, children, id }: { title: string; children: ReactNode; 
   )
 }
 
-function Row({ label, value }: { label: string; value: ReactNode }) {
+export function Row({ label, value }: { label: string; value: ReactNode }) {
   if (value === '' || value === null || value === undefined) return null
   return (
     <div className="flex gap-3 py-1 text-sm">
@@ -495,6 +497,8 @@ export default function InfoPanel({
         </Section>
       )}
 
+      <AlbumsSection detail={detail} onToast={onToast} />
+
       <Section title="Details">
         <dl>
           <Row label="Date taken" value={formatDate(detail.taken_at, true)} />
@@ -505,6 +509,7 @@ export default function InfoPanel({
           <Row label="Size" value={formatBytes(detail.size_bytes)} />
           <Row label="Pages" value={detail.page_count ? String(detail.page_count) : ''} />
           <Row label="Camera" value={detail.camera} />
+          <LocationRow detail={detail} />
           {isVideo && <Row label="Length" value={formatDuration(detail.duration_s)} />}
           {isVideo && (
             <Row

@@ -78,6 +78,11 @@ ROUTERS: tuple[tuple[str, str], ...] = (
     ("app.api.uploads", "/api/uploads"),
     ("app.api.files", "/files"),
     ("app.api.system", "/api/system"),
+    ("app.api.timeline", "/api/timeline"),
+    ("app.api.albums", "/api/albums"),
+    ("app.api.map", "/api/map"),
+    ("app.api.shares", "/api/shares"),
+    ("app.api.share", ""),  # public share routes carry their own /api/s and /files/s paths (section 26)
 )
 
 

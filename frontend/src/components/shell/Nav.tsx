@@ -5,19 +5,7 @@ import { useEffect, useState, type ComponentType } from 'react'
 import { Link, useLocation } from 'react-router'
 import { useQuery } from '@tanstack/react-query'
 import clsx from 'clsx'
-import {
-  ClipboardCheck,
-  FileText,
-  Images,
-  Lock,
-  LockOpen,
-  LogOut,
-  Menu,
-  Settings,
-  Trash2,
-  Upload,
-  Users,
-} from 'lucide-react'
+import { ClipboardCheck, FileText, Images, Lock, LockOpen, LogOut, Menu, Settings, Trash2, Upload, Users, BookImage, Map } from 'lucide-react'
 import { api } from '../../lib/api'
 import { useAuth } from '../../lib/auth'
 import { THEME_CHOICES, useTheme } from '../../lib/theme'
@@ -37,6 +25,8 @@ export const NAV_ITEMS: NavItem[] = [
   { to: '/', label: 'Library', icon: Images, match: (p) => p === '/' || p.startsWith('/m/') },
   { to: '/people', label: 'People', icon: Users },
   { to: '/documents', label: 'Documents', icon: FileText },
+  { to: '/albums', label: 'Albums', icon: BookImage },
+  { to: '/map', label: 'Map', icon: Map },
   { to: '/review', label: 'Review', icon: ClipboardCheck },
   { to: '/vault', label: 'Vault', icon: Lock },
   { to: '/upload', label: 'Upload', icon: Upload },

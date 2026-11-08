@@ -31,6 +31,19 @@ MIGRATED_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("persons", "kind", "TEXT NOT NULL DEFAULT 'person'"),
     ("persons", "species", "TEXT"),
     ("items", "animal_count", "INTEGER NOT NULL DEFAULT 0"),
+    ("items", "place", "TEXT"),
+    ("items", "place_city", "TEXT"),
+    ("items", "place_admin", "TEXT"),
+    ("items", "place_country", "TEXT"),
+    ("items", "place_source", "TEXT"),
+    ("items", "gps_checked", "INTEGER NOT NULL DEFAULT 0"),
+    ("uploads", "session_id", "INTEGER"),
+    ("uploads", "resource", "TEXT"),
+)
+# Indexes on migrated columns: schema.sql runs before the columns exist on an old database, so
+# these are created after _add_missing_columns.
+MIGRATED_INDEXES: tuple[str, ...] = (
+    "CREATE INDEX IF NOT EXISTS uploads_asset ON uploads(session_id, pair_key, resource)",
 )
 _SCHEMA_FILE = Path(__file__).with_name("schema.sql")
 # Full-text tokenizer of items_fts. unicode61 treats combining marks (Unicode Mn, Mc) as separators,
@@ -79,6 +92,8 @@ def init_db() -> None:
         conn.executescript(schema)
         with tx(conn):
             _add_missing_columns(conn)
+            for stmt in MIGRATED_INDEXES:
+                conn.execute(stmt)
             _upgrade_fts(conn, schema)
             conn.execute("INSERT OR IGNORE INTO kv(key, value) VALUES ('schema_version', ?)", (str(SCHEMA_VERSION),))
             conn.execute(

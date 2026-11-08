@@ -22,6 +22,10 @@ const TrashPage = lazy(() => import('./pages/TrashPage'))
 const SettingsPage = lazy(() => import('./pages/SettingsPage'))
 const MediaPage = lazy(() => import('./pages/MediaPage'))
 const NotFoundPage = lazy(() => import('./pages/NotFoundPage'))
+const AlbumsPage = lazy(() => import('./pages/AlbumsPage'))
+const AlbumPage = lazy(() => import('./pages/AlbumPage'))
+const MapPage = lazy(() => import('./pages/MapPage'))
+const SharePage = lazy(() => import('./pages/SharePage'))
 
 export default function App() {
   return (
@@ -32,11 +36,15 @@ export default function App() {
           <Routes>
             <Route path="/setup" element={<SetupPage />} />
             <Route path="/login" element={<LoginPage />} />
+            <Route path="/s/:token" element={<SharePage />} />
             <Route element={<AppShell />}>
               <Route path="/" element={<LibraryPage />} />
               <Route path="/people" element={<PeoplePage />} />
               <Route path="/people/:id" element={<PersonPage />} />
               <Route path="/documents" element={<DocumentsPage />} />
+              <Route path="/albums" element={<AlbumsPage />} />
+              <Route path="/albums/:id" element={<AlbumPage />} />
+              <Route path="/map" element={<MapPage />} />
               <Route path="/review" element={<ReviewPage />} />
               <Route path="/vault" element={<VaultPage />} />
               <Route path="/upload" element={<UploadPage />} />

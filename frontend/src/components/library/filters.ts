@@ -67,8 +67,9 @@ export function readFilters(params: URLSearchParams, vault: boolean): LibraryFil
   }
 }
 
-export function itemsQuery(f: LibraryFilters, vault: boolean): Omit<ItemsQuery, 'cursor'> {
+export function itemsQuery(f: LibraryFilters, vault: boolean, album?: number): Omit<ItemsQuery, 'cursor'> {
   return {
+    album: album ?? undefined,
     category: f.category || undefined,
     kind: f.kind || undefined,
     person: f.people.length ? f.people : undefined,

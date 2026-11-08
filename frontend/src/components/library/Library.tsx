@@ -26,14 +26,16 @@ interface Props {
   title?: string
   /** Extra controls in the header (the vault's countdown and lock button). */
   headerExtra?: ReactNode
+  /** Show one album's members only (section 24). */
+  album?: number
 }
 
-export default function Library({ vault = false, title, headerExtra }: Props) {
+export default function Library({ vault = false, title, headerExtra, album }: Props) {
   const [params, setParams] = useSearchParams()
   const filters = useMemo(() => readFilters(params, vault), [params, vault])
   const searching = filters.q !== ''
 
-  const iq = useMemo(() => itemsQuery(filters, vault), [filters, vault])
+  const iq = useMemo(() => itemsQuery(filters, vault, album), [filters, vault, album])
   const sq = useMemo(() => searchQuery(filters, vault), [filters, vault])
   const browse = useLibraryItems(iq, !searching)
   const search = useSearchList(sq, searching)
@@ -231,6 +233,7 @@ export default function Library({ vault = false, title, headerExtra }: Props) {
             onSelectAll={() => selection.setAll(list.items.map((i) => i.uid))}
             total={list.items.length}
             vault={vault}
+            album={album}
           />
         </div>
       )}

@@ -1,5 +1,7 @@
 // Actions for the selected library items: favourite, category, add or remove a tag, keep
 // (mis-clicks), vault, trash.
+import AlbumBulkActions from '../albums/BulkActions'
+import ShareBulkAction from '../share/BulkAction'
 import { useId, useState, type FormEvent } from 'react'
 import { useMutation } from '@tanstack/react-query'
 import { Lock, Star, StarOff, Tag, Trash2, Unlock, X } from 'lucide-react'
@@ -22,6 +24,8 @@ interface Props {
   onSelectAll: () => void
   total: number
   vault: boolean
+  /** The album page's id: its actions swap Add to album for Remove from album (section 24). */
+  album?: number
 }
 
 const DONE: Partial<Record<BulkAction, string>> = {
@@ -97,7 +101,7 @@ function TagForm({
   )
 }
 
-export default function BulkBar({ items, selected, onClear, onSelectAll, total, vault }: Props) {
+export default function BulkBar({ items, selected, onClear, onSelectAll, total, vault, album }: Props) {
   const toast = useToast()
   const refresh = useRefreshLibrary()
   const invalidateTags = useInvalidateTags()
@@ -170,6 +174,8 @@ export default function BulkBar({ items, selected, onClear, onSelectAll, total, 
           {vault ? <Unlock className="size-4" aria-hidden /> : <Lock className="size-4" aria-hidden />}
           {vault ? 'Not private' : 'Mark private'}
         </Button>
+        <AlbumBulkActions uids={[...selected]} vault={vault} album={album} busy={busy} onDone={onClear} />
+        <ShareBulkAction uids={[...selected]} vault={vault} busy={busy} />
         <Button variant="danger" disabled={busy} onClick={() => setConfirmDelete(true)}>
           <Trash2 className="size-4" aria-hidden />
           Delete

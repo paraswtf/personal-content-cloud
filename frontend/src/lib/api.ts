@@ -196,6 +196,8 @@ export interface ItemsQuery {
   sort?: 'taken' | 'added'
   /** Tag names, repeated as tag=; every one is required. */
   tag?: string[]
+  /** Members of this album only (section 24). */
+  album?: number
   cursor?: string | null
   limit?: number
 }

@@ -227,6 +227,9 @@ The full DDL is `backend/app/schema.sql`. Summary of tables and the columns code
   `fields` is `{"<key>": {"value": str, "label": str, "confidence": 0..1}}`.
 - `jobs(id, type, queue CHECK ('main','text','video'), payload, status, attempts, last_error, priority, run_after, created_at, updated_at)`.
 
+Tables and columns added by sections 23 to 28: `albums`, `album_items`, `shares`, `share_items`;
+`items.place*`, `items.gps_checked`, the `items_gps` index; `uploads.session_id`, `uploads.resource`.
+
 ## 6. Uploads
 
 The hub's chunked, resumable protocol, unchanged except: no uploader name; `UploadCreate` gains
@@ -571,12 +574,16 @@ queues, disk, wallet{configured, missing[]}, timezone, data_dir_free_bytes}`; `P
 downloader in a thread; progress via `GET`); `POST housekeeping` (no orphan sweep); `POST retry-failed` ->
 `{requeued}` (failed uploads whose bytes are kept, errored jobs, item statuses back to `pending`).
 
+Timeline, albums, map and places, share links, video encoders and device uploads: sections 23 to 28.
+
 ## 14. Frontend
 
-Routes: `/setup`, `/login` (no shell); everything else inside `AppShell` (session guard: redirects to
-`/login?next=`, `/setup` when `setup_required`): `/` Library, `/people`, `/people/:id`, `/documents`,
-`/review` (tabs Mis-clicks, Duplicates, Guesses), `/vault`, `/upload`, `/trash`, `/settings`
-(Account and passkeys, Sessions, System, Wallet), `/m/:uid` (standalone viewer), `*`.
+Routes: `/setup`, `/login`, `/s/:token` (shared link, section 26; no shell); everything else inside
+`AppShell` (session guard: redirects to `/login?next=`, `/setup` when `setup_required`): `/` Library
+(the timeline grid, section 23), `/people`, `/people/:id`, `/documents`, `/albums`, `/albums/:id`
+(section 24), `/map` (section 25), `/review` (tabs Mis-clicks, Duplicates, Guesses), `/vault`, `/upload`,
+`/trash`, `/settings` (Account and passkeys, Sessions, System, Learning, Sharing, Wallet, Appearance),
+`/m/:uid` (standalone viewer), `*`.
 
 Library: filter bar (category chips, kind, people, dates, favourites), search box (one box; results page
 shows the semantic and text hits with a mode switch), `MediaGrid` with document tiles (page 1 render in
@@ -638,6 +645,10 @@ serving sources against a stale API) and any other mix.
 | `OCR_ENABLED`, `OCR_MAX_PAGES` | true, 50 | |
 | `WALLET_PASS_TYPE_ID`, `WALLET_TEAM_ID`, `WALLET_ORG_NAME`, `WALLET_DIR`, `WALLET_KEY_PASSWORD` | unset, unset, site title, `DATA_DIR/wallet`, unset | Apple Wallet (the key password only when key.pem is encrypted) |
 | `WORKERS_ENABLED` | true (false in tests) | |
+| `VIDEO_ENCODER`, `VAAPI_DEVICE` | `auto`, `/dev/dri/renderD128` | web copy encoder: `auto`, `h264_nvenc`, `h264_vaapi`, `h264_qsv`, `libx264` (section 27) |
+| `VIDEO_PREVIEW_MAX_HEIGHT`, `VIDEO_PREVIEW_MAXRATE_KBPS`, `VIDEO_PREVIEW_CRF`, `VIDEO_STREAM_MAX_KBPS` | 1080, 6000, 23, 8000 | web copy rendition and the bitrate up to which H.264 originals stream as they are |
+| `GEO_ENABLED` | true | download and use the GeoNames gazetteer for place names (section 25) |
+| `MAP_TILES`, `MAP_TILE_STYLE` | `offline`, OpenFreeMap liberty | default basemap and the online style URL (section 25) |
 
 ## 16. Testing
 
@@ -919,3 +930,269 @@ assign popover that lists pets of that species first and never people; the item'
 with the paw; the People page requests `kind=person` and shows a Pets section below; the person page of a
 pet shows its species and a crops grid (select, move, unassign, remove) instead of faces and guesses; the
 library's person filter lists pets too.
+
+## 23. Timeline (`app/api/timeline.py`, `components/timeline/`)
+
+The library at scale: the browse grid renders only what is on screen, knows the whole library's
+shape before any card is loaded, and jumps to any month. Search results, people pages, review and
+trash keep `MediaGrid`.
+
+Buckets. A bucket is one calendar month of the sort key (`COALESCE(taken_at, created_at)` for
+`sort=taken`, `created_at` for `sort=added`) in `settings.local_timezone`, so the month headers agree
+with the `from`/`to` filters and the day logic elsewhere (section 9 of the hub, `local_day_start_utc`).
+`GET /api/timeline/buckets` takes every `GET /api/items` filter (`category`, `kind`, `person`, `tag`,
+`live`, `from`, `to`, `favorite`, `misclicks`, `dups`, `sort`, `vault`, `album`) and answers
+`TimelineBuckets = {buckets: [{key: "2024-03", count, newest, oldest}], total}` newest first, where
+`newest` and `oldest` are the sort keys at the bucket's ends. It runs one indexed query for the sort
+keys (`SELECT <sort_expr> AS k ... ORDER BY k DESC`, the `items_order` or `items_added` index) and
+walks them against month boundaries computed in Python (`util.local_month_start_utc(year, month)`,
+the first instant of the local month as a UTC ISO string in the stored format, compared as text,
+the same trick as `local_day_start_utc`). No `strftime` grouping: the stored strings are UTC and the
+local offset is not constant across years. 100 000 items answer in well under a second.
+`GET /api/timeline/bucket?key=YYYY-MM` with the same filters plus `cursor` and `limit` (1..1000,
+default 500) returns an `ItemPage` of that month in library order (`_page` with the month's
+`[start, end)` added to the where list; `total` is the bucket count on the first page). Both share
+the filter builder with `GET /api/items` (`library.item_filters(...) -> (where, params, sort_expr)`),
+so a filter added later applies to the grid, the buckets, the map and the shares alike. A `key` that
+is not `YYYY-MM` is 422.
+
+Frontend (`components/timeline/TimelineGrid.tsx`, used by `Library.tsx` whenever `filters.q` is
+empty). Tiles keep `MediaGrid`'s look: square thumbs, the same column counts per breakpoint (3, 4, 5,
+6, 7), the same badges and hover checkbox. The grid measures its width with a `ResizeObserver`,
+derives the column count and tile size, and lays the buckets out top to bottom: a month header row
+(`MMMM YYYY` and the count, sticky under the app header while its month is on screen) followed by
+`ceil(count / columns)` rows. Every bucket's height is known from its count alone, so the page has
+its full height at once and the scrollbar is honest. The window scrolls (as everywhere in the app);
+the grid renders only the buckets that intersect the viewport plus one viewport above and below, and
+within a bucket only the rows in that range, so a month with 5 000 photos costs as much as one screen.
+Bucket cards load on demand through `['timeline', 'bucket', query, key]` (react-query, pages of 500
+fetched in order until the visible rows are covered); rows not loaded yet draw placeholder squares
+of the final size, so nothing jumps when they arrive. `['timeline', 'buckets', query]` is the
+skeleton; both keys are in `LIBRARY_KEYS`, so bulk actions and viewer edits refetch them, and the
+scroll position stays because bucket heights only change when counts do. The header count comes
+from `total`. The empty state is `MediaGrid`'s.
+
+Scrubber. A thin rail on the right edge (always on desktop, shown while scrolling and for two seconds
+after on phones) marks the years at their share of the total height; dragging or tapping it scrolls
+to the bucket under the pointer and a floating label names the month. Keyboard users get the month
+headers in the tab order with `Home` and `End` on the grid.
+
+Selection and viewer. Selection works as before over loaded tiles; each month header has a Select
+month toggle for its loaded tiles; Select all in the bulk bar selects every loaded tile. The viewer
+opens through `useViewerParam` over the concatenation of the loaded buckets' cards in timeline order;
+its `loadMore` loads the next bucket after the last loaded one, so prev and next walk the whole
+library given time, and `total` is the buckets' total. Opening `?m=<uid>` for a card in a month that
+is not loaded yet scrolls to and loads that month first (the bucket key is derived from the card's
+sort key when the card is cached, else from `GET /api/items/{uid}`).
+
+## 24. Albums (`app/api/albums.py`, `albums` and `album_items` tables, `components/albums/`)
+
+Schema: `albums(id, name, name_key, description, cover_item_id REFERENCES items ON DELETE SET NULL,
+created_at, updated_at)` with `albums_name(name_key)`; `album_items(album_id REFERENCES albums ON
+DELETE CASCADE, item_id REFERENCES items ON DELETE CASCADE, added_at, PRIMARY KEY (album_id,
+item_id))` with `album_items_item(item_id)`. `name_key` is `util.name_key` of the name (casefolded,
+collapsed spaces); two albums cannot share it (409 `album_exists`). An album lists in time order,
+the library's order; there is no manual ordering. Trashing an item hides it from its albums and
+restoring brings it back (membership stays); purging removes the row through the cascade.
+
+API (`/api/albums`, session): `GET ?q&sort=updated|name|created&cursor&limit` ->
+`AlbumPage{items: [AlbumOut], next_cursor, total}` (`q` matches `name_key` as a substring);
+`POST {name, description?, item_uids?}` -> `AlbumOut` (201); `GET {id}`; `PATCH {id} {name?,
+description?, cover_item_uid?}` (`null` clears the chosen cover; a cover must be a member); `DELETE
+{id}` (the items stay); `POST {id}/items {uids}` -> `{added, skipped}` (skipped = already in);
+`DELETE {id}/items {uids}` -> `{removed}`. `AlbumOut = {id, name, description, count, vault_count,
+cover_url, newest, oldest, created_at, updated_at}`: `count` is the live members on the normal side,
+`vault_count` the live members in the vault (a number only; their cards show only in an unlocked
+vault), `cover_url` the chosen cover's thumb or the newest normal-side member's, `newest` and
+`oldest` the sort keys of the normal-side members. Items in an album: `GET /api/items?album=<id>`
+(and the timeline buckets with `album=`), so the album page is the library with one more filter;
+an unknown album id is 404. `ItemDetail.albums: [{id, name}]`. Bulk: `POST /api/items/bulk {action:
+"album" | "unalbum", value: "<album id>"}` adds or removes the selection (the album's `updated_at`
+moves on every change). Vault items may be members; nothing about them shows outside an unlocked
+vault, and an album share (section 26) never includes them.
+
+Frontend: `/albums` (`pages/AlbumsPage.tsx`: cards with cover, name, count and date range; sort menu;
+New album dialog; empty state) and `/albums/:id` (`pages/AlbumPage.tsx`: `<Library album={id}>` with
+the album header above the grid: name, description, count and date range, and a menu with Rename and
+description, Set cover (from the current selection or the open item), Share album (section 26) and
+Delete album; the bulk bar offers Remove from album here). Everywhere else the bulk bar has Add to
+album, which opens `AlbumPicker` (search, recent albums, Create new); the viewer's info panel has an
+Albums section with chips linking to each album and the same picker. Navigation gets Albums (desktop
+links and the phone More sheet; the phone tabs stay as they are). Query keys `['albums', ...]` and
+`['album', id]` are in `LIBRARY_KEYS`.
+
+## 25. Map and places (`app/geo/`, `app/api/map.py`, `components/map/`)
+
+What exists: `items.gps_lat/gps_lon/gps_alt` are read at ingest from EXIF and QuickTime tags
+(section 7) and shown in `ItemDetail.gps`; nothing else used them. This section adds an index, place
+names, a points API, a backfill for items ingested before GPS was read, and the map page.
+
+Schema: `items_gps ON items(gps_lat, gps_lon) WHERE gps_lat IS NOT NULL AND deleted_at IS NULL`;
+columns `items.place TEXT` (the display name, "Panaji, Goa, India"), `place_city`, `place_admin`,
+`place_country` (TEXT), `place_source TEXT` (NULL until looked up, then `geonames` or `none` when
+nothing is within reach), `gps_checked INTEGER NOT NULL DEFAULT 0` (the original was re-read for GPS
+by the backfill). All migrated through `MIGRATED_COLUMNS`.
+
+Gazetteer (`app/geo/gazetteer.py`): GeoNames `cities15000.zip`, `admin1CodesASCII.txt` and
+`countryInfo.txt` (CC BY 4.0; the attribution is in the README, the map footer and Settings >
+System), fetched by `scripts/download_models.py` into `MODELS_DIR/geo/` next to the models (about
+3 MB; `GEO_ENABLED=false` skips the download and every lookup). Loaded lazily into numpy arrays;
+`place_for(lat, lon) -> Place | None` is the nearest city by haversine within 100 km, with the
+admin-1 name and the country name resolved. Without the files every lookup answers None and
+`GET /api/map/status` says so.
+
+Places (`app/geo/places.py`): `tag_item(conn, item_id)` sets the place columns from the gazetteer;
+`housekeeping(conn, budget_s=5)` runs from the worker's housekeeping (every 10 minutes, section 7) and
+from `POST /api/map/refresh` (which runs it to completion on `worker.run_in_background("geo", ...)`):
+first items with GPS and `place_source IS NULL` (batches of 500, then `refresh_fts` for them), then
+the GPS backfill, `probe.read_gps(original)` for images and videos with `gps_lat IS NULL AND
+gps_checked = 0` (batches of 200, `gps_checked = 1` either way). Place names go into the FTS
+`labels` column (`documents/extract.refresh_fts`), so "goa" finds the photos taken there in text
+search. Items analysed later keep getting places from housekeeping within ten minutes of ingest.
+
+API (`/api/map`, session, vault through `want_vault`, every `GET /api/items` filter accepted):
+`GET points?bbox=w,s,e,n?` -> `MapPoints{points: [[lat, lon, uid, k]], total, with_gps}` where `k`
+is 0 image, 1 video, 2 document, 3 other, coordinates have five decimals, `total` counts the
+filtered items and `with_gps` those with coordinates; no limit, the response is compact and gzipped
+(100 000 points are about 3 MB raw). `GET items?bbox=w,s,e,n&cursor&limit` -> `ItemPage` of the items
+inside the box in library order (for the cluster panel). `GET places` -> `[{place, place_city,
+place_admin, place_country, count, lat, lon}]` grouped by place, most photos first, at most 500.
+`GET status` -> `{gazetteer: bool, with_gps, unchecked, unplaced, running}`; `POST refresh` -> `{started}`.
+Every query goes through `visible_sql`, so vault items, companions, mis-clicks and duplicate copies
+follow the library's rules.
+
+Frontend (`/map`, `pages/MapPage.tsx`, MapLibre GL JS and supercluster, new dependencies). Basemap:
+by default an offline one, Natural Earth 110m land and country boundaries bundled as
+`frontend/public/map/basemap.json` (about half a megabyte) drawn as fill and line layers on a plain
+background, so the map works with no internet and nothing leaves the server; a Detailed map toggle
+on the page switches to online vector tiles (`MAP_TILE_STYLE`, default OpenFreeMap's `liberty`
+style, no key) and remembers the choice in localStorage (`pcc.mapTiles`), with a one-line note that
+tiles come from that service and photos never do. `GET /api/config` carries `map: {tiles, style_url}`
+with the defaults (`MAP_TILES` is `offline` or `online`). Points are clustered client side (radius
+60 px, counts on the cluster circles, a thumb on single points when zoomed in); clicking a cluster
+zooms into it, clicking a single point or a small cluster opens the side panel (desktop) or bottom
+sheet (phone) with those items in a `MediaGrid` (`GET /api/map/items` with the cluster's bounds) and
+the viewer. The library's filter bar is reused in a compact form (dates, people, category,
+favourites, kind; no search), kept in the URL like the library so a filtered map is a link, and a
+Show on map button in the library's filter panel opens `/map` with the same parameters. A Places
+list (from `GET /api/map/places`) sits beside the map on desktop and in a sheet on phones; choosing
+one flies there. The viewer's info panel shows a Location row (place name, else coordinates) with a
+Show on map link that opens `/map?at=<lat>,<lon>&z=14&m=<uid>`. Navigation gets Map. The footer
+credits Natural Earth and GeoNames, and OpenFreeMap and OpenStreetMap when online tiles are on.
+
+## 26. Sharing (`app/api/share.py`, `shares` and `share_items` tables, `/s/:token`)
+
+A share link shows a chosen set of photos and videos to someone without an account: an album, or
+a hand-picked set. Vault items are never shared (creating a share with one answers 422 `vault_item`;
+an album share skips them), trashed items drop out of a share while in the trash, and a link can
+carry a password, an expiry and a download switch, and can be revoked.
+
+Schema: `shares(id, token UNIQUE (16 random bytes, base64url, 22 chars), kind 'album'|'items',
+album_id REFERENCES albums ON DELETE CASCADE, title, password_hash (argon2id, NULL when open),
+expires_at, allow_download INTEGER DEFAULT 1, created_at, revoked_at, view_count, last_viewed_at)`;
+`share_items(share_id REFERENCES shares ON DELETE CASCADE, item_id REFERENCES items ON DELETE
+CASCADE, position, PRIMARY KEY (share_id, item_id))`.
+
+Owner API (`/api/shares`, session): `GET` -> `[ShareOut]` (newest first, revoked ones last 30 days
+included with `revoked_at` set); `POST {kind: "album" | "items", album_id?, item_uids?, title?,
+password?, expires_days?, allow_download?}` -> `ShareOut` (201); `PATCH {id} {title?, password?,
+expires_days?, allow_download?}` (an empty password clears it, `expires_days: null` means never);
+`DELETE {id}` revokes (the row stays for the list; a revoked link answers 404). `ShareOut = {id, token,
+path ("/s/<token>"), kind, album: {id, name} | null, title, count, has_password, expires_at,
+allow_download, created_at, revoked_at, view_count, last_viewed_at}`; the frontend shows
+`location.origin + path`.
+
+Public API (no session; the router carries its full paths and is registered before the SPA
+catch-all): `GET /api/s/{token}` -> `SharePublic{title, kind, count, allow_download, expires_at,
+items: [ShareItem{uid, kind, width, height, duration_s, taken_at, filename, urls{thumb, preview,
+video, download}}]}` in library order, or 403 `share_password_required`, 404 `share_not_found`
+(unknown or revoked), 410 `share_expired`; it bumps `view_count` and `last_viewed_at`.
+`POST /api/s/{token}/unlock {password}` checks the password (403 `invalid_password`; ten failures per
+IP per ten minutes answer 429 `too_many_attempts`, a limiter of its own next to the login one) and sets
+the cookie `pcc_share_<token>` (an `itsdangerous.TimestampSigner` signature of the token with the
+app secret, HttpOnly, SameSite=Lax, 7 days) that the other public routes accept. Public files, outside
+`/api` so they are not gzipped and Range works: `GET|HEAD /files/s/{token}/thumb/{uid}`,
+`/preview/{uid}`, `/video/{uid}` (the web copy when done, else the original) and `/original/{uid}`
+(only with `allow_download`; `?download=1` adds the attachment disposition); each checks the token,
+the password cookie and that the item is a live, non-vault member, serves with the usual
+`content-security-policy` and `private, max-age=3600`, and never answers 401 (the owner's open tab
+would log out). Share URLs appear in nobody's logs beyond the access log.
+
+Frontend: `/s/:token` (`pages/SharePage.tsx`, outside the shell, its own light chrome: title,
+count, "Shared from <site title>", a password form, a simple responsive grid, a lightbox with prev
+and next, keyboard arrows and Escape, a video element, and a Download button when allowed; expired
+and not-found states). Owner side: `ShareModal` (title, password, expiry never, 1 day, 7 days, 30
+days, allow download; afterwards the link with Copy) opened from the bulk bar's Share, the album
+page's Share album and the viewer's Share (one item). Settings > Sharing (`SharingTab.tsx`) lists the
+links with views, expiry and status, and offers Copy, Edit (password, expiry, download) and Revoke.
+`['shares']` is in `LIBRARY_KEYS`.
+
+## 27. Video transcoding with hardware encoders (`app/media/encoders.py`, `app/media/video.py`)
+
+The web copy (`video_preview` job, section 7) exists since the first build: libx264 on the CPU, 720p,
+only for originals that browsers cannot stream (`needs_web_preview`). This section makes it use the
+machine's encoder, raises the rendition, and shows what is going on.
+
+Encoders (`app/media/encoders.py`): candidates in order from `VIDEO_ENCODER` (`auto` means
+`h264_nvenc`, `h264_vaapi`, `h264_qsv`, `libx264`; a named encoder means that one, then `libx264`).
+`detect() -> EncoderInfo{name, hw, device, reason, checked_at}` runs a three-frame test encode per
+candidate (`ffmpeg -f lavfi -i color=size=320x240:rate=25 -frames:v 3 -c:v <enc> <opts> -f null -`,
+20 s timeout; VAAPI with `-vaapi_device $VAAPI_DEVICE`, default `/dev/dri/renderD128`) and keeps the
+first that works; the result is cached for the process, computed lazily by the first transcode on
+the video worker thread (never at startup), and re-run by `POST /api/system/video/detect`.
+`transcode_preview` builds the command for the chosen encoder: software scaling to
+`VIDEO_PREVIEW_MAX_HEIGHT` (`scale=-2:min(ih,H)`; VAAPI scales on the device after `hwupload`),
+`-profile:v high`, `yuv420p` (nv12 on the device), a keyframe every 2 s, AAC audio, `+faststart`,
+and the encoder's quality knob at an equivalent of CRF `VIDEO_PREVIEW_CRF` (`-cq` for NVENC,
+`-global_quality` for QSV, `-qp` for VAAPI) capped by `VIDEO_PREVIEW_MAXRATE_KBPS`. A hardware
+attempt that fails falls back to libx264 inside the same job (logged, no attempt used); a libx264
+failure raises as before. Software encodes keep `nice`.
+
+Defaults move with the hardware: `VIDEO_PREVIEW_MAX_HEIGHT` 1080 (was 720),
+`VIDEO_PREVIEW_MAXRATE_KBPS` 6000 (was 2500), `VIDEO_PREVIEW_CRF` 23 (was 27), `VIDEO_STREAM_MAX_KBPS`
+8000 (was 3000: H.264 originals up to that bitrate stream as they are). Copies made earlier stay as
+they are; `POST /api/system/video/requeue {scope: "failed" | "all"}` -> `{requeued}` queues the web
+copy again for videos whose copy failed, or for every video that needs one.
+
+Status: `GET /api/system` gains `video: {encoder, hw, device, reason, checked_at, queued, running,
+failed, done, pending}` (`encoder` null until detected). Settings > System gets a Video card with the
+encoder in use (for example "h264_nvenc on NVIDIA GeForce RTX 2080" or "libx264 (software)"), the
+counts, Test encoders and Re-run failed copies.
+
+## 28. Device uploads: resumable sessions, a ledger and background transfers (`api/uploads.py`, `ios/`)
+
+The chunked protocol (section 6) already resumes by offset within one upload id and the sync check
+(section 21) already stops re-sends. What a phone needs on top: an interrupted upload must continue
+after the app was killed, the server must confirm per asset what it holds, and the transfer must run
+while the app is in the background.
+
+Backend. `uploads` gains `session_id INTEGER` (the session that created the upload) and `resource
+TEXT` (`still`, `video` or `file`; the half of a Live Photo), both migrated, with an index
+`uploads_asset(session_id, pair_key, resource)`. `POST /api/uploads` from a bearer session with a
+`pair_key` is idempotent: an `uploading` row of the same session, `pair_key`, `resource` and `size`
+is returned as it is (its `received_bytes` tells the client where to continue) instead of opening
+a second staging file; a row of another size is cancelled first. `POST /api/uploads/check` answers
+`{known, assets, pending: {asset_id: [{upload_id, resource, received_bytes, size}]}, trashed:
+[asset_id]}`: `pending` lists the caller's unfinished uploads for those assets, `trashed` the assets
+whose stored item is in the trash (they still count as known, and the app shows them apart so the
+owner decides before deleting them from the phone). `UploadCreate.pair_key` reaches the web types
+too (the PWA has no use for it beyond typing).
+
+iOS (`ios/Sources/Services/`): a background `URLSession` (identifier `in.biios.pcc.upload`,
+`isDiscretionary` when the charging or Wi-Fi options ask for it, `allowsCellularAccess` from the
+Wi-Fi option) carries every chunk as an upload task from a temporary file; the delegate schedules
+the next chunk of the same file when one completes, so a file keeps flowing while the app is
+suspended and the system relaunches the app into the delegate when it has to. The upload state
+(upload id, resource, next offset, chunk file) lives in the `SyncRecord`; on launch and on every run
+the engine first asks the sync check and continues the `pending` uploads from the server's offset
+(a lost chunk reply is resolved by `GET /api/uploads/{id}`), then hashes and creates the rest.
+Create, chunk and complete calls retry with backoff (1, 2, 4, 8, 16, 30 s, at most eight attempts),
+`offset_mismatch` resyncs, and a 507 or 413 fails the asset with the server's message. The sync
+check sends asset ids, and hashes for assets without a record (after a reinstall or when the photo
+was uploaded from the web), so nothing is sent twice. Delete synced lists only assets the server
+confirms as stored and not trashed; trashed ones sit under their own heading. The PWA's drop zone
+waits for the picker (section 14): iOS hands files over late when originals live in iCloud.
+
+Web: `DropZone` polls the file input after the picker opens (90 s at most) and shows a waiting notice,
+because WebKit may deliver the files seconds after the picker closes or without a change event
+while iCloud originals download.

@@ -62,6 +62,8 @@ CREATE TABLE IF NOT EXISTS uploads (
   uid               TEXT NOT NULL UNIQUE,      -- returned to the client; a new item reuses it as items.uid
   source            TEXT NOT NULL DEFAULT 'web' CHECK (source IN ('web','share','camera','api')),
   pair_key          TEXT,                       -- the client's key for the two halves of a Live Photo
+  session_id        INTEGER,                    -- the session that created it (device resume, section 28)
+  resource          TEXT,                       -- 'still' | 'video' | 'file': the half of a Live Photo
   client_id         TEXT,                      -- random id kept in the browser (resume, "mine")
   original_filename TEXT NOT NULL,
   size_bytes        INTEGER NOT NULL,          -- declared size
@@ -137,6 +139,12 @@ CREATE TABLE IF NOT EXISTS items (
   companion_of      INTEGER REFERENCES items(id) ON DELETE SET NULL,  -- a Live Photo's MOV: the still it belongs to
   live_video_item_id INTEGER REFERENCES items(id) ON DELETE SET NULL, -- a Live Photo still: its MOV item
   live              INTEGER NOT NULL DEFAULT 0, -- the still has a clip (a paired MOV or an embedded motion clip)
+  place             TEXT,                      -- "Panaji, Goa, India" from the gazetteer (section 25)
+  place_city        TEXT,
+  place_admin       TEXT,
+  place_country     TEXT,
+  place_source      TEXT,                      -- NULL until looked up, then 'geonames' or 'none'
+  gps_checked       INTEGER NOT NULL DEFAULT 0, -- the original was re-read for GPS by the backfill
   deleted_at        TEXT,                      -- in the trash since (NULL = live)
   created_at        TEXT NOT NULL,
   updated_at        TEXT NOT NULL
@@ -386,3 +394,48 @@ CREATE TABLE IF NOT EXISTS jobs (
 CREATE INDEX IF NOT EXISTS jobs_pick ON jobs(queue, status, priority, id);
 -- enqueue(unique=True) looks for a live job with the same type and payload.
 CREATE INDEX IF NOT EXISTS jobs_dedup ON jobs(type, payload) WHERE status IN ('queued', 'running');
+
+-- Albums (docs/ARCHITECTURE.md section 24).
+CREATE TABLE IF NOT EXISTS albums (
+  id            INTEGER PRIMARY KEY,
+  name          TEXT NOT NULL,
+  name_key      TEXT NOT NULL,
+  description   TEXT NOT NULL DEFAULT '',
+  cover_item_id INTEGER REFERENCES items(id) ON DELETE SET NULL,
+  created_at    TEXT NOT NULL,
+  updated_at    TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS albums_name ON albums(name_key);
+CREATE TABLE IF NOT EXISTS album_items (
+  album_id INTEGER NOT NULL REFERENCES albums(id) ON DELETE CASCADE,
+  item_id  INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+  added_at TEXT NOT NULL,
+  PRIMARY KEY (album_id, item_id)
+);
+CREATE INDEX IF NOT EXISTS album_items_item ON album_items(item_id);
+
+-- Share links (section 26).
+CREATE TABLE IF NOT EXISTS shares (
+  id             INTEGER PRIMARY KEY,
+  token          TEXT NOT NULL UNIQUE,
+  kind           TEXT NOT NULL CHECK (kind IN ('album','items')),
+  album_id       INTEGER REFERENCES albums(id) ON DELETE CASCADE,
+  title          TEXT NOT NULL DEFAULT '',
+  password_hash  TEXT,
+  expires_at     TEXT,
+  allow_download INTEGER NOT NULL DEFAULT 1,
+  created_at     TEXT NOT NULL,
+  revoked_at     TEXT,
+  view_count     INTEGER NOT NULL DEFAULT 0,
+  last_viewed_at TEXT
+);
+CREATE TABLE IF NOT EXISTS share_items (
+  share_id INTEGER NOT NULL REFERENCES shares(id) ON DELETE CASCADE,
+  item_id  INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+  position INTEGER NOT NULL,
+  PRIMARY KEY (share_id, item_id)
+);
+CREATE INDEX IF NOT EXISTS share_items_item ON share_items(item_id);
+
+-- Map (section 25): items with coordinates. gps_lat has existed since the first schema, so the index is safe here.
+CREATE INDEX IF NOT EXISTS items_gps ON items(gps_lat, gps_lon) WHERE gps_lat IS NOT NULL AND deleted_at IS NULL;

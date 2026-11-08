@@ -2,6 +2,7 @@
 // while this tab is open (the hub's dashboard cards, adapted). Missing models can be downloaded from
 // here; housekeeping runs the cleanup jobs now instead of waiting for their schedule, and failed
 // uploads can be queued for processing again.
+import VideoCard from './VideoCard'
 import { useState, type ReactNode } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import clsx from 'clsx'
@@ -280,6 +281,7 @@ export default function SystemTab() {
           )}
         </Section>
 
+        <VideoCard video={s.video} onRefresh={() => void q.refetch()} />
         <Section title="Disk">
           <div className="flex items-center gap-2 text-sm text-ink-soft">
             <HardDrive className="size-4 text-ink-faint" aria-hidden />

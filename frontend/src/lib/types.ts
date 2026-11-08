@@ -352,6 +352,11 @@ export interface LiveVideoOut {
   url: string
   duration_s: number | null
 }
+/** An album the item belongs to (section 24). */
+export interface AlbumRef {
+  id: number
+  name: string
+}
 export interface ItemDetail extends ItemCard {
   mime: string
   size_bytes: number
@@ -370,6 +375,8 @@ export interface ItemDetail extends ItemCard {
   faces: FaceOut[]
   bodies: BodyOut[]
   animals: AnimalOut[]
+  /** Albums containing the item (section 24). */
+  albums: AlbumRef[]
   tags: PersonRef[]
   people: PersonRef[]
   /** Free-form tags: the owner's first, then suggestions by score. */
@@ -398,6 +405,8 @@ export type BulkAction =
   | 'favorite'
   | 'unfavorite'
   | 'purge'
+  | 'album'
+  | 'unalbum'
   /** value: the tag name (created when new) */
   | 'tag'
   /** value: the tag name */
@@ -539,6 +548,9 @@ export interface UploadCreate {
   client_id?: string | null
   sha256?: string | null
   source?: UploadSource
+  /** The device's id for the asset; both halves of a Live Photo share it (sections 20 and 28). */
+  pair_key?: string | null
+  resource?: 'still' | 'video' | 'file'
 }
 export interface UploadOut {
   id: string
@@ -572,6 +584,19 @@ export interface ModelStatus {
   downloading: boolean
   error: string | null
 }
+/** The web copy encoder and queue (section 27). */
+export interface VideoStatus {
+  encoder: string | null
+  hw: boolean
+  device: string | null
+  reason: string | null
+  checked_at: string | null
+  queued: number
+  running: number
+  failed: number
+  done: number
+  pending: number
+}
 export interface SystemOut {
   version: string
   site_title: string
@@ -584,6 +609,7 @@ export interface SystemOut {
   ffmpeg: boolean
   workers: boolean
   download: { running: boolean; progress: string | null; error: string | null } | null
+  video: VideoStatus | null
 }
 // learning (section 18): what the small models learned from the owner's corrections
 export type LearningEventKind = 'category' | 'vault' | 'misclick' | 'doc_type' | 'guess' | 'tag'
@@ -626,4 +652,6 @@ export interface ConfigOut {
   categories: Category[]
   vault_unlock_min: number
   trash_days: number
+  /** Map defaults (section 25). */
+  map: { tiles: 'offline' | 'online'; style_url: string }
 }

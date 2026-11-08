@@ -51,7 +51,9 @@ def test_sync_check_by_hash_and_asset_id(client):
     uid = client.get("/api/items").json()["items"][0]["uid"]
     r = client.post("/api/uploads/check", json={"sha256": [sha, "0" * 64], "asset_ids": ["asset-10", "asset-11"]}, headers=H)
     assert r.status_code == 200
-    assert r.json() == {"known": {sha: uid}, "assets": {"asset-10": uid}}
+    body = r.json()
+    assert body["known"] == {sha: uid} and body["assets"] == {"asset-10": uid}
+    assert body["pending"] == {} and body["trashed"] == []  # section 28 fields, empty for a web session
     # a trashed item still counts as known, so the device does not send it again
     client.delete(f"/api/items/{uid}", headers=H)
     assert client.post("/api/uploads/check", json={"sha256": [sha]}, headers=H).json()["known"] == {sha: uid}

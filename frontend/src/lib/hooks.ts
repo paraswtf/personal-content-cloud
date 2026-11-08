@@ -83,6 +83,11 @@ export const LIBRARY_KEYS = [
   'review',
   'stats',
   'trash',
+  'timeline',
+  'albums',
+  'album',
+  'map',
+  'shares',
 ] as const
 
 /** Invalidate every library query (lists, details, people, documents, review bins, stats). */

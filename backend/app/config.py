@@ -134,6 +134,13 @@ class Settings:
     video_stream_max_kbps: int
     video_transcode_max_s: float
     video_faces_max_s: float
+    video_encoder: str         # auto | h264_nvenc | h264_vaapi | h264_qsv | libx264 (section 27)
+    vaapi_device: str
+
+    # map and places (section 25)
+    geo_enabled: bool
+    map_tiles: str             # offline | online
+    map_tile_style: str
 
     # search
     search_enabled: bool
@@ -232,6 +239,11 @@ def _load(**overrides) -> Settings:
         video_stream_max_kbps=_int("VIDEO_STREAM_MAX_KBPS", 3000),
         video_transcode_max_s=_float("VIDEO_TRANSCODE_MAX_S", 3 * 3600.0),
         video_faces_max_s=_float("VIDEO_FACES_MAX_S", 900.0),
+        video_encoder=(_env("VIDEO_ENCODER", "auto") or "auto").strip().lower(),
+        vaapi_device=_env("VAAPI_DEVICE", "/dev/dri/renderD128"),
+        geo_enabled=_bool("GEO_ENABLED", True),
+        map_tiles=(_env("MAP_TILES", "offline") or "offline").strip().lower(),
+        map_tile_style=_env("MAP_TILE_STYLE", "https://tiles.openfreemap.org/styles/liberty"),
         search_enabled=_bool("SEARCH_ENABLED", True),
         search_threads=max(1, _int("SEARCH_THREADS", 2)),
         search_min_relevance=_float("SEARCH_MIN_RELEVANCE", DEFAULT_SEARCH_MIN_RELEVANCE),
