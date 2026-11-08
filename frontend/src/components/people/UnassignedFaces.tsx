@@ -38,7 +38,7 @@ export default function UnassignedFaces({ open, onClose }: { open: boolean; onCl
     mutationFn: () => runBulk([...sel.selected], (id) => api.people.deleteFace(id)),
     onSuccess: (r) => {
       if (r.failed) toast.error(`${r.failed} could not be removed. ${errorMessage(r.firstError)}`)
-      else toast.success(`${formatCount(r.done, 'face')} removed. Faces that look like them will not be found again.`)
+      else toast.success(`${formatCount(r.done, 'face')} removed and kept as examples of what is not a face.`)
       sel.clear()
       void refresh()
     },

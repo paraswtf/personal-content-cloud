@@ -229,12 +229,15 @@ def _clear(row: sqlite3.Row) -> bool:
 
 
 def _threshold(row: sqlite3.Row) -> float:
-    """The cut a face must reach to join a person: cluster_match_threshold for a fully clear face
-    (face weight 1), rising linearly to the stricter cluster_match_threshold_low as the weight falls
-    to 0 (a blurred, masked or turned-away face needs stronger evidence)."""
-    w = face_weight(row["det_score"], row["size_px"], row["clarity"], row["sharpness"])
+    """The cut a face must reach to join a person: a good face (is_good_face) from
+    cluster_match_threshold at face weight 1 rising linearly to the stricter
+    cluster_match_threshold_low as the weight falls to 0 (a blurred, masked or turned-away face needs
+    stronger evidence); any other face cluster_match_threshold_low, as before the weight existed."""
     good, low = float(settings.cluster_match_threshold), float(settings.cluster_match_threshold_low)
-    return low - (low - good) * w
+    if not is_good_face(row["det_score"], row["size_px"]):
+        return low
+    w = face_weight(row["det_score"], row["size_px"], row["clarity"], row["sharpness"])
+    return max(good, low - (low - good) * w)
 
 
 def _score(idx: FaceIndex, faces: list[sqlite3.Row], exclude: frozenset[int],

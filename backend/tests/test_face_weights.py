@@ -92,6 +92,9 @@ def test_the_cut_rises_as_the_weight_falls_and_only_clear_faces_start_people(con
     assert cluster._threshold(row(**HELMET)) == pytest.approx(low)
     half = face_weight(0.9, 120, 17.5, 45.0)
     assert cluster._threshold(row(clarity=17.5, sharpness=45.0)) == pytest.approx(low - (low - good) * half)
+    # A face that is not good keeps the strict cut it always had, whatever its weight.
+    assert cluster._threshold(row(det_score=0.65, size_px=200)) == pytest.approx(low)
+    assert cluster._threshold(row(size_px=36, **CLEAR)) == pytest.approx(low)
 
     item = make_item(conn)
     clear = make_face(conn, item["id"], None, embedding=_rand(5), **CLEAR)

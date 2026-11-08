@@ -521,8 +521,9 @@ would start to match them.
   measured.
 - Matching: a person's faces are their examples by weight (`index._topk_means`: weight times 1.5 for the owner's
   own), faces of weight 0 are no example at all, and a person whose faces all weigh 0 is never scored; centroids
-  (merge suggestions, merge similarity) are weighted the same way. A face's own cut rises linearly from
-  `CLUSTER_MATCH_THRESHOLD` (weight 1) to `CLUSTER_MATCH_THRESHOLD_LOW` (weight 0), and only a clear face
+  (merge suggestions, merge similarity) are weighted the same way. A good face's own cut rises linearly from
+  `CLUSTER_MATCH_THRESHOLD` (weight 1) to `CLUSTER_MATCH_THRESHOLD_LOW` (weight 0); any other face keeps
+  `CLUSTER_MATCH_THRESHOLD_LOW` as before, so the weight only ever makes a cut stricter. Only a clear face
   (`is_clear_face`: the good-face rule and weight `>= CLEAR_WEIGHT` 0.5) starts a new person.
 - Learning (section 18): a face moves a learned threshold by its weight.
 - A person the owner tags on an unclear face (a helmet, a mask, their back, or a drawn person box with no face,
