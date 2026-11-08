@@ -65,11 +65,20 @@ class SyncCheckIn(BaseModel):
     asset_ids: list[str] = Field(default=[], max_length=2000)
 
 
+class SyncPending(BaseModel):
+    """One of the caller's unfinished uploads of an asset (section 28): continue it at received_bytes."""
+    upload_id: str
+    resource: Literal["still", "video", "file"] = "file"
+    received_bytes: int
+    size: int
+
+
 class SyncCheckOut(BaseModel):
     known: dict[str, str] = {}   # sha256 -> item uid (live or in the trash)
     assets: dict[str, str] = {}  # asset id (the upload pair key) -> item uid
-    # section 28: the caller's unfinished uploads per asset, and the assets whose item is in the trash
-    pending: dict[str, list[dict[str, Any]]] = {}
+    # section 28: the caller's own 'uploading' rows per asked asset id, and the asked asset ids with
+    # an item in the trash (they still count in known and assets)
+    pending: dict[str, list[SyncPending]] = {}
     trashed: list[str] = []
 
 
@@ -277,6 +286,7 @@ class ItemDetail(ItemCard):
     bodies: list[BodyOut] = []
     animals: list[AnimalOut] = []
     albums: list[AlbumRef] = []  # section 24
+    place: str | None = None  # section 25: "Panaji, Goa, India" when the gazetteer knows the spot
     tags: list[PersonRef] = []
     people: list[PersonRef] = []
     user_tags: list[ItemTagOut] = []

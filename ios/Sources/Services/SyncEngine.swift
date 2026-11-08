@@ -4,8 +4,9 @@ import SwiftData
 import Network
 import UIKit
 
-/// The sync run: find new assets, skip what the server already holds, upload the rest through the
-/// chunked protocol, and record every outcome. One run at a time.
+/// The sync run (docs/ARCHITECTURE.md sections 21 and 28): ask the server what it holds, continue
+/// the uploads that were interrupted from the server's offset, then export, hash and upload the
+/// rest through the background uploader, and record every outcome. One run at a time.
 @MainActor
 final class SyncEngine: ObservableObject {
     static let shared = SyncEngine()
@@ -18,6 +19,13 @@ final class SyncEngine: ObservableObject {
     private var task: Task<Void, Never>?
     private let monitor = NWPathMonitor()
     private var onWifi = true
+
+    /// What the sync check answered for the assets of a run.
+    struct ServerState {
+        var assets: [String: String] = [:]
+        var pending: [String: [PendingUpload]] = [:]
+        var trashed: Set<String> = []
+    }
 
     private init() {
         monitor.pathUpdateHandler = { [weak self] path in
@@ -44,8 +52,16 @@ final class SyncEngine: ObservableObject {
         }
     }
 
+    /// Ends the run (the background task's time is up). A transfer in flight goes on in the
+    /// background session.
     func cancel() {
         task?.cancel()
+    }
+
+    /// The Stop button: ends the run and pauses the transfer in flight; the next run continues it.
+    func stop() {
+        task?.cancel()
+        BackgroundUploader.shared.pause()
     }
 
     // MARK: the run
@@ -83,26 +99,55 @@ final class SyncEngine: ObservableObject {
             return
         }
 
-        let ctx = SyncStore.shared.newContext()
+        // One context for the engine, the uploader's delegate and the views: the main context.
+        let ctx = SyncStore.shared.container.mainContext
+        let uploader = BackgroundUploader.shared
         let assets = PhotoLibrary.assets(since: AppSettings.syncSince, includeVideos: AppSettings.includeVideos)
         statusLine = "Checking \(assets.count) items"
-        let known = (try? ctx.fetch(FetchDescriptor<SyncRecord>())) ?? []
-        var byId = Dictionary(uniqueKeysWithValues: known.map { ($0.assetId, $0) })
+        let records = (try? ctx.fetch(FetchDescriptor<SyncRecord>())) ?? []
+        var byId = Dictionary(records.map { ($0.assetId, $0) }, uniquingKeysWith: { a, _ in a })
+        let inLibrary = Dictionary(assets.map { ($0.localIdentifier, $0) }, uniquingKeysWith: { a, _ in a })
+        // Interrupted uploads come first, whatever the current filter says (they hold server state).
+        let unfinished = records.filter { ($0.status == "uploading" || $0.status == "pending") && $0.files.contains { !$0.done } }
         let todo = assets.filter { byId[$0.localIdentifier]?.status != "synced" }
         SyncStore.shared.log("\(assets.count) items in the library, \(todo.count) to check")
 
-        // Ask the server, 200 asset ids at a time, which it already holds.
-        var serverHas: [String: String] = [:]
-        for batch in stride(from: 0, to: todo.count, by: 200) {
+        // 1. What the server holds, and this device's unfinished uploads, by asset id.
+        var askIds: [String] = []
+        var seen = Set<String>()
+        for id in unfinished.map(\.assetId) + todo.map(\.localIdentifier) where seen.insert(id).inserted { askIds.append(id) }
+        var server = ServerState()
+        for batch in stride(from: 0, to: askIds.count, by: 200) {
             if Task.isCancelled { return }
-            let ids = todo[batch..<min(batch + 200, todo.count)].map(\.localIdentifier)
-            if let out = try? await api.check(hashes: [], assetIds: ids) {
-                serverHas.merge(out.assets) { a, _ in a }
+            let ids = Array(askIds[batch..<min(batch + 200, askIds.count)])
+            do {
+                let out = try await api.check(hashes: [], assetIds: ids)
+                server.assets.merge(out.assets) { a, _ in a }
+                server.pending.merge(out.pending) { a, _ in a }
+                server.trashed.formUnion(out.trashed)
+            } catch {
+                lastError = "The sync check failed: \(error.localizedDescription)"
+                SyncStore.shared.log(lastError ?? "", level: "error")
+                return
             }
         }
 
-        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("pcc-sync", isDirectory: true)
-        try? FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+        // 2. Continue the interrupted uploads from the server's offset.
+        let live = await uploader.liveAssets()
+        var handled = Set<String>()
+        for rec in unfinished {
+            if Task.isCancelled { return }
+            if let deadline, Date() > deadline { SyncStore.shared.log("Background time is up, continuing later"); return }
+            handled.insert(rec.assetId)
+            statusLine = "Continuing \(rec.filename.isEmpty ? "an upload" : rec.filename)"
+            if !live.contains(rec.assetId) {
+                let asset = inLibrary[rec.assetId] ?? PhotoLibrary.assets(ids: [rec.assetId]).first
+                await resume(rec, asset: asset, server: server, api: api)
+            }
+            await uploader.wait(for: rec.assetId, until: deadline)
+        }
+
+        // 3. The rest, newest first.
         var done = 0
         for asset in todo {
             if Task.isCancelled { break }
@@ -110,124 +155,285 @@ final class SyncEngine: ObservableObject {
             if let wait = allowedNow(manual: manual) { statusLine = wait; break }
             done += 1
             progress = Double(done) / Double(max(1, todo.count))
-            let rec = byId[asset.localIdentifier] ?? {
-                let r = SyncRecord(assetId: asset.localIdentifier, filename: "", kind: asset.mediaType == .video ? "video" : "image",
+            let id = asset.localIdentifier
+            if handled.contains(id) { continue }
+            let isNew = byId[id] == nil
+            let rec = byId[id] ?? {
+                let r = SyncRecord(assetId: id, filename: "", kind: asset.mediaType == .video ? "video" : "image",
                                    bytes: 0, createdAt: asset.creationDate ?? Date())
                 ctx.insert(r)
-                byId[asset.localIdentifier] = r
+                byId[id] = r
                 return r
             }()
-            if let uid = serverHas[asset.localIdentifier] {
-                rec.uid = uid; rec.status = "synced"; rec.updatedAt = Date()
-                try? ctx.save()
+            // Held by the server, and no half of it left to send (a Live Photo whose clip failed is
+            // listed by its still, so its record decides).
+            if let uid = server.assets[id], rec.files.allSatisfy({ $0.done }),
+               rec.status == "uploaded" || (server.pending[id] ?? []).isEmpty {
+                markSynced(rec, uid: uid, trashed: server.trashed.contains(id))
                 continue
             }
-            statusLine = "Uploading \(done) of \(todo.count)"
-            do {
-                try await upload(asset: asset, record: rec, api: api, tmp: tmp)
-                rec.status = "synced"; rec.error = nil
-            } catch {
-                rec.status = "failed"; rec.error = error.localizedDescription
-                SyncStore.shared.log("\(rec.filename.isEmpty ? asset.localIdentifier : rec.filename): \(error.localizedDescription)", level: "error")
+            if rec.status == "uploaded" {
+                await verify(rec, api: api)
+                if rec.status != "pending" { try? ctx.save(); continue }
             }
-            rec.updatedAt = Date()
+            statusLine = "Uploading \(done) of \(todo.count)"
+            // A little background time so an export started in the foreground can hand its file to
+            // the background session when the owner leaves the app. Ended at the hand-off: the
+            // transfer itself needs none.
+            let time = BackgroundTime("pcc.export")
+            defer { time.end() }
+            do {
+                try await prepare(rec, asset: asset, api: api)
+                if isNew, await knownByHash(rec, api: api) {
+                    // After a reinstall, or a photo first uploaded from the web: the server has these
+                    // files (maybe in its trash, which a create would undo), so nothing is sent.
+                    try? ctx.save()
+                    continue
+                }
+                uploader.start(rec)
+                time.end()
+                await uploader.wait(for: id, until: deadline)
+            } catch {
+                rec.status = "failed"
+                rec.error = error.localizedDescription
+                rec.updatedAt = Date()
+                UploadPaths.removeAsset(id)
+                SyncStore.shared.log("\(rec.filename.isEmpty ? id : rec.filename): \(error.localizedDescription)", level: "error")
+            }
             try? ctx.save()
         }
-        try? FileManager.default.removeItem(at: tmp)
         progress = 1
     }
 
-    /// Exports the asset's original files and sends each one; a Live Photo's two files share the
-    /// asset identifier as pair key, so the server pairs them (section 20).
-    private func upload(asset: PHAsset, record: SyncRecord, api: APIClient, tmp: URL) async throws {
-        let files = try await PhotoLibrary.export(asset, to: tmp)
-        defer { for f in files { try? FileManager.default.removeItem(at: f.url) } }
-        guard let still = files.first(where: { !$0.isClip }) else { throw APIError(status: 0, detail: "No original file") }
-        record.filename = still.filename
-        record.bytes = still.bytes
-        if asset.mediaSubtypes.contains(.photoLive) { record.kind = "live" }
-        for file in files {
-            let url = file.url
-            let sha = try await Task.detached(priority: .utility) { try PhotoLibrary.sha256(of: url) }.value
-            if !file.isClip { record.sha256 = sha }
-            let uid = try await send(file: file, sha256: sha, pairKey: asset.localIdentifier, api: api)
-            if file.isClip { record.clipUid = uid } else { record.uid = uid }
-        }
-        SyncStore.shared.log("Synced \(still.filename)")
+    private func markSynced(_ rec: SyncRecord, uid: String, trashed: Bool) {
+        if rec.uid == nil { rec.uid = uid }
+        rec.status = "synced"
+        rec.error = nil
+        rec.trashedOnServer = trashed
+        rec.clearTransfer()
+        rec.updatedAt = Date()
+        UploadPaths.removeAsset(rec.assetId)
+        try? SyncStore.shared.container.mainContext.save()
     }
 
-    /// The chunked upload protocol: create (a known hash answers at once), PUT chunks, complete,
-    /// then wait for the item. Returns the item uid.
-    private func send(file: PhotoLibrary.ExportedFile, sha256: String, pairKey: String, api: APIClient) async throws -> String? {
-        var up = try await api.createUpload(filename: file.filename, size: file.bytes, mime: file.mime, sha256: sha256, pairKey: pairKey)
-        if up.status == "duplicate" { return up.item_uid }
-        let handle = try FileHandle(forReadingFrom: file.url)
-        defer { try? handle.close() }
-        var offset: Int64 = up.received_bytes
-        let chunk = max(1, up.chunk_size)
-        while offset < file.bytes {
-            if Task.isCancelled { throw CancellationError() }
-            try handle.seek(toOffset: UInt64(offset))
-            guard let data = try handle.read(upToCount: chunk), !data.isEmpty else { break }
-            var attempt = 0
-            while true {
-                do {
-                    let out = try await api.putChunk(id: up.id, offset: offset, data: data)
-                    offset = out.received_bytes
-                    break
-                } catch {
-                    attempt += 1
-                    if attempt >= 3 { throw error }
-                    try await Task.sleep(nanoseconds: UInt64(attempt) * 2_000_000_000)
-                    if let fresh = try? await api.uploadStatus(id: up.id) { offset = fresh.received_bytes }
-                }
+    /// Puts an interrupted upload back on the wire (section 28). The server's `pending` list gives
+    /// the offset; an upload it does not list had its last reply lost, and its own state
+    /// (`GET /api/uploads/{id}`) says what happened.
+    private func resume(_ rec: SyncRecord, asset: PHAsset?, server: ServerState, api: APIClient) async {
+        let uploader = BackgroundUploader.shared
+        let present = rec.files.filter { !$0.done }.allSatisfy { f in
+            let size = (try? FileManager.default.attributesOfItem(atPath: UploadPaths.url(f.path).path)[.size] as? Int64) ?? -1
+            return size == f.bytes
+        }
+        if !present {
+            guard let asset else {
+                rec.status = "failed"
+                rec.error = "The photo is no longer in the library"
+                rec.clearTransfer()
+                UploadPaths.removeAsset(rec.assetId)
+                return
+            }
+            do {
+                try await prepare(rec, asset: asset, api: api)
+            } catch {
+                rec.status = "failed"
+                rec.error = error.localizedDescription
+                return
             }
         }
-        up = try await api.complete(id: up.id)
-        var waited = 0
-        while !["stored", "duplicate", "rejected", "error", "cancelled"].contains(up.status) && waited < 120 {
-            try await Task.sleep(nanoseconds: 2_000_000_000)
-            waited += 2
-            up = try await api.uploadStatus(id: up.id)
+        guard let id = rec.uploadId else {
+            uploader.start(rec)          // the create was never answered: it is idempotent, ask again
+            return
         }
-        if up.status == "rejected" || up.status == "error" {
-            throw APIError(status: 0, detail: up.message ?? "The server rejected the file")
+        if let p = server.pending[rec.assetId]?.first(where: { $0.upload_id == id }) {
+            uploader.resume(rec, at: p.received_bytes)
+            return
         }
-        return up.item_uid
+        do {
+            let up = try await api.upload(id: id)
+            uploader.resume(rec, with: up)
+        } catch {
+            rec.status = "pending"
+            rec.error = "Cannot reach the server: \(error.localizedDescription)"
+        }
+    }
+
+    /// An asset sent earlier that the server does not list yet: still being stored, turned down,
+    /// or dropped (then it is sent again).
+    private func verify(_ rec: SyncRecord, api: APIClient) async {
+        var files = rec.files
+        var waiting = false
+        for i in files.indices {
+            guard let id = files[i].uploadId else { continue }
+            guard let up = try? await api.upload(id: id) else {
+                if (try? await api.state()) != nil { files[i].done = false; files[i].uploadId = nil }
+                else { waiting = true }   // the server is not reachable now
+                continue
+            }
+            switch up.status {
+            case "stored", "duplicate":
+                files[i].itemUid = up.item_uid
+            case "rejected", "error":
+                rec.status = "failed"
+                rec.error = up.message ?? "The server turned the file down"
+                rec.files = files
+                SyncStore.shared.log("\(rec.filename): \(rec.error ?? "")", level: "error")
+                return
+            case "cancelled":
+                files[i].done = false
+                files[i].uploadId = nil
+            default:
+                waiting = true      // queued, processing
+            }
+        }
+        rec.files = files
+        if files.contains(where: { !$0.done }) {
+            rec.status = "pending"          // sent again by the caller
+        } else if !waiting {
+            rec.status = "synced"
+            rec.uid = files.first?.itemUid ?? rec.uid
+        }
+        rec.updatedAt = Date()
+    }
+
+    /// Exports the asset's originals into its upload folder and hashes them. A file that is the
+    /// same as before keeps its upload; the unfinished upload of a file that changed is cancelled.
+    private func prepare(_ rec: SyncRecord, asset: PHAsset, api: APIClient) async throws {
+        let old = rec.files
+        UploadPaths.removeAsset(rec.assetId)
+        let exported = try await PhotoLibrary.export(asset, to: UploadPaths.assetDir(rec.assetId))
+        guard let main = exported.first(where: { !$0.isClip }) else { throw APIError(status: 0, detail: "No original file") }
+        var files: [UploadFile] = []
+        for f in exported {
+            let url = f.url
+            let sha = try await Task.detached(priority: .utility) { try PhotoLibrary.sha256(of: url) }.value
+            let resource = f.isClip || asset.mediaType == .video ? "video" : "still"
+            let prior = old.first { $0.resource == resource }
+            let same = prior.map { $0.bytes == f.bytes && $0.sha256 == sha } ?? false
+            if let prior, !same, !prior.done, let id = prior.uploadId {
+                try? await api.cancelUpload(id: id)   // its bytes are of another version of the file
+            }
+            files.append(UploadFile(resource: resource, path: UploadPaths.relative(url), filename: f.filename, mime: f.mime,
+                                    bytes: f.bytes, sha256: sha, uploadId: same ? prior?.uploadId : nil,
+                                    done: same && (prior?.done ?? false), itemUid: same ? prior?.itemUid : nil))
+        }
+        if let current = rec.uploadResource, rec.uploadId != nil,
+           !files.contains(where: { $0.resource == current && $0.uploadId == rec.uploadId }) {
+            rec.clearTransfer()   // its file changed (the old upload was cancelled above)
+        }
+        rec.files = files
+        rec.filename = main.filename
+        rec.bytes = main.bytes
+        rec.sha256 = files.first(where: { $0.resource == (asset.mediaType == .video ? "video" : "still") })?.sha256
+        if asset.mediaSubtypes.contains(.photoLive) { rec.kind = "live" }
+        rec.updatedAt = Date()
+    }
+
+    /// For an asset without a record: asks the sync check by file hash. True when the server
+    /// holds every file (the record is then synced).
+    private func knownByHash(_ rec: SyncRecord, api: APIClient) async -> Bool {
+        let files = rec.files
+        guard !files.isEmpty, let out = try? await api.check(hashes: files.map(\.sha256), assetIds: []),
+              files.allSatisfy({ out.known[$0.sha256] != nil }) else { return false }
+        rec.uid = out.known[files[0].sha256]
+        if files.count > 1 { rec.clipUid = out.known[files[1].sha256] }
+        rec.files = files.map { var f = $0; f.done = true; f.itemUid = out.known[f.sha256]; return f }
+        rec.status = "synced"
+        rec.error = nil
+        rec.updatedAt = Date()
+        UploadPaths.removeAsset(rec.assetId)
+        SyncStore.shared.log("Already in the cloud: \(rec.filename)")
+        return true
     }
 
     // MARK: delete synced
 
-    /// The synced assets still in the library, confirmed by the server right now.
+    /// A synced asset still in the library.
     struct SyncedRow: Identifiable {
         let asset: PHAsset
         let rec: SyncRecord
         var id: String { rec.assetId }
     }
 
-    func confirmedSynced() async -> [SyncedRow] {
-        guard let api = APIClient.current() else { return [] }
+    /// The synced assets still in the library, as the server confirms them right now: `stored`
+    /// (held and not in the trash) and `trashed` (held, but in the server's trash, so the owner
+    /// decides). An asset the server cannot confirm is in neither list.
+    func confirmedSynced() async -> (stored: [SyncedRow], trashed: [SyncedRow]) {
+        guard let api = APIClient.current() else { return ([], []) }
         let ctx = SyncStore.shared.container.mainContext
-        let synced = ((try? ctx.fetch(FetchDescriptor<SyncRecord>(predicate: #Predicate { $0.status == "synced" && !$0.deletedFromLibrary }))) ?? [])
+        let synced = ((try? ctx.fetch(FetchDescriptor<SyncRecord>(predicate: #Predicate<SyncRecord> { $0.status == "synced" && !$0.deletedFromLibrary }))) ?? [])
         let assets = PhotoLibrary.assets(ids: synced.map(\.assetId))
-        let present = Dictionary(uniqueKeysWithValues: assets.map { ($0.localIdentifier, $0) })
-        var confirmed: Set<String> = []
-        let ids = synced.map(\.assetId)
+        let present = Dictionary(assets.map { ($0.localIdentifier, $0) }, uniquingKeysWith: { a, _ in a })
+        let mine = synced.filter { present[$0.assetId] != nil }
+        var server = ServerState()
+        let ids = mine.map(\.assetId)
         for batch in stride(from: 0, to: ids.count, by: 200) {
             let slice = Array(ids[batch..<min(batch + 200, ids.count)])
-            if let out = try? await api.check(hashes: [], assetIds: slice) {
-                confirmed.formUnion(out.assets.keys)
+            guard let out = try? await api.check(hashes: [], assetIds: slice) else { return ([], []) }
+            server.assets.merge(out.assets) { a, _ in a }
+            server.pending.merge(out.pending) { a, _ in a }
+            server.trashed.formUnion(out.trashed)
+        }
+        // Assets the server knows only by file hash (synced after a reinstall, or first uploaded
+        // from the web): the item itself says whether it sits in the trash.
+        var byHash: [String: Bool] = [:]   // asset id -> in the trash
+        let hashOnly = mine.filter { server.assets[$0.assetId] == nil }
+        func hashes(_ rec: SyncRecord) -> [String] {
+            rec.files.isEmpty ? [rec.sha256].compactMap { $0 } : rec.files.map(\.sha256)
+        }
+        let wanted = Array(Set(hashOnly.flatMap(hashes)))
+        var known: [String: String] = [:]
+        for batch in stride(from: 0, to: wanted.count, by: 1000) {
+            let slice = Array(wanted[batch..<min(batch + 1000, wanted.count)])
+            if let out = try? await api.check(hashes: slice, assetIds: []) { known.merge(out.known) { a, _ in a } }
+        }
+        for rec in hashOnly {
+            let h = hashes(rec)
+            guard !h.isEmpty, h.allSatisfy({ known[$0] != nil }), let uid = known[h[0]],
+                  let item = try? await api.item(uid: uid) else { continue }   // a vault item answers 403 to a locked device: not confirmed
+            byHash[rec.assetId] = item.deleted_at != nil
+        }
+        var stored: [SyncedRow] = []
+        var trashed: [SyncedRow] = []
+        for rec in mine {
+            guard let asset = present[rec.assetId] else { continue }
+            let id = rec.assetId
+            let onServer = server.assets[id] != nil && (server.pending[id] ?? []).isEmpty
+            if (onServer && server.trashed.contains(id)) || byHash[id] == true {
+                rec.trashedOnServer = true
+                trashed.append(SyncedRow(asset: asset, rec: rec))
+            } else if onServer || byHash[id] == false {
+                rec.trashedOnServer = false
+                stored.append(SyncedRow(asset: asset, rec: rec))
             }
         }
-        return synced.compactMap { rec in
-            guard let asset = present[rec.assetId], confirmed.contains(rec.assetId) else { return nil }
-            return SyncedRow(asset: asset, rec: rec)
-        }
+        try? ctx.save()
+        return (stored, trashed)
     }
 
     func markDeleted(_ records: [SyncRecord]) {
         let ctx = SyncStore.shared.container.mainContext
         for r in records { r.deletedFromLibrary = true; r.updatedAt = Date() }
         try? ctx.save()
+    }
+}
+
+/// A short stretch of background time for work that must reach a hand-off point (an export that
+/// ends with a task in the background session). Ended as soon as the work is handed over, or by
+/// iOS when the time runs out.
+@MainActor
+private final class BackgroundTime {
+    private var id: UIBackgroundTaskIdentifier = .invalid
+
+    init(_ name: String) {
+        id = UIApplication.shared.beginBackgroundTask(withName: name) { [weak self] in
+            self?.end()
+        }
+    }
+
+    func end() {
+        guard id != .invalid else { return }
+        UIApplication.shared.endBackgroundTask(id)
+        id = .invalid
     }
 }

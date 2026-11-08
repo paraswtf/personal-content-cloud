@@ -2,9 +2,9 @@
 // dates, favourites, Live Photos, mis-clicks and duplicates. Every change goes to the URL through `set`, except the
 // tags: they are a repeated tag= parameter, which `set` cannot write, so they update the URL here.
 import { useState } from 'react'
-import { useSearchParams } from 'react-router'
+import { Link, useLocation, useSearchParams } from 'react-router'
 import clsx from 'clsx'
-import { Copy, SlidersHorizontal, Star, Tag, TriangleAlert, X } from 'lucide-react'
+import { Copy, MapPin, SlidersHorizontal, Star, Tag, TriangleAlert, X } from 'lucide-react'
 import { CATEGORIES, CATEGORY_LABELS, type ItemKind } from '../../lib/types'
 import Select from '../Select'
 import Segmented from '../public/Segmented'
@@ -98,7 +98,15 @@ const dateInput =
 
 export default function FilterBar({ filters: f, set, clearAll, vault, searching }: Props) {
   const [open, setOpen] = useState(() => hasExtraFilters(f))
-  const [, setParams] = useSearchParams()
+  const [params, setParams] = useSearchParams()
+  const onMap = useLocation().pathname.startsWith('/map')
+  // the same filters on the map (section 25): the URL parameters minus the search and the open item
+  const mapHref = (() => {
+    const p = new URLSearchParams(params)
+    for (const k of ['m', 't', 'q', 'mode']) p.delete(k)
+    const s = p.toString()
+    return s ? `/map?${s}` : '/map'
+  })()
   const setTags = (tags: string[]) =>
     setParams(
       (prev) => {
@@ -190,6 +198,12 @@ export default function FilterBar({ filters: f, set, clearAll, vault, searching 
                   <Copy className="size-4" aria-hidden />
                   Show every copy
                 </button>
+                {!vault && !onMap && (
+                  <Link to={mapHref} className={chip(false)}>
+                    <MapPin className="size-4" aria-hidden />
+                    Show on map
+                  </Link>
+                )}
                 <Segmented<'taken' | 'added'>
                   label="Sort"
                   value={f.sort}

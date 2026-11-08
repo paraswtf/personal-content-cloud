@@ -25,6 +25,8 @@ export function useViewerParam(
   hasMore: boolean,
   loadMore: () => void,
   total?: number,
+  /** The open item's true index in the whole list when `items` holds only part of it (the timeline). */
+  positionOf?: (uid: string) => number | null,
 ) {
   const [params, setParams] = useSearchParams()
   const location = useLocation()
@@ -86,6 +88,7 @@ export function useViewerParam(
 
   const onPrev = index > 0 ? () => go(-1) : undefined
   const onNext = index >= 0 && index < items.length - 1 ? () => go(1) : undefined
-  const position = index >= 0 ? { index, total: Math.max(total ?? items.length, items.length) } : undefined
+  const shown = index >= 0 && uid ? (positionOf?.(uid) ?? index) : index
+  const position = index >= 0 ? { index: shown, total: Math.max(total ?? items.length, items.length, shown + 1) } : undefined
   return { uid, t, open, close, onPrev, onNext, position }
 }

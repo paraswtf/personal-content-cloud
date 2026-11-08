@@ -67,7 +67,8 @@ function isDocument(item: GridItem): boolean {
   return item.kind === 'pdf' || item.kind === 'document' || (item.kind === 'image' && !!item.doc_type && item.category === 'documents')
 }
 
-const Tile = memo(function Tile({
+/** One square tile; the timeline grid (components/timeline) reuses it. */
+export const Tile = memo(function Tile({
   item,
   index,
   selectable,

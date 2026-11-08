@@ -44,6 +44,7 @@ MIGRATED_COLUMNS: tuple[tuple[str, str, str], ...] = (
 # these are created after _add_missing_columns.
 MIGRATED_INDEXES: tuple[str, ...] = (
     "CREATE INDEX IF NOT EXISTS uploads_asset ON uploads(session_id, pair_key, resource)",
+    "CREATE INDEX IF NOT EXISTS uploads_pair ON uploads(pair_key)",  # the sync check looks assets up by key
 )
 _SCHEMA_FILE = Path(__file__).with_name("schema.sql")
 # Full-text tokenizer of items_fts. unicode61 treats combining marks (Unicode Mn, Mc) as separators,

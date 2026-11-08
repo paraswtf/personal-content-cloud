@@ -86,7 +86,7 @@ SORT_KEYS = {"taken": "COALESCE(i.taken_at, i.created_at)", "added": "i.created_
 DETAIL_COLUMNS = (
     f"{ITEM_CARD_COLUMNS}, i.mime, i.size_bytes, i.fps, i.has_audio, i.camera, i.gps_lat, i.gps_lon, i.gps_alt, "
     "i.exif_datetime, i.category_source, i.category_scores, i.nsfw_score, i.nsfw_source, i.quality_scores, "
-    "i.text_status, i.analysis_status, i.deleted_at, i.updated_at, i.misclick_source"
+    "i.text_status, i.analysis_status, i.deleted_at, i.updated_at, i.misclick_source, i.place"
 )
 RECENT_LIMIT = 12
 
@@ -226,6 +226,7 @@ def item_detail(conn: sqlite3.Connection, row: sqlite3.Row) -> ItemDetail:
     from app.api.tags import item_tags_out
 
     data["user_tags"] = item_tags_out(conn, int(row["id"]))
+    data["place"] = row["place"] if "place" in row.keys() else None
     data["albums"] = [
         {"id": int(a["id"]), "name": a["name"]}
         for a in conn.execute(

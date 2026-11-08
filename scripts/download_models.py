@@ -8,6 +8,7 @@ that fails does not stop the others; the exit status is 1 and stderr names each 
 Usage: download_models.py [--only KEY ...] [--verify] [--quiet]
   --only KEY   download only these models (faces, siglip, nsfw, persons, ocr, ocr_devanagari)
   --verify     also hash every present file and report mismatches (slow: about 1.4 GB of reads)
+  --no-geo     skip the GeoNames place data (also skipped when GEO_ENABLED=false)
   --quiet      print only failures
 
 Models go to MODELS_DIR (default <repo>/models). Run it with the backend environment's python.
@@ -31,6 +32,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--only", nargs="+", metavar="KEY", help="model keys to download")
     parser.add_argument("--verify", action="store_true", help="hash present files and report mismatches")
     parser.add_argument("--quiet", action="store_true", help="print only failures")
+    parser.add_argument("--no-geo", action="store_true", help="skip the GeoNames place data")
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.WARNING, format="%(message)s")
@@ -64,6 +66,17 @@ def main(argv: list[str] | None = None) -> int:
             status = 1
         else:
             say("models ready")
+
+    if not args.no_geo and not args.only:
+        # places data (docs/ARCHITECTURE.md section 25): three small GeoNames files next to the models
+        from app.geo import gazetteer
+
+        try:
+            fetched = gazetteer.download(progress=say)
+        except Exception as e:  # noqa: BLE001 - optional data: reported, never a failure of the models step
+            sys.stderr.write(f"places data not downloaded (the map works without place names; run again later): {e}\n")
+        else:
+            say("places data ready" if fetched else "places data present" if gazetteer.available() else "places data off")
 
     if args.verify:
         for key in keys:

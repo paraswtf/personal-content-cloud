@@ -1,16 +1,19 @@
-// The library: filters and one search box in the URL, the item grid with multi-select and bulk
-// actions, and the viewer (?m=<uid>). With `vault` it lists only private items and every request
-// carries vault=1; the vault page renders it only while the vault is unlocked.
+// The library: filters and one search box in the URL, the timeline grid (section 23) for browsing
+// and MediaGrid for search results, multi-select with bulk actions, and the viewer (?m=<uid>). With
+// `vault` it lists only private items and every request carries vault=1; the vault page renders it
+// only while the vault is unlocked.
 import { useCallback, useMemo, useState, type ReactNode } from 'react'
 import { Link, useSearchParams } from 'react-router'
 import { ImageOff, SearchX, Upload } from 'lucide-react'
 import { formatCount } from '../../lib/format'
 import { useStableCallback } from '../../lib/hooks'
-import { useLibraryItems } from '../../lib/useItemList'
+import type { ItemListResult } from '../../lib/useItemList'
 import { useSearchList } from '../../lib/useSearchList'
-import type { SearchMode } from '../../lib/types'
+import type { ItemCard, SearchMode } from '../../lib/types'
 import MediaGrid from '../MediaGrid'
 import Viewer from '../Viewer'
+import TimelineGrid from '../timeline/TimelineGrid'
+import { useTimeline } from '../timeline/useTimeline'
 import { useSelection } from '../admin/adminHooks'
 import Segmented from '../public/Segmented'
 import { withParam } from '../public/params'
@@ -35,17 +38,40 @@ export default function Library({ vault = false, title, headerExtra, album }: Pr
   const filters = useMemo(() => readFilters(params, vault), [params, vault])
   const searching = filters.q !== ''
 
-  const iq = useMemo(() => itemsQuery(filters, vault, album), [filters, vault, album])
+  const tq = useMemo(() => {
+    const { limit: _limit, ...rest } = itemsQuery(filters, vault, album)
+    return rest
+  }, [filters, vault, album])
   const sq = useMemo(() => searchQuery(filters, vault), [filters, vault])
-  const browse = useLibraryItems(iq, !searching)
+  const timeline = useTimeline(tq, !searching, searching ? null : params.get('m'))
+  const browse: ItemListResult<ItemCard> = {
+    items: timeline.items,
+    total: timeline.total,
+    hasMore: timeline.hasMore,
+    loadMore: timeline.loadMore,
+    loading: timeline.loading,
+    error: timeline.error,
+    refetch: timeline.refetch,
+  }
   const search = useSearchList(sq, searching)
   const list = searching ? search : browse
-  const viewer = useViewerParam(list.items, list.hasMore, list.loadMore, list.total)
+  const viewer = useViewerParam(list.items, list.hasMore, list.loadMore, list.total, searching ? undefined : timeline.positionOf)
   const openItem = useStableCallback((uid: string) => viewer.open(uid))
 
   const selection = useSelection<string>()
   const [selectMode, setSelectMode] = useState(false)
   const selecting = selectMode || selection.count > 0
+  const selectMany = useCallback(
+    (uids: string[], on: boolean) => {
+      const next = new Set(selection.selected)
+      for (const u of uids) {
+        if (on) next.add(u)
+        else next.delete(u)
+      }
+      selection.setAll([...next])
+    },
+    [selection],
+  )
 
   const set = useCallback(
     (key: string, value: string | null) => {
@@ -195,7 +221,7 @@ export default function Library({ vault = false, title, headerExtra, album }: Pr
           </EmptyState>
         ) : list.error && !list.items.length ? (
           <ErrorState error={list.error} onRetry={list.refetch} />
-        ) : (
+        ) : searching ? (
           <MediaGrid
             items={list.items}
             onOpen={openItem}
@@ -206,8 +232,20 @@ export default function Library({ vault = false, title, headerExtra, album }: Pr
             selected={selection.selected}
             onToggleSelect={selection.toggle}
             selectOnHover
-            showSnippets={searching}
+            showSnippets
             vault={vault}
+            empty={empty}
+          />
+        ) : (
+          <TimelineGrid
+            timeline={timeline}
+            vault={vault}
+            selectable={selecting}
+            selected={selection.selected}
+            onToggleSelect={selection.toggle}
+            onSelectMany={selectMany}
+            onOpen={openItem}
+            selectOnHover
             empty={empty}
           />
         )}

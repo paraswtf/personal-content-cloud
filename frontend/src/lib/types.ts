@@ -377,6 +377,8 @@ export interface ItemDetail extends ItemCard {
   animals: AnimalOut[]
   /** Albums containing the item (section 24). */
   albums: AlbumRef[]
+  /** Place name from the gazetteer, when the photo has GPS and the spot is known (section 25). */
+  place: string | null
   tags: PersonRef[]
   people: PersonRef[]
   /** Free-form tags: the owner's first, then suggestions by score. */

@@ -117,7 +117,7 @@ docs/
 | Path | Content |
 |---|---|
 | `cloud.db` | SQLite database |
-| `secret.key` | 32 random bytes, mode 0600 (cookie signing, challenge HMAC) |
+| `secret.key` | 32 random bytes, mode 0600, made on first use: signs the share unlock cookies (section 26); sessions use hashed random tokens instead |
 | `.instance.lock` | flock |
 | `originals/<sh>/<uid>.v<n><ext>` | untouched upload bytes |
 | `thumbs/<sh>/<uid>.v<n>.webp` | 480 px thumbnail (page 1 for documents, poster for videos) |
@@ -680,6 +680,15 @@ and Shift+Tab; Settings > Passkeys asks for the vault unlock in a dialog when ad
 answers `vault_locked`, then retries once (`components/vault/UnlockForm.tsx` is shared with the vault page);
 Settings > System has a Retry failed uploads button; the upload queue links vault items with `?vault=1`.
 
+Scale round (2026-11-08): sections 23 to 28 were built in parallel by one implementer per feature on a
+shared scaffold (tables, settings, router stubs, routes, slots), each followed by an adversarial review and
+a fix pass; the integrator kept the shared files. Deviations folded into the sections: the timeline loads a
+month page by page and the viewer position is the library index; album member counts are planned from
+the membership side; share links skip mis-clicks in album shares and items of kind other; a hardware
+encoder is retired only on device errors or two failures in a row, and requeue scope all leaves done
+copies alone; the map falls back to libx264 on this server (no NVENC library, no VA display). The iOS
+background uploader was written against the contract but never compiled (no Mac).
+
 ### Ownership for parallel implementation
 
 Each area owns its files; shared contracts (`schema.sql`, `config.py`, `jobs.py`, `urls.py`,
@@ -999,7 +1008,8 @@ API (`/api/albums`, session): `GET ?q&sort=updated|name|created&cursor&limit` ->
 `AlbumPage{items: [AlbumOut], next_cursor, total}` (`q` matches `name_key` as a substring);
 `POST {name, description?, item_uids?}` -> `AlbumOut` (201); `GET {id}`; `PATCH {id} {name?,
 description?, cover_item_uid?}` (`null` clears the chosen cover; a cover must be a member); `DELETE
-{id}` (the items stay); `POST {id}/items {uids}` -> `{added, skipped}` (skipped = already in);
+{id}` (the items stay); `POST {id}/items {uids}` -> `{added, skipped}` (skipped = already in, unknown, trashed or a companion;
+vault items are added or removed only while the vault is open);
 `DELETE {id}/items {uids}` -> `{removed}`. `AlbumOut = {id, name, description, count, vault_count,
 cover_url, newest, oldest, created_at, updated_at}`: `count` is the live members on the normal side,
 `vault_count` the live members in the vault (a number only; their cards show only in an unlocked
@@ -1084,7 +1094,9 @@ credits Natural Earth and GeoNames, and OpenFreeMap and OpenStreetMap when onlin
 
 A share link shows a chosen set of photos and videos to someone without an account: an album, or
 a hand-picked set. Vault items are never shared (creating a share with one answers 422 `vault_item`;
-an album share skips them), trashed items drop out of a share while in the trash, and a link can
+an album share skips them), trashed items drop out of a share while in the trash, items of kind `other`
+(no thumb or preview) are left out at creation and in the listing (a set with nothing left is 422
+`no_items`), an album share also leaves mis-clicks out as the album page does, and a link can
 carry a password, an expiry and a download switch, and can be revoked.
 
 Schema: `shares(id, token UNIQUE (16 random bytes, base64url, 22 chars), kind 'album'|'items',
@@ -1152,7 +1164,12 @@ Defaults move with the hardware: `VIDEO_PREVIEW_MAX_HEIGHT` 1080 (was 720),
 `VIDEO_PREVIEW_MAXRATE_KBPS` 6000 (was 2500), `VIDEO_PREVIEW_CRF` 23 (was 27), `VIDEO_STREAM_MAX_KBPS`
 8000 (was 3000: H.264 originals up to that bitrate stream as they are). Copies made earlier stay as
 they are; `POST /api/system/video/requeue {scope: "failed" | "all"}` -> `{requeued}` queues the web
-copy again for videos whose copy failed, or for every video that needs one.
+copy again for videos whose copy failed (`failed`), or (`all`) for every video that needs a copy and
+has none yet: `none` and `error` rows, and `pending` rows without a live job. Finished copies are
+never redone by this route, so nothing stops playing while the queue works. A hardware run that fails
+on one file falls back to libx264 for that copy only; the encoder is skipped for later copies when the
+failure is about the device or driver (or after two failures in a row) until Test encoders runs again,
+and a finished file is probed (one video stream, a duration) before it replaces anything.
 
 Status: `GET /api/system` gains `video: {encoder, hw, device, reason, checked_at, queued, running,
 failed, done, pending}` (`encoder` null until detected). Settings > System gets a Video card with the

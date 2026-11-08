@@ -142,8 +142,46 @@ def claim_options_request(ip: str) -> bool:
         return True
 
 
+# ----------------------------------------------------------------- share link password rate limit
+SHARE_MAX_FAILURES = 10
+SHARE_WINDOW_S = 600
+
+_share_lock = threading.Lock()
+_share_failures: dict[str, deque[float]] = {}
+
+
+def claim_share_attempt(ip: str) -> bool:
+    """Count one share password attempt as a failure up front (section 26); False when the IP is over
+    SHARE_MAX_FAILURES per SHARE_WINDOW_S. Its own state: it never touches the login budget."""
+    now = time.monotonic()
+    with _share_lock:
+        if ip not in _share_failures and len(_share_failures) >= MAX_TRACKED:
+            for key in list(_share_failures):
+                q = _share_failures[key]
+                while q and now - q[0] > SHARE_WINDOW_S:
+                    q.popleft()
+                if not q:
+                    del _share_failures[key]
+            if len(_share_failures) >= MAX_TRACKED:
+                del _share_failures[min(_share_failures, key=lambda k: _share_failures[k][-1])]
+        q = _share_failures.setdefault(ip, deque())
+        while q and now - q[0] > SHARE_WINDOW_S:
+            q.popleft()
+        if len(q) >= SHARE_MAX_FAILURES:
+            return False
+        q.append(now)
+        return True
+
+
+def reset_share_failures(ip: str) -> None:
+    with _share_lock:
+        _share_failures.pop(ip, None)
+
+
 def reset_all() -> None:
     with _fail_lock:
         _failures.clear()
     with _options_lock:
         _options.clear()
+    with _share_lock:
+        _share_failures.clear()

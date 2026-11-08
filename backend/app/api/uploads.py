@@ -19,12 +19,23 @@ POST   /api/uploads/{id}/complete -> UploadOut
     received_bytes must equal size (409). The staged file is hashed in this worker thread WITHOUT
     the per-upload lock; the result is applied under the lock after re-checking the row. A known
     sha256 -> 'duplicate' (staged file deleted); otherwise 'queued' + an ingest job. Idempotent.
-POST   /api/uploads/simple  multipart: file, source -> UploadOut (201)
+POST   /api/uploads/simple  multipart: file, source, pair_key, resource -> UploadOut (201)
     One request, up to settings.simple_upload_max_bytes (413), for scripts and tests.
 GET    /api/uploads/{id} -> UploadOut;  GET /api/uploads?ids=a,b,c -> UploadList (max 200)
 GET    /api/uploads/mine?client_id=... -> UploadList (latest 300 of that browser)
 DELETE /api/uploads/{id} -> UploadOut (cancel while 'uploading'; otherwise unchanged)
+POST   /api/uploads/check  SyncCheckIn -> SyncCheckOut (section 21 and 28)
+    known: sha256 -> item uid (live or in the trash); assets: pair key -> item uid; pending: the
+    caller's own 'uploading' rows per asked pair key; trashed: asked pair keys with an item in the trash.
 Upload ids are unguessable 14-character uids.
+
+Device resume (section 28). Every create records uploads.session_id (the session that made it) and
+uploads.resource ('still', 'video' or 'file'). A create from a bearer session with a pair_key is
+idempotent: an 'uploading' row of the same session, pair_key, resource and size is answered as it
+is (200, its received_bytes tells the client where to continue) instead of opening a second staging
+file; 'uploading' rows of that key with another size, or with lost staged bytes, are cancelled
+first and their staging files removed. Cookie sessions (the web, which has no pair_key) always get
+a new row.
 """
 from __future__ import annotations
 
@@ -37,9 +48,7 @@ import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
-
-from app.schemas import SyncCheckIn, SyncCheckOut
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, Response, UploadFile
 from fastapi.responses import JSONResponse
 from starlette.concurrency import run_in_threadpool
 
@@ -49,13 +58,14 @@ from app.api.deps import get_db, require_user
 from app.auth.sessions import SessionInfo, client_ip
 from app.config import settings
 from app.db import connect, tx
-from app.schemas import ChunkOut, UploadCreate, UploadList, UploadOut
+from app.schemas import ChunkOut, SyncCheckIn, SyncCheckOut, SyncPending, UploadCreate, UploadList, UploadOut
 from app.util import new_uid, now_iso, safe_filename
 
 log = logging.getLogger(__name__)
 
 router = APIRouter(dependencies=[Depends(require_user)])
 SOURCES = ("web", "share", "camera", "api")
+RESOURCES = ("still", "video", "file")
 
 MAX_IDS = 200
 MINE_LIMIT = 300
@@ -73,6 +83,9 @@ RESTORED_MESSAGE = "Restored from the trash (identical file)."
 # Per-upload locks so concurrent chunk / complete / cancel calls for one upload never interleave.
 _locks_guard = threading.Lock()
 _locks: dict[str, list] = {}  # uid -> [lock, users]
+# Uploads whose staged file complete_upload is hashing outside its lock: _drop_staging leaves those
+# files alone, and complete_upload removes them itself when it finds the row cancelled afterwards.
+_hashing: set[str] = set()
 
 
 @contextmanager
@@ -149,15 +162,76 @@ def _restore_trashed(conn: sqlite3.Connection, sha: str | None) -> bool:
     return conn.execute("SELECT 1 FROM items WHERE id = ? AND deleted_at IS NULL", (row["id"],)).fetchone() is not None
 
 
+def _pair_key(value: str | None) -> str | None:
+    return (value or "").strip()[:128] or None
+
+
+def _resumable(conn: sqlite3.Connection, session_id: int, pair_key: str, resource: str) -> list[sqlite3.Row]:
+    """The session's unfinished uploads of one half of one asset (index uploads_asset), the one with
+    the most bytes first."""
+    return conn.execute(
+        "SELECT id, uid, size_bytes, received_bytes FROM uploads "
+        "WHERE session_id = ? AND pair_key = ? AND resource = ? AND status = 'uploading' "
+        "ORDER BY received_bytes DESC, id DESC",
+        (session_id, pair_key, resource),
+    ).fetchall()
+
+
+def _staged_intact(row: sqlite3.Row) -> bool:
+    """The staging file still holds at least the bytes the row says it received."""
+    try:
+        return storage.staging_path(row["uid"]).stat().st_size >= int(row["received_bytes"])
+    except FileNotFoundError:
+        return int(row["received_bytes"]) == 0
+
+
+def _cancel_rows(conn: sqlite3.Connection, rows: list[sqlite3.Row], now: str) -> list[str]:
+    """Mark 'uploading' rows cancelled (inside the caller's transaction). Returns the uids that changed;
+    the caller removes their staging files after the commit, under each upload's lock."""
+    cancelled: list[str] = []
+    for r in rows:
+        cur = conn.execute(
+            "UPDATE uploads SET status = 'cancelled', message = NULL, updated_at = ? WHERE id = ? AND status = 'uploading'",
+            (now, r["id"]),
+        )
+        if cur.rowcount == 1:
+            cancelled.append(r["uid"])
+    return cancelled
+
+
+def _drop_staging(uids: list[str]) -> None:
+    for uid in uids:
+        # Under the upload's lock, so a chunk being written for it finishes first (it then finds
+        # the row cancelled). Never called inside a transaction: _write_chunk takes this lock first.
+        with _upload_lock(uid):
+            with _locks_guard:
+                hashing = uid in _hashing
+            if hashing:
+                continue  # complete_upload is reading it; it unlinks the file once it sees the cancellation
+            storage.safe_unlink(storage.staging_path(uid))
+
+
 @router.post("", response_model=UploadOut, status_code=201)
-def create_upload(body: UploadCreate, request: Request, conn: sqlite3.Connection = Depends(get_db),
+def create_upload(body: UploadCreate, request: Request, response: Response,
+                  conn: sqlite3.Connection = Depends(get_db),
                   session: SessionInfo = Depends(require_user)) -> UploadOut:
+    """Open an upload (201), or hand back the device's unfinished one for the same asset half (200).
+
+    A bearer session with a pair_key gets the idempotent form of section 28. A known sha256 answers
+    duplicate at once and cancels every unfinished upload of that key and resource, including one
+    the device may still be sending (the current clients send one request at a time, so that row is
+    always the stale one)."""
     if body.size > settings.max_upload_bytes:
         limit_gb = settings.max_upload_bytes / (1024 ** 3)
         raise HTTPException(status_code=413, detail=f"The file is larger than the {limit_gb:g} GB limit")
     filename = safe_filename(body.filename)
     client_id = (body.client_id or "").strip() or None
     mime = (body.mime or "").strip()[:128] or None
+    pair_key = _pair_key(body.pair_key)
+    resource = body.resource
+    # Idempotent create (section 28): a device that lost the reply, or was killed and relaunched,
+    # asks again with the same key and continues the upload it already has.
+    resume = bool(session.bearer and pair_key)
     now = now_iso()
     uid = new_uid()
     restored = _restore_trashed(conn, body.sha256)
@@ -166,24 +240,45 @@ def create_upload(body: UploadCreate, request: Request, conn: sqlite3.Connection
     if known is None:
         staging.parent.mkdir(parents=True, exist_ok=True)
         staging.touch(exist_ok=False)
+    reused: str | None = None
+    cancelled: list[str] = []
     try:
         with tx(conn):
-            # Inside the write transaction (BEGIN IMMEDIATE), so concurrent creates see each
-            # other's reservations and cannot all pass against the same free space.
-            if known is None and not storage.has_room_for(body.size + _reserved_bytes(conn)):
-                raise HTTPException(status_code=507, detail=NO_SPACE)
-            conn.execute(
-                "INSERT INTO uploads(uid, source, client_id, original_filename, size_bytes, received_bytes, mime, "
-                "sha256, status, message, item_id, remote_addr, created_at, updated_at, pair_key) "
-                "VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (uid, body.source, client_id, filename, body.size, mime, body.sha256 if known else None,
-                 "duplicate" if known else "uploading", RESTORED_MESSAGE if known and restored else None, known,
-                 client_ip(request), now, now, body.pair_key),
-            )
+            # Lookup, cancellation and insert share one write transaction (BEGIN IMMEDIATE): two
+            # creates for the same key (a retry racing the first call) end up with one row.
+            if resume:
+                rows = _resumable(conn, session.id, pair_key, resource)
+                keep = None
+                if known is None:
+                    keep = next((r for r in rows if int(r["size_bytes"]) == body.size and _staged_intact(r)), None)
+                # Everything else of this key is stale: another size (the asset changed), lost staged
+                # bytes, a second row from an older race, or any row once the hash is known.
+                cancelled = _cancel_rows(conn, [r for r in rows if keep is None or r["id"] != keep["id"]], now)
+                if keep is not None:
+                    conn.execute("UPDATE uploads SET updated_at = ? WHERE id = ?", (now, keep["id"]))
+                    reused = keep["uid"]
+            if reused is None:
+                # Inside the write transaction, so concurrent creates see each other's reservations
+                # and cannot all pass against the same free space (rows cancelled above no longer count).
+                if known is None and not storage.has_room_for(body.size + _reserved_bytes(conn)):
+                    raise HTTPException(status_code=507, detail=NO_SPACE)
+                conn.execute(
+                    "INSERT INTO uploads(uid, source, client_id, original_filename, size_bytes, received_bytes, mime, "
+                    "sha256, status, message, item_id, remote_addr, created_at, updated_at, pair_key, session_id, "
+                    "resource) VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (uid, body.source, client_id, filename, body.size, mime, body.sha256 if known else None,
+                     "duplicate" if known else "uploading", RESTORED_MESSAGE if known and restored else None, known,
+                     client_ip(request), now, now, pair_key, session.id, resource),
+                )
     except BaseException:
         if known is None:
             storage.safe_unlink(staging)
         raise
+    _drop_staging(cancelled)
+    if reused is not None:
+        storage.safe_unlink(staging)  # the fresh staging file was not needed
+        response.status_code = 200
+        return upload_out(_load(conn, reused), session.vault_unlocked)
     return upload_out(_load(conn, uid), session.vault_unlocked)
 
 
@@ -365,15 +460,23 @@ def complete_upload(upload_id: str, conn: sqlite3.Connection = Depends(get_db),
             raise HTTPException(status_code=409, detail="The uploaded data is missing, please start again")
         if on_disk != row["size_bytes"]:
             raise HTTPException(status_code=409, detail="The uploaded data is incomplete, please start again")
+        with _locks_guard:
+            _hashing.add(upload_id)
     # Hash outside the per-upload lock: a status poll or cancel must not wait for a multi-GB read.
-    # No chunk can change the file meanwhile (received_bytes == size refuses every offset).
+    # No chunk can change the file meanwhile (received_bytes == size refuses every offset), and a
+    # create that cancels this row meanwhile leaves the file to us (_hashing).
     try:
         digest = _sha256_file(path)
     except FileNotFoundError:
         raise HTTPException(status_code=409, detail="The uploaded data is missing, please start again")
+    finally:
+        with _locks_guard:
+            _hashing.discard(upload_id)
     with _upload_lock(upload_id):
         row = _load(conn, upload_id)
         if row["status"] != "uploading":
+            if row["status"] == "cancelled":
+                storage.safe_unlink(path)  # cancelled while hashing: the cancel skipped the file for us
             return upload_out(row, vault_open)  # cancelled or completed by a concurrent call
         duplicate = _finish(conn, row, digest)
         if duplicate:
@@ -385,12 +488,14 @@ def complete_upload(upload_id: str, conn: sqlite3.Connection = Depends(get_db),
 
 @router.post("/simple", response_model=UploadOut, status_code=201)
 def simple_upload(request: Request, file: UploadFile = File(...), source: str = Form("api"),
-                  pair_key: str | None = Form(None),
+                  pair_key: str | None = Form(None), resource: str = Form("file"),
                   conn: sqlite3.Connection = Depends(get_db),
                   session: SessionInfo = Depends(require_user)) -> UploadOut:
     """Whole file in one multipart request (scripts and tests)."""
     if source not in SOURCES:
         raise HTTPException(status_code=422, detail="source must be one of web, share, camera, api")
+    if resource not in RESOURCES:
+        raise HTTPException(status_code=422, detail="resource must be one of still, video, file")
     limit = settings.simple_upload_max_bytes
     uid = new_uid()
     staging = storage.staging_path(uid)
@@ -424,11 +529,11 @@ def simple_upload(request: Request, file: UploadFile = File(...), source: str = 
             known = _known_item(conn, digest)
             conn.execute(
                 "INSERT INTO uploads(uid, source, client_id, original_filename, size_bytes, received_bytes, mime, "
-                "sha256, status, message, item_id, remote_addr, created_at, updated_at, pair_key) "
-                "VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "sha256, status, message, item_id, remote_addr, created_at, updated_at, pair_key, session_id, resource) "
+                "VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (uid, source, filename, size, size, mime, digest, "duplicate" if known else "queued",
                  RESTORED_MESSAGE if known and restored else None, known, client_ip(request), now, now,
-                 (pair_key or "").strip()[:128] or None),
+                 _pair_key(pair_key), session.id, resource),
             )
             if known is None:
                 upload_id = conn.execute("SELECT id FROM uploads WHERE uid = ?", (uid,)).fetchone()["id"]
@@ -497,7 +602,10 @@ def cancel_upload(upload_id: str, conn: sqlite3.Connection = Depends(get_db),
 def sync_check(body: SyncCheckIn, session: SessionInfo = Depends(require_user),
                conn: sqlite3.Connection = Depends(get_db)) -> SyncCheckOut:
     """What the server already holds, for a device deciding what to send: item uids by file hash
-    (live or in the trash) and by the upload pair key the device used (its asset identifier)."""
+    (live or in the trash) and by the upload pair key the device used (its asset identifier); the
+    caller's own unfinished uploads of those assets (to continue them from the server's offset);
+    and the assets with an item in the trash (still known, so never re-sent, but shown apart so the
+    owner decides before deleting them from the phone)."""
     known: dict[str, str] = {}
     shas = sorted({s.lower() for s in body.sha256 if len(s) == 64})
     for i in range(0, len(shas), 500):
@@ -505,12 +613,25 @@ def sync_check(body: SyncCheckIn, session: SessionInfo = Depends(require_user),
         for r in conn.execute(f"SELECT sha256, uid FROM items WHERE sha256 IN ({','.join('?' * len(chunk))})", chunk):
             known[r["sha256"]] = r["uid"]
     assets: dict[str, str] = {}
+    trashed: set[str] = set()
+    pending: dict[str, list[SyncPending]] = {}
     keys = sorted({a for a in body.asset_ids if a})
     for i in range(0, len(keys), 500):
         chunk = keys[i:i + 500]
+        ph = ",".join("?" * len(chunk))
         for r in conn.execute(
-            f"SELECT u.pair_key, i.uid FROM uploads u JOIN items i ON i.id = u.item_id "
-            f"WHERE u.pair_key IN ({','.join('?' * len(chunk))}) ORDER BY u.id", chunk
+            f"SELECT u.pair_key, i.uid, i.deleted_at FROM uploads u JOIN items i ON i.id = u.item_id "
+            f"WHERE u.pair_key IN ({ph}) ORDER BY u.id", chunk
         ):
             assets.setdefault(r["pair_key"], r["uid"])
-    return SyncCheckOut(known=known, assets=assets)
+            if r["deleted_at"] is not None:
+                trashed.add(r["pair_key"])
+        for r in conn.execute(
+            f"SELECT uid, pair_key, resource, received_bytes, size_bytes FROM uploads "
+            f"WHERE session_id = ? AND pair_key IN ({ph}) AND status = 'uploading' ORDER BY id",
+            [session.id, *chunk],
+        ):
+            pending.setdefault(r["pair_key"], []).append(SyncPending(
+                upload_id=r["uid"], resource=r["resource"] or "file",
+                received_bytes=int(r["received_bytes"]), size=int(r["size_bytes"])))
+    return SyncCheckOut(known=known, assets=assets, pending=pending, trashed=sorted(trashed))

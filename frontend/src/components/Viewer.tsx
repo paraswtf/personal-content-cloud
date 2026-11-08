@@ -19,6 +19,7 @@ import { ConfirmModal, lockScroll } from './ui'
 import { errorMessage } from './admin/adminHooks'
 import DocumentStage, { FileCard } from './viewer/DocumentStage'
 import DownloadMenu from './viewer/DownloadMenu'
+import ShareButton from './share/ShareButton'
 import AnimalEditor from './viewer/AnimalEditor'
 import FaceEditor from './viewer/FaceEditor'
 import InfoPanel from './viewer/InfoPanel'
@@ -154,6 +155,7 @@ function ViewerInner({ uid, onClose, onPrev, onNext, position, startAt = null, v
   const [editing, setEditing] = useState<{ kind: BoxKind; id: number; anchor: HTMLElement } | null>(null)
   const [tagging, setTagging] = useState(false)
   const [confirmDelete, setConfirmDelete] = useState(false)
+  const [sharing, setSharing] = useState(false) // the Share dialog (section 26): the keyboard steps aside like for the delete confirm
   const [exitAfter, setExitAfter] = useState<'next' | 'close' | null>(null)
   const [toast, setToast] = useState<string | null>(null)
   const [seekFace, setSeekFace] = useState<{ key: string; shown: boolean } | null>(null)
@@ -326,8 +328,8 @@ function ViewerInner({ uid, onClose, onPrev, onNext, position, startAt = null, v
   // Keyboard: Esc, arrows, i (info), f (faces), s (favourite), [ and ] for pages, and a focus trap.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (confirmDelete) {
-        // The confirm dialog (portaled after the viewer) has no Tab trap of its own: keep focus in it.
+      if (confirmDelete || sharing) {
+        // The confirm and share dialogs (portaled after the viewer) have no Tab trap of their own: keep focus in them.
         if (e.key !== 'Tab') return
         const dialogs = Array.from(document.querySelectorAll<HTMLElement>('[role="dialog"][aria-modal="true"]')).filter(
           (d) => d !== rootRef.current,
@@ -418,7 +420,7 @@ function ViewerInner({ uid, onClose, onPrev, onNext, position, startAt = null, v
     }
     document.addEventListener('keydown', onKey)
     return () => document.removeEventListener('keydown', onKey)
-  }, [confirmDelete, editing, tagging, livePlaying, onClose, onPrev, onNext, closeEditor, toggleInfo, toggleFaces, detail, favorite, isDocKind, pageCount])
+  }, [confirmDelete, sharing, editing, tagging, livePlaying, onClose, onPrev, onNext, closeEditor, toggleInfo, toggleFaces, detail, favorite, isDocKind, pageCount])
 
   const onTouchStart = (e: TouchEvent) => {
     const t = e.touches[0]
@@ -615,6 +617,7 @@ function ViewerInner({ uid, onClose, onPrev, onNext, position, startAt = null, v
           <button type="button" onClick={toggleInfo} aria-pressed={showInfo} className={iconButton} aria-label="Show details" title="Details (I)">
             <Info className="size-5" aria-hidden />
           </button>
+          {detail && !detail.nsfw && !vault && <ShareButton uid={detail.uid} onOpenChange={setSharing} />}
           {detail && (
             <DownloadMenu
               detail={detail}

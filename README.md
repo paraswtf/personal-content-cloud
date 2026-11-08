@@ -9,8 +9,9 @@ What it does with each file:
 
 - **Any format.** JPEG, PNG, HEIC, WebP, camera RAW, GIF, video (MP4, MOV, MKV and more), PDF, DOCX,
   XLSX, PPTX and plain text. Anything else is stored and listed without a preview.
-- **Previews.** WebP thumbnails and large previews, 720p H.264 streaming copies of videos, page
-  renders of documents.
+- **Previews.** WebP thumbnails and large previews, page renders of documents, and 1080p H.264 web
+  copies of videos the browser cannot play as they are, made with the machine's hardware encoder
+  (NVENC, VAAPI or Quick Sync) when there is one.
 - **Categories.** Each item is sorted automatically into documents, screenshots, personal (people),
   places, food, pets, things, other, or the private (NSFW) vault. Any category can be overridden.
 - **Mis-clicks.** Blurry, shaken, too dark, blown out, pocket and ground shots and burst duplicates
@@ -41,6 +42,19 @@ What it does with each file:
   to that person; a person is matched against every face they have, your own assignments counting more.
 - **Your own tags.** Add free-form tags such as "wedding" or "Goa trip" to any item, and the same
   tags are suggested on look-alike photos, videos and similar documents for you to accept or remove.
+- **A timeline that scales.** The library is laid out by month with the whole library's shape known up
+  front, renders only what is on screen, and has a scrubber to jump to any month; a hundred thousand
+  photos scroll like a hundred.
+- **Albums.** Hand-picked sets with a cover, a description and the library's filters inside them;
+  add from any selection or from the viewer.
+- **Map and places.** Photos with GPS appear on a map (an offline basemap by default, detailed
+  online tiles when you switch them on), clustered, with a list of places; place names come from an
+  offline gazetteer and work in text search ("Goa").
+- **Share links.** An album or a hand-picked set gets a link for someone without an account, with an
+  optional password, an expiry and a download switch; vault items are never shared.
+- **Phone sync that survives.** The iOS app uploads in the background, continues an interrupted
+  upload where it stopped after a restart, and only offers to delete from the phone what the server
+  confirms it holds.
 
 ### Learning from your choices
 
@@ -105,6 +119,10 @@ Environment variables (all optional):
 | `PET_MATCH_THRESHOLD`, `PET_NEW_THRESHOLD` | `0.82`, `0.86` | Cosine cuts for matching a crop to a known pet and for pairing two crops into a new pet. |
 | `WALLET_PASS_TYPE_ID`, `WALLET_TEAM_ID`, `WALLET_ORG_NAME` | unset | Apple Wallet passes (see below). |
 | `OCR_ENABLED`, `OCR_MAX_PAGES` | `true`, `50` | OCR runs in English, Hindi and Marathi when the Devanagari model is present. |
+| `VIDEO_ENCODER`, `VAAPI_DEVICE` | `auto`, `/dev/dri/renderD128` | Web copy encoder: `auto` tries `h264_nvenc`, `h264_vaapi`, `h264_qsv`, then `libx264`; Settings > System shows the one in use. |
+| `VIDEO_PREVIEW_MAX_HEIGHT`, `VIDEO_PREVIEW_MAXRATE_KBPS`, `VIDEO_PREVIEW_CRF`, `VIDEO_STREAM_MAX_KBPS` | `1080`, `6000`, `23`, `8000` | The web copy rendition, and the bitrate up to which H.264 originals play as they are. |
+| `GEO_ENABLED` | `true` | Download the GeoNames gazetteer and name the places of photos with GPS. |
+| `MAP_TILES`, `MAP_TILE_STYLE` | `offline`, OpenFreeMap liberty | The map's default basemap and the online style used when detailed tiles are switched on. |
 
 The full list, with the face, video, preview and search settings carried over from the alumni hub,
 is in `backend/app/config.py` and `docs/ARCHITECTURE.md`.
@@ -130,12 +148,18 @@ start, a no-op when they are present) into `MODELS_DIR`:
 | PP-OCRv6 small models bundled with rapidocr | OCR, English | RapidAI | Apache 2.0 |
 | PP-OCRv5 Devanagari mobile recogniser | OCR, Hindi and Marathi | RapidOCR model zoo | Apache 2.0 |
 | Noto Sans Devanagari | page renders of Hindi and Marathi text | Noto fonts | SIL OFL 1.1 |
+| GeoNames cities15000, admin1 and country tables | place names for photos with GPS (`MODELS_DIR/geo`) | geonames.org | CC BY 4.0 |
+
+The map's offline basemap (`frontend/public/map/basemap.json`) is Natural Earth 1:110m land, lakes and
+boundaries (public domain). Detailed online tiles, when switched on, come from OpenFreeMap (OpenMapTiles
+with OpenStreetMap data); photos never leave the server either way.
 
 ## Data, backups and disk
 
 All state lives in `DATA_DIR`: `cloud.db` (SQLite, WAL mode), `originals/` (untouched files),
 `thumbs/`, `previews/`, `pages/`, `videos/`, `faces/`, `bodies/`, `docphoto/` (generated, rebuildable),
-`staging/` and `failed/` (uploads), `wallet/` (your certificates), `tmp/`. Deleted items stay in the
+`staging/` and `failed/` (uploads), `wallet/` (your certificates), `site/` (the served copy of the
+frontend build), `tmp/`. Deleted items stay in the
 trash for `TRASH_DAYS` days. To back up, stop the server and copy `DATA_DIR`, or use
 `sqlite3 cloud.db ".backup copy.db"` plus a copy of `originals/` while it runs.
 

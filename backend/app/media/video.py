@@ -6,7 +6,7 @@ default), so frames come out in display orientation and their size matches Media
 - extract_frame(path, t, max_side=None) -> BGR uint8 ndarray | None (extract_frame_image: PIL RGB)
 - frames_at(path, info, times, max_side=256) -> [PIL RGB | None] (fingerprints)
 - poster_time(info), stream_friendly(codec, ext, w, h, bitrate), needs_web_preview(info, ext),
-  transcode_preview(src, dst, info, max_height), make_video_derivatives(...)
+  transcode_preview(src, dst, info, max_height) -> encoder name, make_video_derivatives(...)
 
 All subprocess calls need a timeout and must not leave temp files behind on failure.
 """
@@ -31,7 +31,7 @@ import numpy as np
 from PIL import Image
 
 from app.config import settings
-from app.media import images
+from app.media import encoders, images
 from app.media.probe import MediaInfo, ToolFailure
 
 log = logging.getLogger(__name__)
@@ -397,50 +397,117 @@ def _low_priority(cmd: list[str]) -> list[str]:
     return [nice, "-n", str(NICE_LEVEL), *cmd] if nice else cmd
 
 
-def transcode_preview(src: Path, dst: Path, info: MediaInfo, max_height: int) -> None:
-    """Compressed streaming copy: H.264 (libx264, preset veryfast, crf settings.video_preview_crf,
-    capped at settings.video_preview_maxrate_kbps with a buffer of twice that, high profile,
-    yuv420p, even dims, a keyframe every KEYFRAME_INTERVAL_S seconds for seeking, SHORT side <=
-    max_height, so a portrait phone clip becomes 720x1280 rather than 406x720, never upscaled) +
-    AAC settings.video_preview_audio_kbps stereo (if audio), mp4 with +faststart. ffmpeg uses
-    settings.video_transcode_threads threads and runs at low CPU priority (nice).
-    Write to a temp file and os.replace into dst. Timeout scales with duration, up to
-    settings.video_transcode_max_s (the duration is declared by the uploaded file).
-    Raises RuntimeError on failure. Frames are already display-oriented (ffmpeg autorotate runs
-    before this filter), so iw/ih below are the rotated dimensions.
-    -fps_mode passthrough keeps every frame with its own timestamp (no frames dropped or
-    duplicated to reach a constant rate), so a face's frame_time_s shows the same frame in the
-    copy as in the original."""
+def _transcode_cmd(src: Path, tmp: Path, encoder: str, max_height: int) -> list[str]:
+    pre, video_args = encoders.build_video_args(encoder, int(max_height), int(settings.video_preview_crf),
+                                                int(settings.video_preview_maxrate_kbps))
+    return [*_FF, "-y", *pre, "-i", str(src), "-map", "0:V:0", "-map", "0:a:0?", "-sn", "-dn",
+            "-map_metadata", "-1", *video_args, "-fps_mode", "passthrough",
+            "-force_key_frames", f"expr:gte(t,n_forced*{KEYFRAME_INTERVAL_S})",
+            "-c:a", "aac", "-b:a", f"{int(settings.video_preview_audio_kbps)}k", "-ac", "2",
+            "-threads", str(max(1, int(settings.video_transcode_threads))),
+            "-movflags", "+faststart", "-f", "mp4", str(tmp)]
+
+
+class TranscodeTimeout(RuntimeError):
+    """ffmpeg did not finish within the budget (a hung device counts as a device failure)."""
+
+
+PROBE_TIMEOUT_S = 60
+FALLBACK_FLOOR_S = 120.0
+
+
+def _output_problem(path: Path) -> str | None:
+    """None when `path` is a readable file with one video stream and a positive duration (ffprobe),
+    else why not. An encoder that exits 0 and leaves a broken file must not be served."""
+    try:
+        res = subprocess.run(["ffprobe", "-v", "error", "-print_format", "json", "-show_format", "-show_streams", str(path)],
+                             capture_output=True, timeout=PROBE_TIMEOUT_S, stdin=subprocess.DEVNULL)
+    except (subprocess.TimeoutExpired, OSError) as e:
+        return f"ffprobe could not read the copy: {e}"
+    if res.returncode != 0:
+        return "ffprobe could not read the copy: " + (res.stderr.decode("utf-8", "replace").strip()[-200:] or "no output")
+    try:
+        data = json.loads(res.stdout.decode("utf-8", "replace") or "{}")
+    except ValueError:
+        return "ffprobe gave no readable output for the copy"
+    streams = [s for s in data.get("streams", []) if s.get("codec_type") == "video"]
+    if len(streams) != 1:
+        return f"the copy has {len(streams)} video streams"
+    try:
+        duration = float(data.get("format", {}).get("duration") or streams[0].get("duration") or 0)
+    except (TypeError, ValueError):
+        duration = 0.0
+    if duration <= 0:
+        return "the copy has no duration"
+    return None
+
+
+def _fallback_budget(deadline: float, now: float, total: float) -> float:
+    """Seconds left for the libx264 fallback: what remains of the job's budget, with a floor of
+    FALLBACK_FLOOR_S (or the whole budget when that is shorter) so a short clip still gets its copy."""
+    return max(deadline - now, min(FALLBACK_FLOOR_S, total))
+
+
+def _run_transcode(cmd: list[str], tmp: Path, timeout: float) -> None:
+    """Run one ffmpeg command and check its output; RuntimeError (with the last stderr lines) when
+    it fails, TranscodeTimeout when it overruns `timeout`."""
+    try:
+        res = subprocess.run(_low_priority(cmd), capture_output=True, timeout=timeout, stdin=subprocess.DEVNULL)
+    except subprocess.TimeoutExpired as e:
+        raise TranscodeTimeout(f"transcode timed out after {timeout:.0f}s") from e
+    except OSError as e:
+        raise RuntimeError(f"could not run ffmpeg: {e}") from e
+    if res.returncode != 0 or not tmp.exists() or tmp.stat().st_size == 0:
+        msg = res.stderr.decode("utf-8", "replace").strip()[-500:]
+        raise RuntimeError(f"transcode failed: {msg or 'no output'}")
+    problem = _output_problem(tmp)
+    if problem is not None:
+        raise RuntimeError(f"transcode produced an unusable file: {problem}")
+
+
+def transcode_preview(src: Path, dst: Path, info: MediaInfo, max_height: int) -> str:
+    """Compressed web copy: H.264 from the detected encoder (encoders.detect: NVENC, VAAPI, Quick
+    Sync or libx264 per settings.video_encoder), quality at the CRF equivalent of
+    settings.video_preview_crf capped at settings.video_preview_maxrate_kbps with a buffer of twice
+    that, high profile, yuv420p, even dims, a keyframe every KEYFRAME_INTERVAL_S seconds for seeking,
+    SHORT side <= max_height (a portrait phone clip becomes 1080x1920 rather than 608x1080), never
+    upscaled, plus AAC settings.video_preview_audio_kbps stereo (if audio), mp4 with +faststart.
+    A hardware encoder that fails is noted (encoders.note_failure: skipped from then on when the
+    device or driver is the problem or after two failures in a row) and the same call runs libx264
+    instead with what is left of the time budget, so one bad driver or one odd file never costs a
+    job attempt; a libx264 failure raises RuntimeError. The finished file is probed before it is
+    moved into place.
+    ffmpeg runs at low CPU priority (nice) with settings.video_transcode_threads threads. Writes a
+    temp file and os.replace()s it into dst. Timeout scales with duration, up to
+    settings.video_transcode_max_s. -fps_mode passthrough keeps every frame with its own timestamp,
+    so a face's frame_time_s shows the same frame in the copy as in the original. Returns the name
+    of the encoder that produced the copy."""
     dst = Path(dst)
     dst.parent.mkdir(parents=True, exist_ok=True)
     tmp = dst.with_name(f".{dst.name}.{uuid.uuid4().hex}.tmp.mp4")
-    mh = int(max_height)
-    vf = (
-        f"scale=w='if(gte(iw,ih),-2,trunc(min(iw,{mh})/2)*2)'"
-        f":h='if(gte(iw,ih),trunc(min(ih,{mh})/2)*2,-2)',format=yuv420p"
-    )
-    maxrate = int(settings.video_preview_maxrate_kbps)
-    cmd = [*_FF, "-y", "-i", str(src), "-map", "0:V:0", "-map", "0:a:0?", "-sn", "-dn",
-           "-map_metadata", "-1", "-vf", vf, "-fps_mode", "passthrough",
-           "-c:v", "libx264", "-preset", "veryfast", "-crf", str(int(settings.video_preview_crf)),
-           "-maxrate", f"{maxrate}k", "-bufsize", f"{2 * maxrate}k",
-           "-profile:v", "high", "-pix_fmt", "yuv420p",
-           "-force_key_frames", f"expr:gte(t,n_forced*{KEYFRAME_INTERVAL_S})",
-           "-c:a", "aac", "-b:a", f"{int(settings.video_preview_audio_kbps)}k", "-ac", "2",
-           "-threads", str(max(1, int(settings.video_transcode_threads))),
-           "-movflags", "+faststart", "-f", "mp4", str(tmp)]
-    timeout = min(max(120.0, 4 * (info.duration_s or 0.0)), float(settings.video_transcode_max_s))
+    total = min(max(120.0, 4 * (info.duration_s or 0.0)), float(settings.video_transcode_max_s))
+    deadline = time.monotonic() + total
+    first = encoders.detect().name
+    plan = [first] if first == encoders.SOFTWARE else [first, encoders.SOFTWARE]
+    budget = total
     try:
-        try:
-            res = subprocess.run(_low_priority(cmd), capture_output=True, timeout=timeout,
-                                 stdin=subprocess.DEVNULL)
-        except subprocess.TimeoutExpired as e:
-            raise RuntimeError(f"transcode timed out after {timeout:.0f}s") from e
-        except OSError as e:
-            raise RuntimeError(f"could not run ffmpeg: {e}") from e
-        if res.returncode != 0 or not tmp.exists() or tmp.stat().st_size == 0:
-            msg = res.stderr.decode("utf-8", "replace").strip()[-500:]
-            raise RuntimeError(f"transcode failed: {msg or 'no output'}")
-        os.replace(tmp, dst)
+        for encoder in plan:
+            try:
+                _run_transcode(_transcode_cmd(src, tmp, encoder, max_height), tmp, budget)
+            except RuntimeError as e:
+                tmp.unlink(missing_ok=True)
+                if encoder == encoders.SOFTWARE:
+                    raise
+                why = encoders.reason_from_stderr(str(e).replace("transcode failed: ", "", 1), encoder)
+                device_error = isinstance(e, TranscodeTimeout) or encoders.is_device_error(why)
+                skipped = encoders.note_failure(encoder, why, device_error=device_error)
+                log.warning("web copy: %s failed (%s); libx264 makes this copy%s", encoder, why,
+                            "; later copies skip it until the encoders are tested again" if skipped else "")
+                budget = _fallback_budget(deadline, time.monotonic(), total)
+                continue
+            encoders.note_success(encoder)
+            os.replace(tmp, dst)
+            return encoder
+        raise RuntimeError("transcode failed: no encoder ran")  # not reached
     finally:
         tmp.unlink(missing_ok=True)

@@ -3,9 +3,11 @@ import SwiftData
 
 struct SyncView: View {
     @ObservedObject private var engine = SyncEngine.shared
+    @ObservedObject private var uploader = BackgroundUploader.shared
     @Query(sort: \SyncEvent.at, order: .reverse) private var events: [SyncEvent]
     @Query(filter: #Predicate<SyncRecord> { $0.status == "synced" }) private var synced: [SyncRecord]
     @Query(filter: #Predicate<SyncRecord> { $0.status == "failed" }) private var failed: [SyncRecord]
+    @Query(filter: #Predicate<SyncRecord> { $0.status == "uploaded" }) private var waiting: [SyncRecord]
 
     var body: some View {
         NavigationStack {
@@ -24,13 +26,22 @@ struct SyncView: View {
                             ProgressView(value: engine.progress).frame(width: 80)
                         }
                     }
+                    if let file = uploader.current {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Sending \(file)").font(.footnote).lineLimit(1)
+                            ProgressView(value: uploader.fileProgress)
+                        }
+                    }
                     HStack {
-                        Button(engine.running ? "Stop" : "Sync now") {
-                            if engine.running { engine.cancel() } else { engine.start(manual: true) }
+                        Button(engine.running || uploader.current != nil ? "Stop" : "Sync now") {
+                            if engine.running || uploader.current != nil { engine.stop() } else { engine.start(manual: true) }
                         }
                         .buttonStyle(.borderedProminent)
                         Spacer()
                         Text("\(synced.count) synced, \(failed.count) failed").font(.footnote).foregroundStyle(.secondary)
+                    }
+                    if !waiting.isEmpty {
+                        Text("\(waiting.count) sent, waiting for the server to store them").font(.footnote).foregroundStyle(.secondary)
                     }
                 }
                 if !failed.isEmpty {

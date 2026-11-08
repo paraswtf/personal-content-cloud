@@ -20,7 +20,21 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
     func application(_ application: UIApplication,
                      didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
         BackgroundSync.register()
+        BackgroundUploader.shared.activate()   // reconnect to the background session (section 28)
         return true
+    }
+
+    /// iOS relaunched the app (or woke it) because tasks of the background upload session finished
+    /// while it was suspended or not running. The uploader's delegate takes the events and calls the
+    /// handler once it has seen them all.
+    func application(_ application: UIApplication, handleEventsForBackgroundURLSession identifier: String,
+                     completionHandler: @escaping () -> Void) {
+        guard identifier == BackgroundUploader.identifier else {
+            completionHandler()
+            return
+        }
+        BackgroundUploader.shared.backgroundCompletion = completionHandler
+        BackgroundUploader.shared.activate()
     }
 }
 
@@ -38,6 +52,7 @@ final class AppSession: ObservableObject {
     }
 
     func signOut() {
+        BackgroundUploader.shared.pause()
         Keychain.deleteToken()
         signedIn = false
     }

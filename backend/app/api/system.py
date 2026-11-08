@@ -13,6 +13,13 @@ POST /api/system/retry-failed     retries what failed for good (ingest.retry_fai
                                   whose bytes are kept, errored jobs with their item status set back to
                                   'pending') -> {"requeued": int}. Holds worker.housekeeping_lock so it
                                   never runs beside housekeeping.
+Video (section 27): SystemOut.video = app.media.encoders.status() plus the web copy counts (queued and
+  running video_preview jobs; failed, done and pending from items.preview_status of live videos);
+POST /api/system/video/detect     probes the encoders again (a few seconds) -> the video dict
+POST /api/system/video/requeue    {scope: failed | all} queues the web copy again: for videos whose copy
+                                  failed, or for every live video that needs a copy and has none yet
+                                  (none and error rows, pending rows without a live job); done rows stay
+                                  -> {"requeued": int}
 """
 from __future__ import annotations
 
@@ -20,14 +27,17 @@ import logging
 import shutil
 import sqlite3
 import threading
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
 from app import jobs, storage
+from app.db import tx
+from app.media import encoders, video
 from app.api.deps import get_db, require_user
 from app.config import APP_VERSION, settings
+from app.util import now_iso
 from app.schemas import DiskStats, LearningApplyOut, LearningEnabledIn, LearningStatus, ModelStatus, Ok, SystemOut
 
 log = logging.getLogger(__name__)
@@ -37,6 +47,10 @@ router = APIRouter(dependencies=[Depends(require_user)])  # require_user also ch
 
 class RetryOut(BaseModel):
     requeued: int
+
+
+class VideoRequeueIn(BaseModel):
+    scope: Literal["failed", "all"] = "failed"
 
 _download_thread: threading.Thread | None = None
 _download_guard = threading.Lock()
@@ -116,8 +130,63 @@ def system(conn: sqlite3.Connection = Depends(get_db)) -> SystemOut:
         queues=jobs.counts(conn), disk=DiskStats(free_bytes=free, total_bytes=total, originals_bytes=originals),
         wallet=_wallet(), timezone=settings.local_timezone,
         ffmpeg=shutil.which("ffmpeg") is not None and shutil.which("ffprobe") is not None,
-        workers=settings.workers_enabled, download=_download_state(),
+        workers=settings.workers_enabled, download=_download_state(), video=_video_status(conn),
     )
+
+
+def _video_status(conn: sqlite3.Connection) -> dict[str, Any]:
+    """encoders.status() plus the web copy counts."""
+    out = encoders.status()
+    out.update({"queued": 0, "running": 0, "failed": 0, "done": 0, "pending": 0})
+    for r in conn.execute("SELECT status, COUNT(*) AS n FROM jobs WHERE type = 'video_preview' GROUP BY status"):
+        if r["status"] in ("queued", "running"):
+            out[r["status"]] = int(r["n"])
+    for r in conn.execute(
+        "SELECT preview_status, COUNT(*) AS n FROM items WHERE kind = 'video' AND deleted_at IS NULL "
+        "AND companion_of IS NULL GROUP BY preview_status"
+    ):
+        key = {"done": "done", "pending": "pending", "error": "failed"}.get(r["preview_status"])
+        if key:
+            out[key] = int(r["n"])
+    return out
+
+
+@router.post("/video/detect")
+def video_detect(conn: sqlite3.Connection = Depends(get_db)) -> dict[str, Any]:
+    encoders.redetect()
+    encoders.detect()
+    return _video_status(conn)
+
+
+@router.post("/video/requeue", response_model=RetryOut)
+def video_requeue(body: VideoRequeueIn, conn: sqlite3.Connection = Depends(get_db)) -> RetryOut:
+    from app import ingest
+
+    rows = conn.execute(
+        "SELECT id, version, ext, width, height, bitrate, video_codec, preview_status FROM items "
+        "WHERE kind = 'video' AND deleted_at IS NULL AND companion_of IS NULL"
+    ).fetchall()
+    # Finished copies are never redone here: a done row set back to pending would stop playing until
+    # the serial video queue reached it (urls.playable_video_url hides a pending copy).
+    wanted = []
+    for r in rows:
+        status = r["preview_status"]
+        if body.scope == "failed":
+            if status == "error":
+                wanted.append(r)
+        elif status == "error" or status == "pending" or (
+            status == "none" and not video.stream_friendly(r["video_codec"], r["ext"], r["width"], r["height"], r["bitrate"])
+        ):
+            wanted.append(r)
+    requeued = 0
+    with tx(conn):
+        for r in wanted:
+            if r["preview_status"] != "pending":
+                conn.execute("UPDATE items SET preview_status = 'pending', updated_at = ? WHERE id = ?",
+                             (now_iso(), int(r["id"])))
+            if jobs.enqueue(conn, "video_preview", ingest.item_payload(int(r["id"]), int(r["version"])), unique=True):
+                requeued += 1
+    return RetryOut(requeued=requeued)
 
 
 def _run_download() -> None:

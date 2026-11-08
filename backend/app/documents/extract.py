@@ -714,7 +714,7 @@ def snippet_originals(conn: sqlite3.Connection, ids: list[int]) -> dict[int, tup
 
 
 def refresh_fts(conn: sqlite3.Connection, item_id: int) -> None:
-    item = conn.execute("SELECT original_filename, companion_of FROM items WHERE id = ?", (item_id,)).fetchone()
+    item = conn.execute("SELECT original_filename, companion_of, place FROM items WHERE id = ?", (item_id,)).fetchone()
     if item is None or item["companion_of"]:
         remove_fts(conn, item_id)
         return
@@ -733,6 +733,8 @@ def refresh_fts(conn: sqlite3.Connection, item_id: int) -> None:
     labels += [r["name"] for r in conn.execute(
         "SELECT t.name FROM item_user_tags ut JOIN tags t ON t.id = ut.tag_id WHERE ut.item_id = ? ORDER BY t.name",
         (item_id,))]
+    if item["place"]:  # the place name (section 25), so "goa" finds the photos taken there
+        labels.append(item["place"])
     filename = item["original_filename"] or ""
     stem = re.sub(r"[_\-.]+", " ", filename)
     with tx(conn):

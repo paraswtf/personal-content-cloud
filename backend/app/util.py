@@ -72,6 +72,17 @@ def local_day_start_utc(value: str, tz_name: str, *, next_day: bool = False) -> 
     return dt.isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
+def local_month_start_utc(year: int, month: int, tz_name: str) -> str:
+    """The first instant of a calendar month in tz_name, as a UTC ISO string in the stored format (the
+    same shape as local_day_start_utc, so it compares as text with stored times). A month outside
+    1..12 rolls the year (13 is the next January, 0 the previous December); years are clamped to the
+    calendar edges by local_day_start_utc."""
+    year += (month - 1) // 12
+    month = (month - 1) % 12 + 1
+    year = min(max(year, 1), 9998)
+    return local_day_start_utc(f"{year:04d}-{month:02d}-01", tz_name)
+
+
 def new_uid(length: int = 14) -> str:
     """Random lowercase id, safe for URLs and file names (~70 bits for length 14)."""
     return "".join(secrets.choice(_UID_ALPHABET) for _ in range(length))

@@ -35,6 +35,8 @@ targets:
           UIApplicationSupportsMultipleScenes: false
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
         NSPhotoLibraryUsageDescription: "Content Cloud uploads your new photos and videos to your own server, and can remove the ones it has synced from this phone when you ask it to."
+        # fetch and processing: the BGProcessingTask sync. The background URLSession that carries the
+        # uploads (in.biios.pcc.upload, section 28) needs no background mode of its own.
         UIBackgroundModes: [fetch, processing]
         BGTaskSchedulerPermittedIdentifiers: [in.biios.pcc.sync]
         NSAppTransportSecurity:
