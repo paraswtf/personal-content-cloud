@@ -1,6 +1,8 @@
-// Actions for the selected library items: favourite, category, add or remove a tag, keep
-// (mis-clicks), vault, trash.
+// Actions for the selected library items: favourite, category, add or remove a tag, people (move,
+// remove, tag or rename who the items show, section 10), keep (mis-clicks), vault, trash. The library,
+// search results, albums and the vault share this bar.
 import AlbumBulkActions from '../albums/BulkActions'
+import PeopleBulkAction from '../people/PeopleBulkAction'
 import ShareBulkAction from '../share/BulkAction'
 import { useId, useState, type FormEvent } from 'react'
 import { useMutation } from '@tanstack/react-query'
@@ -170,6 +172,7 @@ export default function BulkBar({ items, selected, onClear, onSelectAll, total, 
             options={CATEGORIES.filter((c) => c !== 'nsfw').map((c) => ({ value: c, label: CATEGORY_LABELS[c] }))}
           />
         )}
+        <PeopleBulkAction uids={uids} vault={vault} busy={busy} onDone={onClear} />
         <Button variant="secondary" disabled={busy} aria-expanded={tagMode === 'tag'} onClick={() => setTagMode(tagMode === 'tag' ? null : 'tag')}>
           <Tag className="size-4" aria-hidden />
           Add tag

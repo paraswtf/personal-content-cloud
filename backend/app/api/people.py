@@ -14,6 +14,14 @@ Routes (all under /api, all require a logged-in session; writes need the CSRF he
   GET    /suggestions?limit -> SuggestionList;  POST /suggestions/dismiss {a, b} -> Ok
   POST   /items/{uid}/tags {person_id | new_person_name, kind?, species?, relation?} -> [PersonRef] (a person or a
          pet, section 22; relation in|related, section 10);  DELETE /items/{uid}/tags/{person_id}
+  People on a selection (section 10; uids 1 to 1000, unknown and trashed items skipped, 403 vault_locked for a
+  vault item while the vault is locked):
+  POST   /items/people {uids} -> ItemsPeopleOut (the people and pets on them, unnamed faces counted)
+  POST   /items/people/move {uids, from_person_id, person_id | new_person_name} -> PeopleBulkOut (their faces,
+         bodies, pet boxes and tags there go to the target; a person only to a person, a pet only to a pet;
+         boxes remembered as not them, look-alikes follow; a move to a person is learned like a merge)
+  POST   /items/people/remove {uids, person_id} -> PeopleBulkOut (their boxes there unassigned, tags deleted)
+  POST   /items/people/tag {uids, person_id | new_person_name, kind?, species?, relation?} -> PeopleBulkOut
   POST   /recluster -> Ok
 Faces, bodies and counts in NSFW or trashed items are never shown here (person items take vault=1
 with an unlocked session). With the vault locked, acting on a box or the tags of an NSFW item is
@@ -24,7 +32,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
-from typing import Any, Literal
+from typing import Any, Literal, NamedTuple
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
@@ -64,6 +72,9 @@ from app.schemas import (
     GuessItem,
     GuessPage,
     ItemPage,
+    ItemPersonOut,
+    ItemsPeopleIn,
+    ItemsPeopleOut,
     MergeIn,
     Ok,
     PersonCreate,
@@ -72,6 +83,10 @@ from app.schemas import (
     PersonRef,
     PersonSpeciesIn,
     PersonUpdate,
+    PeopleBulkOut,
+    PeopleMoveIn,
+    PeopleRemoveIn,
+    PeopleTagIn,
     SpeciesIn,
     Suggestion,
     SuggestionList,
@@ -312,9 +327,13 @@ def _items_of_person(conn: sqlite3.Connection, person_id: int) -> set[int]:
     )}
 
 
+_REJECTION_KIND = {"faces": "face", "bodies": "body", "animals": "animal"}
+
+
 def _move_boxes(conn: sqlite3.Connection, table: str, ids: list[int], target: int | None) -> tuple[int, set[int]]:
-    """Assign faces, bodies or animal boxes to target (None unassigns), locked as 'user'. Call inside
-    a tx. Returns (rows updated, item ids). 404 when an id is unknown."""
+    """Assign faces, bodies or animal boxes to target (None unassigns), locked as 'user', forgetting any
+    earlier "not the target" for them (guess_rejections). Call inside a tx. Returns (rows updated, item ids).
+    404 when an id is unknown."""
     ids = sorted({int(i) for i in ids})
     ph = _ids_sql(ids)
     rows = conn.execute(f"SELECT id, item_id, person_id FROM {table} WHERE id IN ({ph})", ids).fetchall()
@@ -326,11 +345,19 @@ def _move_boxes(conn: sqlite3.Connection, table: str, ids: list[int], target: in
     items = {int(r["item_id"]) for r in rows}
     clear = "" if table == "animals" else ", guess_person_id = NULL, guess_score = NULL, guess_evidence = NULL"
     conn.execute(f"UPDATE {table} SET person_id = ?, assigned_by = 'user'{clear} WHERE id IN ({ph})", [target, *ids])
+    if target is not None:
+        # The owner says these boxes are the target: an older "not the target" for them is outdated.
+        conn.execute(f"DELETE FROM guess_rejections WHERE kind = ? AND person_id = ? AND ref_id IN ({ph})",
+                     [_REJECTION_KIND[table], int(target), *ids])
     now = now_iso()
     if table == "faces":
         # A body around the face follows it.
         conn.execute(f"UPDATE bodies SET person_id = ?, assigned_by = 'user'{clear} WHERE face_id IN ({ph})",
                      [target, *ids])
+        if target is not None:
+            conn.execute(
+                "DELETE FROM guess_rejections WHERE kind = 'body' AND person_id = ? "
+                f"AND ref_id IN (SELECT id FROM bodies WHERE face_id IN ({ph}))", [int(target), *ids])
         conn.execute(
             f"UPDATE persons SET cover_face_id = NULL, updated_at = ? WHERE cover_face_id IN ({ph}) AND id IS NOT ?",
             [now, *ids, target],
@@ -696,7 +723,7 @@ def _assign(conn: sqlite3.Connection, table: str, ids: list[int], person_id: int
 
 
 def _leaving(conn: sqlite3.Connection, table: str, ids: list[int], target: int | None) -> dict[int, list[int]]:
-    """{person_id: faces among `ids` that are leaving that person} (a move to the same person is no leave)."""
+    """{person_id: boxes among `ids` that are leaving that person or pet} (a move to the same one is no leave)."""
     ids = sorted({int(i) for i in ids})
     out: dict[int, list[int]] = {}
     for r in conn.execute(f"SELECT id, person_id FROM {table} WHERE id IN ({_ids_sql(ids)}) AND person_id IS NOT NULL", ids):
@@ -708,13 +735,19 @@ def _leaving(conn: sqlite3.Connection, table: str, ids: list[int], target: int |
 def _follow_lookalikes(conn: sqlite3.Connection, leaving: dict[int, list[int]],
                        target: int | None) -> tuple[list[int], set[int]]:
     """When faces leave a person, the person's automatic faces that look like them go the same way
-    (to the target person, or loose), and every face that left is remembered as not that person.
-    Returns (the faces that followed, their items). Call inside a tx."""
+    (to the target person, or loose), and every face that left is remembered as not that person. A
+    look-alike the owner already said is not the target stays. Returns (the faces that followed, their
+    items). Call inside a tx."""
     followed: list[int] = []
     items: set[int] = set()
     for pid, seeds in leaving.items():
         cluster.record_rejections(conn, seeds, pid)
         more = cluster.followers(conn, seeds, pid)
+        if more and target is not None:
+            refused = {int(r[0]) for r in conn.execute(
+                f"SELECT ref_id FROM guess_rejections WHERE kind = 'face' AND person_id = ? AND ref_id IN ({_ids_sql(more)})",
+                [int(target), *more])}
+            more = [f for f in more if f not in refused]
         if not more:
             continue
         cluster.record_rejections(conn, more, pid)
@@ -821,9 +854,33 @@ def assign_animals(body: AssignAnimalsIn, conn: sqlite3.Connection = Depends(get
                 if change.person_id is not None and change.person_id != body.person_id:
                     body.person_id = change.person_id
         target = _target_person(conn, body.person_id, body.new_person_name, name_given, session, species=boxes_species)
+        leaving = _leaving(conn, "animals", ids, target)
         updated, items = _move_boxes(conn, "animals", ids, target)
+        crops: list[int] = []
+        if leaving:
+            # not this pet (section 22): remembered, and the pet's automatic look-alikes go the same way
+            crops, crop_items = pets_mod.leave_pets(conn, leaving, target)
+            items |= crop_items
     _after_people_change(conn, items, set())
-    return AssignOut(updated=updated, person=_person_out(conn, target) if target is not None else None, followed=followed)
+    if crops and target is None:
+        _regroup_pets(conn, crops, items)
+    return AssignOut(updated=updated, person=_person_out(conn, target) if target is not None else None,
+                     followed=followed + len(crops))
+
+
+def _regroup_pets(conn: sqlite3.Connection, crops: list[int], items: set[int]) -> None:
+    """Pet crops that followed a crop the owner unassigned are loose: let them find another pet or start
+    one together (never the pet they left: its rejected crops keep them away)."""
+    try:
+        with tx(conn):
+            marks = _ids_sql(crops)
+            for item_id in sorted({int(r[0]) for r in conn.execute(
+                    f"SELECT DISTINCT item_id FROM animals WHERE id IN ({marks})", crops)}):
+                pets_mod.assign_new_animals(conn, item_id)
+            bump_faces_version(conn)
+    except Exception:  # noqa: BLE001 - the owner's correction already happened
+        log.exception("could not regroup %d look-alike pet crops", len(crops))
+    guess.refresh_fts(conn, items)
 
 
 @router.post("/animals/species", response_model=AssignOut)
@@ -945,8 +1002,8 @@ def _delete_box(conn: sqlite3.Connection, table: str, box_id: int, session: Sess
             cluster.remove_faces(conn, [box_id])
         else:
             conn.execute(f"DELETE FROM {table} WHERE id = ?", (box_id,))
-            if table == "bodies":
-                cluster.drop_rejections(conn, "body", [box_id])
+            if table in ("bodies", "animals"):
+                cluster.drop_rejections(conn, _REJECTION_KIND[table], [box_id])
         conn.execute(f"UPDATE items SET {count_col} = (SELECT COUNT(*) FROM {table} WHERE item_id = ?) WHERE id = ?",
                      (row["item_id"], row["item_id"]))
         if row["person_id"] is not None:
@@ -1157,6 +1214,296 @@ def remove_tag(uid: str, person_id: int, conn: sqlite3.Connection = Depends(get_
             bump_faces_version(conn)
     guess.refresh_fts(conn, {item_id})
     return _tags_of(conn, item_id)
+
+
+
+# ------------------------------------------------------------------ people on a selection (section 10)
+def _chunks(ids: list[Any], n: int = 500) -> list[list[Any]]:
+    return [ids[i:i + n] for i in range(0, len(ids), n)]
+
+
+def _selection(conn: sqlite3.Connection, session: SessionInfo, uids: list[str]) -> list[int]:
+    """The ids of the selected items that exist and are not in the trash; 403 vault_locked when one of
+    them is in the vault and the vault is locked."""
+    wanted = list(dict.fromkeys(u for u in uids if u))
+    ids: list[int] = []
+    vault = False
+    for chunk in _chunks(wanted):
+        for r in conn.execute(
+            f"SELECT id, nsfw FROM items WHERE uid IN ({_ids_sql(chunk)}) AND deleted_at IS NULL", chunk
+        ):
+            ids.append(int(r["id"]))
+            vault = vault or bool(r["nsfw"])
+    if vault and not session.vault_unlocked:
+        raise _vault_locked()
+    return sorted(ids)
+
+
+def _box_ids(conn: sqlite3.Connection, table: str, item_ids: list[int], person_id: int) -> list[int]:
+    out: list[int] = []
+    for chunk in _chunks(item_ids):
+        out += [int(r[0]) for r in conn.execute(
+            f"SELECT id FROM {table} WHERE person_id = ? AND item_id IN ({_ids_sql(chunk)})", [person_id, *chunk])]
+    return out
+
+
+class _Moved(NamedTuple):
+    changed: set[int]  # the selected items that changed
+    faces: list[int]  # the source's faces there, now the target's (or loose)
+    followed: list[int]  # the source's automatic look-alike faces that went along
+    crops: list[int]  # the pet's automatic look-alike crops that went along
+    touched: set[int]  # every item touched
+
+
+def _move_on_items(conn: sqlite3.Connection, item_ids: list[int], source: int, target: int | None) -> _Moved:
+    """On these items every face, body and pet box of `source` goes to `target` (None unassigns them), as
+    the owner's (_move_boxes), and every tag of `source` moves to `target` with its relation ('in' winning
+    over a tag the target already has there) or, with no target, is deleted. Every box taken from `source`
+    is remembered as not `source` (guess_rejections: faces, bodies, and pet crops, section 22), and the
+    automatic look-alikes of the faces and crops follow them (_follow_lookalikes, pets.leave_pets), as
+    /faces/assign and /animals/assign do. Call inside a tx."""
+    changed: set[int] = set()
+    touched: set[int] = set()
+    followed: list[int] = []
+    crops: list[int] = []
+    # every body of the source here, those around its faces included (they go with the faces)
+    body_ids = _box_ids(conn, "bodies", item_ids, source)
+    face_ids = _box_ids(conn, "faces", item_ids, source)
+    if face_ids:
+        leaving = _leaving(conn, "faces", face_ids, target)
+        _, items = _move_boxes(conn, "faces", face_ids, target)
+        changed |= items
+        if leaving:
+            followed, more = _follow_lookalikes(conn, leaving, target)
+            touched |= more
+    rest = _box_ids(conn, "bodies", item_ids, source)  # the faceless bodies
+    if rest:
+        _, items = _move_boxes(conn, "bodies", rest, target)
+        changed |= items
+    if body_ids:
+        cluster.record_box_rejections(conn, "body", body_ids, source)
+    animal_ids = _box_ids(conn, "animals", item_ids, source)
+    if animal_ids:
+        _, items = _move_boxes(conn, "animals", animal_ids, target)
+        changed |= items
+        crops, more = pets_mod.leave_pets(conn, {source: animal_ids}, target)
+        touched |= more
+    now = now_iso()
+    for chunk in _chunks(item_ids):
+        rows = conn.execute(
+            f"SELECT item_id, relation FROM item_tags WHERE person_id = ? AND item_id IN ({_ids_sql(chunk)})",
+            [source, *chunk],
+        ).fetchall()
+        for r in rows:
+            item_id = int(r["item_id"])
+            if target is not None:
+                have = conn.execute("SELECT relation FROM item_tags WHERE item_id = ? AND person_id = ?",
+                                    (item_id, target)).fetchone()
+                relation = "in" if r["relation"] == "in" or (have is not None and have["relation"] == "in") else "related"
+                conn.execute(
+                    "INSERT INTO item_tags(item_id, person_id, source, relation, created_at) VALUES (?, ?, 'user', ?, ?) "
+                    "ON CONFLICT(item_id, person_id) DO UPDATE SET relation = excluded.relation, source = 'user'",
+                    (item_id, target, relation, now),
+                )
+            conn.execute("DELETE FROM item_tags WHERE item_id = ? AND person_id = ?", (item_id, source))
+            changed.add(item_id)
+    if target is not None and changed:
+        conn.execute("UPDATE persons SET updated_at = ? WHERE id = ?", (now, target))
+    cluster.prune_empty_persons(conn, {source})
+    if changed:
+        bump_faces_version(conn)
+    touched |= changed
+    return _Moved(changed, face_ids, followed, crops, touched)
+
+
+def _pet_species(conn: sqlite3.Connection, source: sqlite3.Row, item_ids: list[int]) -> str | None:
+    """A pet's species: its own, else the one species of its boxes on these items."""
+    if source["species"]:
+        return str(source["species"])
+    found: set[str] = set()
+    for chunk in _chunks(item_ids):
+        found |= {str(r[0]) for r in conn.execute(
+            f"SELECT DISTINCT species FROM animals WHERE person_id = ? AND item_id IN ({_ids_sql(chunk)})",
+            [int(source["id"]), *chunk])}
+    return found.pop() if len(found) == 1 else None
+
+
+def _pet_target(conn: sqlite3.Connection, session: SessionInfo, person_id: int | None, new_name: str | None,
+                species: str | None) -> int:
+    """The pet a pet's appearances move to: an existing pet (400 for a person, or a pet of another species),
+    or a new name: a pet of that name and species (or of no species yet) when there is one, else a new pet
+    of `species` (a cat and a dog may share a name). Call inside a tx."""
+    if person_id is not None:
+        row = _visible_person_row(conn, session, person_id)
+        if row["kind"] != "pet":
+            raise HTTPException(status_code=400, detail="That is a person, not a pet")
+        if species and row["species"] and row["species"] != species:
+            raise HTTPException(status_code=400, detail=f"That pet is a {row['species']}, not a {species}")
+        return int(row["id"])
+    name = cluster.clean_person_name(new_name)
+    if not name:
+        raise HTTPException(status_code=400, detail="Enter a name")
+    for r in conn.execute("SELECT id, species FROM persons WHERE kind = 'pet' AND name_key = ? ORDER BY id",
+                          (name.casefold(),)):
+        if not species or not r["species"] or r["species"] == species:
+            return int(r["id"])
+    return cluster.new_person(conn, name, kind="pet", species=species)
+
+
+@router.post("/items/people", response_model=ItemsPeopleOut)
+def people_on_items(body: ItemsPeopleIn, conn: sqlite3.Connection = Depends(get_db),
+                    session: SessionInfo = Depends(require_user)) -> ItemsPeopleOut:
+    """The people and pets on the selected items (section 10): who is on them through faces, bodies, pet
+    boxes and tags, most items first, named before unnamed; and the faces nobody is named for."""
+    item_ids = _selection(conn, session, body.uids)
+    stats: dict[int, dict[str, Any]] = {}
+
+    def entry(pid: int) -> dict[str, Any]:
+        return stats.setdefault(pid, {"items": set(), "faces": 0, "bodies": 0, "animals": 0, "tags": 0, "related": 0})
+
+    unnamed = 0
+    for chunk in _chunks(item_ids):
+        ph = _ids_sql(chunk)
+        for table, key in (("faces", "faces"), ("bodies", "bodies"), ("animals", "animals")):
+            for r in conn.execute(
+                f"SELECT person_id, item_id FROM {table} WHERE person_id IS NOT NULL AND item_id IN ({ph})", chunk
+            ):
+                e = entry(int(r["person_id"]))
+                e[key] += 1
+                e["items"].add(int(r["item_id"]))
+        for r in conn.execute(f"SELECT person_id, item_id, relation FROM item_tags WHERE item_id IN ({ph})", chunk):
+            e = entry(int(r["person_id"]))
+            e["related" if r["relation"] == "related" else "tags"] += 1
+            e["items"].add(int(r["item_id"]))
+        unnamed += int(conn.execute(
+            f"SELECT COUNT(*) FROM faces WHERE person_id IS NULL AND item_id IN ({ph})", chunk).fetchone()[0])
+    rows: list[sqlite3.Row] = []
+    for chunk in _chunks(sorted(stats)):
+        rows += conn.execute(f"SELECT {PERSON_COLUMNS} FROM persons WHERE id IN ({_ids_sql(chunk)})", chunk).fetchall()
+    covers = _covers(conn, rows) if rows else {}
+    people = []
+    for r in rows:
+        pid = int(r["id"])
+        e = stats[pid]
+        pet = r["kind"] == "pet"
+        people.append(ItemPersonOut(
+            id=pid, name=r["name"], kind=r["kind"] or "person", species=r["species"] if pet else None,
+            cover_url=covers.get(pid), items=len(e["items"]), faces=e["faces"], bodies=e["bodies"],
+            animals=e["animals"], tags=e["tags"], related=e["related"],
+        ))
+    people.sort(key=lambda p: (-p.items, p.name is None, (p.name or "").casefold(), p.id))
+    return ItemsPeopleOut(items=len(item_ids), unnamed_faces=unnamed, people=people)
+
+
+@router.post("/items/people/move", response_model=PeopleBulkOut)
+def move_people_on_items(body: PeopleMoveIn, conn: sqlite3.Connection = Depends(get_db),
+                         session: SessionInfo = Depends(require_user)) -> PeopleBulkOut:
+    """On the selected items, everything of `from_person_id` goes to the target (section 10): a person only
+    to a person, a pet only to a pet of its species. The boxes are remembered as not `from_person_id` and its
+    look-alike faces and crops follow (as /faces/assign, /animals/assign); faces moved to a person are learned
+    like a merge, pulling the unnamed look-alike groups along (`pulled`)."""
+    name_given = body.new_person_name is not None
+    if (body.person_id is None) == (not name_given):
+        raise HTTPException(status_code=400, detail="Choose an existing person or a new name")
+    with tx(conn):
+        item_ids = _selection(conn, session, body.uids)
+        source = _visible_person_row(conn, session, body.from_person_id)
+        source_id = int(source["id"])
+        is_pet = source["kind"] == "pet"
+        if is_pet:
+            target = _pet_target(conn, session, body.person_id, body.new_person_name,
+                                 _pet_species(conn, source, item_ids))
+        else:
+            target = _target_person(conn, body.person_id, body.new_person_name, name_given, session)
+        assert target is not None
+        target = int(target)
+        if target == source_id:
+            raise HTTPException(status_code=400, detail="That is the same person")
+        moved = _move_on_items(conn, item_ids, source_id, target)
+    touched = set(moved.touched)
+    guesses: set[tuple[int, int | None]] = set() if is_pet else {(target, i) for i in moved.changed}
+    pulled: list[int] = []
+    if not is_pet and moved.faces:
+        # Learned like a merge (section 18): the similarity the owner accepted, and the unnamed look-alike
+        # groups it justifies come along (cluster.accept_faces).
+        try:
+            with tx(conn):
+                _, pulled = cluster.accept_faces(conn, target, moved.faces, moved.followed)
+        except Exception:  # noqa: BLE001 - the owner's move already happened
+            log.exception("could not learn from the move to person %d", target)
+            pulled = []
+        if pulled:
+            touched |= _items_of_person(conn, target)
+            guesses.add((target, None))
+    _after_people_change(conn, touched, guesses)
+    return PeopleBulkOut(updated=len(moved.changed), person=_person_out(conn, target),
+                         followed=len(moved.followed) + len(moved.crops), pulled=len(pulled))
+
+
+@router.post("/items/people/remove", response_model=PeopleBulkOut)
+def remove_people_from_items(body: PeopleRemoveIn, conn: sqlite3.Connection = Depends(get_db),
+                             session: SessionInfo = Depends(require_user)) -> PeopleBulkOut:
+    """On the selected items, the person's faces, bodies and pet boxes are unassigned (remembered as not
+    them, the look-alike faces and crops following and regrouping, as an unassign through /faces/assign and
+    /animals/assign) and their tags there are deleted (section 10)."""
+    with tx(conn):
+        item_ids = _selection(conn, session, body.uids)
+        source_id = int(_visible_person_row(conn, session, body.person_id)["id"])
+        moved = _move_on_items(conn, item_ids, source_id, None)
+    _after_people_change(conn, moved.touched, set())
+    if moved.followed:
+        # The look-alikes are loose now: let them find or start another person together (never the one
+        # they just left: its rejected examples keep them away).
+        try:
+            cluster.assign_new_faces(conn, moved.followed)
+        except Exception:  # noqa: BLE001 - the owner's correction already happened
+            log.exception("could not regroup %d look-alike faces", len(moved.followed))
+        guess.refresh_fts(conn, moved.touched)
+    if moved.crops:
+        _regroup_pets(conn, moved.crops, moved.touched)
+    return PeopleBulkOut(updated=len(moved.changed), person=None, followed=len(moved.followed) + len(moved.crops))
+
+
+@router.post("/items/people/tag", response_model=PeopleBulkOut)
+def tag_people_on_items(body: PeopleTagIn, conn: sqlite3.Connection = Depends(get_db),
+                        session: SessionInfo = Depends(require_user)) -> PeopleBulkOut:
+    """POST /items/{uid}/tags on every selected item (section 10): a box of theirs already says 'in', a
+    'related' tag is always recorded, and a new pet needs its species (400 species_needed)."""
+    name_given = body.new_person_name is not None
+    if (body.person_id is None) == (not name_given):
+        raise HTTPException(status_code=400, detail="Choose an existing person or a new name")
+    changed: set[int] = set()
+    with tx(conn):
+        item_ids = _selection(conn, session, body.uids)
+        pid = _tag_target(conn, body, session)
+        now = now_iso()
+        for item_id in item_ids:
+            on_item = conn.execute(
+                "SELECT 1 FROM faces WHERE item_id = ? AND person_id = ? UNION ALL "
+                "SELECT 1 FROM bodies WHERE item_id = ? AND person_id = ? UNION ALL "
+                "SELECT 1 FROM animals WHERE item_id = ? AND person_id = ? LIMIT 1",
+                (item_id, pid, item_id, pid, item_id, pid),
+            ).fetchone()
+            if body.relation != "related" and on_item is not None:
+                continue  # a box of theirs already says they are in it
+            have = conn.execute("SELECT relation, source FROM item_tags WHERE item_id = ? AND person_id = ?",
+                                (item_id, pid)).fetchone()
+            if have is not None and have["relation"] == body.relation and have["source"] == "user":
+                continue
+            conn.execute(
+                "INSERT INTO item_tags(item_id, person_id, source, relation, created_at) VALUES (?, ?, 'user', ?, ?) "
+                "ON CONFLICT(item_id, person_id) DO UPDATE SET relation = excluded.relation, source = 'user'",
+                (item_id, pid, body.relation, now),
+            )
+            changed.add(item_id)
+        conn.execute("UPDATE persons SET updated_at = ? WHERE id = ?", (now, pid))
+        kind = conn.execute("SELECT kind FROM persons WHERE id = ?", (pid,)).fetchone()[0]
+        if changed:
+            bump_faces_version(conn)
+    # The guess job looks around the item for the person's other appearances: only when they are in it.
+    guesses = {(pid, i) for i in changed} if body.relation == "in" and kind == "person" else set()
+    _after_people_change(conn, changed, guesses)
+    return PeopleBulkOut(updated=len(changed), person=_person_out(conn, pid), followed=0)
 
 
 # ------------------------------------------------------------------ recluster

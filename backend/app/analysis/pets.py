@@ -9,6 +9,13 @@ CONTRACT.
 - carry_over(conn, old_rows, new_ids) -> int: user-assigned boxes of a re-analysed item keep their
   pet on the best-overlapping new box (IoU >= CARRY_IOU). Call inside a tx.
 - pet_centroids(conn, species) -> {person_id: unit vector} over the assigned crops of that species.
+- Not this pet (section 22): leave_pets(conn, {pet_id: box_ids}, target) -> (followers, their items): boxes
+  the owner took away from a pet are remembered as not that pet (guess_rejections kind 'animal'), and the
+  pet's automatic boxes of the same species that look like them (followers: cosine >= PET_FOLLOW_SIM to one,
+  and closer to it than to the pet's other crops, as faces do) go the same way (to `target`, or unassigned)
+  and are remembered too. assign_new_animals never puts a box on a pet when it is >= PET_FOLLOW_SIM to one
+  of that pet's rejected crops; the learner raises the pet's threshold above its closest rejected crop
+  (learning.people). carry_over moves a re-detected box's rejections to its successor. Call inside a tx.
 - new_pet(conn, species, name=None) -> person id (persons.kind 'pet').
 - set_species(conn, animal_ids, species) -> SpeciesChange: the owner's species for these boxes (section 22,
   species corrections): species_source 'user', a 'species' learning event per box, a box in a pet of
@@ -28,6 +35,7 @@ from dataclasses import dataclass, field
 
 from app.analysis import cluster
 from app.config import settings
+from app.db import bump_faces_version
 from app.util import now_iso
 
 log = logging.getLogger(__name__)
@@ -35,6 +43,9 @@ log = logging.getLogger(__name__)
 CARRY_IOU = 0.5
 POOL_LIMIT = 2000   # unassigned boxes of one species considered for a new pet
 SPECIES_FOLLOW_SIM = 0.85  # an automatic crop this close to a corrected one takes its species too
+# Not this pet: a crop this close to one the owner took away from a pet is the same wrong animal (the
+# similarity two unassigned crops need to start a new pet, settings.pet_new_threshold's default).
+PET_FOLLOW_SIM = 0.86
 FOLLOW_POOL = 5000  # automatic crops of the old species compared with the corrected ones
 
 
@@ -97,6 +108,7 @@ def assign_new_animals(conn: sqlite3.Connection, item_id: int) -> int:
         centroids = pet_centroids(conn, species)
         pids = list(centroids)
         matrix = np.stack([centroids[p] for p in pids]) if pids else None
+        rejected = rejected_crops(conn, pids) if pids else {}
         leftovers: list[tuple[int, np.ndarray]] = []
         for r in boxes:
             v = _vec(r["embedding"])
@@ -105,7 +117,8 @@ def assign_new_animals(conn: sqlite3.Connection, item_id: int) -> int:
             if matrix is not None:
                 sims = matrix @ v
                 order = np.argsort(-sims)
-                hit = next((pids[i] for i in order if float(sims[i]) >= match_threshold(pids[i])), None)
+                hit = next((pids[i] for i in order if float(sims[i]) >= match_threshold(pids[i])
+                            and not _looks_rejected(rejected.get(pids[i]), v)), None)
                 if hit is not None:
                     conn.execute("UPDATE animals SET person_id = ?, assigned_by = 'auto' WHERE id = ?", (hit, int(r["id"])))
                     conn.execute("UPDATE persons SET updated_at = ? WHERE id = ?", (now, hit))
@@ -121,6 +134,112 @@ def assign_new_animals(conn: sqlite3.Connection, item_id: int) -> int:
         if leftovers:
             assigned += _group_new(conn, species, leftovers, now)
     return assigned
+
+
+# ------------------------------------------------------------------ not this pet (section 22)
+def rejected_crops(conn: sqlite3.Connection, pet_ids: list[int] | set[int]) -> dict[int, np.ndarray]:
+    """{pet_id: (n, d) unit vectors of the crops the owner took away from that pet} (a crop that is the
+    pet's again, through a merge, is left out)."""
+    ids = sorted({int(p) for p in pet_ids})
+    out: dict[int, list[np.ndarray]] = {}
+    for start in range(0, len(ids), 500):
+        chunk = ids[start:start + 500]
+        marks = ",".join("?" * len(chunk))
+        for r in conn.execute(
+            f"SELECT g.person_id, a.embedding FROM guess_rejections g JOIN animals a ON a.id = g.ref_id "
+            f"WHERE g.kind = 'animal' AND g.person_id IN ({marks}) AND a.person_id IS NOT g.person_id", chunk,
+        ):
+            v = _vec(r["embedding"])
+            have = out.setdefault(int(r["person_id"]), [])
+            if v is not None and (not have or have[0].shape == v.shape):  # one embedding model at a time
+                have.append(v)
+    return {pid: np.stack(vs) for pid, vs in out.items() if vs}
+
+
+def _looks_rejected(examples: np.ndarray | None, v: np.ndarray) -> bool:
+    """True when the crop is the same animal as one the owner took away from the pet (>= PET_FOLLOW_SIM)."""
+    return examples is not None and examples.shape[1] == v.shape[0] and float(np.max(examples @ v)) >= PET_FOLLOW_SIM
+
+
+def followers(conn: sqlite3.Connection, seed_ids: list[int], pet_id: int) -> list[int]:
+    """The pet's automatic boxes, of a species among the seeds', that look like the seed crops the owner just
+    took away from it: cosine >= PET_FOLLOW_SIM to a seed, and closer to a seed than to the pet's other crops
+    (top-k mean, the seeds left out), as cluster.followers does for faces. The owner's own boxes never follow."""
+    seeds = sorted({int(s) for s in seed_ids})
+    if not seeds:
+        return []
+    marks = ",".join("?" * len(seeds))
+    seed_rows = conn.execute(f"SELECT id, species, embedding FROM animals WHERE id IN ({marks})", seeds).fetchall()
+    seed_vecs = [v for v in (_vec(r["embedding"]) for r in seed_rows) if v is not None]
+    if not seed_vecs:
+        return []
+    dim = seed_vecs[0].shape  # one embedding model at a time
+    s = np.stack([v for v in seed_vecs if v.shape == dim])
+    species = {str(r["species"]) for r in seed_rows}
+    rows, vecs = [], []
+    for r in conn.execute(
+        f"SELECT id, assigned_by, species, embedding FROM animals WHERE person_id = ? AND id NOT IN ({marks}) "
+        "AND embedding IS NOT NULL ORDER BY id", [int(pet_id), *seeds]
+    ):
+        v = _vec(r["embedding"])
+        if v is not None and v.shape == dim:
+            rows.append(r)
+            vecs.append(v)
+    if not rows:
+        return []
+    e = np.stack(vecs)
+    to_seed = (e @ s.T).max(axis=1)
+    among = e @ e.T
+    np.fill_diagonal(among, -1.0)
+    k = max(1, int(settings.cluster_topk))
+    if among.shape[1] > 1:
+        top = -np.sort(-among, axis=1)[:, :k]
+        rest = np.where(top > -1.0, top, np.nan)
+        rest_score = np.nan_to_num(np.nanmean(rest, axis=1), nan=-1.0)
+    else:
+        rest_score = np.full(e.shape[0], -1.0)
+    out = []
+    for r, near_seed, own in zip(rows, to_seed, rest_score):
+        if r["assigned_by"] == "user" or str(r["species"]) not in species:
+            continue
+        if float(near_seed) >= PET_FOLLOW_SIM and float(near_seed) > float(own):
+            out.append(int(r["id"]))
+    return out
+
+
+def leave_pets(conn: sqlite3.Connection, leaving: dict[int, list[int]],
+               target: int | None) -> tuple[list[int], set[int]]:
+    """Boxes the owner took away from their pets ({pet_id: box ids}) are remembered as not that pet, and
+    each pet's automatic look-alikes (followers) go the same way, to `target` (None: unassigned, free for
+    matching again), remembered too; a look-alike the owner already said is not `target` stays. Returns (the
+    boxes that followed, their items). Call inside a tx."""
+    followed: list[int] = []
+    items: set[int] = set()
+    for pid, seeds in leaving.items():
+        if not seeds:
+            continue
+        cluster.record_box_rejections(conn, "animal", seeds, pid)
+        more = followers(conn, seeds, pid)
+        if more and target is not None:
+            marks = ",".join("?" * len(more))
+            not_target = {int(r[0]) for r in conn.execute(
+                f"SELECT ref_id FROM guess_rejections WHERE kind = 'animal' AND person_id = ? AND ref_id IN ({marks})",
+                [int(target), *more])}
+            more = [m for m in more if m not in not_target]
+        if not more:
+            continue
+        cluster.record_box_rejections(conn, "animal", more, pid)
+        marks = ",".join("?" * len(more))
+        items |= {int(r[0]) for r in conn.execute(f"SELECT item_id FROM animals WHERE id IN ({marks})", more)}
+        conn.execute(f"UPDATE animals SET person_id = ?, assigned_by = 'auto' WHERE id IN ({marks})", [target, *more])
+        followed.extend(more)
+        log.info("pets: %d look-alike crops followed %d crops away from pet %d", len(more), len(seeds), pid)
+    if followed:
+        if target is not None:
+            conn.execute("UPDATE persons SET updated_at = ? WHERE id = ?", (now_iso(), int(target)))
+        cluster.prune_empty_persons(conn, set(leaving))
+        bump_faces_version(conn)
+    return followed, items
 
 
 def _group_new(conn: sqlite3.Connection, species: str, boxes: list[tuple[int, np.ndarray]], now: str) -> int:
@@ -178,10 +297,16 @@ def _user_species(row: sqlite3.Row) -> bool:
 def carry_over(conn: sqlite3.Connection, old_rows: list[sqlite3.Row], new_ids: list[int]) -> int:
     """Boxes of the previous analysis the owner touched keep what they said on the best-overlapping new
     box (IoU >= CARRY_IOU): a user assignment keeps its pet (the new box must be of the same species
-    unless the owner also set the species), and a user species (section 22, species corrections)
-    goes to the new box whatever the detector said this time."""
-    olds = [r for r in old_rows if (r["assigned_by"] == "user" and r["person_id"] is not None) or _user_species(r)]
+    unless the owner also set the species), a user species (section 22, species corrections) goes to
+    the new box whatever the detector said this time, and the owner's "not this pet" (guess_rejections)
+    goes to it too, leaving it free for matching. The rejections of old boxes without a successor are
+    forgotten (the caller deletes those boxes)."""
+    old_ids = [int(r["id"]) for r in old_rows]
+    rejected = cluster.rejected_ids(conn, "animal", old_ids) if old_ids else set()
+    olds = [r for r in old_rows if (r["assigned_by"] == "user" and r["person_id"] is not None) or _user_species(r)
+            or int(r["id"]) in rejected]
     if not olds or not new_ids:
+        cluster.drop_rejections(conn, "animal", old_ids)  # the old boxes are deleted by the caller
         return 0
     marks = ",".join("?" * len(new_ids))
     news = conn.execute(f"SELECT id, species, x, y, w, h FROM animals WHERE id IN ({marks}) AND person_id IS NULL",
@@ -200,6 +325,10 @@ def carry_over(conn: sqlite3.Connection, old_rows: list[sqlite3.Row], new_ids: l
                 best = (s, int(n["id"]))
         if best is None:
             continue
+        if int(o["id"]) in rejected:
+            cluster.move_rejections(conn, "animal", int(o["id"]), best[1])
+        if not user_species and not (o["assigned_by"] == "user" and o["person_id"] is not None):
+            continue  # only its rejections carry over; the new box stays free for matching
         if user_species:
             conn.execute("UPDATE animals SET species = ?, species_source = 'user' WHERE id = ?", (o["species"], best[1]))
         if o["assigned_by"] == "user" and o["person_id"] is not None:
@@ -207,6 +336,7 @@ def carry_over(conn: sqlite3.Connection, old_rows: list[sqlite3.Row], new_ids: l
                          (int(o["person_id"]), best[1]))
         used.add(best[1])
         moved += 1
+    cluster.drop_rejections(conn, "animal", old_ids)  # what was not carried goes with the deleted boxes
     return moved
 
 

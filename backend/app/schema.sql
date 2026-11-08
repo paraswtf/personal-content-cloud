@@ -287,8 +287,10 @@ CREATE TABLE IF NOT EXISTS item_tags (
 CREATE INDEX IF NOT EXISTS item_tags_person ON item_tags(person_id);
 
 -- "That is not this person": a rejected guess is never suggested again for the same box.
+-- The owner said a box is not this person or pet: a turned-down guess, a face, body or pet box taken away
+-- from them (section 10, section 22 for 'animal'). Matching and guesses keep the box's look-alikes away.
 CREATE TABLE IF NOT EXISTS guess_rejections (
-  kind       TEXT NOT NULL CHECK (kind IN ('face','body')),
+  kind       TEXT NOT NULL CHECK (kind IN ('face','body','animal')),
   ref_id     INTEGER NOT NULL,
   person_id  INTEGER NOT NULL REFERENCES persons(id) ON DELETE CASCADE,
   created_at TEXT NOT NULL,

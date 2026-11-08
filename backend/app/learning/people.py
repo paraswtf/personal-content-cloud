@@ -2,12 +2,15 @@
 
 Per-person face thresholds: a person the owner confirmed faces for is matched more readily (the
 threshold drops towards the 10th percentile of those faces' similarity to the person, floor FLOOR),
-a person the owner merged others into is matched down to the similarity they accepted in the least
-alike of those merges (learning_events kind 'merge', features.accepted, minus LOOSEN, floor FLOOR),
-and one the owner rejected a guess for or took faces away from is matched more carefully (the
-threshold rises above the closest rejected face, which wins over any loosening). Guess weights: a logistic regression on the evidence terms of confirmed and
-rejected guesses (learning_events kind 'guess'), used instead of the fixed 0.5/0.3/0.2 mix once
-MIN_GUESS_EVENTS outcomes with both labels exist.
+a person the owner merged others into (or moved faces to, section 10) is matched down to the similarity
+they accepted in the least alike of those merges (learning_events kind 'merge', features.accepted, minus
+LOOSEN, floor FLOOR), and one the owner rejected a guess for or took faces away from is matched more
+carefully (the threshold rises above the closest rejected face, which wins over any loosening). Pets
+learn the same way from their crops (section 22): the owner's crops set the threshold, and a crop the
+owner took away from a pet (guess_rejections kind 'animal') raises it above that crop, up to PET_CEIL.
+Guess weights: a logistic regression on the evidence terms of confirmed and rejected guesses
+(learning_events kind 'guess'), used instead of the fixed 0.5/0.3/0.2 mix once MIN_GUESS_EVENTS outcomes
+with both labels exist.
 """
 from __future__ import annotations
 
@@ -25,6 +28,7 @@ MIN_GUESS_EVENTS = 30
 MIN_USER_FACES = 3
 FLOOR = 0.30
 CEIL = 0.90
+PET_CEIL = 0.97  # pet crops of one animal sit near 0.86 to 0.95 (SigLIP), so a pet's threshold may rise higher
 LOOSEN = 0.02
 TIGHTEN = 0.02
 FEATURES = ("clothes", "scene_term", "face_term", "same_day", "has_gps")
@@ -50,7 +54,8 @@ def person_thresholds(conn: sqlite3.Connection) -> dict[int, float]:
             by_person.setdefault(int(r["person_id"]), []).append(v)
     rejected: dict[int, list[np.ndarray]] = {}
     for r in conn.execute(
-        "SELECT g.person_id, f.embedding FROM guess_rejections g JOIN faces f ON f.id = g.ref_id WHERE g.kind = 'face'"
+        "SELECT g.person_id, f.embedding FROM guess_rejections g JOIN faces f ON f.id = g.ref_id WHERE g.kind = 'face' "
+        "AND f.person_id IS NOT g.person_id"  # a face that is theirs again (a merge) is no rejection
     ):
         v = _vec(r["embedding"])
         if v is not None:
@@ -80,13 +85,34 @@ def person_thresholds(conn: sqlite3.Connection) -> dict[int, float]:
         v = _vec(r["embedding"])
         if v is not None:
             by_pet.setdefault(int(r["person_id"]), []).append(v)
-    out.update(_thresholds(by_pet, {}, float(settings.pet_match_threshold)))
+    rejected_pets: dict[int, list[np.ndarray]] = {}
+    for r in conn.execute(
+        "SELECT g.person_id, a.embedding FROM guess_rejections g JOIN animals a ON a.id = g.ref_id "
+        "JOIN persons p ON p.id = g.person_id WHERE g.kind = 'animal' AND p.kind = 'pet' AND a.embedding IS NOT NULL "
+        "AND a.person_id IS NOT g.person_id"
+    ):
+        v = _vec(r["embedding"])
+        if v is not None:
+            rejected_pets.setdefault(int(r["person_id"]), []).append(v)
+    # A pet without crops of the owner's still needs a reference for the rejection rule: its crops.
+    pet_reference: dict[int, np.ndarray] = {}
+    for pid in set(rejected_pets) - set(by_pet):
+        vs = [v for v in (_vec(r["embedding"]) for r in conn.execute(
+            "SELECT embedding FROM animals WHERE person_id = ? AND embedding IS NOT NULL ORDER BY id LIMIT 200",
+            (pid,))) if v is not None]
+        if vs:
+            c = np.stack(vs).mean(axis=0)
+            n = float(np.linalg.norm(c))
+            if n > 0:
+                pet_reference[pid] = (c / n).astype(np.float32)
+    out.update(_thresholds(by_pet, rejected_pets, float(settings.pet_match_threshold),
+                           reference=pet_reference, ceil=PET_CEIL))
     return out
 
 
 def _thresholds(by_person: dict[int, list[np.ndarray]], rejected: dict[int, list[np.ndarray]],
                 default: float, merged: dict[int, float] | None = None,
-                reference: dict[int, np.ndarray] | None = None) -> dict[int, float]:
+                reference: dict[int, np.ndarray] | None = None, ceil: float = CEIL) -> dict[int, float]:
     out: dict[int, float] = {}
     merged = merged or {}
     reference = reference or {}
@@ -116,8 +142,9 @@ def _thresholds(by_person: dict[int, list[np.ndarray]], rejected: dict[int, list
             loose = max(FLOOR, min(default, merged[pid] - LOOSEN))
             t = loose if t is None else min(t, loose)
         if centroid is not None and rejected.get(pid):
-            worst = max(float(v @ centroid) for v in rejected[pid])
-            t = min(CEIL, max(t if t is not None else default, worst + TIGHTEN))
+            worst = max((float(v @ centroid) for v in rejected[pid] if v.shape == centroid.shape), default=None)
+            if worst is not None:
+                t = min(ceil, max(t if t is not None else default, worst + TIGHTEN))
         if t is not None and abs(t - default) > 1e-6:
             out[pid] = round(t, 4)
     return out

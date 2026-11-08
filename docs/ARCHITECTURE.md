@@ -520,6 +520,76 @@ toy, a person's handwriting), so it shows under the person and in a search for t
   switch, the person items filter and count, the viewer's people list carrying the relation, and a search for
   the name finding the related item.
 
+People on a selection (2026-11-08). On every page that selects items (the library, search results, an album,
+the vault, and the Items and Related tabs of a person's or a pet's page) the owner can change who the
+selected items show: move one person's or pet's appearances in them to another (an existing one or a new
+name), remove someone from them, tag someone on all of them, or rename someone found in them. Routes
+(`app/api/people.py`, mounted at `/api`; every route requires a session; `uids` 1 to 1000 item uids; items not
+found or in the trash are skipped; a selection holding a vault item while the vault is locked answers 403
+`vault_locked`):
+- `POST /api/items/people` `{uids}` -> `ItemsPeopleOut{items, unnamed_faces, people: [ItemPersonOut]}`: the
+  people and pets on those items, from faces, bodies, pet boxes and tags. `ItemPersonOut{id, name, kind,
+  species, cover_url, items, faces, bodies, animals, tags, related}`: `items` counts the selected items they
+  are on (any way), `tags` and `related` their tags by relation. Sorted by `items` (most first), then named
+  before unnamed, then by name. `unnamed_faces` counts the faces in the selection that nobody is named for.
+- `POST /api/items/people/move` `{uids, from_person_id, person_id | new_person_name}` ->
+  `PeopleBulkOut{updated, person, followed}`. In those items every face, body and pet box of `from` goes to
+  the target, locked as the owner's (`assigned_by = 'user'`, as `/faces/assign`), and every tag of `from`
+  is re-pointed to the target with its relation (when the target already has a tag there, `in` wins).
+  Faces leaving `from` are recorded as not `from` and its automatic look-alikes follow them
+  (`_leaving`/`_follow_lookalikes`, section 10's merge learning), counted in `followed`. A person moves only
+  to a person and a pet only to a pet (400 otherwise); a pet's new name creates a pet of `from`'s species,
+  and an existing pet of another species is refused (400). The same person as target is 400. `updated`
+  counts the selected items where something changed; `person` is the target's `PersonOut`. `from` is pruned
+  when it ends up empty and unnamed (`cluster.prune_empty_persons`). Guess jobs and the search index follow
+  (`_after_people_change`).
+- `POST /api/items/people/remove` `{uids, person_id}` -> `PeopleBulkOut{updated, person: null, followed}`: in
+  those items the person's faces, bodies and pet boxes are unassigned (faces recorded as not them, look-alikes
+  follow and regroup, as an unassign through `/faces/assign`), and their tags on those items are deleted.
+- `POST /api/items/people/tag` `{uids, person_id | new_person_name, kind: person|pet = person, species?,
+  relation: in|related = in}` -> `PeopleBulkOut{updated, person, followed: 0}`: the per-item tag route
+  (`POST /api/items/{uid}/tags`) on every item: a box of theirs already says `in`, `related` is always
+  recorded, and a new pet needs its species (400 `species_needed`).
+- Renaming someone found in the selection is the existing `PATCH /api/people/{id} {name}` (it renames them
+  everywhere, and merges into an existing person or pet of that name).
+
+Learning from these choices (the owner's "learn from not this person choices and merge data"):
+- Not this person: faces leaving `from` are remembered (`guess_rejections` kind `face`) and its automatic
+  look-alikes follow, as above; bodies leaving `from` get kind `body` rows, so guesses never propose `from` for
+  them again; an owner's box assignment forgets an earlier rejection of that pair; look-alikes the owner
+  already refused for the target stay where they are.
+- Not this pet: `guess_rejections.kind` gains `animal` (old databases rebuild the table at startup through
+  `db.CHECKED_TABLES`). Crops leaving a pet (these routes and `POST /api/animals/assign`) are remembered; the
+  pet's automatic crops of that species at least `pets.PET_FOLLOW_SIM` (0.86) like a removed crop, and closer
+  to it than to the pet's other crops, go along (counted in `followed`, remembered too, matched again but never
+  back to that pet); `pets.assign_new_animals` never puts a crop that like a rejected one on that pet; the
+  pet's learned threshold rises above its closest rejected crop (+0.02, at most 0.97; faces stay at most 0.90).
+  Re-analysis moves a crop's rejections to the new box; deleting a crop drops them.
+- Merge data: a bulk move to a person is learned like a merge (`cluster.accept_faces`): `accepted` is the
+  moved faces' mean top-k similarity to the faces the target already had (None without any); a `merge`
+  learning event `{accepted, faces, followed}` loosens the target as merges do, and the unnamed look-alike
+  groups join the target (`follow_merge`), counted in `PeopleBulkOut.pulled`. An `accepted` below
+  `PULL_FLOOR` (0.30, one badly matched face in a small selection) is recorded as `below_floor`: no
+  loosening and no pull; the faces still count as the owner's examples. Pet moves record no merge event.
+
+Frontend: `components/people/PeopleBulkAction.tsx`, a "People" button for selection bars with props `{uids,
+vault, busy?, onDone, from?: {id, name, kind, species}}`. It opens a sheet "People in N items": with `from`
+(a person's or pet's page) a first block "Not NAME?" with "Move these to..." (`PersonChoiceModal` of the same
+kind; a pet keeps its species) and "Remove NAME from these" (with a confirm); then the list from
+`POST /api/items/people`, each row with the avatar, the name ("Unnamed person" or "Unnamed pet") and "in X of
+N", and the actions "Change to...", "Rename" (an inline name field; "Name" for unnamed ones) and "Remove";
+the unnamed faces count as a note; and "Tag someone in these" (the picker of both kinds with the related
+switch, a new pet asking its species). A move, a removal or a tag closes the sheet, clears the selection,
+toasts the outcome ("12 items moved to Meera", "+3 look-alike faces followed") and refreshes the library, the
+person pages, the people list and open item details; a rename keeps the sheet open and reloads its list.
+`BulkBar` (library, search, albums, vault) gets the button; the person and pet pages' Items and Related tabs
+get a Select button, selectable tiles and a selection bar with the button (`from` = that person or pet).
+
+Tests (`tests/test_people_bulk.py`): the list with faces, bodies, pet boxes and both relations; a move to an
+existing person and to a new name, with look-alikes following and the tags re-pointed (relation kept, `in`
+winning); a pet moved to a pet and refused to a person or another species; remove; a bulk tag of both kinds
+and relations with `species_needed`; vault items with the vault locked; the same person as target.
+
 ## 11. Documents (`app/documents`)
 
 Text extraction order: text layer (pdf) -> OCR (rapidocr; English, Hindi and Marathi: each detected line is

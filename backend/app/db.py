@@ -145,6 +145,7 @@ def _upgrade_fts(conn: sqlite3.Connection, schema: str) -> bool:
 # schema.sql when the stored definition differs, rows copied, indexes made again.
 CHECKED_TABLES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("learning_events", ("CREATE INDEX IF NOT EXISTS learning_events_kind ON learning_events(kind, created_at)",)),
+    ("guess_rejections", ()),   # kind 'animal' (section 22, not this pet)
 )
 
 

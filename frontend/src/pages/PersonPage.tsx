@@ -1,7 +1,8 @@
 // One person (/people/:id): rename in place, cover, their items (with the viewer), their faces
 // (move, remove, use as cover), guesses waiting for them, merge into someone else, delete.
 // A pet has no cover picker, faces or guesses: it shows its animal crops instead. Both have a Related tab
-// (section 10): the items tagged as about them without them in it.
+// (section 10): the items tagged as about them without them in it. The Items and Related tabs select items
+// for People (section 10, people on a selection): move them to someone else, remove them, tag or rename.
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
@@ -17,6 +18,7 @@ import Viewer from '../components/Viewer'
 import AnimalGrid from '../components/people/AnimalGrid'
 import FaceGrid from '../components/people/FaceGrid'
 import GuessCard from '../components/people/GuessCard'
+import PeopleBulkAction, { type BulkFrom } from '../components/people/PeopleBulkAction'
 import PersonChoiceModal from '../components/people/PersonChoiceModal'
 import { choiceBody, type PersonChoice } from '../components/people/PersonPicker'
 import { guessKey, useGuessReview } from '../components/people/useGuessReview'
@@ -139,15 +141,33 @@ function SpeciesEditor({ id, species }: { id: number; species: Species | null })
   )
 }
 
-function ItemsTab({ id, relation = 'in' }: { id: number; relation?: 'in' | 'related' }) {
+function ItemsTab({ id, relation = 'in', from }: { id: number; relation?: 'in' | 'related'; from: BulkFrom }) {
   const related = relation === 'related'
   // The default relation is not sent: the request stays what older servers know.
   const fetchPage = useCallback((c: string | null) => api.people.items(id, c, 60, false, related ? 'related' : undefined), [id, related])
   const list = useItemList(['person-items', id, relation], fetchPage)
   const viewer = useViewerParam(list.items, list.hasMore, list.loadMore, list.total)
   const openItem = useStableCallback((uid: string) => viewer.open(uid))
+  const sel = useSelection<string>()
+  const [selecting, setSelecting] = useState(false)
+  const selectingNow = selecting || sel.count > 0
+  const stopSelecting = () => {
+    sel.clear()
+    setSelecting(false)
+  }
   return (
     <div className="-mx-4 sm:mx-0">
+      {list.items.length > 0 && (
+        <div className="mb-3 flex flex-wrap items-center gap-2 px-4 sm:px-0">
+          <Button variant="secondary" aria-pressed={selectingNow} onClick={() => (selectingNow ? stopSelecting() : setSelecting(true))}>
+            <ListChecks className="size-4" aria-hidden />
+            {selectingNow ? 'Done' : 'Select'}
+          </Button>
+          <p className="text-sm text-ink-soft">
+            {selectingNow ? 'Pick items, then People to move, remove, tag or rename who they show.' : ''}
+          </p>
+        </div>
+      )}
       {list.error && !list.items.length ? (
         <ErrorState error={list.error} onRetry={list.refetch} />
       ) : (
@@ -157,6 +177,10 @@ function ItemsTab({ id, relation = 'in' }: { id: number; relation?: 'in' | 'rela
           hasMore={list.hasMore}
           loadMore={list.loadMore}
           loading={list.loading}
+          selectable={selectingNow}
+          selected={sel.selected}
+          onToggleSelect={sel.toggle}
+          selectOnHover
           empty={
             related ? (
               <EmptyState icon={<Link2 className="size-8" aria-hidden />} title="Nothing related yet">
@@ -167,6 +191,20 @@ function ItemsTab({ id, relation = 'in' }: { id: number; relation?: 'in' | 'rela
             )
           }
         />
+      )}
+      {sel.count > 0 && (
+        <div className="px-4 sm:px-0">
+          <SelectionBar
+            count={sel.count}
+            noun={sel.count === 1 ? 'item' : 'items'}
+            onClear={stopSelecting}
+            onSelectAll={() => sel.setAll(list.items.map((i) => i.uid))}
+            allSelected={sel.count >= list.items.length}
+            total={list.items.length}
+          >
+            <PeopleBulkAction uids={[...sel.selected]} vault={false} onDone={stopSelecting} from={from} />
+          </SelectionBar>
+        </div>
       )}
       {viewer.uid && <Viewer uid={viewer.uid} onClose={viewer.close} onPrev={viewer.onPrev} onNext={viewer.onNext} position={viewer.position} />}
     </div>
@@ -296,7 +334,8 @@ function AnimalsTab({ id, name, species }: { id: number; name: string; species: 
   const assign = useMutation({
     mutationFn: (choice: PersonChoice | null) => api.animals.assign({ animal_ids: [...sel.selected], ...choiceBody(choice) }),
     onSuccess: (r, choice) => {
-      toast.success(choice ? `${formatCount(r.updated, 'crop')} moved${r.person ? ` to ${personName(r.person)}` : ''}.` : `${formatCount(r.updated, 'crop')} removed from ${name}.`)
+      const along = r.followed ? ` ${formatCount(r.followed, 'look-alike crop')} went along.` : ''
+      toast.success((choice ? `${formatCount(r.updated, 'crop')} moved${r.person ? ` to ${personName(r.person)}` : ''}.` : `${formatCount(r.updated, 'crop')} removed from ${name}.`) + along)
       setMoving(false)
       sel.clear()
       void refresh()
@@ -502,6 +541,7 @@ function PersonView({ id }: { id: number }) {
   if (!p) return <PageSpinner />
   const name = personName(p)
   const pet = p.kind === 'pet'
+  const from: BulkFrom = { id: p.id, name: p.name, kind: p.kind, species: p.species }
   const tab: Tab = pet
     ? raw === 'animals' || raw === 'related'
       ? raw
@@ -578,8 +618,8 @@ function PersonView({ id }: { id: number }) {
       </div>
 
       <div role="tabpanel">
-        {tab === 'items' && <ItemsTab id={id} />}
-        {tab === 'related' && <ItemsTab key="related" id={id} relation="related" />}
+        {tab === 'items' && <ItemsTab id={id} from={from} />}
+        {tab === 'related' && <ItemsTab key="related" id={id} relation="related" from={from} />}
         {tab === 'faces' && <FacesTab id={id} name={name} coverId={p.cover_face_id} />}
         {tab === 'animals' && <AnimalsTab id={id} name={name} species={p.species} />}
         {tab === 'guesses' && <GuessesTab id={id} />}

@@ -134,7 +134,7 @@ def prune_empty_persons(conn: sqlite3.Connection, person_ids: set[int] | list[in
 
 # ------------------------------------------------------------------ guess rejections
 def rejected_ids(conn: sqlite3.Connection, kind: str, ids: list[int]) -> set[int]:
-    """The box ids (kind 'face' or 'body') that have guess_rejections rows."""
+    """The box ids (kind 'face', 'body' or 'animal') that have guess_rejections rows."""
     out: set[int] = set()
     for chunk in _chunks(sorted({int(i) for i in ids})):
         marks = ",".join("?" * len(chunk))
@@ -261,14 +261,15 @@ def _score(idx: FaceIndex, faces: list[sqlite3.Row], exclude: frozenset[int],
 
 
 def rejected_examples(conn: sqlite3.Connection, person_ids: list[int] | set[int]) -> dict[int, np.ndarray]:
-    """{person_id: (n, 512) embeddings of the faces the owner rejected for that person}."""
+    """{person_id: (n, 512) embeddings of the faces the owner rejected for that person} (a face that is the
+    person's again, through a merge, is left out)."""
     ids = sorted({int(p) for p in person_ids})
     out: dict[int, list[np.ndarray]] = {}
     for chunk in _chunks(ids):
         marks = ",".join("?" * len(chunk))
         for r in conn.execute(
             f"SELECT g.person_id, f.embedding FROM guess_rejections g JOIN faces f ON f.id = g.ref_id "
-            f"WHERE g.kind = 'face' AND g.person_id IN ({marks})", chunk,
+            f"WHERE g.kind = 'face' AND g.person_id IN ({marks}) AND f.person_id IS NOT g.person_id", chunk,
         ):
             v = np.frombuffer(r["embedding"], dtype=np.float32)
             if v.shape[0]:
@@ -337,10 +338,16 @@ def followers(conn: sqlite3.Connection, seed_ids: list[int], person_id: int) -> 
 def record_rejections(conn: sqlite3.Connection, face_ids: list[int], person_id: int) -> None:
     """Remember that these faces are not `person_id` (guess_rejections): guesses skip them and
     matching keeps their look-alikes away from that person. Call inside a tx."""
+    record_box_rejections(conn, "face", face_ids, person_id)
+
+
+def record_box_rejections(conn: sqlite3.Connection, kind: str, box_ids: list[int], person_id: int) -> None:
+    """Remember that these boxes (kind 'face', 'body' or 'animal') are not `person_id`: the owner took
+    them away from that person or pet (section 10, section 22). Call inside a tx."""
     now = now_iso()
-    for fid in sorted({int(f) for f in face_ids}):
-        conn.execute("INSERT OR IGNORE INTO guess_rejections(kind, ref_id, person_id, created_at) VALUES ('face', ?, ?, ?)",
-                     (fid, int(person_id), now))
+    for bid in sorted({int(b) for b in box_ids}):
+        conn.execute("INSERT OR IGNORE INTO guess_rejections(kind, ref_id, person_id, created_at) VALUES (?, ?, ?, ?)",
+                     (kind, bid, int(person_id), now))
 
 
 FOLLOW_SIM = 0.55  # a face this close to a face the owner took away looks like the same wrong person
@@ -749,6 +756,54 @@ def merge_similarity(conn: sqlite3.Connection, target_id: int, source_ids: list[
             mean = float(np.mean(sims))
             worst = mean if worst is None else min(worst, mean)
     return worst
+
+
+def accept_faces(conn: sqlite3.Connection, target_id: int, face_ids: list[int],
+                 came_along: list[int] | tuple[int, ...] = ()) -> tuple[float | None, list[int]]:
+    """The owner moved these faces to `target_id` (a bulk move on a selection, section 10): learned like a
+    merge. `accepted` is the faces' mean top-k similarity to the faces the target had before (the moved
+    faces and the look-alikes that `came_along` with them left out; None when there were none); a 'merge'
+    learning event for the target records {accepted, faces, followed} (as merge_and_follow); and with
+    `accepted` the unnamed look-alike groups follow (follow_merge). An `accepted` below PULL_FLOOR is
+    recorded as `below_floor` instead: no loosening, no pull. The faces must already be the target's.
+    Returns (accepted, the pulled person ids). Call inside a tx."""
+    ids = sorted({int(f) for f in face_ids})
+    target_id = int(target_id)
+    if not ids:
+        return None, []
+    new = sorted(set(ids) | {int(f) for f in came_along})
+    accepted: float | None = None
+    idx = get_index()
+    with idx.lock:
+        idx.sync(conn)
+        marks = ",".join("?" * len(new))
+        if conn.execute(
+            f"SELECT 1 FROM faces WHERE person_id = ? AND embedding IS NOT NULL AND id NOT IN ({marks}) LIMIT 1",
+            [target_id, *new],
+        ).fetchone():
+            sims = []
+            for scores in idx.person_scores_many(idx.embeddings_of(ids), settings.cluster_topk, frozenset(new)):
+                sims.append(next((sc for pid, sc in scores if pid == target_id), 0.0))
+            accepted = float(np.mean(sims)) if sims else None
+    below: float | None = None
+    if accepted is not None and accepted < PULL_FLOOR:
+        # A selection holding a face the matching sees as unlike the target would loosen the target for
+        # good (the learner keeps the least accepted similarity) and pull look-alikes at the floor. The
+        # faces still count as the owner's examples of the target; the move is not learned as a merge.
+        below, accepted = accepted, None
+        log.info("bulk move to person %s: accepted %.2f is below %.2f, not learned as a merge", target_id, below, PULL_FLOOR)
+    pulled = follow_merge(conn, target_id, accepted) if accepted is not None else []
+    try:
+        from app.learning import events
+
+        events.record(conn, "merge", 1, {
+            "accepted": None if accepted is None else round(float(accepted), 4),
+            "below_floor": None if below is None else round(float(below), 4),
+            "faces": len(ids), "followed": len(pulled),
+        }, person_id=target_id)
+    except Exception:  # noqa: BLE001 - learning never blocks the action
+        log.exception("could not record the bulk move for learning")
+    return accepted, pulled
 
 
 def follow_merge(conn: sqlite3.Connection, target_id: int, accepted: float) -> list[int]:

@@ -278,6 +278,61 @@ export interface TagIn {
   relation?: TagRelation
 }
 
+// people on a selection (section 10): who the selected items show, and changes to it on all of them
+export interface ItemsPeopleIn {
+  uids: string[]
+}
+export interface ItemPersonOut {
+  id: number
+  name: string | null
+  kind: PersonKind
+  species: Species | null
+  cover_url: string | null
+  /** Selected items they are on, any way: a face, a body, a pet box or a tag. */
+  items: number
+  faces: number
+  bodies: number
+  animals: number
+  /** Their tags on the selected items, by relation. */
+  tags: number
+  related: number
+}
+export interface ItemsPeopleOut {
+  /** Selected items found (trashed ones are skipped). */
+  items: number
+  /** Faces in the selection that nobody is named for. */
+  unnamed_faces: number
+  people: ItemPersonOut[]
+}
+export interface PeopleMoveIn {
+  uids: string[]
+  from_person_id: number
+  person_id?: number | null
+  new_person_name?: string | null
+}
+export interface PeopleRemoveIn {
+  uids: string[]
+  person_id: number
+}
+export interface PeopleTagIn {
+  uids: string[]
+  person_id?: number | null
+  new_person_name?: string | null
+  /** A new name makes a pet with `kind: 'pet'` and its `species` (400 species_needed without one). */
+  kind?: PersonKind
+  species?: Species | null
+  relation?: TagRelation
+}
+export interface PeopleBulkOut {
+  /** Selected items where something changed. */
+  updated: number
+  person: PersonOut | null
+  /** Look-alike faces (or pet crops) that went the same way (section 10). */
+  followed: number
+  /** Unnamed look-alike groups that joined the target, learned like a merge (moves only). */
+  pulled?: number
+}
+
 // free-form tags (section 19): the owner's own tags, and the ones the tag learner suggests
 export interface TagOut {
   id: number

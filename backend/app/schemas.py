@@ -601,6 +601,61 @@ class TagIn(BaseModel):
         return self
 
 
+# People on a selection (section 10): who the selected items show, and changing it on all of them at once.
+class ItemsPeopleIn(BaseModel):
+    """POST items/people: the selected items (unknown and trashed uids are skipped)."""
+    uids: list[str] = Field(min_length=1, max_length=1000)
+
+
+class ItemPersonOut(BaseModel):
+    """A person or pet on the selected items: `items` counts the items they are on in any way (a face, a
+    body, a pet box or a tag of either relation); `tags` and `related` count their tags by relation."""
+    id: int
+    name: str | None = None
+    kind: PersonKind = "person"
+    species: str | None = None
+    cover_url: str | None = None
+    items: int = 0
+    faces: int = 0
+    bodies: int = 0
+    animals: int = 0
+    tags: int = 0
+    related: int = 0
+
+
+class ItemsPeopleOut(BaseModel):
+    items: int                      # the selected items found (live, not in the trash)
+    unnamed_faces: int = 0          # faces on them that nobody is named for (no person)
+    people: list[ItemPersonOut] = []
+
+
+class PeopleMoveIn(BaseModel):
+    """POST items/people/move: on these items, everything of `from_person_id` goes to `person_id` or to
+    `new_person_name` (exactly one of them)."""
+    uids: list[str] = Field(min_length=1, max_length=1000)
+    from_person_id: int
+    person_id: int | None = None
+    new_person_name: str | None = Field(default=None, max_length=120)
+
+
+class PeopleRemoveIn(BaseModel):
+    """POST items/people/remove: on these items, the person's boxes are unassigned and their tags deleted."""
+    uids: list[str] = Field(min_length=1, max_length=1000)
+    person_id: int
+
+
+class PeopleTagIn(TagIn):
+    """POST items/people/tag: the per-item tag (TagIn) on every selected item."""
+    uids: list[str] = Field(min_length=1, max_length=1000)
+
+
+class PeopleBulkOut(BaseModel):
+    updated: int                    # selected items where something changed
+    person: PersonOut | None = None  # the target (move, tag); None for a removal
+    followed: int = 0               # look-alike faces and pet crops that followed the boxes moved away
+    pulled: int = 0                 # unnamed look-alike groups merged into the target person (a move, section 10)
+
+
 # ---------------------------------------------------------------- documents
 
 class DocumentListItem(BaseModel):

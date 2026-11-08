@@ -60,6 +60,11 @@ import type {
   AnimalOut,
   ThroughputOut,
   ThroughputRange,
+  ItemsPeopleOut,
+  PeopleBulkOut,
+  PeopleMoveIn,
+  PeopleRemoveIn,
+  PeopleTagIn,
 } from './types'
 
 export const CSRF_HEADER = 'X-Requested-With'
@@ -435,6 +440,14 @@ export const api = {
     suggestions: (limit = 30) => get<SuggestionList>(`/api/suggestions${qs({ limit })}`),
     dismissSuggestion: (a: number, b: number) => post<OkOut>('/api/suggestions/dismiss', { a, b }),
     recluster: () => post<OkOut>('/api/recluster'),
+    /** Section 10, people on a selection: who the selected items show (faces, bodies, pet boxes, tags). */
+    onItems: (uids: string[]) => post<ItemsPeopleOut>('/api/items/people', { uids }),
+    /** Everything of `from_person_id` on those items goes to the chosen person or pet (or a new name). */
+    moveOnItems: (body: PeopleMoveIn) => post<PeopleBulkOut>('/api/items/people/move', body),
+    /** The person's faces, bodies and boxes on those items are unassigned and their tags there removed. */
+    removeFromItems: (body: PeopleRemoveIn) => post<PeopleBulkOut>('/api/items/people/remove', body),
+    /** Tags a person or pet on every item, as on one item (relation in or related). */
+    tagItems: (body: PeopleTagIn) => post<PeopleBulkOut>('/api/items/people/tag', body),
   },
 
   animals: {
