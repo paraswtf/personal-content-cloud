@@ -6,6 +6,15 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Private settings live in .env at the repo root (ignored by git) and are loaded here: WALLET_*,
+# CHALLAN_PORTAL_URL, anything you would not put in .claude/devservers.json. Shell syntax, one
+# NAME=value per line; a value in .env overrides the same name from the environment.
+if [ -f "$ROOT/.env" ]; then
+  set -a
+  # shellcheck disable=SC1091
+  . "$ROOT/.env"
+  set +a
+fi
 PORT="${PORT:-41010}"
 HOST="${HOST:-127.0.0.1}"
 

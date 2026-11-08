@@ -105,6 +105,14 @@ again: that is the vault unlock, and it stays open for 15 minutes.
 
 ## Configuration
 
+Private settings go in `.env` at the repository root, which git ignores and `scripts/run.sh` loads before
+the server starts: the Apple Wallet values (`WALLET_PASS_TYPE_ID`, `WALLET_TEAM_ID`, `WALLET_ORG_NAME`),
+another state's `CHALLAN_PORTAL_URL`, and anything else you would not want in a public repository. Keep
+them out of `.claude/devservers.json` and `ios/project.yml` (set your Apple team in Xcode under Signing).
+`.gitignore` also keeps out `data/` (the database, the originals, the share-link key, the Wallet
+certificates), `models/`, every key, certificate, provisioning profile and pass file, local editor and
+tool state, and the generated Xcode project.
+
 Environment variables (all optional):
 
 | Variable | Default | Meaning |

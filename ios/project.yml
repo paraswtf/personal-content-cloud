@@ -11,7 +11,7 @@ settings:
     SWIFT_VERSION: "5.9"
     MARKETING_VERSION: "0.1.0"
     CURRENT_PROJECT_VERSION: "1"
-    DEVELOPMENT_TEAM: 483UY553Z5         # your Apple team id, or set it in Xcode under Signing
+    DEVELOPMENT_TEAM: ""           # set your Apple team in Xcode under Signing; it stays out of the repo
 targets:
   PersonalContentCloud:
     type: application
