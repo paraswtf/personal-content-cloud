@@ -11,7 +11,7 @@ import sqlite3
 import threading
 from typing import Any
 
-from app.learning import doc_type, events, forwards, images, misclick, people, store, tags
+from app.learning import doc_type, events, forwards, images, misclick, not_faces, people, store, tags
 from app.util import now_iso
 
 log = logging.getLogger(__name__)
@@ -19,7 +19,7 @@ log = logging.getLogger(__name__)
 STATUS = "status"
 _lock = threading.Lock()
 LEARNERS = (("doc_type", doc_type), ("images", images), ("misclick", misclick), ("people", people), ("tags", tags),
-            ("forwards", forwards))
+            ("forwards", forwards), ("not_faces", not_faces))
 
 
 def signature(conn: sqlite3.Connection) -> list[Any]:
@@ -43,6 +43,7 @@ def signature(conn: sqlite3.Connection) -> list[Any]:
         one("SELECT MAX(id) FROM learning_events"),
         one("SELECT COUNT(*) FROM item_user_tags WHERE source = 'user'"),
         one("SELECT COUNT(*) FROM tag_rejections"),
+        one("SELECT COUNT(*) FROM not_faces"),
     ]
 
 
@@ -83,6 +84,7 @@ def pending(conn: sqlite3.Connection) -> int:
     ).fetchone()[0]
     n += conn.execute("SELECT COUNT(*) FROM documents WHERE source = 'user' AND updated_at > ?", (since,)).fetchone()[0]
     n += conn.execute("SELECT COUNT(*) FROM learning_events WHERE created_at >= ?", (since,)).fetchone()[0]
+    n += conn.execute("SELECT COUNT(*) FROM not_faces WHERE created_at >= ?", (since,)).fetchone()[0]
     if not since:
         n += conn.execute("SELECT COUNT(*) FROM faces WHERE assigned_by = 'user'").fetchone()[0]
     return int(n)
@@ -107,6 +109,7 @@ def status(conn: sqlite3.Connection) -> dict[str, Any]:
             "people": people.status(),
             "tags": tags.status(),
             "forwards": forwards.status(),
+            "not_faces": not_faces.status(),
         },
         "events": _event_counts(conn),
         "errors": st.get("errors") or {},

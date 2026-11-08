@@ -81,6 +81,10 @@ export interface ChallengeOut {
 export interface OkOut {
   ok: boolean
 }
+/** "Not a face" (section 10): followed = unassigned look-alikes removed with it. */
+export interface FaceDeleteOut extends OkOut {
+  followed: number
+}
 
 // people
 export type Species = 'bird' | 'cat' | 'dog' | 'horse' | 'sheep' | 'cow' | 'elephant' | 'bear' | 'zebra' | 'giraffe'
@@ -136,6 +140,8 @@ export interface BodyOut {
   url: string
   /** Videos: tracks of one person, or of one look-alike, share a number (section 10). */
   group?: number | null
+  /** 'user' when the owner drew the box (a person box, section 10), else found by the detector. */
+  source?: 'detector' | 'user'
 }
 /** An animal box (section 22): a pet found by its look, assigned to a pet identity. */
 export interface AnimalOut {
@@ -847,6 +853,23 @@ export interface ConfigOut {
   map: { tiles: 'offline' | 'online'; style_url: string }
 }
 
+/** A person box the owner draws (section 10): normalised to the picture, with who it is (exactly one of
+ *  person_id and new_person_name). */
+export interface AddPersonBoxIn {
+  x: number
+  y: number
+  w: number
+  h: number
+  /** Videos: the time of the frame the box was drawn on, in seconds (400 frame_time_needed without it). */
+  t?: number
+  person_id?: number
+  new_person_name?: string
+}
+/** The drawn person box, and the face the detector found inside it (null for a helmet, a back or someone far away). */
+export interface PersonBoxOut {
+  body: BodyOut
+  face: FaceOut | null
+}
 /** A pet box the owner draws (section 22): normalised to the picture, with the species when the owner picks one. */
 export interface AddAnimalIn {
   x: number

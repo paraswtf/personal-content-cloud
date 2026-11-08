@@ -125,11 +125,17 @@ export default function FaceEditor({ uid, target, anchor, onClose, onDone, track
   })
   const remove = useMutation({
     mutationFn: async () => {
-      for (const t of scopeTargets) await (t.kind === 'face' ? api.people.deleteFace(t.box.id) : api.people.deleteBody(t.box.id))
+      let followed = 0
+      for (const t of scopeTargets) {
+        if (t.kind === 'face') followed += (await api.people.deleteFace(t.box.id)).followed ?? 0
+        else await api.people.deleteBody(t.box.id)
+      }
+      return followed
     },
-    onSuccess: () => {
+    onSuccess: (followed) => {
       invalidate()
-      onDone(`Removed. It will not be shown as a ${noun} again.${trackTail}`)
+      const more = followed > 0 ? ` ${formatCount(followed, 'look-alike')} went with it.` : ''
+      onDone(`Removed. It will not be shown as a ${noun} again.${more}${trackTail}`)
     },
   })
   const busy = assign.isPending || remove.isPending || nameGroup.isPending || guessAct.isPending

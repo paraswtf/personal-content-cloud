@@ -1,11 +1,14 @@
 """People learner (section 18).
 
 Per-person face thresholds: a person the owner confirmed faces for is matched more readily (the
-threshold drops towards the 10th percentile of those faces' similarity to the person, floor FLOOR),
+threshold drops towards the weighted 10th percentile of those faces' similarity to the person, floor
+FLOOR),
 a person the owner merged others into (or moved faces to, section 10) is matched down to the similarity
 they accepted in the least alike of those merges (learning_events kind 'merge', features.accepted, minus
 LOOSEN, floor FLOOR), and one the owner rejected a guess for or took faces away from is matched more
-carefully (the threshold rises above the closest rejected face, which wins over any loosening). Pets
+carefully (the threshold rises above the closest rejected face, which wins over any loosening). Every
+face counts by its face weight (app.analysis.faces.face_weight, section 10): a blurred, masked or
+turned-away face moves a threshold little or not at all, so unclear faces cannot bias it. Pets
 learn the same way from their crops (section 22): the owner's crops set the threshold, and a crop the
 owner took away from a pet (guess_rejections kind 'animal') raises it above that crop, up to PET_CEIL.
 Guess weights: a logistic regression on the evidence terms of confirmed and rejected guesses
@@ -34,6 +37,12 @@ TIGHTEN = 0.02
 FEATURES = ("clothes", "scene_term", "face_term", "same_day", "has_gps")
 
 
+def _weight(row: sqlite3.Row) -> float:
+    from app.analysis.faces import face_weight
+
+    return face_weight(row["det_score"], row["size_px"], row["clarity"], row["sharpness"])
+
+
 def _vec(blob: bytes | None) -> np.ndarray | None:
     if not blob:
         return None
@@ -46,20 +55,26 @@ def person_thresholds(conn: sqlite3.Connection) -> dict[int, float]:
     """{person_id: match threshold} for the people (faces) and the pets (animal crops, section 22)
     whose owner-assigned examples say the default is too loose or too tight."""
     by_person: dict[int, list[np.ndarray]] = {}
+    weights: dict[int, list[float]] = {}
     for r in conn.execute(
-        "SELECT person_id, embedding FROM faces WHERE assigned_by = 'user' AND person_id IS NOT NULL"
+        "SELECT person_id, embedding, det_score, size_px, clarity, sharpness FROM faces "
+        "WHERE assigned_by = 'user' AND person_id IS NOT NULL"
     ):
-        v = _vec(r["embedding"])
-        if v is not None:
+        v, w = _vec(r["embedding"]), _weight(r)
+        if v is not None and w > 0:
             by_person.setdefault(int(r["person_id"]), []).append(v)
+            weights.setdefault(int(r["person_id"]), []).append(w)
     rejected: dict[int, list[np.ndarray]] = {}
+    rejected_weights: dict[int, list[float]] = {}
     for r in conn.execute(
-        "SELECT g.person_id, f.embedding FROM guess_rejections g JOIN faces f ON f.id = g.ref_id WHERE g.kind = 'face' "
+        "SELECT g.person_id, f.embedding, f.det_score, f.size_px, f.clarity, f.sharpness FROM guess_rejections g "
+        "JOIN faces f ON f.id = g.ref_id WHERE g.kind = 'face' "
         "AND f.person_id IS NOT g.person_id"  # a face that is theirs again (a merge) is no rejection
     ):
-        v = _vec(r["embedding"])
-        if v is not None:
+        v, w = _vec(r["embedding"]), _weight(r)
+        if v is not None and w > 0:
             rejected.setdefault(int(r["person_id"]), []).append(v)
+            rejected_weights.setdefault(int(r["person_id"]), []).append(w)
     merged: dict[int, float] = {}
     for r in conn.execute("SELECT person_id, features FROM learning_events WHERE kind = 'merge' AND person_id IS NOT NULL"):
         a = (json_loads(r["features"], {}) or {}).get("accepted")
@@ -69,14 +84,20 @@ def person_thresholds(conn: sqlite3.Connection) -> dict[int, float]:
     # A person without confirmed faces still needs a reference for the rejection rule: their faces.
     reference: dict[int, np.ndarray] = {}
     for pid in (set(rejected) | set(merged)) - set(by_person):
-        vs = [v for v in (_vec(r["embedding"]) for r in conn.execute(
-            "SELECT embedding FROM faces WHERE person_id = ? ORDER BY quality DESC LIMIT 200", (pid,))) if v is not None]
+        vs, ws = [], []
+        for r in conn.execute("SELECT embedding, det_score, size_px, clarity, sharpness FROM faces WHERE person_id = ? "
+                              "ORDER BY quality DESC LIMIT 200", (pid,)):
+            v, w = _vec(r["embedding"]), _weight(r)
+            if v is not None and w > 0:
+                vs.append(v)
+                ws.append(w)
         if vs:
-            c = np.stack(vs).mean(axis=0)
+            c = (np.stack(vs) * np.asarray(ws, dtype=np.float32)[:, None]).sum(axis=0)
             n = float(np.linalg.norm(c))
             if n > 0:
                 reference[pid] = (c / n).astype(np.float32)
-    out = _thresholds(by_person, rejected, float(settings.cluster_match_threshold), merged, reference)
+    out = _thresholds(by_person, rejected, float(settings.cluster_match_threshold), merged, reference,
+                      weights=weights, rejected_weights=rejected_weights)
     by_pet: dict[int, list[np.ndarray]] = {}
     for r in conn.execute(
         "SELECT a.person_id, a.embedding FROM animals a JOIN persons p ON p.id = a.person_id "
@@ -110,41 +131,66 @@ def person_thresholds(conn: sqlite3.Connection) -> dict[int, float]:
     return out
 
 
+def _weighted_percentile(values: list[float], weights: list[float], q: float) -> float:
+    """The value below which q percent of the total weight lies (np.percentile when all weigh 1)."""
+    order = np.argsort(values, kind="stable")
+    v = np.asarray(values, dtype=np.float64)[order]
+    w = np.asarray(weights, dtype=np.float64)[order]
+    if v.size == 1 or float(w.sum()) <= 0:
+        return float(np.percentile(v, q))
+    # Midpoints of each value's weight span, scaled to 0..100, as np.percentile's linear rule does
+    # for equal weights.
+    cum = np.cumsum(w) - 0.5 * w
+    pos = (cum - cum[0]) / max(float(cum[-1] - cum[0]), 1e-12) * 100.0
+    return float(np.interp(q, pos, v))
+
+
 def _thresholds(by_person: dict[int, list[np.ndarray]], rejected: dict[int, list[np.ndarray]],
                 default: float, merged: dict[int, float] | None = None,
-                reference: dict[int, np.ndarray] | None = None, ceil: float = CEIL) -> dict[int, float]:
+                reference: dict[int, np.ndarray] | None = None, ceil: float = CEIL,
+                weights: dict[int, list[float]] | None = None,
+                rejected_weights: dict[int, list[float]] | None = None) -> dict[int, float]:
+    """weights / rejected_weights: the face weight of each example (1 when not given). The centroid
+    and the 10th percentile are weighted, MIN_USER_FACES counts the total weight, and a rejected
+    example raises the threshold by its weight's share of the way to its similarity + TIGHTEN."""
     out: dict[int, float] = {}
     merged = merged or {}
     reference = reference or {}
+    weights = weights or {}
+    rejected_weights = rejected_weights or {}
     for pid in set(by_person) | set(rejected) | set(merged):
         confirmed = by_person.get(pid, [])
+        cw = np.asarray(weights.get(pid) or [1.0] * len(confirmed), dtype=np.float64)
         t: float | None = None
         centroid: np.ndarray | None = reference.get(pid)
         if confirmed:
             x = np.stack(confirmed)
-            centroid = x.mean(axis=0)
+            centroid = (x * cw[:, None]).sum(axis=0)
             n = float(np.linalg.norm(centroid))
             centroid = centroid / n if n > 0 else None
-        if centroid is not None and len(confirmed) >= MIN_USER_FACES:
+        if centroid is not None and float(cw.sum()) >= MIN_USER_FACES - 1e-9:
             x = np.stack(confirmed)
-            if len(confirmed) >= 2:  # leave-one-out: each face against the centroid of the others
+            if len(confirmed) >= 2:  # leave-one-out: each face against the weighted centroid of the others
                 sims = []
-                total = x.sum(axis=0)
+                total = (x * cw[:, None]).sum(axis=0)
                 for i in range(len(confirmed)):
-                    other = total - x[i]
+                    other = total - x[i] * cw[i]
                     n = float(np.linalg.norm(other))
                     sims.append(float(x[i] @ (other / n)) if n > 0 else 1.0)
             else:
                 sims = [1.0]
-            p10 = float(np.percentile(sims, 10))
+            p10 = _weighted_percentile(sims, cw.tolist(), 10)
             t = max(FLOOR, min(default, p10 - LOOSEN))
         if pid in merged:
             loose = max(FLOOR, min(default, merged[pid] - LOOSEN))
             t = loose if t is None else min(t, loose)
         if centroid is not None and rejected.get(pid):
-            worst = max((float(v @ centroid) for v in rejected[pid] if v.shape == centroid.shape), default=None)
-            if worst is not None:
-                t = min(ceil, max(t if t is not None else default, worst + TIGHTEN))
+            rw = rejected_weights.get(pid) or [1.0] * len(rejected[pid])
+            base = t if t is not None else default
+            raised = [base + w * (float(v @ centroid) + TIGHTEN - base)
+                      for v, w in zip(rejected[pid], rw) if v.shape == centroid.shape]
+            if raised:
+                t = min(ceil, max(base, max(raised)))
         if t is not None and abs(t - default) > 1e-6:
             out[pid] = round(t, 4)
     return out

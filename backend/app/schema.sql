@@ -227,7 +227,9 @@ CREATE TABLE IF NOT EXISTS faces (
   guess_person_id INTEGER REFERENCES persons(id) ON DELETE SET NULL,
   guess_score     REAL,
   guess_evidence  TEXT,                         -- JSON {clothes, scene, face, ref_face_id, ref_item_uid, same_day, gps_m}
-  created_at      TEXT NOT NULL
+  created_at      TEXT NOT NULL,
+  clarity         REAL,                         -- face-model feature norm; NULL = not measured (section 10)
+  sharpness       REAL                          -- Laplacian variance of the aligned face; NULL = not measured
 );
 CREATE INDEX IF NOT EXISTS faces_item   ON faces(item_id);
 CREATE INDEX IF NOT EXISTS faces_person ON faces(person_id, quality);
@@ -247,7 +249,8 @@ CREATE TABLE IF NOT EXISTS bodies (
   guess_score     REAL,
   guess_evidence  TEXT,
   frame_time_s    REAL,
-  created_at      TEXT NOT NULL
+  created_at      TEXT NOT NULL,
+  source          TEXT NOT NULL DEFAULT 'detector' CHECK (source IN ('detector','user'))  -- 'user': drawn (section 10)
 );
 CREATE INDEX IF NOT EXISTS bodies_item   ON bodies(item_id);
 CREATE INDEX IF NOT EXISTS bodies_person ON bodies(person_id);
@@ -295,6 +298,19 @@ CREATE TABLE IF NOT EXISTS guess_rejections (
   person_id  INTEGER NOT NULL REFERENCES persons(id) ON DELETE CASCADE,
   created_at TEXT NOT NULL,
   PRIMARY KEY (kind, ref_id, person_id)
+);
+
+-- "Not a face" (sections 10 and 18): faces the owner removed as not a face, kept so detection learns
+-- from them (app.learning.not_faces). item_id is only where it was seen.
+CREATE TABLE IF NOT EXISTS not_faces (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  item_id    INTEGER REFERENCES items(id) ON DELETE SET NULL,
+  det_score  REAL NOT NULL,
+  size_px    INTEGER NOT NULL,
+  clarity    REAL,
+  sharpness  REAL,
+  embedding  BLOB NOT NULL,                     -- float32[512] (ArcFace) of the removed face
+  created_at TEXT NOT NULL
 );
 
 -- "These two are different people": hides a merge suggestion.

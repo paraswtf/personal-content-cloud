@@ -1,7 +1,8 @@
 // Viewer info panel: document card, people and guesses, free-form tags (TagsPanel), category with override, mis-click reasons,
 // labels, read text, file details, and the item actions (favourite, vault, reprocess, download, trash).
 // Tags (section 10): "Tag someone" lists people and pets (a new pet asks for its species) and can mark the item as
-// related to someone who is not in it; related tags show under "Related to" and each tag's menu switches the relation.
+// related to someone who is not in it; related tags show under "Related to". Every person's chip has a menu (section 14):
+// Change to..., Rename, Not NAME (or Remove from this item for a tag alone) and, for the owner's tags, the relation switch.
 import AlbumsSection from '../albums/AlbumsSection'
 import LocationRow from '../map/LocationRow'
 import { useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from 'react'
@@ -19,14 +20,18 @@ import {
   Lock,
   MoreHorizontal,
   PawPrint,
+  Pencil,
   RefreshCw,
   ScanFace,
+  SquareUser,
   Star,
   Tag,
   Trash2,
   TriangleAlert,
   Unlock,
   UserPlus,
+  UserRoundPen,
+  UserX,
   X,
 } from 'lucide-react'
 import { ApiError, api } from '../../lib/api'
@@ -59,6 +64,7 @@ import { burstBestUid, reasonKeys, reasonLabel } from '../library/misclick'
 import PersonPicker, { choiceBody, type PersonChoice } from '../people/PersonPicker'
 import { boxKey, type BoxTarget } from './boxes'
 import GuessChip from './GuessChip'
+import { PersonEditCard, usePersonEdits, type PersonEditMode, type PersonEditTarget } from './PersonEdit'
 import TagsPanel from './TagsPanel'
 import TextPanel from './TextPanel'
 import { darkButton, useInvalidateItem } from './shared'
@@ -83,6 +89,8 @@ interface Props {
   onEditBox: (target: BoxTarget, anchor: HTMLElement) => void
   /** Draw mode for a pet the detector missed (section 22): the photo or video stage takes a box from the owner. */
   onAddPetBox?: () => void
+  /** Draw mode for a person box (section 10): someone in a helmet, from behind or far away, or a face the detector missed. */
+  onAddPersonBox?: () => void
   /** Opened from the documents page: the document card comes first. */
   documentFirst?: boolean
 }
@@ -109,15 +117,21 @@ export function Row({ label, value }: { label: string; value: ReactNode }) {
 const menuItemClass =
   'flex min-h-11 w-full items-center gap-2.5 rounded-lg px-3 py-2 text-left text-sm text-white/90 hover:bg-white/10 focus-visible:bg-white/10 disabled:opacity-50'
 
-/** What the owner can do with a tag they made: switch its relation (the same POST with the other one) or remove it. */
-interface TagMenu {
-  relation: TagRelation
+/** What the owner can do with someone on this item (section 14): change them to someone else, rename them, take them
+ * off the item, and for a tag of the owner's, switch its relation (the same POST with the other one). */
+interface ChipMenu {
   busy: boolean
+  /** The owner tagged them here: the tag's relation, which the menu switches. */
+  relation?: TagRelation
   onRelation: (relation: TagRelation) => void
+  onChange: () => void
+  onRename: () => void
+  /** "Not NAME" when boxes of theirs are here (they stay, remembered as not them), "Remove from this item" for a tag alone. */
   onRemove: () => void
+  tagOnly: boolean
 }
 
-function PersonChip({ person, thumb, menu }: { person: PersonRef; thumb: string | null | undefined; menu?: TagMenu }) {
+function PersonChip({ person, thumb, menu }: { person: PersonRef; thumb: string | null | undefined; menu?: ChipMenu }) {
   const name = personName(person)
   const pet = person.kind === 'pet'
   const related = person.relation === 'related'
@@ -133,7 +147,9 @@ function PersonChip({ person, thumb, menu }: { person: PersonRef; thumb: string 
       if (!root.current?.contains(e.target as Node)) setOpen(false)
     }
     document.addEventListener('pointerdown', onDown)
-    list.current?.querySelector<HTMLElement>('[role="menuitem"]')?.focus()
+    list.current?.querySelector<HTMLElement>('[role="menuitem"]')?.focus({ preventScroll: true })
+    // In the phone sheet the menu may hang below its visible edge: bring all of it into view.
+    list.current?.scrollIntoView({ block: 'nearest' })
     return () => document.removeEventListener('pointerdown', onDown)
   }, [open])
 
@@ -198,6 +214,7 @@ function PersonChip({ person, thumb, menu }: { person: PersonRef; thumb: string 
           aria-label={`Options for ${name}`}
           aria-haspopup="menu"
           aria-expanded={open}
+          data-person-menu={person.id}
           className="-ml-2 flex size-10 shrink-0 items-center justify-center rounded-full text-white/60 hover:bg-white/10 hover:text-white disabled:opacity-50"
         >
           {menu.busy ? <Loader2 className="size-4 animate-spin" aria-hidden /> : <ChevronDown className="size-4" aria-hidden />}
@@ -207,12 +224,26 @@ function PersonChip({ person, thumb, menu }: { person: PersonRef; thumb: string 
         <div
           ref={list}
           role="menu"
-          aria-label={`Tag ${name}`}
+          aria-label={`Edit ${name}`}
           className={clsx(
             'absolute top-full z-30 mt-1 w-56 max-w-[calc(100vw-1rem)] rounded-xl border border-white/10 bg-[#222] p-1.5 shadow-2xl',
             alignRight ? 'right-0' : 'left-0',
           )}
         >
+          <button type="button" role="menuitem" className={menuItemClass} onClick={act(menu.onChange)}>
+            <UserRoundPen className="size-4 shrink-0" aria-hidden />
+            <span className="min-w-0">
+              Change to...
+              <span className="block text-xs text-white/50">{pet ? 'It is another pet' : 'It is someone else'}</span>
+            </span>
+          </button>
+          <button type="button" role="menuitem" className={menuItemClass} onClick={act(menu.onRename)}>
+            <Pencil className="size-4 shrink-0" aria-hidden />
+            <span className="min-w-0">
+              {person.name ? 'Rename' : 'Name'}
+              <span className="block text-xs text-white/50">Everywhere, not only here</span>
+            </span>
+          </button>
           {menu.relation === 'related' ? (
             <button type="button" role="menuitem" className={menuItemClass} onClick={act(() => menu.onRelation('in'))}>
               <ScanFace className="size-4 shrink-0" aria-hidden />
@@ -221,7 +252,7 @@ function PersonChip({ person, thumb, menu }: { person: PersonRef; thumb: string 
                 <span className="block text-xs text-white/50">{pet ? 'The pet is in the picture' : 'They are in the picture'}</span>
               </span>
             </button>
-          ) : (
+          ) : menu.relation === 'in' ? (
             <button type="button" role="menuitem" className={menuItemClass} onClick={act(() => menu.onRelation('related'))}>
               <Link2 className="size-4 shrink-0" aria-hidden />
               <span className="min-w-0">
@@ -229,11 +260,26 @@ function PersonChip({ person, thumb, menu }: { person: PersonRef; thumb: string 
                 <span className="block text-xs text-white/50">Not in the picture, it is about them</span>
               </span>
             </button>
+          ) : null}
+          {menu.tagOnly ? (
+            <button type="button" role="menuitem" className={menuItemClass} onClick={act(menu.onRemove)}>
+              <X className="size-4 shrink-0" aria-hidden />
+              <span className="min-w-0">
+                Remove from this item
+                <span className="block text-xs text-white/50">Removes the tag</span>
+              </span>
+            </button>
+          ) : (
+            <button type="button" role="menuitem" className={menuItemClass} onClick={act(menu.onRemove)}>
+              <UserX className="size-4 shrink-0" aria-hidden />
+              <span className="min-w-0">
+                Not {name}
+                <span className="block text-xs text-white/50">
+                  {pet ? 'Its boxes here stay, unnamed and remembered as not it' : 'Their faces here stay, unnamed and remembered as not them'}
+                </span>
+              </span>
+            </button>
           )}
-          <button type="button" role="menuitem" className={menuItemClass} onClick={act(menu.onRemove)}>
-            <X className="size-4 shrink-0" aria-hidden />
-            Remove
-          </button>
         </div>
       )}
     </li>
@@ -283,23 +329,33 @@ export default function InfoPanel({
   guesses,
   onEditBox,
   onAddPetBox,
+  onAddPersonBox,
   documentFirst = false,
 }: Props) {
   const invalidate = useInvalidateItem(detail.uid)
   const [busyId, setBusyId] = useState<number | null>(null)
   const isVideo = detail.kind === 'video'
   const isDoc = detail.kind === 'pdf' || detail.kind === 'document'
-  // section 22: a pet box the owner draws, and a second look by the detector (photos and videos)
-  const canAddBoxes = (detail.kind === 'image' || isVideo) && !!onAddPetBox
+  // section 22: a pet box the owner draws, and a second look by the detector (photos and videos);
+  // section 10: a person box the owner draws
+  const boxable = detail.kind === 'image' || isVideo
+  const canAddBoxes = boxable && !!onAddPetBox
+  const canAddPersonBox = boxable && !!onAddPersonBox
   // section 10: the tag form's switch, and the new pet whose species is still to pick
   const [related, setRelated] = useState(false)
   const [newPet, setNewPet] = useState<string | null>(null)
+  // section 14: the person whose "Change to..." or "Rename" card is open under the chips
+  const [personEdit, setPersonEdit] = useState<PersonEditTarget | null>(null)
   useEffect(() => {
     if (!tagging) {
       setRelated(false)
       setNewPet(null)
-    }
+    } else setPersonEdit(null)
   }, [tagging])
+  useEffect(() => {
+    setPersonEdit(null)
+  }, [detail.uid])
+  const edits = usePersonEdits(detail.uid, onToast, () => setPersonEdit(null))
   const [moreBoxes, setMoreBoxes] = useState(false)
   const findPets = useMutation({
     mutationFn: () => api.items.detectAnimals(detail.uid),
@@ -374,15 +430,38 @@ export default function InfoPanel({
     },
     onError: fail('Could not remove the tag'),
   })
-  const tagMenu = (p: PersonRef): TagMenu | undefined =>
-    tagIds.has(p.id) || p.relation === 'related'
-      ? {
-          relation: p.relation ?? 'in',
-          busy: busyId === p.id,
-          onRelation: (relation) => setRelation.mutate({ personId: p.id, relation }),
-          onRemove: () => removeTag.mutate(p.id),
-        }
-      : undefined
+  // Who has a face, body or pet box here (the rest are here through a tag alone).
+  const boxed = new Set<number>()
+  for (const f of detail.faces) if (f.person) boxed.add(f.person.id)
+  for (const b of detail.bodies) if (b.person) boxed.add(b.person.id)
+  for (const a of detail.animals) if (a.person) boxed.add(a.person.id)
+  const startEdit = (mode: PersonEditMode, p: PersonRef) => {
+    setTagging(false)
+    setPersonEdit({ mode, who: p, species: detail.animals.find((a) => a.person?.id === p.id)?.species ?? null })
+  }
+  const closeEdit = () => {
+    const id = personEdit?.who.id
+    setPersonEdit(null)
+    if (id !== undefined)
+      requestAnimationFrame(() => document.querySelector<HTMLElement>(`[data-person-menu="${id}"]`)?.focus())
+  }
+  const personMenu = (p: PersonRef): ChipMenu => {
+    const tagged = tagIds.has(p.id) || p.relation === 'related'
+    const tagOnly = tagged && !boxed.has(p.id)
+    return {
+      busy: busyId === p.id || edits.busyId === p.id,
+      relation: tagged ? (p.relation ?? 'in') : undefined,
+      onRelation: (relation) => setRelation.mutate({ personId: p.id, relation }),
+      onChange: () => startEdit('change', p),
+      onRename: () => startEdit('rename', p),
+      onRemove: () => {
+        setPersonEdit(null)
+        if (tagOnly) removeTag.mutate(p.id)
+        else edits.notThem.mutate(p)
+      },
+      tagOnly,
+    }
+  }
   const update = useMutation({
     mutationFn: (body: Parameters<typeof api.items.update>[1]) => api.items.update(detail.uid, body),
     onSuccess: (_d, body) => {
@@ -572,7 +651,7 @@ export default function InfoPanel({
           {inPeople.length > 0 ? (
             <ul className="flex flex-wrap gap-2" aria-label="People in this item">
               {inPeople.map((p) => (
-                <PersonChip key={p.id} person={p} thumb={thumbs.get(p.id) ?? p.cover_url} menu={tagMenu(p)} />
+                <PersonChip key={p.id} person={p} thumb={thumbs.get(p.id) ?? p.cover_url} menu={personMenu(p)} />
               ))}
             </ul>
           ) : (
@@ -595,10 +674,22 @@ export default function InfoPanel({
               </p>
               <ul className="flex flex-wrap gap-2" aria-label="Related to">
                 {relatedPeople.map((p) => (
-                  <PersonChip key={p.id} person={p} thumb={p.cover_url} menu={tagMenu(p)} />
+                  <PersonChip key={p.id} person={p} thumb={p.cover_url} menu={personMenu(p)} />
                 ))}
               </ul>
             </div>
+          )}
+
+          {personEdit && (
+            <PersonEditCard
+              key={`${personEdit.mode}-${personEdit.who.id}`}
+              edit={personEdit}
+              busy={edits.busy}
+              video={isVideo}
+              onPick={(choice) => edits.change.mutate({ who: personEdit.who, choice })}
+              onRename={(name) => edits.rename.mutate({ who: personEdit.who, name })}
+              onCancel={closeEdit}
+            />
           )}
 
           {guessTargets.length > 0 && (
@@ -712,27 +803,35 @@ export default function InfoPanel({
             </button>
           )}
 
-          {canAddBoxes && (
+          {(canAddBoxes || canAddPersonBox) && (
             <div className="mt-3">
-              {detail.animals.length > 0 && (
-                <button type="button" aria-expanded={moreBoxes} onClick={() => setMoreBoxes((v) => !v)} className={darkButton('default')}>
-                  <MoreHorizontal className="size-4" aria-hidden />
-                  More
-                </button>
-              )}
-              {(detail.animals.length === 0 || moreBoxes) && (
-                <div className={clsx('flex flex-wrap gap-2', detail.animals.length > 0 && 'mt-2')}>
-                  <button type="button" onClick={onAddPetBox} className={darkButton('default')}>
-                    <PawPrint className="size-4" aria-hidden />
-                    Add a pet box
+              <div className="flex flex-wrap gap-2">
+                {canAddPersonBox && (
+                  <button type="button" onClick={onAddPersonBox} className={darkButton('default')}>
+                    <SquareUser className="size-4" aria-hidden />
+                    Add a person box
                   </button>
-                  <button type="button" onClick={() => findPets.mutate()} disabled={findPets.isPending} className={darkButton('default')}>
-                    <RefreshCw className={clsx('size-4', findPets.isPending && 'animate-spin')} aria-hidden />
-                    Find pets again
+                )}
+                {canAddBoxes && detail.animals.length > 0 && (
+                  <button type="button" aria-expanded={moreBoxes} onClick={() => setMoreBoxes((v) => !v)} className={darkButton('default')}>
+                    <MoreHorizontal className="size-4" aria-hidden />
+                    More
                   </button>
-                </div>
-              )}
-              {detail.animals.length === 0 && (
+                )}
+                {canAddBoxes && (detail.animals.length === 0 || moreBoxes) && (
+                  <>
+                    <button type="button" onClick={onAddPetBox} className={darkButton('default')}>
+                      <PawPrint className="size-4" aria-hidden />
+                      Add a pet box
+                    </button>
+                    <button type="button" onClick={() => findPets.mutate()} disabled={findPets.isPending} className={darkButton('default')}>
+                      <RefreshCw className={clsx('size-4', findPets.isPending && 'animate-spin')} aria-hidden />
+                      Find pets again
+                    </button>
+                  </>
+                )}
+              </div>
+              {canAddBoxes && detail.animals.length === 0 && (
                 <p className="mt-2 text-xs text-white/55">
                   {isVideo
                     ? 'No pet box in this video. Pause on a frame with the pet and draw a box over it, or let the detector look again more closely.'

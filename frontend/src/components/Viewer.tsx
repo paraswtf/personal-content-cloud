@@ -27,7 +27,7 @@ import LiveButton from './viewer/LiveButton'
 import PhotoStage from './viewer/PhotoStage'
 import VideoPreparing from './viewer/VideoPreparing'
 import VideoStage, { currentFrameTime, posterTime } from './viewer/VideoStage'
-import { animalLabel, boxKey, findBox, groupVideoBoxes, videoBoxes, type AnimalBox, type BoxKind, type BoxTarget, type PersonBoxTarget } from './viewer/boxes'
+import { animalLabel, boxKey, findBox, groupVideoBoxes, videoBoxes, type AnimalBox, type BoxKind, type BoxTarget, type DrawKind, type PersonBoxTarget } from './viewer/boxes'
 import { useGuessActions } from './viewer/useGuessActions'
 import { useOnScreenFaces } from './viewer/useOnScreenFaces'
 import { seekToFrame } from './viewer/videoSeek'
@@ -192,7 +192,7 @@ function ViewerInner({ uid, onClose, onPrev, onNext, position, startAt = null, v
   )
   const [editing, setEditing] = useState<{ kind: BoxKind; id: number; anchor: HTMLElement; group?: boolean } | null>(null)
   const [tagging, setTagging] = useState(false)
-  const [drawing, setDrawing] = useState(false) // section 22: a pet box the owner draws
+  const [drawing, setDrawing] = useState<DrawKind | null>(null) // a pet box (section 22) or a person box (section 10) the owner draws
   const [confirmDelete, setConfirmDelete] = useState(false)
   const [sharing, setSharing] = useState(false) // the Share dialog (section 26): the keyboard steps aside like for the delete confirm
   const [exitAfter, setExitAfter] = useState<'next' | 'close' | null>(null)
@@ -233,7 +233,7 @@ function ViewerInner({ uid, onClose, onPrev, onNext, position, startAt = null, v
   useEffect(() => {
     setEditing(null)
     setTagging(false)
-    setDrawing(false)
+    setDrawing(null)
     setPage(0)
   }, [uid])
 
@@ -337,15 +337,17 @@ function ViewerInner({ uid, onClose, onPrev, onNext, position, startAt = null, v
       return !v
     })
   }, [])
-  /** Draw mode for a pet box (section 22): the boxes show, the editor and the tagging form close, and
-   *  on a phone the details sheet goes down so the photo is in reach. */
-  const startDrawing = useCallback(() => {
+  /** Draw mode for a pet box (section 22) or a person box (section 10): the boxes show, the editor and the
+   *  tagging form close, and on a phone the details sheet goes down so the photo is in reach. */
+  const startDrawing = useCallback((kind: DrawKind) => {
     setEditing(null)
     setTagging(false)
     setShowFaces(true)
-    setDrawing(true)
+    setDrawing(kind)
     if (typeof window !== 'undefined' && !window.matchMedia('(min-width: 1024px)').matches) setShowInfo(false)
   }, [])
+  const addPetBox = useCallback(() => startDrawing('pet'), [startDrawing])
+  const addPersonBox = useCallback(() => startDrawing('person'), [startDrawing])
 
   const closeEditor = useCallback(() => {
     setEditing((cur) => {
@@ -418,7 +420,7 @@ function ViewerInner({ uid, onClose, onPrev, onNext, position, startAt = null, v
       if (drawing) {
         if (e.key === 'Escape') {
           e.preventDefault()
-          setDrawing(false)
+          setDrawing(null)
         }
         return
       }
@@ -553,7 +555,7 @@ function ViewerInner({ uid, onClose, onPrev, onNext, position, startAt = null, v
             onDismissFace={dismissSeekFace}
             frameTimeRef={frameTimeRef}
             drawing={drawing}
-            onDrawEnd={() => setDrawing(false)}
+            onDrawEnd={() => setDrawing(null)}
             frameTime={frameTime}
             onToast={showToast}
           />
@@ -577,7 +579,7 @@ function ViewerInner({ uid, onClose, onPrev, onNext, position, startAt = null, v
           onLiveStop={stopLive}
           onLiveError={onLiveError}
           drawing={drawing}
-          onDrawEnd={() => setDrawing(false)}
+          onDrawEnd={() => setDrawing(null)}
           onToast={showToast}
         />
       )
@@ -763,7 +765,8 @@ function ViewerInner({ uid, onClose, onPrev, onNext, position, startAt = null, v
                 setTagging={setTagging}
                 guesses={guesses}
                 onEditBox={editBox}
-                onAddPetBox={startDrawing}
+                onAddPetBox={addPetBox}
+                onAddPersonBox={addPersonBox}
                 documentFirst={mode === 'document'}
               />
             </aside>

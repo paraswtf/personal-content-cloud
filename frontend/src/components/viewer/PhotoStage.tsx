@@ -1,8 +1,9 @@
 // The picture with face and body boxes drawn in percent of the rendered image box. A box with a
 // person shows the name; a box with a guess shows "Name?" with confirm and reject; a tap on a box
 // opens the editor. A Live Photo's clip plays over the still, in the same box, while `liveSrc` is set.
-// Draw mode (section 22): the owner drags a box over a pet the detector missed (or takes the whole
-// photo), picks the species, and the new box's popover opens so the pet can be named.
+// Draw mode: the owner drags a box (or takes the whole photo) over a pet the detector missed (section 22),
+// picks the species, and the new box's popover opens so the pet can be named; or over a person (section 10),
+// picks who it is in PersonBoxCard, and the box is added with them.
 import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
 import { useMutation } from '@tanstack/react-query'
 import clsx from 'clsx'
@@ -12,8 +13,9 @@ import { SPECIES, type AnimalOut, type ItemDetail, type Species } from '../../li
 import { personName, speciesLabel } from '../../lib/format'
 import { previewSrcSet } from '../../lib/preview'
 import { errorMessage } from '../admin/adminHooks'
-import { animalLabel, boxKey, stillBoxes, type BoxTarget } from './boxes'
+import { animalLabel, boxKey, stillBoxes, type BoxTarget, type DrawKind } from './boxes'
 import GuessChip from './GuessChip'
+import PersonBoxCard from './PersonBoxCard'
 import { darkButton, useInvalidateItem } from './shared'
 
 /** The smallest box the owner can draw, in screen pixels. */
@@ -37,8 +39,8 @@ interface Props {
   onLiveStop?: () => void
   /** The clip could not be loaded or played. */
   onLiveError?: () => void
-  /** Draw mode (section 22): a box for a pet the detector missed. */
-  drawing?: boolean
+  /** Draw mode: a box for a pet the detector missed (section 22) or for a person (section 10); null when off. */
+  drawing?: DrawKind | null
   /** Draw mode ended (cancelled, or the box was added). */
   onDrawEnd?: () => void
   onToast?: (message: string) => void
@@ -108,7 +110,7 @@ export default function PhotoStage({
   liveSrc,
   onLiveStop,
   onLiveError,
-  drawing = false,
+  drawing = null,
   onDrawEnd,
   onToast,
 }: Props) {
@@ -121,13 +123,16 @@ export default function PhotoStage({
   const [pending, setPending] = useState<NormBox | null>(null)
   // the box just added: its popover opens once the fresh detail draws it
   const [pendingEdit, setPendingEdit] = useState<number | null>(null)
+  // the drawn person box on screen: PersonBoxCard sits next to it
+  const [pendingEl, setPendingEl] = useState<HTMLDivElement | null>(null)
   const invalidate = useInvalidateItem(detail.uid)
+  const person = drawing === 'person'
+  const what = person ? 'person' : 'pet'
 
   useEffect(() => {
-    if (!drawing) {
-      setDrag(null)
-      setPending(null)
-    }
+    // off, or switched between a pet and a person: start over
+    setDrag(null)
+    setPending(null)
   }, [drawing])
 
   const add = useMutation({
@@ -312,7 +317,7 @@ export default function PhotoStage({
         <div
           data-no-swipe
           role="application"
-          aria-label="Draw a box over the pet"
+          aria-label={`Draw a box over the ${what}`}
           className="absolute inset-0 z-20 cursor-crosshair touch-none select-none"
           onPointerDown={onDrawDown}
           onPointerMove={onDrawMove}
@@ -321,7 +326,10 @@ export default function PhotoStage({
         >
           {dragRect && (
             <div
-              className="pointer-events-none absolute rounded-lg border-2 border-dashed border-emerald-300 bg-emerald-300/10"
+              className={clsx(
+                'pointer-events-none absolute rounded-lg border-2 border-dashed',
+                person ? 'border-sky-300 bg-sky-300/10' : 'border-emerald-300 bg-emerald-300/10',
+              )}
               style={dragRect}
             />
           )}
@@ -329,28 +337,52 @@ export default function PhotoStage({
       )}
 
       {drawing && (
-        <div data-no-swipe className="absolute inset-x-0 top-0 z-30 flex flex-wrap items-center justify-center gap-2 p-2">
+        <div data-no-swipe className="pointer-events-none absolute inset-x-0 top-0 z-30 flex flex-wrap items-center justify-center gap-2 p-2">
           {!pending && (
             <span role="status" className="rounded-full bg-black/70 px-3 py-1.5 text-sm font-semibold text-white">
-              Drag over the pet
+              Drag over the {what}
             </span>
           )}
           {!pending && (
             <button
               type="button"
               onClick={() => setPending({ x: WHOLE_MARGIN, y: WHOLE_MARGIN, w: 1 - 2 * WHOLE_MARGIN, h: 1 - 2 * WHOLE_MARGIN })}
-              className={darkButton('default', 'bg-black/60')}
+              className={darkButton('default', 'pointer-events-auto bg-black/60')}
             >
               Whole photo
             </button>
           )}
-          <button type="button" onClick={() => onDrawEnd?.()} className={darkButton('default', 'bg-black/60')}>
+          <button type="button" onClick={() => onDrawEnd?.()} className={darkButton('default', 'pointer-events-auto bg-black/60')}>
             Cancel
           </button>
         </div>
       )}
 
-      {drawing && pending && (
+      {person && pending && (
+        <>
+          <div
+            ref={setPendingEl}
+            className="pointer-events-none absolute z-20 rounded-lg border-2 border-sky-300 bg-sky-300/10"
+            style={{ left: `${pending.x * 100}%`, top: `${pending.y * 100}%`, width: `${pending.w * 100}%`, height: `${pending.h * 100}%` }}
+          />
+          {pendingEl && (
+            <PersonBoxCard
+              uid={detail.uid}
+              box={pending}
+              anchor={pendingEl}
+              onAdded={(message) => {
+                setPending(null)
+                onDrawEnd?.()
+                onToast?.(message)
+              }}
+              onRedraw={() => setPending(null)}
+              onCancel={() => onDrawEnd?.()}
+            />
+          )}
+        </>
+      )}
+
+      {drawing === 'pet' && pending && (
         <>
           <div
             className="pointer-events-none absolute z-20 rounded-lg border-2 border-emerald-300 bg-emerald-300/10"

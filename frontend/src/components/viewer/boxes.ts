@@ -3,6 +3,8 @@ import { speciesLabel } from '../../lib/format'
 import type { AnimalOut, BodyOut, FaceOut, ItemDetail } from '../../lib/types'
 
 export type BoxKind = 'face' | 'body' | 'animal'
+/** What the owner is drawing a box for: a pet the detector missed (section 22) or a person (section 10). */
+export type DrawKind = 'pet' | 'person'
 /** An animal box has no guesses; the optional field lets shared code read `box.guess` on any box. */
 export type AnimalBox = AnimalOut & { guess?: null }
 export type BoxTarget =

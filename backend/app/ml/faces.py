@@ -6,9 +6,13 @@ Contract:
   loaded() / provider()               for app.ml.models.statuses()
   engine.detect(img_bgr, det_size=640, threshold=0.5, nms_thresh=0.4) -> list[DetectedFace] (no embeddings)
   engine.detect_multiscale(img_bgr, sizes, threshold, nms_thresh) -> list[DetectedFace]
-  engine.embed(img_bgr, faces) -> None  fills face.embedding (512, float32, L2-normalised)
+  engine.embed(img_bgr, faces) -> None  fills face.embedding (512, float32, L2-normalised), face.norm
+                                      (the feature norm before normalising: blur, low resolution and a
+                                      face turned away lower it; app.analysis.faces reads it as clarity)
+                                      and face.sharpness (sharpness() of the aligned crop)
   engine.analyze(img_bgr, sizes, threshold, min_size) -> list[DetectedFace] detected and embedded
-  DetectedFace(bbox (4,) x1 y1 x2 y2, kps (5, 2), det_score, embedding) with width, height, size_px
+  DetectedFace(bbox (4,) x1 y1 x2 y2, kps (5, 2), det_score, embedding, norm, sharpness) with width,
+  height, size_px; sharpness(aligned_bgr) -> float
 
 SCRFD-10GF (det_10g.onnx) finds faces and 5 landmarks. ArcFace R50 (w600k_r50.onnx) turns each
 aligned 112x112 face into a 512-d embedding; cosine similarity of two L2-normalised embeddings says
@@ -51,6 +55,8 @@ class DetectedFace:
     kps: np.ndarray  # (5, 2) float32 landmarks in pixels of the analysed image
     det_score: float
     embedding: np.ndarray | None = None  # (512,) float32, L2-normalised
+    norm: float | None = None  # ArcFace feature norm before normalising: how recognisable the face is
+    sharpness: float | None = None  # Laplacian variance of the aligned face's centre (blur and tiny faces are low)
 
     @property
     def width(self) -> float:
@@ -96,6 +102,15 @@ def _umeyama(src: np.ndarray, dst: np.ndarray) -> np.ndarray:
     t[:dim, dim] = dst_mean - scale * (t[:dim, :dim] @ src_mean.T)
     t[:dim, :dim] *= scale
     return t
+
+
+def sharpness(aligned_bgr: np.ndarray) -> float:
+    """How sharp an aligned 112 px face is: the variance of the Laplacian over its centre (the
+    eyes, nose and mouth), on 0-255 grey levels. Blurred, dark and tiny upscaled faces score low."""
+    h, w = aligned_bgr.shape[:2]
+    m = max(1, round(min(h, w) / 7))
+    grey = cv2.cvtColor(aligned_bgr[m:h - m, m:w - m], cv2.COLOR_BGR2GRAY)
+    return float(cv2.Laplacian(grey, cv2.CV_64F).var())
 
 
 def align_face(img_bgr: np.ndarray, kps: np.ndarray, size: int = 112) -> np.ndarray:
@@ -231,6 +246,8 @@ class FaceEngine:
         if not faces:
             return
         crops = [align_face(img_bgr, f.kps) for f in faces]
+        for f, c in zip(faces, crops):
+            f.sharpness = sharpness(c)
         for start in range(0, len(crops), batch):
             chunk = np.stack(crops[start : start + batch])  # (n, 112, 112, 3) BGR
             blob = chunk[:, :, :, ::-1].astype(np.float32)
@@ -240,8 +257,9 @@ class FaceEngine:
                 feats = self._rec.run(None, {self._rec_in: blob})[0]
             norms = np.linalg.norm(feats, axis=1, keepdims=True)
             feats = (feats / np.maximum(norms, 1e-12)).astype(np.float32)
-            for f, e in zip(faces[start : start + batch], feats):
+            for f, e, n in zip(faces[start : start + batch], feats, norms[:, 0]):
                 f.embedding = e
+                f.norm = float(n)
 
     def detect_multiscale(
         self,

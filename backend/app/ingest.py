@@ -1287,7 +1287,9 @@ def recover_on_startup(conn: sqlite3.Connection) -> None:
     text or streaming copy is pending has its job; queue a reparse of the automatic 'other' documents a
     newer detection rule set now types (kv doc_rules_version, section 30); apply a changed guessing window
     (guess.apply_window_change); when kv probe_version is below probe.PROBE_VERSION, probe again on a
-    background thread the plain files whose bytes claim a media type (reprobe_plain); wipe data_dir/tmp."""
+    background thread the plain files whose bytes claim a media type (reprobe_plain); bring stored faces
+    up to the current face analysis (app.analysis.face_upkeep.start: analysed videos re-tracked once,
+    photo faces measured for clarity); wipe data_dir/tmp."""
     _rebuild_fts_if_flagged(conn)
     n, exhausted = jobs.requeue_running(conn)
     if n:
@@ -1346,6 +1348,9 @@ def recover_on_startup(conn: sqlite3.Connection) -> None:
                     kv_set(conn, PROBE_VERSION_KEY, PROBE_VERSION)
     except Exception:
         log.exception("startup: could not start the re-probe of plain files")
+    from app.analysis import face_upkeep  # section 10: videos to re-track, photo faces to measure
+
+    face_upkeep.start(conn)
     tmp = storage.root() / "tmp"
     if tmp.is_dir():
         for p in tmp.iterdir():

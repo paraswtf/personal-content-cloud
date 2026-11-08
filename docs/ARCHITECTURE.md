@@ -311,7 +311,8 @@ all GPU work except OCR so two heavy models never contend. Handlers are idempote
    insert item (`analysis_status='pending'`, `text_status='pending'` for `pdf` and `document`, else `'none'`,
    the file-level forward signals and `received_via` of section 29), enqueue `analyze`, plus `video_preview` when `needs_web_preview`, plus `text` for documents.
 2. `analyze` (`analysis.pipeline.analyze_item`): load the analysis image (oriented original at most 2048 px; page 1
-   render for documents; sampled frames for videos: 1 per second, at most 150); SigLIP embeddings (whole image and
+   render for documents; for videos, frames 5 a second for the faces (section 10, "Video faces through the whole
+   clip") of which SigLIP, NSFW and pets keep 1 per second, at most 150); SigLIP embeddings (whole image and
    frames) stored in `item_embeddings`; category scores and labels; NSFW score; quality scores and mis-click
    reasons (not for documents); faces (SCRFD multi-scale, ArcFace) and video face tracks; person boxes (YOLOX-S
    class 0) matched to faces by containment; torso crops (3.2 face widths wide, from y-0.25h to y+4h; for a body
@@ -478,7 +479,7 @@ Guessing (`analysis/guess.py`). For an unassigned face or body D in item I:
   queues a `guess` job for its item; `kv guess_window_h` records the value in force.
 - A person is guessed for at most one box per photo (the best score wins, the other boxes are scored again
   without that person; videos are exempt), and confirming skips a box whose person is already in the item.
-  Rejections follow a face across a reprocess (carried to the new face by position). Vault items are never
+  Rejections follow a face across a reprocess (carried to the new face, see "Carry-over" below). Vault items are never
   references, and NSFW items get no guesses. Reclustering and merging refresh the FTS people column.
 - People routes and the vault: with the vault locked, tagging or untagging an NSFW item and box actions on
   NSFW boxes answer 403 `vault_locked`; a person seen only in vault items answers 404 by id outside the vault.
@@ -503,6 +504,106 @@ is tedious. So the item detail of a video groups its tracks and the viewer edits
 - Tests: `video_groups` on hand-made embeddings (assigned tracks grouped by person, look-alikes joined at 0.5,
   strangers apart, kinds never mixed, photos get null), the item detail of a video carrying the groups, and
   the assign route with several face ids of a group.
+
+Face weight (2026-11-08). Only clear faces should teach who someone is, so every face counts by how clear and
+visible it is, from 0 to 1 (`faces.face_weight`). A blurred, masked, helmeted or turned-away face, or something
+that is not a face at all, would otherwise pull a person's examples towards "unclear", and other unclear faces
+would start to match them.
+- Measures, stored per face: `faces.clarity`, the ArcFace feature norm before normalising (it falls for blur,
+  low resolution, a face turned away or covered), and `faces.sharpness`, the Laplacian variance over the centre
+  of the aligned 112 px face (`app.ml.faces.sharpness`); both migrated columns, NULL for faces analysed before
+  them. Measured on 617 faces from the owner's photos: below a norm of about 14 they were turned away, masked or
+  not faces (textures, a sign, the back of a head), from about 22 clear; below a sharpness of about 8 blurred,
+  dark or tiny.
+- The weight is the product of four linear ramps, each 0 at its first value and 1 at its second: norm 13 to 22,
+  sharpness 5 to 30, detector score 0.5 to 0.8, size `FACE_MIN_SIZE_PX` to `FACE_GOOD_MIN_SIZE_PX` source pixels.
+  An unmeasured norm or sharpness counts as 1, so old faces are weighed on detector score and size until they are
+  measured.
+- Matching: a person's faces are their examples by weight (`index._topk_means`: weight times 1.5 for the owner's
+  own), faces of weight 0 are no example at all, and a person whose faces all weigh 0 is never scored; centroids
+  (merge suggestions, merge similarity) are weighted the same way. A face's own cut rises linearly from
+  `CLUSTER_MATCH_THRESHOLD` (weight 1) to `CLUSTER_MATCH_THRESHOLD_LOW` (weight 0), and only a clear face
+  (`is_clear_face`: the good-face rule and weight `>= CLEAR_WEIGHT` 0.5) starts a new person.
+- Learning (section 18): a face moves a learned threshold by its weight.
+- A person the owner tags on an unclear face (a helmet, a mask, their back, or a drawn person box with no face,
+  below) stays theirs on that item and is a reference for the clothes guesses within the hour like any tagged
+  face or body, but teaches nothing about their face.
+- Existing faces: photos analysed before the measures get them on a background pass at startup
+  (`face_upkeep.measure_photo_faces`: the photo is detected again as the analysis saw it, and each stored face
+  takes the measures of the detection over it at IoU `>= 0.5`; the stored embedding stays; kv `face_measure_cursor`
+  resumes it). Videos get them from their re-tracking (below).
+
+Video faces through the whole clip (2026-11-08). Faces are followed through every part of a video by where they
+are and how they look, so a profile, a blurred frame or a look away stays on the right person, and a person is
+known from all their good views.
+- Sampling (`faces.video_plan`): `VIDEO_FACE_INTERVAL_S` (0.2 s, 5 frames a second), at most
+  `VIDEO_FACE_MAX_FRAMES` (1500; the step grows on clips over 5 minutes). Clips over 10 minutes are read by
+  seeking, one ffmpeg run per frame, so they keep the plain sampling (`VIDEO_SAMPLE_INTERVAL_S`,
+  `VIDEO_MAX_SAMPLES`). The single decode pass already decoded every frame, so the cost is the detection and the
+  embedding: measured on the owner's 4K clips on the RTX 2080, the face pass takes about 0.4 to 0.5 times the
+  clip's length. SigLIP, NSFW and the pet detector keep the plain cadence (`on_frame` sees the first frame and
+  then each one at least `max(1 s, duration / 150)` after the last, at most 150).
+- Every face of at least `FACE_MIN_SIZE_PX` source pixels is detected at `FACE_VIDEO_DET_SIZE` and embedded,
+  with its clarity and sharpness.
+- Linking (`faces.FaceTracker`): each open tracklet predicts its box (last box moved on by its velocity). A
+  detection continues it by motion (seen at most 1 s ago, IoU `>= 0.3` with the prediction, and looking alike
+  at `>= 0.2` against its latest views or all of them) or by look alone (`>= VIDEO_TRACK_THRESHOLD` 0.5).
+  Measured on the owner's clips at 5 frames a second: the same face in consecutive frames looks alike at 0.43 or
+  more (1st percentile), two people in one frame at 0.26 or less (99th percentile). Pairs are taken best first
+  (a motion link scores its similarity plus its IoU), one detection per tracklet per frame; a tracklet unseen
+  for `max(1 s, 2.5 steps)` ends.
+- Tracklets of one person are then joined by look (closest groups first, weighted identities, `>= 0.5`), never
+  two seen in the same frame: two faces on screen at once are two people. Tracklets in fewer frames than cover
+  0.3 s are flickers (a detector blink, a blurred pan) and are dropped first on dense sampling; a person is kept
+  when seen in frames covering 0.8 s (at least 2), or with a good face.
+- Each person gives one face row as before: the best view's box, crop, torso and time (the best view is the
+  clearest, then the highest quality), the identity (`faces.identity`: up to 8 of the best views at least 0.4 s
+  apart, averaged by face weight, leaving out views unlike the rest at `< 0.3`), and the spans, gaps up to the
+  lost time closed and never past the clip's end.
+- Existing videos: once per `faces.TRACKER_VERSION` (kv `video_tracker_version`), every analysed video that is not
+  a Live Photo's clip or in the trash is analysed again, its job at priority 80 so new uploads come first
+  (`face_upkeep.retrack_videos`, from `ingest.recover_on_startup`; `jobs.enqueue` takes a `priority`). It reads
+  "pending" until its job runs; its faces, names and choices stay until then.
+- Carry-over (`cluster.plan_carry`, `carry_over`): re-detection pairs old and new faces one to one (box IoU
+  `>= 0.3` with similarity `>= 0.3`, then similarity `>= 0.6`, then for the owner's faces `>= 0.4`, or IoU
+  `>= 0.1` with `>= 0.3`), the owner's locked faces through all three passes before any other face takes a new
+  one. A video tracked again has fewer, longer tracks, so old faces left without a pair follow the new face they
+  match by the first two passes and hand it their rejected guesses; an automatic person carried onto a face that
+  now holds a rejection of that person is dropped, and the face is assigned afresh.
+
+Not a face (2026-11-08). "Not a face" (`DELETE /api/faces/{id}`) teaches detection instead of only deleting
+(`app/learning/not_faces.py`):
+- The removed face is kept in `not_faces` (item, detector score, size, clarity, sharpness, embedding).
+- Detection drops a new face (`not_faces.Filter.keep`, in the pipeline before bodies or anything else use the
+  faces, photos and videos alike) that looks like a marking at `>= 0.5`, or that the learned rule (section 18)
+  calls no face at `P >= 0.9`. Measured on the owner's photos: things that are not faces look alike to the face
+  model (0.52 median to the nearest other one, up to 0.73), while clear faces stay at 0.34 or below against them.
+  A clear face (weight `>= 0.5`) is never dropped, nor one where the owner already assigned a face on the item
+  (IoU `>= 0.5` or similarity `>= 0.6`). The markings apply whether learning is on or off, like rejected guesses.
+- The unassigned automatic faces that look like the removed one the same way go with it (`not_faces.followers`,
+  through the face index), with their crops and counts; they are not markings themselves. The answer is
+  `FaceDeleteOut {ok, followed}`.
+
+Person boxes the owner draws (2026-11-08), like the pet boxes of section 22. `POST /api/items/{uid}/people-boxes`
+(`PersonBoxIn {x, y, w, h, t?, person_id | new_person_name}`, 201 `PersonBoxOut {body, face}`;
+`app/analysis/person_boxes.py`):
+- The slow part runs before any write (`prepare_box`: the photo or the frame at `t` as the analysis sees it, the
+  SigLIP vector of the upper box as its clothes, and the face detector inside the box padded by 15 percent); then
+  one transaction makes the person (a new name) and stores the box (`store_box`).
+- The box is a `bodies` row: `source 'user'` (a migrated column, `BodyOut.source`), `assigned_by 'user'`, the
+  person, det_score 1.0, the clothes vector, `frame_time_s = t` on a video, and its crop. It holds the person for
+  that occasion: the item lists them, and the guesses use the clothes within the hour.
+- A face found inside becomes a face row of the same person (`assigned_by 'user'`, clarity and sharpness, so its
+  weight decides how much it teaches; a video's spans `t +- 0.5 s`) and the body points at it. On a photo a stored
+  face already there (IoU `>= 0.4`) is used instead and assigned through `_assign`, as a hand assignment is. No
+  face (a helmet, a back, someone far away): the box alone, never their face.
+- 400 `frame_time_needed` (a video without `t`), 400 `person_needed`, 400 for documents, 404, 409 when the photo or
+  frame cannot be opened, 422 for a box outside the frame or under half a percent of it. Deleting is `DELETE
+  /api/bodies/{id}` ("Not a person").
+- Re-analysis keeps the drawn boxes and the faces they point at, and drops new detector boxes and faces over them
+  (IoU `>= 0.5`, photos) as the same person (`person_boxes.drop_over_drawn`).
+- Tests: `tests/test_video_tracking.py`, `tests/test_face_weights.py`, `tests/test_not_faces.py`,
+  `tests/test_person_boxes.py`, `tests/test_face_upkeep.py`.
 
 Related items (2026-11-08). A tag can also say that an item is about someone without them in it (a pet's
 toy, a person's handwriting), so it shows under the person and in a search for the name:
@@ -829,7 +930,8 @@ and picking a pet of another species in "Move to another pet" shows "Move and ma
 (assign with `fix_species`). The pet's page has a "These are {species}" picker (POST `people/{id}/species`).
 A photo without an animal box offers "Add a pet box" (draw mode on the photo stage: drag over the pet, or
 "Whole photo", then "What is it?" picks the species; POST `items/{uid}/animals`) and "Find pets again"
-(POST `items/{uid}/animals/detect`); a photo with boxes keeps both under "More" in the People and pets section.
+(POST `items/{uid}/animals/detect`); a photo with boxes keeps both under "More" in the People and pets section,
+after "Add a person box", which is always shown.
 
 The video strip ("People and pets in this video") shows one chip per group of tracks (section 10, whole-video
 editing): the name or species with "N tracks", seeking to the first track; its edit control opens the face or pet
@@ -841,12 +943,36 @@ Pets in videos and related items (sections 10 and 22): the "Tag someone" button 
 picker (`PersonPicker` with `kind="all"`) lists people and then a Pets section, and offers a typed name as "Create"
 (a person) and "New pet"; the latter asks "What is {name}?" with the ten species before posting `kind: 'pet'` and
 `species`. The form's switch "Not in the picture, related to them" posts `relation: 'related'`; such tags show under
-"Related to" with a link mark, and every tag the owner made has a chip menu ("Options for {name}") with "Make this
-'in'" or "Make this 'related'" and "Remove". The person and pet pages have a "Related" tab (`items?relation=related`,
+"Related to" with a link mark. The person and pet pages have a "Related" tab (`items?relation=related`,
 count `related_count`; the Items tab keeps sending no relation). "Add a pet box" and "Find pets again" also appear
 for videos: draw mode pauses the player and keeps it paused, the box is drawn over the picture area of the frame on
 screen ("Whole frame" takes it all) and is posted with `t`, the viewer's `currentFrameTime`; the new box shows as a
 track chip under the video.
+
+People in the info panel (2026-11-08, `viewer/InfoPanel.tsx`, `viewer/PersonEdit.tsx`): every chip under "People" (or
+"People and pets", "In this video") and "Related to" has a menu ("Options for {name}", menu "Edit {name}", arrow keys
+and Escape) with the changes the face boxes make, for everything of theirs on the item at once, without clicking a
+box. "Change to..." and "Rename" (or "Name" for an unnamed person) open a light card under the chips, which scrolls
+itself into view in the phone sheet: "Change {name} to..." holds a `PersonPicker` (people for a person, pets of the
+same species for a pet, a typed name creates one) and posts `/api/items/people/move` with this item alone (their
+faces, bodies, pet boxes and tags here go to the one picked, remembered as not them, learned like a move from a face
+box); "Rename" sends `PATCH /api/people/{id}` (everywhere; a name someone else has merges them). "Not {name}" posts
+`/api/items/people/remove` with this item: their boxes here stay, unnamed and remembered as not them
+(guess_rejections), and their tags here go. Someone here through a tag alone gets "Remove from this item" (the tag's
+DELETE) instead, and a tag the owner made also offers "Make this 'in'" or "Make this 'related'". The chips under
+"In the frame" (videos) stay links only. Escape closes the card (not the viewer) and puts the focus back on the
+chip's menu button.
+
+Person boxes (2026-11-08, `viewer/PersonBoxCard.tsx`, section 10 for the server side): the People section of the
+info panel has "Add a person box" next to the pet buttons, on photos and videos, for someone in a helmet, seen from
+behind or far away, or a face the detector missed. Draw mode (`Viewer` keeps which kind is drawn, 'pet' or
+'person') works as for a pet box: drag over the person or take the whole photo or frame; on a video the player pauses
+and the box goes with `t`. The drawn box (sky blue, like other person boxes) then opens "Who is it?", a card placed
+like the face editor (next to the box on wide screens, a bottom sheet on phones) and rendered into the viewer rather
+than the stage, holding a `PersonPicker` (a typed name creates the person) with "Draw again" and "Cancel". Picking
+someone posts `items/{uid}/people-boxes` (`person_id` or `new_person_name`); the toast says when a face inside the
+box was tagged too. The new box shows with the name like any person box (a video's as a chip under it), and its
+editor's "Not a person" removes it.
 
 Header (2026-11-08, `components/shell/Header.tsx`, `Nav.tsx`, `HeaderMenu.tsx`): on md and up the bar
 holds the site name (from lg), Library and People as links, a Documents menu (All documents and the six
@@ -965,6 +1091,9 @@ the pipeline with an mtime cache. `LEARNING_ENABLED` (env, default true) and the
 `learning_enabled` (Settings switch, default on) turn it off: the learners then answer "nothing learned"
 and training is skipped. Resetting deletes the learned files only, never the choices themselves.
 
+Faces count by their face weight (section 10) wherever a learner reads them: a blurred, masked or turned-away
+face moves a person's threshold little or not at all.
+
 Signals (read from existing tables; `learning_events` adds what is otherwise lost):
 - category: `items.category_source = 'user'` -> (SigLIP whole-image embedding, category);
 - vault: `items.nsfw_source = 'user'` -> (embedding, nsfw) and the classifier's `nsfw_score`;
@@ -1012,9 +1141,18 @@ Learners (one module each, all pure numpy, all with a `status()` and a `train(co
   closest rejected face (+0.02; the reference is the confirmed faces, else the person's 200 best faces;
   a rejection wins over any loosening). `cluster._score` uses the learned threshold in place of the
   good-face default (a weaker face keeps its extra margin on top), so a person the owner confirmed or
-  merged often is matched more readily and one they corrected is matched more carefully. `guess_probability(features) -> float | None`: a logistic
+  merged often is matched more readily and one they corrected is matched more carefully. Every face counts by
+  its face weight (section 10): the centroid and the 10th percentile are weighted, `MIN_USER_FACES` counts the
+  total weight, faces of weight 0 are left out, and a rejected face raises the threshold by its weight's share
+  of the way to its similarity + 0.02. `guess_probability(features) -> float | None`: a logistic
   regression on [clothes, scene_term, face_term, same_day, has_gps] fitted on `guess` events (needs 30
   events with both outcomes); `guess.guess_score` returns it instead of the fixed 0.5/0.3/0.2 mix.
+- `not_faces.py` (section 10, "Not a face"): the faces the owner removed as not a face (`not_faces`) against
+  the faces the owner assigned, clear or not (so the helmets and masks the owner tags keep being found); a
+  logistic regression on [detector score, clarity / 30, log1p(sharpness) / 5, log(size) / 6, similarity to
+  the nearest marking (the marking itself left out)], fitted once 10 measured markings and 10 measured owner
+  faces exist; detection uses it at `P(not a face) >= 0.9`, never on a clear face. `status()` gives the number
+  of markings and whether a rule exists.
 - `forwards.py` (section 29): `probability(signals) -> float | None`, a logistic regression over the forward
   signals fitted on the owner's choices (`forward_source='user'` rows and `forward` events), used once 10
   examples with both labels exist; `forwards.decide` takes it in place of its rule for the second step.

@@ -39,7 +39,9 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from app import storage
 from app.analysis import cluster, guess
 from app.analysis import animals as animals_mod
+from app.analysis import person_boxes
 from app.analysis import pets as pets_mod
+from app.learning import not_faces as not_faces_mod
 from app.api.common import (
     ITEM_CARD_COLUMNS,
     animal_out,
@@ -76,8 +78,11 @@ from app.schemas import (
     ItemsPeopleIn,
     ItemsPeopleOut,
     MergeIn,
+    FaceDeleteOut,
     Ok,
     PersonCreate,
+    PersonBoxIn,
+    PersonBoxOut,
     PersonOut,
     PersonPage,
     PersonRef,
@@ -947,6 +952,44 @@ def add_animal_box(uid: str, body: AnimalBoxIn, conn: sqlite3.Connection = Depen
     return animal_out(conn, conn.execute("SELECT * FROM animals WHERE id = ?", (aid,)).fetchone())
 
 
+@router.post("/items/{uid}/people-boxes", response_model=PersonBoxOut, status_code=201)
+def add_person_box(uid: str, body: PersonBoxIn, conn: sqlite3.Connection = Depends(get_db),
+                   session: SessionInfo = Depends(require_user)) -> PersonBoxOut:
+    """A person box the owner drew on a photo or a video frame (section 10, app.analysis.person_boxes): the
+    person for that occasion, and the face the detector finds inside it for the same person (counted by its
+    face weight). A stored face found there is assigned the way a hand assignment is. A video takes `t`
+    (400 frame_time_needed without it); the person is person_id or new_person_name (400 person_needed
+    without either); other kinds answer 400, an unreadable photo or frame 409."""
+    item = _boxable_or_400(conn, session, uid)
+    video = item["kind"] == "video"
+    if video and body.t is None:
+        raise HTTPException(status_code=400, detail="frame_time_needed")
+    name_given = body.new_person_name is not None and body.new_person_name.strip() != ""
+    if body.person_id is None and not name_given:
+        raise HTTPException(status_code=400, detail="person_needed")
+    try:
+        prep = person_boxes.prepare_box(item, (body.x, body.y, body.w, body.h), t=body.t if video else None)
+    except animals_mod.FrameTimeNeeded:
+        raise HTTPException(status_code=400, detail="frame_time_needed") from None
+    except animals_mod.NoImage:
+        raise HTTPException(status_code=409, detail="The photo or frame could not be opened") from None
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
+    with tx(conn):
+        target = _target_person(conn, body.person_id, body.new_person_name if name_given else None, name_given, session)
+        if target is None:
+            raise HTTPException(status_code=400, detail="person_needed")
+        drawn = person_boxes.store_box(conn, prep, int(target))
+        bump_faces_version(conn)
+        bump_search_version(conn)
+    if drawn.existing_face and drawn.face_id is not None:
+        _assign(conn, "faces", [drawn.face_id], int(target), None, False, session)
+    _after_people_change(conn, {int(item["id"])}, {(int(target), int(item["id"]))})
+    body_row = conn.execute("SELECT * FROM bodies WHERE id = ?", (drawn.body_id,)).fetchone()
+    face_row = conn.execute("SELECT * FROM faces WHERE id = ?", (drawn.face_id,)).fetchone() if drawn.face_id else None
+    return PersonBoxOut(body=body_out(conn, body_row), face=face_out(conn, face_row) if face_row is not None else None)
+
+
 @router.post("/items/{uid}/animals/detect", response_model=list[AnimalOut])
 def redetect_animals(uid: str, body: RedetectIn | None = None, conn: sqlite3.Connection = Depends(get_db),
                      session: SessionInfo = Depends(require_user)) -> list[AnimalOut]:
@@ -991,31 +1034,45 @@ def delete_animal(animal_id: int, conn: sqlite3.Connection = Depends(get_db),
 
 def _delete_box(conn: sqlite3.Connection, table: str, box_id: int, session: SessionInfo) -> Ok:
     not_found, count_col = _BOX_NAMES[table]
+    followed: list[int] = []
+    touched: set[int] = set()
     with tx(conn):
         row = conn.execute(f"SELECT id, item_id, person_id FROM {table} WHERE id = ?", (box_id,)).fetchone()
         if row is None:
             raise HTTPException(status_code=404, detail=not_found)
         _check_items_vault(conn, session, [int(row["item_id"])])
+        touched.add(int(row["item_id"]))
         if table == "bodies" and row["person_id"] is not None:
             _drop_body_tags(conn, [row])
         if table == "faces":
-            cluster.remove_faces(conn, [box_id])
+            # "Not a face" (section 10): kept for the learner, and its unassigned look-alikes go with it.
+            face = conn.execute("SELECT * FROM faces WHERE id = ?", (box_id,)).fetchone()
+            not_faces_mod.record(conn, face)
+            followed = not_faces_mod.followers(conn, face)
+            if followed:
+                touched |= {int(r[0]) for r in conn.execute(
+                    f"SELECT DISTINCT item_id FROM faces WHERE id IN ({_ids_sql(followed)})", followed)}
+            cluster.remove_faces(conn, [box_id, *followed])
         else:
             conn.execute(f"DELETE FROM {table} WHERE id = ?", (box_id,))
             if table in ("bodies", "animals"):
                 cluster.drop_rejections(conn, _REJECTION_KIND[table], [box_id])
-        conn.execute(f"UPDATE items SET {count_col} = (SELECT COUNT(*) FROM {table} WHERE item_id = ?) WHERE id = ?",
-                     (row["item_id"], row["item_id"]))
+        for item_id in sorted(touched):
+            conn.execute(f"UPDATE items SET {count_col} = (SELECT COUNT(*) FROM {table} WHERE item_id = ?) WHERE id = ?",
+                         (item_id, item_id))
         if row["person_id"] is not None:
             cluster.prune_empty_persons(conn, {int(row["person_id"])})
         bump_faces_version(conn)
         bump_search_version(conn)
-    storage.safe_unlink(_CROP_PATHS[table](box_id))
-    guess.refresh_fts(conn, {int(row["item_id"])})
-    return Ok()
+    for gone in (box_id, *followed):
+        storage.safe_unlink(_CROP_PATHS[table](gone))
+    guess.refresh_fts(conn, touched)
+    if followed:
+        log.info("not a face: face %s and %d look-alike(s) removed", box_id, len(followed))
+    return FaceDeleteOut(followed=len(followed)) if table == "faces" else Ok()
 
 
-@router.delete("/faces/{face_id}", response_model=Ok)
+@router.delete("/faces/{face_id}", response_model=FaceDeleteOut)
 def delete_face(face_id: int, conn: sqlite3.Connection = Depends(get_db),
                 session: SessionInfo = Depends(require_user)) -> Ok:
     return _delete_box(conn, "faces", face_id, session)

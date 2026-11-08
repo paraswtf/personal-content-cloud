@@ -120,6 +120,11 @@ class Ok(BaseModel):
     ok: bool = True
 
 
+class FaceDeleteOut(Ok):
+    """DELETE /faces/{id} ("Not a face", section 10): followed = unassigned look-alikes removed with it."""
+    followed: int = 0
+
+
 # ---------------------------------------------------------------- items
 
 PersonKind = Literal["person", "pet"]
@@ -177,6 +182,7 @@ class BodyOut(BaseModel):
     frame_time_s: float | None = None
     url: str
     group: int | None = None    # videos: the tracks of one person or look-alike share a number (section 10)
+    source: Literal["detector", "user"] = "detector"  # section 10: 'user' when the owner drew the person box
 
 
 class AnimalOut(BaseModel):
@@ -520,6 +526,33 @@ class AssignAnimalsIn(BaseModel):
 
 SPECIES_NAMES = ("bird", "cat", "dog", "horse", "sheep", "cow", "elephant", "bear", "zebra", "giraffe")
 MIN_BOX_SHARE = 0.005  # analysis.animals.MIN_BOX_SHARE
+
+
+class PersonBoxIn(BaseModel):
+    """A person box the owner draws on a photo or a video frame (section 10): normalised, inside the frame, at
+    least half a percent of it; `t`, the frame's time in seconds, for a video (400 frame_time_needed without
+    it); the person: an existing one (person_id) or a new name (400 person_needed without either)."""
+    x: float = Field(ge=0.0, le=1.0)
+    y: float = Field(ge=0.0, le=1.0)
+    w: float = Field(gt=0.0, le=1.0)
+    h: float = Field(gt=0.0, le=1.0)
+    t: float | None = Field(default=None, ge=0.0, le=86400.0)
+    person_id: int | None = None
+    new_person_name: str | None = Field(default=None, max_length=120)
+
+    @model_validator(mode="after")
+    def _inside_and_large_enough(self) -> "PersonBoxIn":
+        if self.x + self.w > 1.0005 or self.y + self.h > 1.0005:
+            raise ValueError("The box must lie inside the photo")
+        if self.w * self.h < MIN_BOX_SHARE:
+            raise ValueError("The box must cover at least half a percent of the photo")
+        return self
+
+
+class PersonBoxOut(BaseModel):
+    """The drawn person box and the face found inside it (null for a helmet, a back, someone far away)."""
+    body: BodyOut
+    face: FaceOut | None = None
 
 
 class AnimalBoxIn(BaseModel):

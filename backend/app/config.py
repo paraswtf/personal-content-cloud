@@ -123,6 +123,8 @@ class Settings:
 
     # video
     video_sample_interval_s: float
+    video_face_interval_s: float   # faces are followed this densely (section 10)
+    video_face_max_frames: int
     video_max_samples: int
     video_track_threshold: float
     video_previews: bool
@@ -248,6 +250,8 @@ def _load(**overrides) -> Settings:
         guess_clothes_sim=_float("GUESS_CLOTHES_SIM", 0.85),
         guess_gps_m=_float("GUESS_GPS_M", 250.0),
         video_sample_interval_s=_float("VIDEO_SAMPLE_INTERVAL_S", 1.0),
+        video_face_interval_s=_float("VIDEO_FACE_INTERVAL_S", 0.2),
+        video_face_max_frames=_int("VIDEO_FACE_MAX_FRAMES", 1500),
         video_max_samples=_int("VIDEO_MAX_SAMPLES", 150),
         video_track_threshold=_float("VIDEO_TRACK_THRESHOLD", 0.5),
         video_previews=_bool("VIDEO_PREVIEWS", True),

@@ -51,7 +51,7 @@ type Step =
 const ITEMS_PEOPLE_KEY = 'items-people'
 
 /** "Asha", or "Unnamed person" / "Unnamed pet" (the sheet's wording for someone without a name). */
-function displayName(p: { name: string | null; kind: PersonKind }): string {
+export function displayName(p: { name: string | null; kind: PersonKind }): string {
   if (p.name?.trim()) return p.name
   return p.kind === 'pet' ? 'Unnamed pet' : 'Unnamed person'
 }
@@ -60,7 +60,8 @@ function itemsTail(n: number): string {
   return n === 1 ? 'this item' : `these ${n.toLocaleString()} items`
 }
 
-function followedTail(r: PeopleBulkOut, kind: PersonKind): string {
+/** " 3 look-alike faces followed." and " 2 look-alike groups joined them." after a move or a removal. */
+export function followedTail(r: PeopleBulkOut, kind: PersonKind): string {
   const followed = r.followed ? ` ${formatCount(r.followed, kind === 'pet' ? 'look-alike crop' : 'look-alike face')} followed.` : ''
   const pulled = r.pulled ? ` ${formatCount(r.pulled, 'look-alike group')} joined them.` : ''
   return followed + pulled

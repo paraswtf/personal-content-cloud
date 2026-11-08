@@ -172,8 +172,10 @@ def test_unassigned_assign_and_delete_faces(api, conn):
     crop = storage.face_crop_path(f2)
     assert crop.exists()
     v0 = conn.execute("SELECT value FROM kv WHERE key = 'search_version'").fetchone()[0]
-    assert api.delete(f"/api/faces/{f2}").json() == {"ok": True}
+    assert api.delete(f"/api/faces/{f2}").json() == {"ok": True, "followed": 0}
     assert not crop.exists()
+    # "Not a face" is kept for the learner (section 10).
+    assert conn.execute("SELECT COUNT(*) FROM not_faces WHERE item_id = ?", (i1["id"],)).fetchone()[0] == 1
     assert conn.execute("SELECT face_count FROM items WHERE id = ?", (i1["id"],)).fetchone()[0] == 1
     assert conn.execute("SELECT value FROM kv WHERE key = 'search_version'").fetchone()[0] != v0
     assert api.delete(f"/api/faces/{f2}").status_code == 404

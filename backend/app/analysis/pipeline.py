@@ -45,6 +45,7 @@ from app.analysis import animals as animals_mod
 from app.analysis import bodies as bodies_mod
 from app.analysis import categories, cluster, quality
 from app.analysis import faces as faces_mod
+from app.analysis import person_boxes
 from app.analysis.index import get_index
 from app.config import settings
 from app.db import bump_faces_version, bump_search_version, faces_version, tx, kv_get
@@ -246,7 +247,7 @@ def _norm(v: np.ndarray) -> np.ndarray:
 
 # ------------------------------------------------------------------ the models
 def _run_models(item: sqlite3.Row, v: Visual, siglip: ModuleType | None, nsfw: ModuleType | None,
-                faces_engine: ModuleType | None) -> Result:
+                faces_engine: ModuleType | None, not_face: Any = None) -> Result:
     kind = item["kind"]
     r = Result()
     visual = v.bgr is not None
@@ -266,6 +267,9 @@ def _run_models(item: sqlite3.Row, v: Visual, siglip: ModuleType | None, nsfw: M
             r.faces_ran = True
         else:
             r.skipped.append("faces")
+    if not_face is not None and r.faces:
+        # Before anything links to the faces: what looks like a marked "Not a face" goes (section 10).
+        r.faces = not_face.keep(r.faces)
 
     # Person boxes (images only) and animal boxes (images and sampled video frames, section 22):
     # one YOLOX run per frame answers both.
@@ -512,8 +516,13 @@ def analyze_item(conn: sqlite3.Connection, item_id: int, version: int) -> None:
     siglip = _model("siglip")
     nsfw = _model("nsfw")
     faces_engine = _model("faces") if kind in ("image", "video") else None
+    not_face = None
+    if faces_engine is not None:
+        from app.learning import not_faces as not_faces_mod
+
+        not_face = not_faces_mod.load(conn, item_id)  # section 10: what the owner marked "Not a face"
     v = _load_visual(item, faces_engine, need_frames=(siglip is not None or nsfw is not None))
-    r = _run_models(item, v, siglip, nsfw, faces_engine)
+    r = _run_models(item, v, siglip, nsfw, faces_engine, not_face=not_face)
     del v
 
     # Decisions that need only this item.
@@ -582,8 +591,12 @@ def analyze_item(conn: sqlite3.Connection, item_id: int, version: int) -> None:
                 conn.execute("INSERT OR REPLACE INTO item_labels(item_id, label, score) VALUES (?, ?, ?)",
                              (item_id, label, float(score)))
 
-            # Faces.
-            old_faces = conn.execute("SELECT * FROM faces WHERE item_id = ? ORDER BY id", (item_id,)).fetchall()
+            # Faces. The owner's drawn person boxes and the faces they point at stay (section 10).
+            drawn_bodies = conn.execute("SELECT * FROM bodies WHERE item_id = ? AND source = 'user' ORDER BY id",
+                                        (item_id,)).fetchall()
+            drawn_faces = person_boxes.protected_face_ids(drawn_bodies)
+            old_faces = [f for f in conn.execute("SELECT * FROM faces WHERE item_id = ? ORDER BY id", (item_id,)).fetchall()
+                         if int(f["id"]) not in drawn_faces]
             if keep_faces:
                 # Kept faces still say whether a person is in the picture.
                 good_face = any(cluster.is_good_face(f["det_score"], f["size_px"]) for f in old_faces)
@@ -595,11 +608,12 @@ def analyze_item(conn: sqlite3.Connection, item_id: int, version: int) -> None:
             for rec, crop, torso in zip(r.faces, face_crops, r.face_torsos):
                 fid = int(conn.execute(
                     "INSERT INTO faces(item_id, person_id, assigned_by, x, y, w, h, det_score, size_px, quality, "
-                    "frame_time_s, spans, embedding, torso_embedding, created_at) "
-                    "VALUES (?, NULL, 'auto', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "frame_time_s, spans, embedding, torso_embedding, created_at, clarity, sharpness) "
+                    "VALUES (?, NULL, 'auto', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (item_id, rec.x, rec.y, rec.w, rec.h, rec.det_score, int(rec.size_px), rec.quality,
                      rec.frame_time_s, json_dumps(rec.spans) if rec.spans is not None else None,
-                     np.asarray(rec.embedding, dtype=np.float32).tobytes(), _blob(torso), now),
+                     np.asarray(rec.embedding, dtype=np.float32).tobytes(), _blob(torso), now,
+                     rec.clarity, rec.sharpness),
                 ).lastrowid)
                 new_face_ids.append(fid)
                 path = storage.face_crop_path(fid)
@@ -609,8 +623,9 @@ def analyze_item(conn: sqlite3.Connection, item_id: int, version: int) -> None:
             if old_faces and new_face_ids:
                 cluster.carry_over(conn, old_faces, new_face_ids)
 
-            # Bodies (after the faces, so face_id can point at the new rows).
-            old_bodies = conn.execute("SELECT * FROM bodies WHERE item_id = ? ORDER BY id", (item_id,)).fetchall()
+            # Bodies (after the faces, so face_id can point at the new rows); drawn ones stay.
+            old_bodies = conn.execute("SELECT * FROM bodies WHERE item_id = ? AND source != 'user' ORDER BY id",
+                                      (item_id,)).fetchall()
             if keep_bodies:
                 # Faceless bodies stay; bodies around a face go only when that face is re-detected.
                 kept = [b for b in old_bodies if keep_faces or b["face_id"] is None]
@@ -630,6 +645,19 @@ def analyze_item(conn: sqlite3.Connection, item_id: int, version: int) -> None:
                 path = storage.body_crop_path(bid)
                 written.append(path)
                 storage.write_bytes_atomic(path, crop)
+            if kind == "image" and drawn_bodies:
+                # Detections over a drawn person box or its face are that person again: the drawn ones stay.
+                for gone in person_boxes.drop_over_drawn(conn, "bodies", new_body_ids,
+                                                         [(b["x"], b["y"], b["w"], b["h"]) for b in drawn_bodies]):
+                    new_body_ids.remove(gone)
+                    trash.append(storage.body_crop_path(gone))
+                if drawn_faces:
+                    marks = ",".join("?" * len(drawn_faces))
+                    boxes = [(f["x"], f["y"], f["w"], f["h"]) for f in conn.execute(
+                        f"SELECT x, y, w, h FROM faces WHERE id IN ({marks})", sorted(drawn_faces))]
+                    for gone in person_boxes.drop_over_drawn(conn, "faces", new_face_ids, boxes):
+                        new_face_ids.remove(gone)
+                        trash.append(storage.face_crop_path(gone))
             if old_bodies and new_body_ids:
                 _carry_bodies(conn, old_bodies, new_body_ids)
             if old_body_ids:

@@ -6,9 +6,9 @@
 // requestVideoFrameCallback), which frame downloads send to the server: currentTime can sit
 // anywhere inside a frame, and the server returns the first frame at or after the time it gets.
 //
-// Draw mode (section 22, pets in videos): the player pauses, the owner drags a box over the pet in
-// the frame on screen (or takes the whole frame), picks the species, and the box is posted with the
-// frame's time; it then shows as a track chip under the video.
+// Draw mode (pets in videos, section 22; people, section 10): the player pauses, the owner drags a box over
+// the pet or the person in the frame on screen (or takes the whole frame), picks the species or who it is
+// (PersonBoxCard), and the box is posted with the frame's time; it then shows as a track chip under the video.
 import {
   useEffect,
   useLayoutEffect,
@@ -23,7 +23,8 @@ import { SPECIES, type ItemDetail, type Species } from '../../lib/types'
 import { personName, speciesLabel } from '../../lib/format'
 import { posterTime } from '../../lib/preview'
 import { errorMessage } from '../admin/adminHooks'
-import { animalLabel, type BoxTarget } from './boxes'
+import { animalLabel, type BoxTarget, type DrawKind } from './boxes'
+import PersonBoxCard from './PersonBoxCard'
 import { darkButton, useInvalidateItem } from './shared'
 import { boxInVideo, type Rect } from './videoSeek'
 
@@ -37,8 +38,9 @@ interface Props {
   onDismissFace: () => void
   /** Set to the mediaTime of the frame last presented; null when unknown (see currentFrameTime). */
   frameTimeRef: MutableRefObject<number | null>
-  /** Draw mode (section 22): a box for a pet the detector missed, on the paused frame. */
-  drawing?: boolean
+  /** Draw mode, on the paused frame: a box for a pet the detector missed (section 22) or for a person
+   *  (section 10); null when off. */
+  drawing?: DrawKind | null
   /** Draw mode ended (cancelled, or the box was added). */
   onDrawEnd?: () => void
   /** The time of the frame on screen (the viewer's currentFrameTime), sent as `t` with the box. */
@@ -113,7 +115,7 @@ function useFrameClock(videoRef: RefObject<HTMLVideoElement | null>, ref: Mutabl
   }, [videoRef, ref, src])
 }
 
-export default function VideoStage({ detail, src, videoRef, face, onDismissFace, frameTimeRef, drawing = false, onDrawEnd, frameTime, onToast }: Props) {
+export default function VideoStage({ detail, src, videoRef, face, onDismissFace, frameTimeRef, drawing = null, onDrawEnd, frameTime, onToast }: Props) {
   const [rect, setRect] = useState<Rect | null>(null)
   useFrameClock(videoRef, frameTimeRef, src)
 
@@ -121,7 +123,17 @@ export default function VideoStage({ detail, src, videoRef, face, onDismissFace,
   const [picture, setPicture] = useState<Rect | null>(null)
   const [drag, setDrag] = useState<Drag | null>(null)
   const [pending, setPending] = useState<{ box: NormBox; t: number } | null>(null)
+  // the drawn person box on screen: PersonBoxCard sits next to it
+  const [pendingEl, setPendingEl] = useState<HTMLDivElement | null>(null)
   const invalidate = useInvalidateItem(detail.uid)
+  const person = drawing === 'person'
+  const what = person ? 'person' : 'pet'
+
+  useEffect(() => {
+    // switched between a pet and a person: start over
+    setDrag(null)
+    setPending(null)
+  }, [drawing])
 
   useEffect(() => {
     if (!drawing) {
@@ -270,7 +282,7 @@ export default function VideoStage({ detail, src, videoRef, face, onDismissFace,
         <div
           data-no-swipe
           role="application"
-          aria-label="Draw a box over the pet"
+          aria-label={`Draw a box over the ${what}`}
           className="absolute z-20 cursor-crosshair touch-none select-none"
           style={{ left: picture.left, top: picture.top, width: picture.width, height: picture.height }}
           onPointerDown={onDrawDown}
@@ -280,7 +292,10 @@ export default function VideoStage({ detail, src, videoRef, face, onDismissFace,
         >
           {dragRect && (
             <div
-              className="pointer-events-none absolute rounded-lg border-2 border-dashed border-emerald-300 bg-emerald-300/10"
+              className={
+                'pointer-events-none absolute rounded-lg border-2 border-dashed ' +
+                (person ? 'border-sky-300 bg-sky-300/10' : 'border-emerald-300 bg-emerald-300/10')
+              }
               style={dragRect}
             />
           )}
@@ -288,28 +303,53 @@ export default function VideoStage({ detail, src, videoRef, face, onDismissFace,
       )}
 
       {drawing && (
-        <div data-no-swipe className="absolute inset-x-0 top-0 z-30 flex flex-wrap items-center justify-center gap-2 p-2">
+        <div data-no-swipe className="pointer-events-none absolute inset-x-0 top-0 z-30 flex flex-wrap items-center justify-center gap-2 p-2">
           {!pending && (
             <span role="status" className="rounded-full bg-black/70 px-3 py-1.5 text-sm font-semibold text-white">
-              {picture ? 'Paused. Drag over the pet in this frame' : 'Loading the video'}
+              {picture ? `Paused. Drag over the ${what} in this frame` : 'Loading the video'}
             </span>
           )}
           {!pending && picture && (
             <button
               type="button"
               onClick={() => setPending({ box: { x: WHOLE_MARGIN, y: WHOLE_MARGIN, w: 1 - 2 * WHOLE_MARGIN, h: 1 - 2 * WHOLE_MARGIN }, t: now() })}
-              className={darkButton('default', 'bg-black/60')}
+              className={darkButton('default', 'pointer-events-auto bg-black/60')}
             >
               Whole frame
             </button>
           )}
-          <button type="button" onClick={() => onDrawEnd?.()} className={darkButton('default', 'bg-black/60')}>
+          <button type="button" onClick={() => onDrawEnd?.()} className={darkButton('default', 'pointer-events-auto bg-black/60')}>
             Cancel
           </button>
         </div>
       )}
 
-      {drawing && pending && (
+      {person && pending && pendingRect && (
+        <>
+          <div
+            ref={setPendingEl}
+            className="pointer-events-none absolute z-20 rounded-lg border-2 border-sky-300 bg-sky-300/10"
+            style={pendingRect}
+          />
+          {pendingEl && (
+            <PersonBoxCard
+              uid={detail.uid}
+              box={pending.box}
+              t={pending.t}
+              anchor={pendingEl}
+              onAdded={(message) => {
+                setPending(null)
+                onDrawEnd?.()
+                onToast?.(message)
+              }}
+              onRedraw={() => setPending(null)}
+              onCancel={() => onDrawEnd?.()}
+            />
+          )}
+        </>
+      )}
+
+      {drawing === 'pet' && pending && (
         <>
           {pendingRect && (
             <div className="pointer-events-none absolute z-20 rounded-lg border-2 border-emerald-300 bg-emerald-300/10" style={pendingRect} />

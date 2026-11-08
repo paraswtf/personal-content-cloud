@@ -5,7 +5,8 @@ Adapted from the hub's faces/cluster.py (docs/ARCHITECTURE.md section 10).
 CONTRACT.
 - assign_new_faces(conn, face_ids, exclude_face_ids=None) -> {face_id: person_id | None}
 - carry_over(conn, old_faces, new_face_ids) -> int (reprocess keeps names, user locks and rejected
-  guesses; rejected_ids / move_rejections / drop_rejections keep guess_rejections on live boxes)
+  guesses, pairing old and new faces with the pure plan_carry; rejected_ids / move_rejections /
+  drop_rejections keep guess_rejections on live boxes)
 - recluster_unassigned(conn) -> int (never creates people; refreshes the FTS rows it changed)
 - merge_persons(conn, target_id, source_ids): moves faces, bodies, item_tags, guesses,
   guess_rejections, merge_dismissals and the cover; deletes the sources. ValueError on bad ids.
@@ -31,6 +32,7 @@ import numpy as np
 
 from app.config import settings
 from app.db import bump_faces_version, tx
+from app.analysis.faces import face_weight, is_clear_face
 from app.analysis.index import FaceIndex, get_index
 from app.util import clean_name, now_iso
 
@@ -188,8 +190,8 @@ def _face_rows(conn: sqlite3.Connection, face_ids: list[int]) -> list[sqlite3.Ro
     for chunk in _chunks(sorted(set(int(f) for f in face_ids))):
         marks = ",".join("?" * len(chunk))
         rows.extend(conn.execute(
-            "SELECT f.id, f.item_id, f.person_id, f.assigned_by, f.det_score, f.size_px, f.quality, i.kind "
-            f"FROM faces f JOIN items i ON i.id = f.item_id WHERE f.id IN ({marks})",
+            "SELECT f.id, f.item_id, f.person_id, f.assigned_by, f.det_score, f.size_px, f.quality, f.clarity, "
+            f"f.sharpness, i.kind FROM faces f JOIN items i ON i.id = f.item_id WHERE f.id IN ({marks})",
             chunk,
         ).fetchall())
     return rows
@@ -222,10 +224,17 @@ def _set_person(conn: sqlite3.Connection, idx: FaceIndex | None, face_id: int, p
     return False
 
 
+def _clear(row: sqlite3.Row) -> bool:
+    return is_clear_face(row["det_score"], row["size_px"], row["clarity"], row["sharpness"])
+
+
 def _threshold(row: sqlite3.Row) -> float:
-    if is_good_face(row["det_score"], row["size_px"]):
-        return settings.cluster_match_threshold
-    return settings.cluster_match_threshold_low
+    """The cut a face must reach to join a person: cluster_match_threshold for a fully clear face
+    (face weight 1), rising linearly to the stricter cluster_match_threshold_low as the weight falls
+    to 0 (a blurred, masked or turned-away face needs stronger evidence)."""
+    w = face_weight(row["det_score"], row["size_px"], row["clarity"], row["sharpness"])
+    good, low = float(settings.cluster_match_threshold), float(settings.cluster_match_threshold_low)
+    return low - (low - good) * w
 
 
 def _score(idx: FaceIndex, faces: list[sqlite3.Row], exclude: frozenset[int],
@@ -412,7 +421,7 @@ def _apply_item(
             done.add(i)
         if create_people:
             for i, r in enumerate(faces):
-                if i in done or not is_good_face(r["det_score"], r["size_px"]):
+                if i in done or not _clear(r):
                     continue
                 pid = new_person(conn)
                 if _set_person(conn, idx, r["id"], pid):
@@ -424,7 +433,7 @@ def _apply_item(
         for r, opts in zip(faces, options):
             pid: int | None = opts[0][0] if opts else None
             if pid is None:
-                if not (create_people and is_good_face(r["det_score"], r["size_px"])):
+                if not (create_people and _clear(r)):
                     continue
                 pid = new_person(conn)
             if _set_person(conn, idx, r["id"], pid):
@@ -472,9 +481,11 @@ def assign_new_faces(conn: sqlite3.Connection, face_ids: list[int],
     """Assign freshly inserted auto faces (person_id NULL, assigned_by 'auto') to people.
 
     For each face (best quality first): score = FaceIndex.person_scores(emb, settings.cluster_topk,
-    exclude_face_ids); join the best person if score >= settings.cluster_match_threshold (good face)
-    or settings.cluster_match_threshold_low (other faces). In a photo one person appears at most once.
-    Otherwise a good face starts a new unnamed person; other faces stay unassigned.
+    exclude_face_ids); join the best person if score >= the face's cut (_threshold: from
+    settings.cluster_match_threshold for a clear face to settings.cluster_match_threshold_low as its
+    face weight falls). In a photo one person appears at most once. Otherwise a clear face
+    (faces.is_clear_face) starts a new unnamed person; other faces stay unassigned (a blurred, masked
+    or turned-away face never starts a person).
     Returns {face_id: person_id | None}. The faces must be in the database already (the index syncs
     inside the same transaction)."""
     return _auto_assign(conn, face_ids, exclude_face_ids, create_people=True)
@@ -494,14 +505,67 @@ def iou(a: tuple[float, float, float, float], b: tuple[float, float, float, floa
     return _iou(a, b)
 
 
+def plan_carry(old_boxes: list[tuple[float, float, float, float]], old_emb: np.ndarray, user: list[bool] | np.ndarray,
+               new_boxes: list[tuple[float, float, float, float]], new_emb: np.ndarray,
+               ) -> tuple[list[tuple[int, int]], list[tuple[int, int]]]:
+    """Which new face takes over each old face's decisions when an item is analysed again (pure;
+    indexes into the inputs).
+
+    pairs, one-to-one, best pairs first within each pass: (1) box IoU >= CARRY_IOU with similarity
+    >= CARRY_IOU_MIN_SIM, (2) similarity >= CARRY_SIM, (3) user-locked old faces only: similarity >=
+    CARRY_USER_SIM, or IoU >= CARRY_USER_IOU with similarity >= CARRY_IOU_MIN_SIM. The user-locked old
+    faces go through all three passes before any other old face takes a new one, so an owner's choice
+    never loses to an automatic one.
+    follows, (old, new): an old face left without a pair whose best new face passes pass 1 or 2. A
+    video tracked again has fewer, longer tracks, so several old tracks map onto one new track; the
+    followers pass on their rejected guesses only."""
+    if not len(old_boxes) or not len(new_boxes):
+        return [], []
+    ious = np.array([[_iou(a, b) for b in new_boxes] for a in old_boxes], dtype=np.float64)
+    sim = np.asarray(old_emb, dtype=np.float64) @ np.asarray(new_emb, dtype=np.float64).T
+    locked = np.asarray(user, dtype=bool)
+    iou_gated = np.where(sim >= CARRY_IOU_MIN_SIM, ious, 0.0)
+    strict = ((iou_gated, CARRY_IOU), (sim, CARRY_SIM))
+    loose = (sim >= CARRY_USER_SIM) | ((ious >= CARRY_USER_IOU) & (sim >= CARRY_IOU_MIN_SIM))
+    pairs: list[tuple[int, int]] = []
+    used_old: set[int] = set()
+    used_new: set[int] = set()
+
+    def take(matrix: np.ndarray, thr: float, rows: np.ndarray) -> None:
+        cand = np.argwhere((matrix >= thr) & rows[:, None])
+        if not len(cand):
+            return
+        for k in np.argsort(-matrix[cand[:, 0], cand[:, 1]], kind="stable"):
+            i, j = int(cand[k][0]), int(cand[k][1])
+            if i in used_old or j in used_new:
+                continue
+            used_old.add(i)
+            used_new.add(j)
+            pairs.append((i, j))
+
+    for matrix, thr in strict:
+        take(matrix, thr, locked)
+    take(np.where(loose, sim, -1.0), CARRY_IOU_MIN_SIM, locked)
+    for matrix, thr in strict:
+        take(matrix, thr, ~locked)
+    follows: list[tuple[int, int]] = []
+    for i in range(len(old_boxes)):
+        if i in used_old:
+            continue
+        ok = (iou_gated[i] >= CARRY_IOU) | (sim[i] >= CARRY_SIM)
+        if ok.any():
+            follows.append((i, int(np.argmax(np.where(ok, sim[i], -np.inf)))))
+    return pairs, follows
+
+
 def carry_over(conn: sqlite3.Connection, old_faces: list[sqlite3.Row], new_face_ids: list[int]) -> int:
-    """After re-detecting faces on a reprocessed item, copy person_id + assigned_by from old faces to
-    the matching new faces (same item): match by normalised-box IoU >= 0.3 with embedding similarity
-    >= 0.3, then by similarity >= 0.6, then (user-locked old faces only) by similarity >= 0.4 or
-    IoU >= 0.1 with similarity >= 0.3. Each old/new face is used once, best pairs first within each
-    pass. Only old faces that had a person or were user-locked are carried; old faces with rejected
-    guesses take part too, and only their guess_rejections move to the new face. Returns the number
-    of faces whose person was carried."""
+    """After re-detecting faces on a reanalysed item, the old faces' decisions move to the matching
+    new faces (same item) as plan_carry pairs them: person_id + assigned_by for each pair, and the
+    rejected guesses of every paired or following old face (the old tracks of one person in a video
+    tracked again all hand theirs to its new track). An automatic person carried onto a face that now
+    holds a rejection of that person is dropped, so the face is assigned afresh. Only old faces that
+    had a person, were user-locked or had rejected guesses take part. Returns the number of faces
+    whose person was carried."""
     rejected = rejected_ids(conn, "face", [int(o["id"]) for o in old_faces])
     olds = [o for o in old_faces
             if o["person_id"] is not None or o["assigned_by"] == "user" or int(o["id"]) in rejected]
@@ -515,33 +579,17 @@ def carry_over(conn: sqlite3.Connection, old_faces: list[sqlite3.Row], new_face_
         ).fetchall())
     if not news:
         return 0
-    old_boxes = [(o["x"], o["y"], o["w"], o["h"]) for o in olds]
-    new_boxes = [(n["x"], n["y"], n["w"], n["h"]) for n in news]
-    ious = np.array([[_iou(a, b) for b in new_boxes] for a in old_boxes], dtype=np.float64)
-    old_e = np.stack([np.frombuffer(o["embedding"], dtype=np.float32) for o in olds])
-    new_e = np.stack([np.frombuffer(n["embedding"], dtype=np.float32) for n in news])
-    sim = old_e @ new_e.T
-
-    user = np.array([o["assigned_by"] == "user" for o in olds], dtype=bool)[:, None]
-    iou_gated = np.where(sim >= CARRY_IOU_MIN_SIM, ious, 0.0)
-    loose = (sim >= CARRY_USER_SIM) | ((ious >= CARRY_USER_IOU) & (sim >= CARRY_IOU_MIN_SIM))
-    user_pass = np.where(user & loose, sim, -1.0)
-    pairs: list[tuple[int, int]] = []
-    used_old: set[int] = set()
-    used_new: set[int] = set()
-    for matrix, thr in ((iou_gated, CARRY_IOU), (sim, CARRY_SIM), (user_pass, CARRY_IOU_MIN_SIM)):
-        cand = np.argwhere(matrix >= thr)
-        order = np.argsort(-matrix[cand[:, 0], cand[:, 1]], kind="stable") if len(cand) else []
-        for k in order:
-            i, j = int(cand[k][0]), int(cand[k][1])
-            if i in used_old or j in used_new:
-                continue
-            used_old.add(i)
-            used_new.add(j)
-            pairs.append((i, j))
-    if not pairs:
+    pairs, follows = plan_carry(
+        [(o["x"], o["y"], o["w"], o["h"]) for o in olds],
+        np.stack([np.frombuffer(o["embedding"], dtype=np.float32) for o in olds]),
+        [o["assigned_by"] == "user" for o in olds],
+        [(n["x"], n["y"], n["w"], n["h"]) for n in news],
+        np.stack([np.frombuffer(n["embedding"], dtype=np.float32) for n in news]),
+    )
+    if not pairs and not follows:
         return 0
     carried = 0
+    took_rejections: set[int] = set()
     with tx(conn):
         for i, j in pairs:
             o = olds[i]
@@ -551,9 +599,19 @@ def carry_over(conn: sqlite3.Connection, old_faces: list[sqlite3.Row], new_face_
                     (o["person_id"], o["assigned_by"], news[j]["id"]),
                 )
                 carried += 1
-            if int(o["id"]) in rejected:
-                move_rejections(conn, "face", int(o["id"]), int(news[j]["id"]))
-        if carried:
+        for i, j in [*pairs, *follows]:
+            if int(olds[i]["id"]) in rejected:
+                move_rejections(conn, "face", int(olds[i]["id"]), int(news[j]["id"]))
+                took_rejections.add(int(news[j]["id"]))
+        for chunk in _chunks(sorted(took_rejections)):
+            marks = ",".join("?" * len(chunk))
+            carried -= conn.execute(
+                f"UPDATE faces SET person_id = NULL, assigned_by = 'auto' WHERE id IN ({marks}) "
+                "AND assigned_by IN ('auto', 'guess') AND person_id IS NOT NULL AND EXISTS ("
+                "SELECT 1 FROM guess_rejections g WHERE g.kind = 'face' AND g.ref_id = faces.id "
+                "AND g.person_id = faces.person_id)", chunk,
+            ).rowcount
+        if pairs:
             bump_faces_version(conn)
     return carried
 

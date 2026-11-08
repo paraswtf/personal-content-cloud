@@ -45,37 +45,39 @@ def _dup_sql(type_: str) -> str:
     return f"SELECT id FROM jobs WHERE type = ? AND payload = ? AND status IN ('queued', 'running'){narrow}"
 
 
-def _insert(conn: sqlite3.Connection, type_: str, body: str, unique: bool, now: str) -> int | None:
+def _insert(conn: sqlite3.Connection, type_: str, body: str, unique: bool, now: str,
+            priority: int | None = None) -> int | None:
     if unique and conn.execute(_dup_sql(type_), (type_, body)).fetchone():
         return None
     cur = conn.execute(
         "INSERT INTO jobs(type, queue, payload, status, priority, created_at, updated_at) "
         "VALUES (?, ?, ?, 'queued', ?, ?, ?)",
-        (type_, QUEUE_OF[type_], body, PRIORITY[type_], now, now),
+        (type_, QUEUE_OF[type_], body, PRIORITY[type_] if priority is None else int(priority), now, now),
     )
     return int(cur.lastrowid)
 
 
 def enqueue(conn: sqlite3.Connection, type_: str, payload: dict[str, Any] | None = None, *,
-            unique: bool = False) -> int | None:
-    """Add a job. With unique=True, skip if an identical queued job exists (returns None). A
-    recluster also counts a running one as a duplicate."""
+            unique: bool = False, priority: int | None = None) -> int | None:
+    """Add a job (priority: instead of PRIORITY[type_], for background work such as a re-analysis).
+    With unique=True, skip if an identical queued job exists (returns None). A recluster also counts
+    a running one as a duplicate."""
     with tx(conn):
-        job_id = _insert(conn, type_, json_dumps(payload or {}), unique, now_iso())
+        job_id = _insert(conn, type_, json_dumps(payload or {}), unique, now_iso(), priority)
     if job_id is not None:
         wake[QUEUE_OF[type_]].set()
     return job_id
 
 
 def enqueue_many(conn: sqlite3.Connection, type_: str, payloads: Iterable[dict[str, Any]], *,
-                 unique: bool = False) -> int:
-    """Add one job per payload in a single transaction (same unique rule as enqueue). Returns the
-    number of jobs added."""
+                 unique: bool = False, priority: int | None = None) -> int:
+    """Add one job per payload in a single transaction (same unique and priority rules as enqueue).
+    Returns the number of jobs added."""
     added = 0
     now = now_iso()
     with tx(conn):
         for payload in payloads:
-            added += _insert(conn, type_, json_dumps(payload or {}), unique, now) is not None
+            added += _insert(conn, type_, json_dumps(payload or {}), unique, now, priority) is not None
     if added:
         wake[QUEUE_OF[type_]].set()
     return added

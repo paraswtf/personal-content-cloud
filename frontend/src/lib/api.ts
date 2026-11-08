@@ -35,6 +35,7 @@ import type {
   ItemUpdate,
   MergeIn,
   OkOut,
+  FaceDeleteOut,
   PageOut,
   PasskeyOut,
   PersonCreate,
@@ -57,6 +58,8 @@ import type {
   UploadOut,
   VaultSensitivity,
   AddAnimalIn,
+  AddPersonBoxIn,
+  PersonBoxOut,
   AnimalOut,
   ThroughputOut,
   ThroughputRange,
@@ -372,6 +375,9 @@ export const api = {
     detail: (uid: string, vault = false) => get<ItemDetail>(`/api/items/${enc(uid)}${qs({ vault })}`),
     /** A pet box the owner drew (section 22): the server cuts the crop, takes or picks the species, and matches it. */
     addAnimal: (uid: string, body: AddAnimalIn) => post<AnimalOut>(`/api/items/${enc(uid)}/animals`, body),
+    /** A person box the owner drew (section 10): a person box with who it is, plus their face when the detector
+     *  finds one inside it. Removed like any person box (people.deleteBody). */
+    addPersonBox: (uid: string, body: AddPersonBoxIn) => post<PersonBoxOut>(`/api/items/${enc(uid)}/people-boxes`, body),
     /** The detector looks once more at a lower threshold; 409 models_unavailable when it is not loaded. */
     detectAnimals: (uid: string, threshold?: number) =>
       post<AnimalOut[]>(`/api/items/${enc(uid)}/animals/detect`, threshold === undefined ? {} : { threshold }),
@@ -432,7 +438,13 @@ export const api = {
       get<ItemPage>(`/api/people/${id}/items${qs({ cursor, limit, vault, relation })}`),
     unassignedFaces: (cursor?: string | null, limit = 200) => get<FacePage>(`/api/faces/unassigned${qs({ cursor, limit })}`),
     assignFaces: (body: AssignFacesIn) => post<AssignOut>('/api/faces/assign', body),
-    deleteFace: (id: number) => del<OkOut>(`/api/faces/${id}`),
+    /** "Not a face" (section 10): the server keeps it for learning and removes unassigned look-alikes with it
+     *  (followed). A face already gone, for example as an earlier one's look-alike, counts as done. */
+    deleteFace: (id: number) =>
+      del<FaceDeleteOut>(`/api/faces/${id}`).catch((e: unknown): FaceDeleteOut => {
+        if (e instanceof ApiError && e.status === 404) return { ok: true, followed: 0 }
+        throw e
+      }),
     assignBodies: (body: AssignBodiesIn) => post<AssignOut>('/api/bodies/assign', body),
     deleteBody: (id: number) => del<OkOut>(`/api/bodies/${id}`),
     confirmGuesses: (body: GuessIdsIn) => post<BulkOut>('/api/guesses/confirm', body),

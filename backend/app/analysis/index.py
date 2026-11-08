@@ -1,8 +1,11 @@
 """In-memory face embedding index, kept in sync with the DB (adapted from the hub's faces/index.py).
 
 CONTRACT. A process-wide singleton (get_index()) shared by the worker and API threads, guarded by
-an RLock. It caches (face id, person id, user-locked flag, item id, embedding) for every face and
-refreshes when kv 'faces_version' changes:
+an RLock. It caches (face id, person id, user-locked flag, face weight, item id, embedding) for every
+face and refreshes when kv 'faces_version' changes. A person's faces are their examples in
+person_scores and centroids, each counted by its face weight (app.analysis.faces.face_weight): a
+blurred, masked or turned-away face the owner or the clustering put on someone stays theirs but
+teaches little or nothing about what they look like.
   sync(conn): if the stored version differs, re-read (id, person_id, assigned_by, item_id) for all
   faces, drop rows that disappeared, load embeddings only for ids it has not seen, update the
   rest. That keeps refreshes cheap (no full embedding reload) at 100k+ faces.
@@ -28,6 +31,7 @@ from pathlib import Path
 
 import numpy as np
 
+from app.analysis.faces import face_weights
 from app.db import faces_version
 
 log = logging.getLogger(__name__)
@@ -46,6 +50,7 @@ class FaceIndex:
         self._person = np.zeros(0, dtype=np.int64)  # -1 = unassigned
         self._item = np.zeros(0, dtype=np.int64)
         self._user = np.zeros(0, dtype=bool)
+        self._weight = np.zeros(0, dtype=np.float32)  # face weight: how much each face counts as an example
         self._emb = np.zeros((0, DIM), dtype=np.float32)
         self._pos: dict[int, int] = {}
         self._tentative_conn: int | None = None  # id(conn) of a sync made inside a transaction
@@ -100,12 +105,15 @@ class FaceIndex:
         if not force and version == self._version:
             return
         reload_ids = self._tentative_ids
-        rows = conn.execute("SELECT id, person_id, assigned_by, item_id FROM faces ORDER BY id").fetchall()
+        rows = conn.execute(
+            "SELECT id, person_id, assigned_by, item_id, det_score, size_px, clarity, sharpness FROM faces ORDER BY id"
+        ).fetchall()
         n = len(rows)
         ids = np.fromiter((r[0] for r in rows), dtype=np.int64, count=n)
         person = np.fromiter((r[1] if r[1] is not None else -1 for r in rows), dtype=np.int64, count=n)
         user = np.fromiter((r[2] == "user" for r in rows), dtype=bool, count=n)
         item = np.fromiter((r[3] for r in rows), dtype=np.int64, count=n)
+        weight = _weight_of(rows)
         emb = np.zeros((n, DIM), dtype=np.float32)
         # Carry cached embeddings over (both id arrays are sorted).
         hit = np.zeros(n, dtype=bool)
@@ -119,13 +127,14 @@ class FaceIndex:
         missing = np.nonzero(~hit)[0].tolist()
         if missing:
             self._load_embeddings(conn, ids, missing, emb)
-        self._set_state(ids, person, user, item, emb, version)
+        self._set_state(ids, person, user, item, emb, version, weight=weight)
         self._mark(conn, in_tx, {int(ids[i]) for i in missing})
         log.debug("face index synced: %d faces (%d loaded), version %d", n, len(missing), version)
 
     def _set_state(self, ids, person, user, item, emb, version: int | None,
-                   pos: dict[int, int] | None = None) -> None:
+                   pos: dict[int, int] | None = None, *, weight: np.ndarray) -> None:
         self._ids, self._person, self._user, self._item, self._emb = ids, person, user, item, emb
+        self._weight = weight
         self._pos = pos if pos is not None else {fid: i for i, fid in enumerate(ids.tolist())}
         self._version = version
         self._changed()
@@ -172,7 +181,8 @@ class FaceIndex:
                 self._sync(conn, False, in_tx=conn.in_transaction)
                 return
             rows = conn.execute(
-                "SELECT id, person_id, assigned_by, item_id FROM faces WHERE item_id = ? ORDER BY id",
+                "SELECT id, person_id, assigned_by, item_id, det_score, size_px, clarity, sharpness FROM faces "
+                "WHERE item_id = ? ORDER BY id",
                 (int(item_id),),
             ).fetchall()
             n = len(rows)
@@ -180,16 +190,17 @@ class FaceIndex:
             r_person = np.fromiter((r[1] if r[1] is not None else -1 for r in rows), dtype=np.int64, count=n)
             r_user = np.fromiter((r[2] == "user" for r in rows), dtype=bool, count=n)
             r_item = np.full(n, int(item_id), dtype=np.int64)
+            r_weight = _weight_of(rows)
             r_emb = np.zeros((n, DIM), dtype=np.float32)
             if n:
                 self._load_by_id(conn, r_ids, list(range(n)), r_emb)
             keep = self._item != int(item_id)
             kept_all = bool(keep.all())
-            parts = [self._ids, self._person, self._user, self._item, self._emb]
+            parts = [self._ids, self._person, self._user, self._item, self._emb, self._weight]
             if not kept_all:
                 parts = [a[keep] for a in parts]
             if n:
-                parts = [np.concatenate([a, b]) for a, b in zip(parts, [r_ids, r_person, r_user, r_item, r_emb])]
+                parts = [np.concatenate([a, b]) for a, b in zip(parts, [r_ids, r_person, r_user, r_item, r_emb, r_weight])]
             pos = None
             if n and parts[0].size > n and r_ids[0] < parts[0][parts[0].size - n - 1]:
                 # Some new id sorts before a kept one (rare: ids grow): restore the id order.
@@ -201,7 +212,8 @@ class FaceIndex:
                 base = parts[0].size - n
                 for k, fid in enumerate(r_ids.tolist()):
                     pos[int(fid)] = base + k
-            self._set_state(*parts, faces_version(conn), pos=pos)
+            *state, weight = parts
+            self._set_state(*state, faces_version(conn), pos=pos, weight=weight)
             self._mark(conn, True, {int(f) for f in r_ids.tolist()})
             log.debug("face index: item %s refreshed (%d faces), version %d", item_id, n, self._version)
 
@@ -237,6 +249,7 @@ class FaceIndex:
             self._set_state(
                 np.zeros(0, dtype=np.int64), np.zeros(0, dtype=np.int64), np.zeros(0, dtype=bool),
                 np.zeros(0, dtype=np.int64), np.zeros((0, DIM), dtype=np.float32), None,
+                weight=np.zeros(0, dtype=np.float32),
             )
             self._tentative_conn = None
             self._tentative_ids = set()
@@ -260,10 +273,11 @@ class FaceIndex:
     def person_scores(
         self, emb: np.ndarray, topk: int, exclude_face_ids: set[int] | frozenset[int] = frozenset()
     ) -> list[tuple[int, float]]:
-        """For each person with faces in the index: mean of the top-k cosine similarities between
-        emb and that person's faces (fewer if the person has fewer faces). Sorted desc.
-        Only people with at least one face similarity >= MIN_SIM are returned; their score uses
-        all of their faces, weak ones included."""
+        """For each person with faces of weight > 0 in the index: the weighted mean of the top-k
+        cosine similarities between emb and those faces (fewer if the person has fewer), each face
+        counted by its face weight (and USER_WEIGHT when the owner assigned it). Sorted desc. Only
+        people with at least one such similarity >= MIN_SIM are returned; their score uses all of
+        those faces, weak matches included. A person whose faces all weigh 0 is never scored."""
         return self.person_scores_many(np.asarray(emb, dtype=np.float32)[None, :], topk, exclude_face_ids)[0]
 
     def person_scores_many(
@@ -274,23 +288,25 @@ class FaceIndex:
         with self.lock:
             if self._ids.shape[0] == 0 or embs.shape[0] == 0:
                 return [[] for _ in range(embs.shape[0])]
-            base = self._person >= 0
+            base = (self._person >= 0) & (self._weight > 0)
             if exclude_face_ids:
                 base &= ~np.isin(self._ids, np.fromiter(exclude_face_ids, dtype=np.int64))
             out: list[list[tuple[int, float]]] = []
             for start in range(0, embs.shape[0], _SCORE_BATCH):
                 sims = self._emb @ embs[start:start + _SCORE_BATCH].T  # (N, b)
-                out.extend(_topk_means(self._person, base, sims[:, b], topk, self._user) for b in range(sims.shape[1]))
+                out.extend(_topk_means(self._person, base, sims[:, b], topk, self._user, self._weight)
+                           for b in range(sims.shape[1]))
             return out
 
     def centroids(self, person_ids: list[int] | None = None) -> tuple[np.ndarray, np.ndarray]:
-        """(person_ids array, L2-normalised mean embeddings (P, 512)) for people with faces."""
+        """(person_ids array, L2-normalised mean embeddings (P, 512)) for people with faces of weight
+        > 0, each face counted by its face weight."""
         with self.lock:
-            mask = self._person >= 0
+            mask = (self._person >= 0) & (self._weight > 0)
             if person_ids is not None:
                 mask &= np.isin(self._person, np.asarray(list(person_ids), dtype=np.int64))
             sel = np.nonzero(mask)[0]
-            p, e = self._person[sel], self._emb[sel]
+            p, e = self._person[sel], self._emb[sel] * self._weight[sel][:, None]
         if p.size == 0:
             return np.zeros(0, dtype=np.int64), np.zeros((0, DIM), dtype=np.float32)
         order = np.argsort(p, kind="stable")
@@ -299,6 +315,16 @@ class FaceIndex:
         sums = np.add.reduceat(e, starts, axis=0)
         norms = np.linalg.norm(sums, axis=1, keepdims=True)
         return pids.astype(np.int64), (sums / np.maximum(norms, 1e-12)).astype(np.float32)
+
+    def unassigned_lookalikes(self, emb: np.ndarray, min_sim: float, max_weight: float) -> list[int]:
+        """Ids of faces with no person and not locked by the owner that look like emb (cosine >=
+        min_sim) and weigh less than max_weight (section 10: look-alikes of a face marked "Not a face")."""
+        with self.lock:
+            if self._ids.size == 0:
+                return []
+            sims = self._emb @ np.asarray(emb, dtype=np.float32)
+            mask = (self._person < 0) & ~self._user & (self._weight < max_weight) & (sims >= min_sim)
+            return [int(i) for i in self._ids[mask].tolist()]
 
     def embeddings_of(self, face_ids: list[int]) -> np.ndarray:
         """(n, 512) embeddings for the given face ids, in order (KeyError if unknown)."""
@@ -311,10 +337,10 @@ USER_WEIGHT = 1.5  # a face the owner assigned counts this much in the top-k mea
 
 
 def _topk_means(person: np.ndarray, base: np.ndarray, sims: np.ndarray, topk: int,
-                user: np.ndarray | None = None) -> list[tuple[int, float]]:
+                user: np.ndarray | None = None, weight: np.ndarray | None = None) -> list[tuple[int, float]]:
     """Per candidate person: the weighted mean of the top-k similarities to that person's faces.
-    The reference for a person is every face they have, so it sharpens as faces are added; the
-    owner's own assignments weigh USER_WEIGHT, automatic ones 1.0."""
+    The reference for a person is every face they have (in base), so it sharpens as faces are added;
+    each counts by its face weight, times USER_WEIGHT for the owner's own assignments."""
     cand = np.unique(person[base & (sims >= MIN_SIM)])
     if cand.size == 0:
         return []
@@ -323,6 +349,8 @@ def _topk_means(person: np.ndarray, base: np.ndarray, sims: np.ndarray, topk: in
     sel = np.nonzero(base & np.isin(person, cand))[0]
     p, s = person[sel], sims[sel]
     w = np.where(user[sel], USER_WEIGHT, 1.0) if user is not None and user.shape[0] == person.shape[0] else np.ones(sel.size)
+    if weight is not None and weight.shape[0] == person.shape[0]:
+        w = w * weight[sel]
     order = np.lexsort((-s, p))
     p, s, w = p[order], s[order], w[order]
     starts = np.r_[0, np.nonzero(np.diff(p))[0] + 1]
@@ -335,6 +363,20 @@ def _topk_means(person: np.ndarray, base: np.ndarray, sims: np.ndarray, topk: in
     pids = p[starts]
     out = sorted(zip(pids.tolist(), means.tolist()), key=lambda t: (-t[1], t[0]))
     return [(int(a), float(b)) for a, b in out]
+
+
+def _weight_of(rows: list[sqlite3.Row] | list[tuple]) -> np.ndarray:
+    """The face weight of face rows (id, person_id, assigned_by, item_id, det_score, size_px, clarity,
+    sharpness)."""
+    n = len(rows)
+    if not n:
+        return np.zeros(0, dtype=np.float32)
+    nan = float("nan")
+    det = np.fromiter((r[4] for r in rows), dtype=np.float64, count=n)
+    size = np.fromiter((r[5] for r in rows), dtype=np.float64, count=n)
+    clarity = np.fromiter((nan if r[6] is None else r[6] for r in rows), dtype=np.float64, count=n)
+    sharp = np.fromiter((nan if r[7] is None else r[7] for r in rows), dtype=np.float64, count=n)
+    return face_weights(det, size, clarity, sharp).astype(np.float32)
 
 
 def _decode(blob: bytes) -> np.ndarray:
