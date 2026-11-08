@@ -58,6 +58,8 @@ import type {
   VaultSensitivity,
   AddAnimalIn,
   AnimalOut,
+  ThroughputOut,
+  ThroughputRange,
 } from './types'
 
 export const CSRF_HEADER = 'X-Requested-With'
@@ -308,6 +310,10 @@ export const api = {
    *  The learning calls are /api/system/learning (section 18 of docs/ARCHITECTURE.md). */
   system: Object.assign(() => get<SystemOut>('/api/system'), {
     retryFailed: () => post<{ requeued: number }>('/api/system/retry-failed'),
+    /** Takes a backup snapshot now (section 31); started is false when one is running or backups are off. */
+    backupNow: () => post<{ started: boolean; running: boolean }>('/api/system/backup'),
+    /** Finished jobs per bucket by type (section 32): the last hour by minute, the day by hour, the week by six hours. */
+    throughput: (range: ThroughputRange) => get<ThroughputOut>(`/api/system/throughput?range=${range}`),
     learning: () => get<LearningStatus>('/api/system/learning'),
     /** The Settings switch (kv flag learning_enabled). The reply body is not used: refetch the status. */
     setLearningEnabled: (enabled: boolean) => patch<OkOut>('/api/system/learning', { enabled }),
@@ -416,8 +422,9 @@ export const api = {
     setSpecies: (id: number, species: Species) => post<PersonOut>(`/api/people/${id}/species`, { species }),
     faces: (id: number, cursor?: string | null, limit = 200) => get<FacePage>(`/api/people/${id}/faces${qs({ cursor, limit })}`),
     animals: (id: number, cursor?: string | null, limit = 120) => get<AnimalPage>(`/api/people/${id}/animals${qs({ cursor, limit })}`),
-    items: (id: number, cursor?: string | null, limit = 60, vault = false) =>
-      get<ItemPage>(`/api/people/${id}/items${qs({ cursor, limit, vault })}`),
+    /** `relation`: in (the default), related (items about them without them in it, section 10) or all. */
+    items: (id: number, cursor?: string | null, limit = 60, vault = false, relation?: 'in' | 'related' | 'all') =>
+      get<ItemPage>(`/api/people/${id}/items${qs({ cursor, limit, vault, relation })}`),
     unassignedFaces: (cursor?: string | null, limit = 200) => get<FacePage>(`/api/faces/unassigned${qs({ cursor, limit })}`),
     assignFaces: (body: AssignFacesIn) => post<AssignOut>('/api/faces/assign', body),
     deleteFace: (id: number) => del<OkOut>(`/api/faces/${id}`),

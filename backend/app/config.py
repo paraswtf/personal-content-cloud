@@ -162,6 +162,12 @@ class Settings:
     ocr_enabled: bool
     ocr_max_pages: int
 
+    # storage tiers and nightly backups (section 31)
+    originals_dir: Path | None   # ORIGINALS_DIR: originals, staging and failed uploads (a fast disk); None = data_dir
+    backup_dir: Path | None      # BACKUP_DIR: nightly snapshots (a large, slow disk); None = backups off
+    backup_hour: int             # BACKUP_HOUR: local hour (0-23) of the nightly run
+    backup_keep: int             # BACKUP_KEEP: how many nightly snapshots are kept
+
     # Apple Wallet
     wallet_pass_type_id: str | None
     wallet_team_id: str | None
@@ -177,6 +183,11 @@ class Settings:
         return self.data_dir / "cloud.db"
 
     @property
+    def originals_root(self) -> Path:
+        """Where originals/, staging/ and failed/ live: ORIGINALS_DIR, or DATA_DIR when it is not set."""
+        return self.originals_dir or self.data_dir
+
+    @property
     def wallet_path(self) -> Path:
         return self.wallet_dir or (self.data_dir / "wallet")
 
@@ -185,6 +196,8 @@ def _load(**overrides) -> Settings:
     cpu = os.cpu_count() or 4
     data_dir = _env("DATA_DIR") or str(REPO_ROOT / "data")
     wallet_dir = _env("WALLET_DIR")
+    originals_dir = _env("ORIGINALS_DIR")
+    backup_dir = _env("BACKUP_DIR")
     values = dict(
         site_title=_env("SITE_TITLE", SITE_TITLE),
         data_dir=Path(data_dir).resolve(),
@@ -270,12 +283,22 @@ def _load(**overrides) -> Settings:
         wallet_org_name=_env("WALLET_ORG_NAME"),
         wallet_key_password=_env("WALLET_KEY_PASSWORD"),
         wallet_dir=Path(wallet_dir).resolve() if wallet_dir else None,
+        originals_dir=Path(originals_dir).resolve() if originals_dir else None,
+        backup_dir=Path(backup_dir).resolve() if backup_dir else None,
+        backup_hour=min(23, max(0, _int("BACKUP_HOUR", 3))),
+        backup_keep=max(1, _int("BACKUP_KEEP", 14)),
         workers_enabled=_bool("WORKERS_ENABLED", True),
         gpu_arena_shrink=_bool("GPU_ARENA_SHRINK", True),
         learning_enabled=_bool("LEARNING_ENABLED", True),
         vault_sensitivity=(_env("VAULT_SENSITIVITY", "normal") or "normal").strip().lower(),
     )
     values.update(overrides)
+    if values.get("originals_dir") is not None:
+        values["originals_dir"] = Path(values["originals_dir"]).resolve()
+        if values["originals_dir"] == Path(values["data_dir"]).resolve():
+            values["originals_dir"] = None  # the same folder: one tier, as before
+    if values.get("backup_dir") is not None:
+        values["backup_dir"] = Path(values["backup_dir"]).resolve()
     return Settings(**values)
 
 

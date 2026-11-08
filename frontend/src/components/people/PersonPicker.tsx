@@ -1,21 +1,24 @@
 // Person search-and-pick combobox with an inline option list (works inside popovers and modals).
-// Offers "Create <name>" for a typed name that matches nobody exactly.
-import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from 'react'
+// Offers "Create <name>" for a typed name that matches nobody exactly. With kind 'all' it lists people
+// and then a Pets section, and a new name can become a person ("Create") or a pet ("New pet").
+import { Fragment, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from 'react'
 import { keepPreviousData, useQuery } from '@tanstack/react-query'
 import clsx from 'clsx'
 import { PawPrint, Search, UserPlus } from 'lucide-react'
 import { api } from '../../lib/api'
-import type { PersonOut, Species } from '../../lib/types'
+import type { PersonKind, PersonOut, Species } from '../../lib/types'
 import { formatCount, personName, speciesLabel } from '../../lib/format'
 import { useDebounced } from '../../lib/hooks'
 import { Avatar, Spinner } from '../ui'
 
-export type PersonChoice = { personId: number } | { newName: string }
+/** A new name carries `kind: 'pet'` only when the owner picked "New pet" in a picker listing both kinds. */
+export type PersonChoice = { personId: number } | { newName: string; kind?: PersonKind }
 
 /** Request body fields for an assign or tag call from a picker choice. */
-export function choiceBody(choice: PersonChoice | null): { person_id?: number | null; new_person_name?: string } {
+export function choiceBody(choice: PersonChoice | null): { person_id?: number | null; new_person_name?: string; kind?: PersonKind } {
   if (!choice) return { person_id: null }
-  return 'personId' in choice ? { person_id: choice.personId } : { new_person_name: choice.newName }
+  if ('personId' in choice) return { person_id: choice.personId }
+  return choice.kind === 'pet' ? { new_person_name: choice.newName, kind: 'pet' } : { new_person_name: choice.newName }
 }
 
 interface Props {
@@ -25,19 +28,19 @@ interface Props {
   allowCreate?: boolean
   excludeIds?: number[]
   autoFocus?: boolean
-  /** Who to list: people (the default) or pets. Never both. */
-  kind?: 'person' | 'pet'
+  /** Who to list: people (the default), pets, or 'all' (people, then a Pets section; a new name offers both). */
+  kind?: PersonKind | 'all'
   /** Pets: this species is listed first. */
   species?: Species
   /** Pets: list only `species`. */
   speciesOnly?: boolean
 }
 
-type Option = { kind: 'person'; person: PersonOut } | { kind: 'create'; name: string }
+type Option = { kind: 'person'; person: PersonOut } | { kind: 'create'; name: string; as: PersonKind }
 
 export default function PersonPicker({
   onPick,
-  placeholder = 'Search people or type a new name',
+  placeholder,
   allowCreate = true,
   excludeIds,
   autoFocus = false,
@@ -46,6 +49,9 @@ export default function PersonPicker({
   speciesOnly = false,
 }: Props) {
   const pets = kind === 'pet'
+  const both = kind === 'all'
+  const hint =
+    placeholder ?? (both ? 'Search people and pets or type a new name' : pets ? 'Search pets or type a new name' : 'Search people or type a new name')
   const [text, setText] = useState('')
   const [active, setActive] = useState(0)
   const inputRef = useRef<HTMLInputElement>(null)
@@ -62,7 +68,11 @@ export default function PersonPicker({
 
   const options = useMemo<Option[]>(() => {
     const exclude = new Set(excludeIds ?? [])
-    const found = (persons.data?.items ?? []).filter((p) => (p.kind ?? 'person') === kind)
+    const all = persons.data?.items ?? []
+    // Both kinds: people first, then the pets (the Pets heading sits before the first of them).
+    const found = both
+      ? [...all.filter((p) => (p.kind ?? 'person') !== 'pet'), ...all.filter((p) => p.kind === 'pet')]
+      : all.filter((p) => (p.kind ?? 'person') === kind)
     // Pets of the box's species first, the others after them.
     const ranked = species ? [...found].sort((a, b) => Number(b.species === species) - Number(a.species === species)) : found
     const list: Option[] = ranked
@@ -71,11 +81,14 @@ export default function PersonPicker({
     const typed = text.trim()
     if (allowCreate && typed) {
       const lower = typed.toLowerCase()
-      const exact = (persons.data?.items ?? []).some((p) => (p.name ?? '').toLowerCase() === lower)
-      if (!exact) list.push({ kind: 'create', name: typed })
+      const exact = all.some((p) => (p.name ?? '').toLowerCase() === lower)
+      if (!exact) {
+        if (both) list.push({ kind: 'create', name: typed, as: 'person' }, { kind: 'create', name: typed, as: 'pet' })
+        else list.push({ kind: 'create', name: typed, as: pets ? 'pet' : 'person' })
+      }
     }
     return list
-  }, [persons.data, excludeIds, allowCreate, text, kind, species, speciesOnly])
+  }, [persons.data, excludeIds, allowCreate, text, kind, species, speciesOnly, both, pets])
 
   useEffect(() => setActive(0), [q, options.length])
   useEffect(() => {
@@ -85,8 +98,11 @@ export default function PersonPicker({
     listRef.current?.querySelector<HTMLElement>(`[data-index="${active}"]`)?.scrollIntoView({ block: 'nearest' })
   }, [active])
 
+  // A pet-only picker's new name stays a plain name: its callers know the kind (and the species) already.
   const pick = (opt: Option) =>
-    opt.kind === 'person' ? onPick({ personId: opt.person.id }, opt.person) : onPick({ newName: opt.name })
+    opt.kind === 'person'
+      ? onPick({ personId: opt.person.id }, opt.person)
+      : onPick(both && opt.as === 'pet' ? { newName: opt.name, kind: 'pet' } : { newName: opt.name })
 
   const onKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
     if (e.key === 'ArrowDown') {
@@ -125,8 +141,8 @@ export default function PersonPicker({
           aria-controls={`${baseId}-list`}
           aria-activedescendant={options[active] ? optionId(active) : undefined}
           aria-autocomplete="list"
-          aria-label={placeholder}
-          placeholder={placeholder}
+          aria-label={hint}
+          placeholder={hint}
           value={text}
           onChange={(e) => setText(e.target.value)}
           onKeyDown={onKeyDown}
@@ -145,7 +161,7 @@ export default function PersonPicker({
         ref={listRef}
         id={`${baseId}-list`}
         role="listbox"
-        aria-label={pets ? 'Pets' : 'People'}
+        aria-label={both ? 'People and pets' : pets ? 'Pets' : 'People'}
         className="max-h-64 overflow-y-auto overscroll-contain rounded-xl border border-line bg-surface p-1"
       >
         {persons.isError && (
@@ -158,13 +174,24 @@ export default function PersonPicker({
               ? pets
                 ? 'No pet matches that name.'
                 : 'No one matches that name.'
-              : pets
-                ? 'No pets yet. Type a name to add one.'
-                : 'No people yet. Type a name to create one.'}</li>
+              : both
+                ? 'No people or pets yet. Type a name to add one.'
+                : pets
+                  ? 'No pets yet. Type a name to add one.'
+                  : 'No people yet. Type a name to create one.'}</li>
         )}
-        {options.map((opt, i) => (
+        {options.map((opt, i) => {
+          const prev = options[i - 1]
+          const petRow = opt.kind === 'person' ? opt.person.kind === 'pet' : opt.as === 'pet'
+          const heading = both && opt.kind === 'person' && petRow && prev?.kind === 'person' && prev.person.kind !== 'pet' ? 'Pets' : null
+          return (
+          <Fragment key={opt.kind === 'person' ? opt.person.id : `create-${opt.as}`}>
+          {heading && (
+            <li role="presentation" className="px-2 pb-1 pt-2 text-[11px] font-semibold uppercase tracking-[0.1em] text-ink-faint">
+              {heading}
+            </li>
+          )}
           <li
-            key={opt.kind === 'person' ? opt.person.id : 'create'}
             id={optionId(i)}
             data-index={i}
             role="option"
@@ -183,7 +210,7 @@ export default function PersonPicker({
                 <span className="min-w-0 flex-1">
                   <span className={clsx('block truncate font-medium', !opt.person.name && 'text-ink-soft')}>{personName(opt.person)}</span>
                   <span className="block text-xs text-ink-faint">
-                    {pets
+                    {petRow
                       ? `${speciesLabel(opt.person.species)}, ${formatCount(opt.person.item_count, 'item')}`
                       : `${formatCount(opt.person.face_count, 'face')}, ${formatCount(opt.person.item_count, 'item')}`}
                   </span>
@@ -192,15 +219,17 @@ export default function PersonPicker({
             ) : (
               <>
                 <span className="flex size-8 shrink-0 items-center justify-center rounded-full bg-accent-soft text-accent">
-                  {pets ? <PawPrint className="size-4" aria-hidden /> : <UserPlus className="size-4" aria-hidden />}
+                  {petRow ? <PawPrint className="size-4" aria-hidden /> : <UserPlus className="size-4" aria-hidden />}
                 </span>
                 <span className="min-w-0 flex-1 truncate">
-                  {pets ? 'New pet' : 'Create'} <span className="font-semibold">"{opt.name}"</span>
+                  {petRow ? 'New pet' : 'Create'} <span className="font-semibold">"{opt.name}"</span>
                 </span>
               </>
             )}
           </li>
-        ))}
+          </Fragment>
+          )
+        })}
       </ul>
     </div>
   )

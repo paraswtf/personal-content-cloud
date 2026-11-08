@@ -111,7 +111,9 @@ docs/
 
 ## 3. Data directory
 
-`DATA_DIR` (default `<repo>/data`). Shard `sh = uid[:2]`. Versions as in the hub (an item's
+Two roots (section 31). `DATA_DIR` (default `<repo>/data`) holds the database and everything the app
+makes; `ORIGINALS_DIR` (unset by default, then the same folder) holds the bytes the owner uploaded:
+`originals/`, `staging/` and `failed/`. Shard `sh = uid[:2]`. Versions as in the hub (an item's
 `version` only changes when the user replaces a file; near-duplicates never replace anything).
 
 | Path | Content |
@@ -119,7 +121,7 @@ docs/
 | `cloud.db` | SQLite database |
 | `secret.key` | 32 random bytes, mode 0600, made on first use: signs the share unlock cookies (section 26); sessions use hashed random tokens instead |
 | `.instance.lock` | flock |
-| `originals/<sh>/<uid>.v<n><ext>` | untouched upload bytes |
+| `originals/<sh>/<uid>.v<n><ext>` | untouched upload bytes (under `ORIGINALS_DIR`) |
 | `thumbs/<sh>/<uid>.v<n>.webp` | 480 px thumbnail (page 1 for documents, poster for videos) |
 | `previews/<sh>/<uid>.v<n>.webp`, `.sm.webp` | 2048 / 1280 px previews (images, video posters, document page 1) |
 | `pages/<sh>/<uid>.v<n>/<page>.webp` | document page renders, 1600 px long side (PDF pages; office documents get text-rendered pages) |
@@ -127,15 +129,23 @@ docs/
 | `faces/<id//1000>/<id>.webp` | face crops 192 px |
 | `bodies/<id//1000>/<id>.webp` | person crops 256 px long side |
 | `docphoto/<sh>/<uid>.v<n>.webp` | photo cropped out of an ID document |
-| `staging/<uid>.part` | uploads in progress |
-| `failed/<uid>.part` | uploads whose ingest failed for good; deleted after `TRASH_DAYS`; Settings > System > Retry failed uploads queues them again |
+| `staging/<uid>.part` | uploads in progress (under `ORIGINALS_DIR`) |
+| `failed/<uid>.part` | uploads whose ingest failed for good (under `ORIGINALS_DIR`); deleted after `TRASH_DAYS`; Settings > System > Retry failed uploads queues them again |
+| `learned/` | the learned models (section 18) |
 | `wallet/` | `cert.pem`, `key.pem`, `wwdr.pem` placed by the owner (never written by the app) |
 | `tmp/` | wiped at startup |
 | `site/` | copy of the frontend build taken at startup, the site that is served (section 14) |
 
-Staging, originals, tmp share one filesystem (hard link placement). The orphan sweeper walks
-originals, thumbs, previews, pages, videos, faces, bodies, docphoto and deletes files older than an
-hour that no row references (names parsed by regex; `_is_referenced` guards every delete).
+Staging and originals share one filesystem (hard link placement); an original placed from a scratch
+file on another disk is copied to a scratch name beside its destination and renamed from there
+(`storage.move_into_place` handles `EXDEV`). `storage.rel(path)` names a file by its root and top folder
+whichever root holds it, so `_is_referenced` works for both. The orphan sweeper walks originals, thumbs,
+previews, pages, videos, faces, bodies, docphoto (`storage.swept_bases()`: each under its root, plus
+`DATA_DIR/originals` while files of the earlier single-folder layout are still being moved, section 31) and
+deletes files older than an hour that no row references (names parsed by regex; `_is_referenced` guards
+every delete). `storage.disk_usage()` and `Stats.disk` report the disk that receives uploads (the
+originals root); `storage.has_room_for(n)` also asks the data root to keep `MIN_FREE_DISK_MB` for the
+derived files when it is another disk.
 
 ## 4. Authentication and sessions
 
@@ -217,7 +227,9 @@ The full DDL is `backend/app/schema.sql`. Summary of tables and the columns code
   is NULL and `guess_person_id` is set until confirmed or rejected.
 - `bodies(id, item_id, face_id FK SET NULL, person_id, assigned_by, x,y,w,h, det_score, torso_embedding BLOB, guess_person_id, guess_score, guess_evidence, frame_time_s, created_at)`.
 - `persons(id, name, name_key, cover_face_id, created_at, updated_at)`.
-- `item_tags(item_id, person_id, source CHECK ('user','guess'), created_at, PK(item_id, person_id))`.
+- `item_tags(item_id, person_id, source CHECK ('user','guess'), relation CHECK ('in','related'), created_at,
+  PK(item_id, person_id))`; `relation` ('in': they are in the item; 'related': the item is about them without them
+  in it, section 10) came through `MIGRATED_COLUMNS`. A tag names a person or a pet (section 22).
 - `guess_rejections(kind CHECK ('face','body'), ref_id, person_id, created_at, PK(kind, ref_id, person_id))`.
 - `merge_dismissals(person_a, person_b)`.
 - `animals` (section 22) gains `species_source` (auto|user), `species_scores` (JSON) and `source` (detector|user: a box
@@ -259,6 +271,25 @@ with the message `Restored from the trash (identical file).`; staged bytes are n
 stored copy sits in the trash.
 
 ## 7. Processing pipeline
+
+Videos with a placeholder index (added 2026-11-08): some Apple encoders leave a `hoov` atom (or a `free`
+atom) holding an `mvhd` before the media data, with the real `moov` after the `mdat`. ffmpeg's lenient default
+takes the placeholder for the index, finds no packets and the clip used to be kept as kind `other` ("There is no
+preview for this kind of file"). `probe.input_flags(path)` reads the top-level atoms (cached by path, size and
+mtime) and returns `["-strict", "strict"]` for such a file; every ffmpeg and ffprobe call on an original passes
+it before the input, so the real index is read. `MediaInfo.strict_input` marks them and
+`video.needs_web_preview` always gives them a web copy (browsers trip over the placeholder as ffmpeg does). A
+non-zero ffmpeg or ffprobe exit whose stderr names a resource problem (no memory, too many open files, no
+space, an I/O error) is a `ToolFailure`, not a verdict on the file. `probe.PROBE_VERSION` (2) is bumped when
+the probe learns to read files it used to keep as `other`; at startup, when kv `probe_version` is lower,
+`ingest.reprobe_plain` runs once on a background thread over the items kept as `other` whose MIME says image,
+video or PDF: one that now probes as a real kind (with the same storage extension) gets its derivatives, its
+row's media columns, fingerprint and statuses, its analysis, text and web-copy jobs and a Live Photo pairing;
+the kv is set when the pass completes (a `ToolFailure` stops it for the next start).
+
+Every job that ran to a verdict leaves a `job_runs` row (type, queue, finished_at, duration_ms, ok) for the
+processing speed charts (section 32); deferrals (full disk, ffmpeg not running) are not runs. Housekeeping
+deletes rows older than 14 days.
 
 Jobs, queues and priorities: `ingest` (main, 10), `analyze` (main, 50), `video_preview` (video, 50),
 `text` (text, 60), `guess` (main, 70), `recluster` (main, 90). The queues are serial; `main` runs
@@ -465,6 +496,22 @@ is tedious. So the item detail of a video groups its tracks and the viewer edits
   strangers apart, kinds never mixed, photos get null), the item detail of a video carrying the groups, and
   the assign route with several face ids of a group.
 
+Related items (2026-11-08). A tag can also say that an item is about someone without them in it (a pet's
+toy, a person's handwriting), so it shows under the person and in a search for the name:
+- `item_tags.relation TEXT NOT NULL DEFAULT 'in' CHECK (relation IN ('in','related'))` (a migrated column).
+  `POST /api/items/{uid}/tags` takes `relation` (default `in`); posting the other relation for a person
+  already tagged switches it. `ItemDetail.people` entries carry `relation`; the viewer lists `related` ones
+  under "Related to" with a link mark instead of a face mark.
+- `GET /api/people/{id}/items?relation=in|related|all` (default `in`, the behaviour so far); `PersonOut`
+  gains `related_count`; the person page shows a "Related" tab with that count. The library's `person`
+  filter, the timeline and the people pages keep meaning "in"; search finds related items by the name
+  because `refresh_fts` writes every tagged name, whatever the relation, into the `people` column.
+- "Tag someone" gets a switch "Not in the picture, related to them"; the chip's menu offers "Make this
+  'in'" and "Make this 'related'" (the same POST with the other relation) and Remove.
+- Tests: the column upgrade (tests/test_db_upgrade.py stays green), the tag route with both relations and the
+  switch, the person items filter and count, the viewer's people list carrying the relation, and a search for
+  the name finding the related item.
+
 ## 11. Documents (`app/documents`)
 
 Text extraction order: text layer (pdf) -> OCR (rapidocr; English, Hindi and Marathi: each detected line is
@@ -592,23 +639,32 @@ people[PersonRef], document: DocumentOut | null, text_status, analysis_status, p
 urls{thumb, preview, preview_small, original, download, video, pages[]}}`.
 `FaceOut = {id, x, y, w, h, det_score, size_px, quality, frame_time_s, spans, person: PersonRef | null, assigned_by, guess: GuessOut | null, url}`;
 `BodyOut = {id, x, y, w, h, det_score, face_id, person, assigned_by, guess, url}`;
-`GuessOut = {person: PersonRef, score, evidence}`; `PersonRef = {id, name, cover_url}`.
+`GuessOut = {person: PersonRef, score, evidence}`; `PersonRef = {id, name, cover_url, kind, relation}` (`relation`
+`in` | `related` in an item's `people` and `tags`, section 10; a reference from a box is always `in`).
 
 People (`/api`): `GET people?q&filter=all|named|unnamed&sort=items|name|recent&cursor&limit` -> `PersonPage`;
 `POST people {name, face_ids?}`; `GET|PATCH|DELETE people/{id}` (`PATCH {name?, cover_face_id?}`; 422 when the
 cover face's photo is in the trash or the vault; `PersonRef.cover_url` skips such a chosen cover and uses the
 automatic one);
 `POST people/merge {target_id, source_ids}` (PersonOut with `followed`: the look-alikes merged along, section 10);
-`POST items/{uid}/animals {x, y, w, h, species?}` (an owner-drawn pet box, 201 AnimalOut; 400 `species_needed` without a
-species or a model, 422 for a box outside the photo or under half a percent of it, photos only) and
-`POST items/{uid}/animals/detect {threshold?}` (the detector once more at a lower threshold, the new boxes; 409
-`models_unavailable`), section 22; `GET people/{id}/faces`; `GET people/{id}/items` (faces, bodies and tags);
+`POST items/{uid}/animals {x, y, w, h, species?, t?}` (an owner-drawn pet box on a photo or, with `t` seconds, on a
+video's frame, 201 AnimalOut; 400 `species_needed` without a species or a model, 400 `frame_time_needed` for a
+video without `t`, 422 for a box outside the frame or under half a percent of it) and
+`POST items/{uid}/animals/detect {threshold?}` (the detector once more at a lower threshold, the new boxes; on a
+video over the poster and up to 12 sampled frames; 409 `models_unavailable`), section 22; `GET people/{id}/faces`;
+`GET people/{id}/items?relation=in|related|all` (default `in`: faces, bodies, animal boxes and 'in' tags; `related`:
+the items about them, section 10);
 `GET faces/unassigned`; `POST faces/assign {face_ids, person_id | new_person_name | null}`; `DELETE faces/{id}`;
 `POST bodies/assign {body_ids, person_id | new_person_name | null}`; `DELETE bodies/{id}`;
 `POST guesses/confirm {faces: [id], bodies: [id]}`; `POST guesses/reject {faces, bodies}`;
-`GET suggestions`; `POST suggestions/dismiss {a, b}`; `POST items/{uid}/tags {person_id | new_person_name}`;
+`GET suggestions`; `POST suggestions/dismiss {a, b}`; `POST items/{uid}/tags {person_id | new_person_name, kind?,
+species?, relation?}` (a person or a pet: `kind 'pet'` with `species` names a new pet, 400 `species_needed`
+without one, section 22; `relation` `in` | `related`, default `in`, the other relation for someone already tagged
+switches it, section 10; answers the item's tags as `PersonRef[]` with `relation`);
 `DELETE items/{uid}/tags/{person_id}`; `POST recluster`.
-`PersonOut = {id, name, cover_url, cover_face_id, face_count, item_count, guess_count, created_at}` (counts over live, non-vault items).
+`PersonOut = {id, name, cover_url, cover_face_id, face_count, item_count, guess_count, created_at, kind, species,
+animal_count, confirmed_faces, followed, related_count}` (counts over live, non-vault items; `item_count` means
+'in', `related_count` the items related to them, section 10).
 
 Documents (`/api/documents`): `GET ?type&group&q&cursor&limit` -> `DocumentPage{items:[{item: ItemCard, document: DocumentOut}], next_cursor, total}`;
 `GET types` -> `[{type, group, label, count}]`; `GET {uid}`; `PATCH {uid} {doc_type?, fields?, title?, doc_date?, person_name?}`;
@@ -629,9 +685,13 @@ browser's viewer works.
 
 System (`/api/system`): `GET` -> `{version, gpu{available, name, provider}, models[{key, present, loaded, provider}],
 queues, disk, wallet{configured, missing[]}, timezone, data_dir_free_bytes, forwards{enabled, unchecked, forwards, received,
-running} (section 29)}`; `POST models/download` (starts the
-downloader in a thread; progress via `GET`); `POST housekeeping` (no orphan sweep); `POST retry-failed` ->
-`{requeued}` (failed uploads whose bytes are kept, errored jobs, item statuses back to `pending`).
+running} (section 29), storage{tiered, tiers[{key, path, holds, free_bytes, total_bytes, shared_with}], migration{active,
+running, pending_files, pending_bytes, moved_files, moved_bytes, error, started_at, finished_at}}, backup{enabled, dir, hour,
+keep, running, progress, last, snapshots[], next_run_at, free_bytes, total_bytes} (section 31)}`; `POST models/download`
+(starts the downloader in a thread; progress via `GET`); `POST housekeeping` (no orphan sweep); `POST retry-failed` ->
+`{requeued}` (failed uploads whose bytes are kept, errored jobs, item statuses back to `pending`); `POST backup` ->
+`{started, running}` (a snapshot now, section 31); `GET throughput?range=hour|day|week` -> `ThroughputOut` (finished
+jobs per bucket by type, section 32; 422 for another range).
 
 Timeline, albums, map and places, share links, video encoders and device uploads: sections 23 to 28.
 
@@ -699,6 +759,31 @@ editor in group scope ("Applies to all N tracks of this person in the video", a 
 person who leaves and comes back is named, moved, unassigned, confirmed or removed in one go; a chevron shows the
 single tracks for a mis-detection.
 
+Pets in videos and related items (sections 10 and 22): the "Tag someone" button opens "Tag a person or pet", whose
+picker (`PersonPicker` with `kind="all"`) lists people and then a Pets section, and offers a typed name as "Create"
+(a person) and "New pet"; the latter asks "What is {name}?" with the ten species before posting `kind: 'pet'` and
+`species`. The form's switch "Not in the picture, related to them" posts `relation: 'related'`; such tags show under
+"Related to" with a link mark, and every tag the owner made has a chip menu ("Options for {name}") with "Make this
+'in'" or "Make this 'related'" and "Remove". The person and pet pages have a "Related" tab (`items?relation=related`,
+count `related_count`; the Items tab keeps sending no relation). "Add a pet box" and "Find pets again" also appear
+for videos: draw mode pauses the player and keeps it paused, the box is drawn over the picture area of the frame on
+screen ("Whole frame" takes it all) and is posted with `t`, the viewer's `currentFrameTime`; the new box shows as a
+track chip under the video.
+
+Header (2026-11-08, `components/shell/Header.tsx`, `Nav.tsx`, `HeaderMenu.tsx`): on md and up the bar
+holds the site name (from lg), Library and People as links, a Documents menu (All documents and the six
+document groups, `/documents?group=<id>`) and a More menu in two groups (Browse: Albums, Map, Vault with its
+locked or open state; Tidy up: Review with its waiting count, Trash; a dot on the trigger while Review has
+items), then on the right the vault countdown while it is open, an Upload button and the account menu (the
+owner's initial): "Signed in as", a Settings submenu with the eight sections (`settings/sections.ts`, shared
+with the Settings page), a Theme submenu (System, Light, Dark as radio items) and Sign out. Triggers show
+icons only below lg. `HeaderMenu` is an ARIA menu: Enter, Space or ArrowDown opens it on the first item,
+arrows, Home and End move, ArrowRight or Enter opens a submenu on its first item, ArrowLeft or Escape goes
+back, Escape closes and focuses the trigger, Tab closes; a submenu opens on hover with the mouse and on tap,
+and flies out to the left when there is no room on the right; a click outside or a route change closes it.
+Phones keep the bottom tab bar; its More sheet lists the same groups under headings (Browse, Tidy up,
+Account), then the theme switch and Sign out.
+
 ## 15. Configuration (env)
 
 | Variable | Default | Meaning |
@@ -729,6 +814,8 @@ single tracks for a mis-detection.
 | `OCR_ENABLED`, `OCR_MAX_PAGES` | true, 50 | |
 | `WALLET_PASS_TYPE_ID`, `WALLET_TEAM_ID`, `WALLET_ORG_NAME`, `WALLET_DIR`, `WALLET_KEY_PASSWORD` | unset, unset, site title, `DATA_DIR/wallet`, unset | Apple Wallet (the key password only when key.pem is encrypted) |
 | `WORKERS_ENABLED` | true (false in tests) | |
+| `ORIGINALS_DIR` | unset (= `DATA_DIR`) | the folder (another disk) for `originals/`, `staging/` and `failed/` (section 31) |
+| `BACKUP_DIR`, `BACKUP_HOUR`, `BACKUP_KEEP` | unset (backups off), 3, 14 | nightly snapshots: where, the local hour, how many are kept (section 31) |
 | `VIDEO_ENCODER`, `VAAPI_DEVICE` | `auto`, `/dev/dri/renderD128` | web copy encoder: `auto`, `h264_nvenc`, `h264_vaapi`, `h264_qsv`, `libx264` (section 27) |
 | `VIDEO_PREVIEW_MAX_HEIGHT`, `VIDEO_PREVIEW_MAXRATE_KBPS`, `VIDEO_PREVIEW_CRF`, `VIDEO_STREAM_MAX_KBPS` | 1080, 6000, 23, 8000 | web copy rendition and the bitrate up to which H.264 originals stream as they are |
 | `GEO_ENABLED` | true | download and use the GeoNames gazetteer for place names (section 25) |
@@ -1125,6 +1212,22 @@ without a box there is nothing to name:
 - Tests: the create route with models off (crop file written, species from the body, 400 without one, the
   box matched to a pet of that species when a look-alike pet exists, `animal_count`), the detect route with
   models off (409), a user-drawn box surviving `carry_over`, the box inside the frame and large enough.
+
+Pets in videos (2026-11-08, later). A video's animal is often missed and "Tag someone" knew people only:
+- `POST /api/items/{uid}/tags` takes a pet too: `person_id` of a pet, or `new_person_name` with `kind: 'pet'`
+  and `species` (400 `species_needed` without one); a pet tag means the pet is in the item, like a person
+  tag, and `ItemDetail.people` lists it with `kind 'pet'`. The "Tag someone" form lists people and pets (the
+  picker's pet section) and asks for the species when a new pet is named.
+- `POST /api/items/{uid}/animals` takes `t` (seconds) for a video: the frame at `t` is extracted
+  (`video.extract_frame_image` on the original, else the web copy), the box is cut from it and stored with
+  `frame_time_s = t`; a video without `t` answers 400 `frame_time_needed`. "Add a pet box" in a video draws
+  over the paused frame and posts the player's current time; the new box becomes a track chip.
+- `POST /api/items/{uid}/animals/detect` on a video runs the detector at the lower threshold over the poster
+  and up to `REDETECT_VIDEO_FRAMES` (12) frames sampled evenly (`video.frames_at`), keeps per frame the boxes
+  over no stored box of that frame (IoU under 0.5), and stores them with their `frame_time_s`.
+- Tests: a pet tag with a new name and species, the species-less 400, the video box with `t` (frame cut from a
+  generated clip, `frame_time_s` stored), the 400 without `t`, the video detect route with a faked detector
+  storing boxes with times and skipping a frame's stored box.
 
 ## 23. Timeline (`app/api/timeline.py`, `components/timeline/`)
 
@@ -1574,3 +1677,85 @@ Tests: both parsers on anonymised copies of the two OCR texts measured on 2026-1
 Traffic Police challan page and the thermal parking bill), the detection scores of each against the other
 and against a receipt and an invoice, the pay-portal choice, and the startup reparse of an automatic `other`
 document.
+
+## 31. Storage tiers and nightly backups (`app/storage.py`, `app/tiers.py`, `app/backup.py`)
+
+Three disks, three jobs. A fast disk holds the bytes the owner uploaded; the disk the app runs from holds
+the database and everything made from the originals (previews, thumbnails, page renders, streaming copies,
+crops, the served site); a large slow disk holds a snapshot a night. Nothing changes when the two settings
+are unset: one folder, as before.
+
+**Tiers.** `ORIGINALS_DIR` is the originals root: `originals/`, `staging/` and `failed/` live there
+(`storage.TIER_DIRS`); every other folder stays under `DATA_DIR` (`storage.DERIVED_DIRS`). The same path
+pattern applies under either root, so `storage.rel`/`from_rel`, `_is_referenced` and the sweeper only need
+the top folder name. `ORIGINALS_DIR` equal to `DATA_DIR` means one tier. `GET /api/system` reports
+`storage.tiers` with each root's free and total bytes and what it holds; a tier on the same filesystem as an
+earlier one carries `shared_with` so the Settings page counts a disk once. `disk` keeps meaning the disk that
+receives uploads.
+
+**Switching an existing library.** Set `ORIGINALS_DIR` and restart. At startup, before recovery and the
+workers, `tiers.move_staged()` moves every `staging/*.part` and `failed/*.part` left under `DATA_DIR`
+(copy beside the destination, size check, fsync, rename, unlink; synchronous, because chunk writes must
+never race it; a file already present under the new root wins). The originals follow on a nice-19 thread
+(`tiers.start()` -> `migrate_originals`): one file at a time, a destination that already exists with the same
+size and mtime (a copy made by hand before the switch) is kept and only the old file removed; empty shard
+folders and `DATA_DIR/originals` itself go at the end. While a legacy file remains, `storage.original_path`
+returns it, so viewing, downloading and analysis keep working during the move, and the sweeper walks the
+legacy folder too. `GET /api/system` reports `storage.migration` (pending and moved counts and bytes, the
+last error); the move resumes at the next start when it was interrupted. Setting `ORIGINALS_DIR` back is not
+automatic: move the three folders by hand.
+
+**Backups.** With `BACKUP_DIR` set, `backup.start()` runs a nice-19 thread that takes one snapshot a day at
+`BACKUP_HOUR` (default 3) local time. Layout: `BACKUP_DIR/snapshots/<YYYY-MM-DD>T<HHMM>/` holds `cloud.db` (an
+online copy through SQLite's backup API that passed `PRAGMA quick_check`), `secret.key`, `learned/`,
+`wallet/` and `originals/<sh>/<file>`; an original whose size and mtime match the previous snapshot's copy is a
+hard link to it, so a night costs only what changed. `BACKUP_DIR/latest` points at the newest complete
+snapshot; `snapshots/.partial-<name>` is the one being written and is deleted at the next run if left over.
+After each run the newest `BACKUP_KEEP` (default 14) snapshots are kept. Not in a snapshot: derived files
+(rebuilt from the originals), staging and failed uploads, `tmp/`, `site/`, and `.env` (outside `DATA_DIR`).
+A run never starts while the originals are still being moved, a missed night (the server was off) is made
+up five minutes after start when the last complete snapshot is older than a day, a first snapshot waits for
+the hour, and a failed run is tried again an hour later. The outcome is kept in kv `backup_last` (started_at,
+finished_at, ok, error, snapshot, files, bytes_copied, bytes_linked, duration_s, reason) and shown by
+`GET /api/system` as `backup` (with `next_run_at`, the snapshot names newest first, the backup disk's free
+space and, while a run goes, `progress{phase, files_total, files_done, bytes_copied, bytes_linked}`).
+`POST /api/system/backup` takes one now (Settings > System > Back up now); a run already going is reported,
+not doubled.
+
+**Restore.** Stop the server; copy `snapshots/<name>/cloud.db` to `DATA_DIR/cloud.db` (remove a stale
+`cloud.db-wal` and `cloud.db-shm`), `secret.key`, `learned/` and `wallet/` into `DATA_DIR`, and `originals/`
+into the originals root; start. Previews, thumbnails and streaming copies of items that lost them are
+rebuilt with "Process again" (section 13) or `POST /api/system/video/requeue`.
+
+Frontend (section 14): Settings > System shows a Storage card (each disk once, with its free space and what
+it holds; the move's progress while legacy originals remain) and a Backups card (the last snapshot and its
+outcome, the next run, snapshots kept, the backup disk, "Back up now", the progress bar while a run goes;
+with backups off, how to turn them on).
+
+Tests: paths under both roots, `rel`/`from_rel`, the legacy fallback, `move_into_place` across filesystems,
+an upload landing on the originals root and being served, `move_staged`, `migrate_originals` (fresh, already
+copied, damaged copy, interrupted and resumed), the sweeper over both roots, `has_room_for` over both disks,
+snapshot contents and hard links, retention, a failed run leaving no partial snapshot, legacy originals in a
+snapshot, the schedule (`next_run`), and "Back up now" through the API.
+
+## 32. Processing speed (`app/throughput.py`, Settings > System)
+
+Every job that ran to a verdict leaves a row in `job_runs` (`type`, `queue`, `finished_at`, `duration_ms`,
+`ok`); a job deferred because the disk is full or ffmpeg could not run did not run. Housekeeping deletes
+rows older than `throughput.KEEP_DAYS` (14). `GET /api/system/throughput?range=hour|day|week` sums them into
+buckets aligned to the local clock (`LOCAL_TIMEZONE`), the last bucket holding now (so partial): the hour as
+60 one-minute buckets, the day as 24 one-hour buckets, the week as 28 six-hour buckets. The reply lists every
+job type in a fixed order with a label (`ingest` "Files stored", `analyze` "Photos and videos analysed", `text`
+"Documents read", `video_preview` "Video web copies", `guess` "Person guesses", `recluster` "Face clustering
+runs"), its total and failed counts, the mean duration in ms, and per bucket the finished and the failed
+counts; `per_minute` gives each type's finished runs per minute over the last ten minutes.
+
+Frontend (section 14): a "Processing speed" card in Settings > System with a range switch (Last hour, 24 hours,
+7 days), one small column chart per job type (one hue for finished runs, the danger colour stacked for
+failures, a legend, hover and focus tooltips with the bucket's time, counts and mean duration) plus the
+type's total, mean duration and current rate; "Show as table" lists the same numbers. The card polls every
+30 seconds while the tab is open.
+
+Tests: bucketing of the last hour (placement, failed counts, mean duration, the ten-minute rate), day and
+week buckets aligned to Asia/Kolkata hours, pruning, the worker recording completed and failed runs, and the
+route (including 422 for an unknown range).

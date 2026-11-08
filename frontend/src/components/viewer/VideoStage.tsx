@@ -5,11 +5,26 @@
 // It also keeps `frameTimeRef` at the presentation time of the frame on screen (from
 // requestVideoFrameCallback), which frame downloads send to the server: currentTime can sit
 // anywhere inside a frame, and the server returns the first frame at or after the time it gets.
-import { useEffect, useLayoutEffect, useState, type MutableRefObject, type RefObject } from 'react'
-import type { ItemDetail } from '../../lib/types'
-import { personName } from '../../lib/format'
+//
+// Draw mode (section 22, pets in videos): the player pauses, the owner drags a box over the pet in
+// the frame on screen (or takes the whole frame), picks the species, and the box is posted with the
+// frame's time; it then shows as a track chip under the video.
+import {
+  useEffect,
+  useLayoutEffect,
+  useState,
+  type MutableRefObject,
+  type PointerEvent as ReactPointerEvent,
+  type RefObject,
+} from 'react'
+import { useMutation } from '@tanstack/react-query'
+import { api } from '../../lib/api'
+import { SPECIES, type ItemDetail, type Species } from '../../lib/types'
+import { personName, speciesLabel } from '../../lib/format'
 import { posterTime } from '../../lib/preview'
+import { errorMessage } from '../admin/adminHooks'
 import { animalLabel, type BoxTarget } from './boxes'
+import { darkButton, useInvalidateItem } from './shared'
 import { boxInVideo, type Rect } from './videoSeek'
 
 interface Props {
@@ -22,9 +37,35 @@ interface Props {
   onDismissFace: () => void
   /** Set to the mediaTime of the frame last presented; null when unknown (see currentFrameTime). */
   frameTimeRef: MutableRefObject<number | null>
+  /** Draw mode (section 22): a box for a pet the detector missed, on the paused frame. */
+  drawing?: boolean
+  /** Draw mode ended (cancelled, or the box was added). */
+  onDrawEnd?: () => void
+  /** The time of the frame on screen (the viewer's currentFrameTime), sent as `t` with the box. */
+  frameTime?: () => number
+  onToast?: (message: string) => void
 }
 
 export { posterTime }
+
+/** The smallest box the owner can draw, in screen pixels. */
+const MIN_DRAW_PX = 24
+/** "Whole frame": the picture minus this margin on every side. */
+const WHOLE_MARGIN = 0.03
+const FULL = { x: 0, y: 0, w: 1, h: 1 }
+
+interface Drag {
+  x0: number
+  y0: number
+  x1: number
+  y1: number
+}
+interface NormBox {
+  x: number
+  y: number
+  w: number
+  h: number
+}
 
 // The frame on screen starts at or just before currentTime, less than one frame earlier. A tracked
 // time further away belongs to an earlier position whose new frame has not been presented yet.
@@ -72,9 +113,103 @@ function useFrameClock(videoRef: RefObject<HTMLVideoElement | null>, ref: Mutabl
   }, [videoRef, ref, src])
 }
 
-export default function VideoStage({ detail, src, videoRef, face, onDismissFace, frameTimeRef }: Props) {
+export default function VideoStage({ detail, src, videoRef, face, onDismissFace, frameTimeRef, drawing = false, onDrawEnd, frameTime, onToast }: Props) {
   const [rect, setRect] = useState<Rect | null>(null)
   useFrameClock(videoRef, frameTimeRef, src)
+
+  // Draw mode: where the picture sits inside the element (letterboxing), the drag, and the box awaiting its species.
+  const [picture, setPicture] = useState<Rect | null>(null)
+  const [drag, setDrag] = useState<Drag | null>(null)
+  const [pending, setPending] = useState<{ box: NormBox; t: number } | null>(null)
+  const invalidate = useInvalidateItem(detail.uid)
+
+  useEffect(() => {
+    if (!drawing) {
+      setDrag(null)
+      setPending(null)
+      setPicture(null)
+      return
+    }
+    const video = videoRef.current
+    if (!video) return
+    // The frame under the box must stay put: the player pauses and stays paused while drawing.
+    const pause = () => video.pause()
+    pause()
+    const update = () => setPicture(boxInVideo(video, FULL))
+    update()
+    const ro = new ResizeObserver(update)
+    ro.observe(video)
+    const events = ['loadedmetadata', 'resize', 'seeked'] as const
+    for (const e of events) video.addEventListener(e, update)
+    video.addEventListener('play', pause)
+    return () => {
+      ro.disconnect()
+      for (const e of events) video.removeEventListener(e, update)
+      video.removeEventListener('play', pause)
+    }
+  }, [drawing, videoRef])
+
+  const add = useMutation({
+    mutationFn: (v: { box: NormBox; t: number; species: Species }) => api.items.addAnimal(detail.uid, { ...v.box, species: v.species, t: v.t }),
+    onSuccess: () => {
+      setPending(null)
+      invalidate()
+      onDrawEnd?.()
+      onToast?.('Pet box added. Name it from its chip under the video.')
+    },
+    onError: (e) => onToast?.(errorMessage(e, 'Could not add the box')),
+  })
+
+  const now = () => {
+    const t = frameTime?.()
+    if (t !== undefined && Number.isFinite(t)) return t
+    const cur = videoRef.current?.currentTime
+    return cur !== undefined && Number.isFinite(cur) ? cur : 0
+  }
+  const point = (e: ReactPointerEvent<HTMLDivElement>) => {
+    const r = e.currentTarget.getBoundingClientRect()
+    return {
+      x: Math.min(Math.max(e.clientX - r.left, 0), r.width),
+      y: Math.min(Math.max(e.clientY - r.top, 0), r.height),
+      cw: r.width,
+      ch: r.height,
+    }
+  }
+  const onDrawDown = (e: ReactPointerEvent<HTMLDivElement>) => {
+    if (e.button !== 0 && e.pointerType === 'mouse') return
+    e.preventDefault()
+    e.currentTarget.setPointerCapture(e.pointerId)
+    const p = point(e)
+    setDrag({ x0: p.x, y0: p.y, x1: p.x, y1: p.y })
+  }
+  const onDrawMove = (e: ReactPointerEvent<HTMLDivElement>) => {
+    if (!drag) return
+    const p = point(e)
+    setDrag((d) => (d ? { ...d, x1: p.x, y1: p.y } : d))
+  }
+  const onDrawUp = (e: ReactPointerEvent<HTMLDivElement>) => {
+    if (!drag) return
+    const p = point(e)
+    const x0 = Math.min(drag.x0, p.x)
+    const y0 = Math.min(drag.y0, p.y)
+    const wpx = Math.abs(p.x - drag.x0)
+    const hpx = Math.abs(p.y - drag.y0)
+    setDrag(null)
+    if (wpx < MIN_DRAW_PX || hpx < MIN_DRAW_PX || !p.cw || !p.ch) return
+    setPending({ box: { x: x0 / p.cw, y: y0 / p.ch, w: wpx / p.cw, h: hpx / p.ch }, t: now() })
+  }
+  const dragRect = drag
+    ? { left: Math.min(drag.x0, drag.x1), top: Math.min(drag.y0, drag.y1), width: Math.abs(drag.x1 - drag.x0), height: Math.abs(drag.y1 - drag.y0) }
+    : null
+  const pendingRect =
+    pending && picture
+      ? {
+          left: picture.left + pending.box.x * picture.width,
+          top: picture.top + pending.box.y * picture.height,
+          width: pending.box.w * picture.width,
+          height: pending.box.h * picture.height,
+        }
+      : null
 
   useLayoutEffect(() => {
     const video = videoRef.current
@@ -129,6 +264,87 @@ export default function VideoStage({ detail, src, videoRef, face, onDismissFace,
             {name}
           </span>
         </div>
+      )}
+
+      {drawing && picture && !pending && (
+        <div
+          data-no-swipe
+          role="application"
+          aria-label="Draw a box over the pet"
+          className="absolute z-20 cursor-crosshair touch-none select-none"
+          style={{ left: picture.left, top: picture.top, width: picture.width, height: picture.height }}
+          onPointerDown={onDrawDown}
+          onPointerMove={onDrawMove}
+          onPointerUp={onDrawUp}
+          onPointerCancel={() => setDrag(null)}
+        >
+          {dragRect && (
+            <div
+              className="pointer-events-none absolute rounded-lg border-2 border-dashed border-emerald-300 bg-emerald-300/10"
+              style={dragRect}
+            />
+          )}
+        </div>
+      )}
+
+      {drawing && (
+        <div data-no-swipe className="absolute inset-x-0 top-0 z-30 flex flex-wrap items-center justify-center gap-2 p-2">
+          {!pending && (
+            <span role="status" className="rounded-full bg-black/70 px-3 py-1.5 text-sm font-semibold text-white">
+              {picture ? 'Paused. Drag over the pet in this frame' : 'Loading the video'}
+            </span>
+          )}
+          {!pending && picture && (
+            <button
+              type="button"
+              onClick={() => setPending({ box: { x: WHOLE_MARGIN, y: WHOLE_MARGIN, w: 1 - 2 * WHOLE_MARGIN, h: 1 - 2 * WHOLE_MARGIN }, t: now() })}
+              className={darkButton('default', 'bg-black/60')}
+            >
+              Whole frame
+            </button>
+          )}
+          <button type="button" onClick={() => onDrawEnd?.()} className={darkButton('default', 'bg-black/60')}>
+            Cancel
+          </button>
+        </div>
+      )}
+
+      {drawing && pending && (
+        <>
+          {pendingRect && (
+            <div className="pointer-events-none absolute z-20 rounded-lg border-2 border-emerald-300 bg-emerald-300/10" style={pendingRect} />
+          )}
+          <div
+            data-no-swipe
+            role="dialog"
+            aria-label="What is it?"
+            className="absolute left-1/2 top-1/2 z-30 w-[min(22rem,92%)] -translate-x-1/2 -translate-y-1/2 rounded-2xl bg-[#1b1b1b] p-3 text-white shadow-2xl"
+          >
+            <p className="mb-2 text-sm font-semibold">What is it?</p>
+            <div className="flex flex-wrap gap-1.5" role="group" aria-label="Species">
+              {SPECIES.map((sp) => (
+                <button
+                  key={sp}
+                  type="button"
+                  disabled={add.isPending}
+                  onClick={() => add.mutate({ ...pending, species: sp })}
+                  className="rounded-full border border-white/15 px-3 py-1.5 text-sm font-semibold text-white hover:bg-white/10 disabled:opacity-50"
+                >
+                  {speciesLabel(sp)}
+                </button>
+              ))}
+            </div>
+            {add.isPending && <p className="mt-2 text-xs text-white/60">Adding the box</p>}
+            <div className="mt-3 flex gap-2">
+              <button type="button" disabled={add.isPending} onClick={() => setPending(null)} className={darkButton('default')}>
+                Draw again
+              </button>
+              <button type="button" disabled={add.isPending} onClick={() => onDrawEnd?.()} className={darkButton('default')}>
+                Cancel
+              </button>
+            </div>
+          </div>
+        </>
       )}
     </div>
   )

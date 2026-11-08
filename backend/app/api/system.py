@@ -13,6 +13,11 @@ POST /api/system/retry-failed     retries what failed for good (ingest.retry_fai
                                   whose bytes are kept, errored jobs with their item status set back to
                                   'pending') -> {"requeued": int}. Holds worker.housekeeping_lock so it
                                   never runs beside housekeeping.
+Storage (section 31): SystemOut.storage = {tiered, tiers: storage.tiers(), migration: tiers.status()} and
+  SystemOut.backup = backup.status(); SystemOut.disk reports the disk that receives uploads.
+POST /api/system/backup           takes a snapshot now (backup.request_now) -> {started, running}
+GET  /api/system/throughput?range=hour|day|week  ThroughputOut: finished jobs per bucket by type
+                                  (app.throughput.summary, section 32); 422 for another range
 Video (section 27): SystemOut.video = app.media.encoders.status() plus the web copy counts (queued and
   running video_preview jobs; failed, done and pending from items.preview_status of live videos);
 POST /api/system/video/detect     probes the encoders again (a few seconds) -> the video dict
@@ -32,7 +37,10 @@ from typing import Any, Literal
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
+from app import backup as backup_mod
 from app import jobs, storage
+from app import throughput as throughput_mod
+from app import tiers as tiers_mod
 from app.db import tx
 from app.analysis import animals as animals_mod
 from app.analysis import forwards as forwards_mod
@@ -40,7 +48,8 @@ from app.media import encoders, video
 from app.api.deps import get_db, require_user
 from app.config import APP_VERSION, settings
 from app.util import now_iso
-from app.schemas import DiskStats, LearningApplyOut, LearningEnabledIn, LearningStatus, ModelStatus, Ok, SystemOut
+from app.schemas import (BackupOut, BackupStartOut, DiskStats, LearningApplyOut, LearningEnabledIn, LearningStatus,
+                         ModelStatus, Ok, StorageOut, SystemOut, ThroughputOut, TierOut)
 
 log = logging.getLogger(__name__)
 
@@ -135,7 +144,21 @@ def system(conn: sqlite3.Connection = Depends(get_db)) -> SystemOut:
         workers=settings.workers_enabled, download=_download_state(), video=_video_status(conn),
         forwards=forwards_mod.status(conn),
         pets=animals_mod.status(conn),
+        storage=StorageOut(tiered=storage.tiered(), tiers=[TierOut(**t) for t in storage.tiers()],
+                           migration=tiers_mod.status()),
+        backup=BackupOut(**backup_mod.status(conn)),
     )
+
+
+@router.post("/backup", response_model=BackupStartOut)
+def backup_now() -> BackupStartOut:
+    return BackupStartOut(**backup_mod.request_now())
+
+
+@router.get("/throughput", response_model=ThroughputOut)
+def throughput(range: Literal["hour", "day", "week"] = "hour",
+               conn: sqlite3.Connection = Depends(get_db)) -> ThroughputOut:
+    return ThroughputOut(**throughput_mod.summary(conn, range))
 
 
 def _video_status(conn: sqlite3.Connection) -> dict[str, Any]:

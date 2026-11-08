@@ -1,21 +1,26 @@
 // Viewer info panel: document card, people and guesses, free-form tags (TagsPanel), category with override, mis-click reasons,
 // labels, read text, file details, and the item actions (favourite, vault, reprocess, download, trash).
+// Tags (section 10): "Tag someone" lists people and pets (a new pet asks for its species) and can mark the item as
+// related to someone who is not in it; related tags show under "Related to" and each tag's menu switches the relation.
 import AlbumsSection from '../albums/AlbumsSection'
 import LocationRow from '../map/LocationRow'
-import { useState, type ReactNode } from 'react'
+import { useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from 'react'
 import { Link } from 'react-router'
 import { useMutation } from '@tanstack/react-query'
 import clsx from 'clsx'
 import {
   AlertCircle,
+  ChevronDown,
   Download,
   EyeOff,
   Forward,
+  Link2,
   Loader2,
   Lock,
   MoreHorizontal,
   PawPrint,
   RefreshCw,
+  ScanFace,
   Star,
   Tag,
   Trash2,
@@ -25,8 +30,27 @@ import {
   X,
 } from 'lucide-react'
 import { ApiError, api } from '../../lib/api'
-import { CATEGORIES, CATEGORY_LABELS, type Category, type ItemDetail, type PersonRef } from '../../lib/types'
-import { formatBytes, formatCount, formatDate, formatDuration, formatPercent, formatResolution, personName } from '../../lib/format'
+import {
+  CATEGORIES,
+  CATEGORY_LABELS,
+  SPECIES,
+  type Category,
+  type ItemDetail,
+  type PersonRef,
+  type Species,
+  type TagIn,
+  type TagRelation,
+} from '../../lib/types'
+import {
+  formatBytes,
+  formatCount,
+  formatDate,
+  formatDuration,
+  formatPercent,
+  formatResolution,
+  personName,
+  speciesLabel,
+} from '../../lib/format'
 import Select from '../Select'
 import { errorMessage } from '../admin/adminHooks'
 import VirtualDocument from '../documents/VirtualDocument'
@@ -57,7 +81,7 @@ interface Props {
     pendingKey: string | null
   }
   onEditBox: (target: BoxTarget, anchor: HTMLElement) => void
-  /** Draw mode for a pet the detector missed (section 22): the photo stage takes a box from the owner. */
+  /** Draw mode for a pet the detector missed (section 22): the photo or video stage takes a box from the owner. */
   onAddPetBox?: () => void
   /** Opened from the documents page: the document card comes first. */
   documentFirst?: boolean
@@ -82,44 +106,135 @@ export function Row({ label, value }: { label: string; value: ReactNode }) {
   )
 }
 
-function PersonChip({
-  person,
-  thumb,
-  removable,
-  removing,
-  onRemove,
-}: {
-  person: PersonRef
-  thumb: string | null | undefined
-  removable: boolean
-  removing: boolean
+const menuItemClass =
+  'flex min-h-11 w-full items-center gap-2.5 rounded-lg px-3 py-2 text-left text-sm text-white/90 hover:bg-white/10 focus-visible:bg-white/10 disabled:opacity-50'
+
+/** What the owner can do with a tag they made: switch its relation (the same POST with the other one) or remove it. */
+interface TagMenu {
+  relation: TagRelation
+  busy: boolean
+  onRelation: (relation: TagRelation) => void
   onRemove: () => void
-}) {
+}
+
+function PersonChip({ person, thumb, menu }: { person: PersonRef; thumb: string | null | undefined; menu?: TagMenu }) {
   const name = personName(person)
   const pet = person.kind === 'pet'
+  const related = person.relation === 'related'
+  const [open, setOpen] = useState(false)
+  const [alignRight, setAlignRight] = useState(false)
+  const root = useRef<HTMLLIElement>(null)
+  const trigger = useRef<HTMLButtonElement>(null)
+  const list = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (!open) return
+    const onDown = (e: Event) => {
+      if (!root.current?.contains(e.target as Node)) setOpen(false)
+    }
+    document.addEventListener('pointerdown', onDown)
+    list.current?.querySelector<HTMLElement>('[role="menuitem"]')?.focus()
+    return () => document.removeEventListener('pointerdown', onDown)
+  }, [open])
+
+  const toggle = () => {
+    if (!open) {
+      // The menu hangs from the chip's left edge unless that would run past the panel.
+      const r = root.current?.getBoundingClientRect()
+      const bound = root.current?.closest('aside')?.getBoundingClientRect()
+      setAlignRight(!!r && r.left + 232 > (bound?.right ?? window.innerWidth) - 8)
+    }
+    setOpen((v) => !v)
+  }
+  const onKeyDown = (e: KeyboardEvent) => {
+    if (!open) return
+    const items = Array.from(list.current?.querySelectorAll<HTMLElement>('[role="menuitem"]') ?? [])
+    const at = items.indexOf(document.activeElement as HTMLElement)
+    if (e.key === 'Escape') {
+      e.stopPropagation()
+      e.preventDefault()
+      setOpen(false)
+      trigger.current?.focus()
+    } else if (e.key === 'ArrowDown') {
+      e.preventDefault()
+      items[(at + 1) % items.length]?.focus()
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault()
+      items[(at - 1 + items.length) % items.length]?.focus()
+    } else if (e.key === 'Tab') {
+      setOpen(false)
+    }
+  }
+  const act = (fn: () => void) => () => {
+    setOpen(false)
+    fn()
+  }
+
+  const mark = related ? (
+    <Link2 className="size-3.5 text-white/70" aria-hidden />
+  ) : pet ? (
+    <PawPrint className="size-3.5 text-white/70" aria-hidden />
+  ) : (
+    <Tag className="size-3.5 text-white/70" aria-hidden />
+  )
   return (
-    <li className="flex max-w-full items-center rounded-full bg-white/10 transition-colors hover:bg-white/15">
+    <li ref={root} className="relative flex max-w-full items-center rounded-full bg-white/10 transition-colors hover:bg-white/15" onKeyDown={onKeyDown}>
       <Link to={`/people/${person.id}`} className="flex h-10 min-w-0 items-center gap-2 rounded-full pl-1 pr-3 text-sm font-medium text-white">
         {thumb ? (
           <img src={thumb} alt="" className="size-8 shrink-0 rounded-full object-cover" />
         ) : (
-          <span className="flex size-8 shrink-0 items-center justify-center rounded-full bg-white/10">
-            {pet ? <PawPrint className="size-3.5 text-white/70" aria-hidden /> : <Tag className="size-3.5 text-white/70" aria-hidden />}
-          </span>
+          <span className="flex size-8 shrink-0 items-center justify-center rounded-full bg-white/10">{mark}</span>
         )}
-        {pet && thumb && <PawPrint className="-mr-0.5 size-3.5 shrink-0 text-white/70" aria-label="Pet" />}
+        {thumb && related && <Link2 className="-mr-0.5 size-3.5 shrink-0 text-white/70" aria-label="Related" />}
+        {thumb && !related && pet && <PawPrint className="-mr-0.5 size-3.5 shrink-0 text-white/70" aria-label="Pet" />}
         <span className={person.name ? 'truncate' : 'truncate text-white/70'}>{name}</span>
       </Link>
-      {removable && (
+      {menu && (
         <button
+          ref={trigger}
           type="button"
-          onClick={onRemove}
-          disabled={removing}
-          aria-label={`Remove tag ${name}`}
+          onClick={toggle}
+          disabled={menu.busy}
+          aria-label={`Options for ${name}`}
+          aria-haspopup="menu"
+          aria-expanded={open}
           className="-ml-2 flex size-10 shrink-0 items-center justify-center rounded-full text-white/60 hover:bg-white/10 hover:text-white disabled:opacity-50"
         >
-          {removing ? <Loader2 className="size-4 animate-spin" aria-hidden /> : <X className="size-4" aria-hidden />}
+          {menu.busy ? <Loader2 className="size-4 animate-spin" aria-hidden /> : <ChevronDown className="size-4" aria-hidden />}
         </button>
+      )}
+      {menu && open && (
+        <div
+          ref={list}
+          role="menu"
+          aria-label={`Tag ${name}`}
+          className={clsx(
+            'absolute top-full z-30 mt-1 w-56 max-w-[calc(100vw-1rem)] rounded-xl border border-white/10 bg-[#222] p-1.5 shadow-2xl',
+            alignRight ? 'right-0' : 'left-0',
+          )}
+        >
+          {menu.relation === 'related' ? (
+            <button type="button" role="menuitem" className={menuItemClass} onClick={act(() => menu.onRelation('in'))}>
+              <ScanFace className="size-4 shrink-0" aria-hidden />
+              <span className="min-w-0">
+                Make this 'in'
+                <span className="block text-xs text-white/50">{pet ? 'The pet is in the picture' : 'They are in the picture'}</span>
+              </span>
+            </button>
+          ) : (
+            <button type="button" role="menuitem" className={menuItemClass} onClick={act(() => menu.onRelation('related'))}>
+              <Link2 className="size-4 shrink-0" aria-hidden />
+              <span className="min-w-0">
+                Make this 'related'
+                <span className="block text-xs text-white/50">Not in the picture, it is about them</span>
+              </span>
+            </button>
+          )}
+          <button type="button" role="menuitem" className={menuItemClass} onClick={act(menu.onRemove)}>
+            <X className="size-4 shrink-0" aria-hidden />
+            Remove
+          </button>
+        </div>
       )}
     </li>
   )
@@ -171,11 +286,20 @@ export default function InfoPanel({
   documentFirst = false,
 }: Props) {
   const invalidate = useInvalidateItem(detail.uid)
-  const [removingId, setRemovingId] = useState<number | null>(null)
+  const [busyId, setBusyId] = useState<number | null>(null)
   const isVideo = detail.kind === 'video'
   const isDoc = detail.kind === 'pdf' || detail.kind === 'document'
-  // section 22: a pet box the owner draws, and a second look by the detector (photos only)
-  const canAddBoxes = detail.kind === 'image' && !!onAddPetBox
+  // section 22: a pet box the owner draws, and a second look by the detector (photos and videos)
+  const canAddBoxes = (detail.kind === 'image' || isVideo) && !!onAddPetBox
+  // section 10: the tag form's switch, and the new pet whose species is still to pick
+  const [related, setRelated] = useState(false)
+  const [newPet, setNewPet] = useState<string | null>(null)
+  useEffect(() => {
+    if (!tagging) {
+      setRelated(false)
+      setNewPet(null)
+    }
+  }, [tagging])
   const [moreBoxes, setMoreBoxes] = useState(false)
   const findPets = useMutation({
     mutationFn: () => api.items.detectAnimals(detail.uid),
@@ -193,6 +317,8 @@ export default function InfoPanel({
   for (const a of detail.animals) if (a.person && !thumbs.has(a.person.id)) thumbs.set(a.person.id, a.url)
   const unnamedAnimals = detail.animals.filter((a) => !a.person).length
   const tagIds = new Set(detail.tags.map((t) => t.id))
+  const inPeople = detail.people.filter((p) => p.relation !== 'related')
+  const relatedPeople = detail.people.filter((p) => p.relation === 'related')
   const unmatched = detail.faces.filter((f) => !f.person && !f.guess).length
   const guessTargets: BoxTarget[] = [
     ...detail.faces.filter((f) => !f.person && f.guess).map((box) => ({ kind: 'face' as const, box })),
@@ -212,23 +338,51 @@ export default function InfoPanel({
   const fail = (fallback: string) => (e: unknown) => onToast(errorMessage(e, fallback))
 
   const addTag = useMutation({
-    mutationFn: (choice: PersonChoice) => api.items.addTag(detail.uid, choiceBody(choice)),
-    onSuccess: () => {
+    mutationFn: (body: TagIn) => api.items.addTag(detail.uid, body),
+    onSuccess: (_d, body) => {
       invalidate()
       setTagging(false)
-      onToast('Tag added')
+      onToast(body.relation === 'related' ? 'Tagged as related' : 'Tag added')
     },
+  })
+  /** The picker's choice: a new pet first asks for its species, anyone else is tagged right away. */
+  const pickTag = (choice: PersonChoice) => {
+    if (addTag.isPending) return
+    if ('newName' in choice && choice.kind === 'pet') {
+      setNewPet(choice.newName)
+      return
+    }
+    addTag.mutate({ ...choiceBody(choice), relation: related ? 'related' : 'in' })
+  }
+  const setRelation = useMutation({
+    mutationFn: (v: { personId: number; relation: TagRelation }) => api.items.addTag(detail.uid, { person_id: v.personId, relation: v.relation }),
+    onMutate: (v) => setBusyId(v.personId),
+    onSettled: () => setBusyId(null),
+    onSuccess: (_d, v) => {
+      invalidate()
+      onToast(v.relation === 'related' ? 'Marked as related: not in the picture' : 'Marked as in the picture')
+    },
+    onError: fail('Could not change the tag'),
   })
   const removeTag = useMutation({
     mutationFn: (personId: number) => api.items.removeTag(detail.uid, personId),
-    onMutate: (personId) => setRemovingId(personId),
-    onSettled: () => setRemovingId(null),
+    onMutate: (personId) => setBusyId(personId),
+    onSettled: () => setBusyId(null),
     onSuccess: () => {
       invalidate()
       onToast('Tag removed')
     },
     onError: fail('Could not remove the tag'),
   })
+  const tagMenu = (p: PersonRef): TagMenu | undefined =>
+    tagIds.has(p.id) || p.relation === 'related'
+      ? {
+          relation: p.relation ?? 'in',
+          busy: busyId === p.id,
+          onRelation: (relation) => setRelation.mutate({ personId: p.id, relation }),
+          onRemove: () => removeTag.mutate(p.id),
+        }
+      : undefined
   const update = useMutation({
     mutationFn: (body: Parameters<typeof api.items.update>[1]) => api.items.update(detail.uid, body),
     onSuccess: (_d, body) => {
@@ -404,7 +558,7 @@ export default function InfoPanel({
           {inFrame.length > 0 ? (
             <ul className="flex flex-wrap gap-2" aria-label="People in the frame">
               {inFrame.map((p) => (
-                <PersonChip key={p.id} person={p} thumb={thumbs.get(p.id)} removable={false} removing={false} onRemove={() => {}} />
+                <PersonChip key={p.id} person={p} thumb={thumbs.get(p.id)} />
               ))}
             </ul>
           ) : (
@@ -415,23 +569,36 @@ export default function InfoPanel({
 
       {(!isDoc || detail.people.length > 0 || detail.faces.length > 0) && (
         <Section title={isVideo ? 'In this video' : detail.people.some((p) => p.kind === 'pet') || detail.animals.length > 0 ? 'People and pets' : 'People'}>
-          {detail.people.length > 0 ? (
+          {inPeople.length > 0 ? (
             <ul className="flex flex-wrap gap-2" aria-label="People in this item">
-              {detail.people.map((p) => (
-                <PersonChip
-                  key={p.id}
-                  person={p}
-                  thumb={thumbs.get(p.id) ?? p.cover_url}
-                  removable={tagIds.has(p.id)}
-                  removing={removingId === p.id}
-                  onRemove={() => removeTag.mutate(p.id)}
-                />
+              {inPeople.map((p) => (
+                <PersonChip key={p.id} person={p} thumb={thumbs.get(p.id) ?? p.cover_url} menu={tagMenu(p)} />
               ))}
             </ul>
           ) : (
             <p className="text-sm text-white/60">
-              {detail.analysis_status === 'pending' ? 'Still looking for people.' : 'No one is tagged here yet.'}
+              {detail.analysis_status === 'pending'
+                ? 'Still looking for people.'
+                : relatedPeople.length > 0
+                  ? isVideo
+                    ? 'No one is in this video.'
+                    : 'No one is in this picture.'
+                  : 'No one is tagged here yet.'}
             </p>
+          )}
+
+          {relatedPeople.length > 0 && (
+            <div className="mt-3">
+              <p className="mb-1.5 flex items-center gap-1.5 text-xs text-white/55">
+                <Link2 className="size-3.5" aria-hidden />
+                Related to
+              </p>
+              <ul className="flex flex-wrap gap-2" aria-label="Related to">
+                {relatedPeople.map((p) => (
+                  <PersonChip key={p.id} person={p} thumb={p.cover_url} menu={tagMenu(p)} />
+                ))}
+              </ul>
+            </div>
           )}
 
           {guessTargets.length > 0 && (
@@ -477,7 +644,7 @@ export default function InfoPanel({
           {tagging ? (
             <div className="mt-3 rounded-2xl bg-surface p-2.5">
               <div className="mb-2 flex items-center justify-between gap-2 px-1">
-                <p className="text-sm font-semibold text-ink">Tag someone not detected</p>
+                <p className="text-sm font-semibold text-ink">{newPet ? `What is ${newPet}?` : 'Tag a person or pet'}</p>
                 <button
                   type="button"
                   onClick={() => setTagging(false)}
@@ -487,7 +654,50 @@ export default function InfoPanel({
                   <X className="size-4" aria-hidden />
                 </button>
               </div>
-              <PersonPicker autoFocus excludeIds={detail.people.map((p) => p.id)} onPick={(c) => !addTag.isPending && addTag.mutate(c)} />
+              {newPet ? (
+                <div className="px-1">
+                  <div className="flex flex-wrap gap-1.5" role="group" aria-label="Species">
+                    {SPECIES.map((sp: Species) => (
+                      <button
+                        key={sp}
+                        type="button"
+                        disabled={addTag.isPending}
+                        onClick={() => addTag.mutate({ new_person_name: newPet, kind: 'pet', species: sp, relation: related ? 'related' : 'in' })}
+                        className="rounded-full border border-line px-3 py-1.5 text-sm font-semibold text-ink hover:bg-surface-2 disabled:opacity-50"
+                      >
+                        {speciesLabel(sp)}
+                      </button>
+                    ))}
+                  </div>
+                  <button type="button" disabled={addTag.isPending} onClick={() => setNewPet(null)} className="mt-2 h-10 rounded-full px-3 text-sm font-medium text-ink-soft hover:bg-surface-2">
+                    Back
+                  </button>
+                </div>
+              ) : (
+                <>
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={related}
+                    onClick={() => setRelated((v) => !v)}
+                    className="mb-2 flex min-h-10 w-full items-center gap-3 rounded-xl px-1 text-left text-sm text-ink hover:bg-surface-2"
+                  >
+                    <span
+                      aria-hidden
+                      className={clsx('relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors', related ? 'bg-accent' : 'bg-ink/20')}
+                    >
+                      <span className={clsx('inline-block size-4 rounded-full bg-white shadow transition-transform', related ? 'translate-x-6' : 'translate-x-1')} />
+                    </span>
+                    <span className="min-w-0 flex-1">
+                      Not in the picture, related to them
+                      <span className="block text-xs text-ink-soft">
+                        {related ? 'Shown under Related on their page and found by search.' : 'Off: they are in the picture.'}
+                      </span>
+                    </span>
+                  </button>
+                  <PersonPicker autoFocus kind="all" excludeIds={detail.people.map((p) => p.id)} onPick={pickTag} />
+                </>
+              )}
               {addTag.isPending && <p className="mt-2 px-1 text-xs text-ink-soft">Adding tag</p>}
               {addTag.error && (
                 <p className="mt-2 px-1 text-sm text-danger" role="alert">
@@ -524,7 +734,9 @@ export default function InfoPanel({
               )}
               {detail.animals.length === 0 && (
                 <p className="mt-2 text-xs text-white/55">
-                  No pet box here. Draw one over the pet, or let the detector look again more closely.
+                  {isVideo
+                    ? 'No pet box in this video. Pause on a frame with the pet and draw a box over it, or let the detector look again more closely.'
+                    : 'No pet box here. Draw one over the pet, or let the detector look again more closely.'}
                 </p>
               )}
             </div>

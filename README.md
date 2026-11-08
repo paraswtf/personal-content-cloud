@@ -117,7 +117,9 @@ Environment variables (all optional):
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `DATA_DIR` | `./data` | Database and all uploaded files. Put this on a large disk. |
+| `DATA_DIR` | `./data` | The database and everything made from your files (previews, thumbnails, streaming copies). |
+| `ORIGINALS_DIR` | same as `DATA_DIR` | Where the uploaded files themselves live. Point it at a fast or large disk; an existing library is moved over in the background after a restart. |
+| `BACKUP_DIR`, `BACKUP_HOUR`, `BACKUP_KEEP` | off, `3`, `14` | A snapshot of the database, the originals and the learned models every night at that local hour, on another disk; the newest `BACKUP_KEEP` are kept and unchanged files are shared between them. |
 | `MODELS_DIR` | `./models` | Downloaded models. |
 | `PORT`, `HOST` | `41010`, `127.0.0.1` | Where the server listens. |
 | `SITE_TITLE` | `Personal Content Cloud` | |
@@ -176,12 +178,21 @@ with OpenStreetMap data); photos never leave the server either way.
 
 ## Data, backups and disk
 
-All state lives in `DATA_DIR`: `cloud.db` (SQLite, WAL mode), `originals/` (untouched files),
-`thumbs/`, `previews/`, `pages/`, `videos/`, `faces/`, `bodies/`, `docphoto/` (generated, rebuildable),
-`staging/` and `failed/` (uploads), `wallet/` (your certificates), `site/` (the served copy of the
-frontend build), `tmp/`. Deleted items stay in the
-trash for `TRASH_DAYS` days. To back up, stop the server and copy `DATA_DIR`, or use
-`sqlite3 cloud.db ".backup copy.db"` plus a copy of `originals/` while it runs.
+Three places, three jobs. `DATA_DIR` holds `cloud.db` (SQLite, WAL mode) and everything that can be rebuilt
+from your files: `thumbs/`, `previews/`, `pages/`, `videos/`, `faces/`, `bodies/`, `docphoto/`, the learned
+models in `learned/`, your Wallet certificates in `wallet/`, the served copy of the frontend in `site/` and
+`tmp/`. `ORIGINALS_DIR` (the same folder unless you set it) holds the uploaded files themselves in
+`originals/` and the uploads on their way in (`staging/`, `failed/`); put it on your fast or biggest disk.
+`BACKUP_DIR`, when set, gets a snapshot every night at `BACKUP_HOUR`: the database (a consistent online
+copy), the originals, the share-link key, the learned models and the Wallet certificates, as
+`snapshots/<date>T<time>/` folders where unchanged originals are hard links to the night before, so each
+night costs only what changed; the newest `BACKUP_KEEP` snapshots are kept and `latest` points at the
+newest. Settings > System shows each disk's free space, the last and the next backup, and has a "Back up
+now" button. Deleted items stay in the trash for `TRASH_DAYS` days.
+
+To restore, stop the server, copy `cloud.db`, `secret.key`, `learned/` and `wallet/` from a snapshot into
+`DATA_DIR` (delete a stale `cloud.db-wal` and `cloud.db-shm` first) and `originals/` into `ORIGINALS_DIR`,
+then start it; previews that are missing are rebuilt when you choose "Process again" on an item.
 
 ## Development
 

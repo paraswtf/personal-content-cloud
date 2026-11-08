@@ -54,6 +54,7 @@ MIGRATED_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("animals", "species_source", "TEXT NOT NULL DEFAULT 'auto' CHECK (species_source IN ('auto','user'))"),
     ("animals", "species_scores", "TEXT"),
     ("animals", "source", "TEXT NOT NULL DEFAULT 'detector' CHECK (source IN ('detector','user'))"),
+    ("item_tags", "relation", "TEXT NOT NULL DEFAULT 'in' CHECK (relation IN ('in','related'))"),
 )
 _SCHEMA_FILE = Path(__file__).with_name("schema.sql")
 # Full-text tokenizer of items_fts. unicode61 treats combining marks (Unicode Mn, Mc) as separators,

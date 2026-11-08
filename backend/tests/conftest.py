@@ -31,6 +31,31 @@ def skip_without_models(*keys: str) -> None:
         pytest.skip(f"model(s) {', '.join(keys)} not available")
 
 
+OWNER_FOLDERS = ("DATA_DIR", "ORIGINALS_DIR", "BACKUP_DIR", "WALLET_DIR")
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _never_the_owners_folders(tmp_path_factory):
+    """Tests never read or write the owner's folders. DATA_DIR points at an empty folder for the whole
+    session (what a test without the data_dir fixture, and every reload_settings() without overrides,
+    falls back to), and ORIGINALS_DIR, BACKUP_DIR and WALLET_DIR from a shell that loaded .env are
+    ignored. Without it, a test without a data dir read the owner's learned thresholds in data/learned."""
+    from app.config import reload_settings
+
+    saved = {k: os.environ.get(k) for k in OWNER_FOLDERS}
+    os.environ["DATA_DIR"] = str(tmp_path_factory.mktemp("no-owner-data"))
+    for k in OWNER_FOLDERS[1:]:
+        os.environ.pop(k, None)
+    reload_settings()
+    yield
+    for k, v in saved.items():
+        if v is None:
+            os.environ.pop(k, None)
+        else:
+            os.environ[k] = v
+    reload_settings()
+
+
 @pytest.fixture()
 def data_dir(tmp_path):
     from app.config import reload_settings

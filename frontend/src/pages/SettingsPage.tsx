@@ -1,9 +1,8 @@
 // /settings: Account, Passkeys, Sessions, System, Learning, Wallet and Appearance tabs (?tab=<id>, default
 // account). The tab bodies live in components/shell/settings/.
-import { useRef, type KeyboardEvent } from 'react'
+import { useRef, type ComponentType, type KeyboardEvent } from 'react'
 import { useSearchParams } from 'react-router'
 import clsx from 'clsx'
-import { Fingerprint, GraduationCap, MonitorSmartphone, Palette, Server, UserRound, Wallet, Link2 } from 'lucide-react'
 import AccountTab from '../components/shell/settings/AccountTab'
 import PasskeysTab from '../components/shell/settings/PasskeysTab'
 import SessionsTab from '../components/shell/settings/SessionsTab'
@@ -13,19 +12,21 @@ import WalletTab from '../components/shell/settings/WalletTab'
 import AppearanceTab from '../components/shell/settings/AppearanceTab'
 import SharingTab from '../components/shell/settings/SharingTab'
 import { usePageTitle } from '../components/shell/title'
+import { SETTINGS_SECTIONS, type SettingsSectionId } from '../components/shell/settings/sections'
 
-const TABS = [
-  { id: 'account', label: 'Account', icon: UserRound, body: AccountTab },
-  { id: 'passkeys', label: 'Passkeys', icon: Fingerprint, body: PasskeysTab },
-  { id: 'sessions', label: 'Sessions', icon: MonitorSmartphone, body: SessionsTab },
-  { id: 'system', label: 'System', icon: Server, body: SystemTab },
-  { id: 'learning', label: 'Learning', icon: GraduationCap, body: LearningTab },
-  { id: 'sharing', label: 'Sharing', icon: Link2, body: SharingTab },
-  { id: 'wallet', label: 'Wallet', icon: Wallet, body: WalletTab },
-  { id: 'appearance', label: 'Appearance', icon: Palette, body: AppearanceTab },
-] as const
+const BODIES: Record<SettingsSectionId, ComponentType> = {
+  account: AccountTab,
+  passkeys: PasskeysTab,
+  sessions: SessionsTab,
+  system: SystemTab,
+  learning: LearningTab,
+  sharing: SharingTab,
+  wallet: WalletTab,
+  appearance: AppearanceTab,
+}
+const TABS = SETTINGS_SECTIONS.map((t) => ({ ...t, body: BODIES[t.id] }))
 
-type TabId = (typeof TABS)[number]['id']
+type TabId = SettingsSectionId
 
 export default function SettingsPage() {
   const [params, setParams] = useSearchParams()

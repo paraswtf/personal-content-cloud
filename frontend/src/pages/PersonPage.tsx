@@ -1,11 +1,12 @@
 // One person (/people/:id): rename in place, cover, their items (with the viewer), their faces
 // (move, remove, use as cover), guesses waiting for them, merge into someone else, delete.
-// A pet has no cover picker, faces or guesses: it shows its animal crops instead.
+// A pet has no cover picker, faces or guesses: it shows its animal crops instead. Both have a Related tab
+// (section 10): the items tagged as about them without them in it.
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import clsx from 'clsx'
-import { ArrowLeft, Check, CheckCheck, GitMerge, Images, ListChecks, PawPrint, Pencil, ScanFace, Sparkles, Star, Trash2, UserMinus, X } from 'lucide-react'
+import { ArrowLeft, Check, CheckCheck, GitMerge, Images, Link2, ListChecks, PawPrint, Pencil, ScanFace, Sparkles, Star, Trash2, UserMinus, X } from 'lucide-react'
 import { ApiError, api } from '../lib/api'
 import { SPECIES, type AnimalListItem, type FaceListItem, type GuessItem, type PersonKind, type Species } from '../lib/types'
 import { followedTail, formatCount, personName, speciesLabel } from '../lib/format'
@@ -26,7 +27,7 @@ import { LoadMore, SelectionBar } from '../components/admin/fields'
 import { useViewerParam } from '../components/public/useViewerParam'
 import { Avatar, Button, EmptyState, ErrorState, PageSpinner, buttonClasses } from '../components/ui'
 
-type Tab = 'items' | 'faces' | 'guesses' | 'animals'
+type Tab = 'items' | 'faces' | 'guesses' | 'animals' | 'related'
 
 function NameEditor({ id, name, kind, species }: { id: number; name: string | null; kind: PersonKind; species: Species | null }) {
   const toast = useToast()
@@ -138,9 +139,11 @@ function SpeciesEditor({ id, species }: { id: number; species: Species | null })
   )
 }
 
-function ItemsTab({ id }: { id: number }) {
-  const fetchPage = useCallback((c: string | null) => api.people.items(id, c, 60), [id])
-  const list = useItemList(['person-items', id], fetchPage)
+function ItemsTab({ id, relation = 'in' }: { id: number; relation?: 'in' | 'related' }) {
+  const related = relation === 'related'
+  // The default relation is not sent: the request stays what older servers know.
+  const fetchPage = useCallback((c: string | null) => api.people.items(id, c, 60, false, related ? 'related' : undefined), [id, related])
+  const list = useItemList(['person-items', id, relation], fetchPage)
   const viewer = useViewerParam(list.items, list.hasMore, list.loadMore, list.total)
   const openItem = useStableCallback((uid: string) => viewer.open(uid))
   return (
@@ -154,7 +157,15 @@ function ItemsTab({ id }: { id: number }) {
           hasMore={list.hasMore}
           loadMore={list.loadMore}
           loading={list.loading}
-          empty={<EmptyState icon={<Images className="size-8" aria-hidden />} title="No items yet" />}
+          empty={
+            related ? (
+              <EmptyState icon={<Link2 className="size-8" aria-hidden />} title="Nothing related yet">
+                Open an item, choose "Tag someone" and turn on "Not in the picture, related to them" to put it here.
+              </EmptyState>
+            ) : (
+              <EmptyState icon={<Images className="size-8" aria-hidden />} title="No items yet" />
+            )
+          }
         />
       )}
       {viewer.uid && <Viewer uid={viewer.uid} onClose={viewer.close} onPrev={viewer.onPrev} onNext={viewer.onNext} position={viewer.position} />}
@@ -491,16 +502,25 @@ function PersonView({ id }: { id: number }) {
   if (!p) return <PageSpinner />
   const name = personName(p)
   const pet = p.kind === 'pet'
-  const tab: Tab = pet ? (raw === 'animals' ? raw : 'items') : raw === 'faces' || raw === 'guesses' ? raw : 'items'
+  const tab: Tab = pet
+    ? raw === 'animals' || raw === 'related'
+      ? raw
+      : 'items'
+    : raw === 'faces' || raw === 'guesses' || raw === 'related'
+      ? raw
+      : 'items'
+  const relatedTab = { value: 'related' as const, label: 'Related', count: p.related_count ?? 0 }
   const tabs: { value: Tab; label: string; count?: number }[] = pet
     ? [
         { value: 'items', label: 'Items', count: p.item_count },
         { value: 'animals', label: 'Crops', count: p.animal_count },
+        relatedTab,
       ]
     : [
         { value: 'items', label: 'Items', count: p.item_count },
         { value: 'faces', label: 'Faces', count: p.face_count },
         { value: 'guesses', label: 'Guesses', count: p.guess_count },
+        relatedTab,
       ]
 
   return (
@@ -559,6 +579,7 @@ function PersonView({ id }: { id: number }) {
 
       <div role="tabpanel">
         {tab === 'items' && <ItemsTab id={id} />}
+        {tab === 'related' && <ItemsTab key="related" id={id} relation="related" />}
         {tab === 'faces' && <FacesTab id={id} name={name} coverId={p.cover_face_id} />}
         {tab === 'animals' && <AnimalsTab id={id} name={name} species={p.species} />}
         {tab === 'guesses' && <GuessesTab id={id} />}

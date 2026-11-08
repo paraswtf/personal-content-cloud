@@ -453,6 +453,8 @@ REDETECT_DEFAULT = 0.2  # the second look's detector threshold
 REDETECT_FLOOR = 0.1
 EXISTING_IOU = 0.5      # a box over a stored one by this much is the same animal
 SOURCES = ("detector", "user")
+REDETECT_VIDEO_FRAMES = 12  # a video's second look: frames sampled evenly besides the poster
+SAMPLE_GAP_S = 0.5          # the second look samples a video no denser than this
 
 
 class SpeciesNeeded(Exception):
@@ -461,6 +463,10 @@ class SpeciesNeeded(Exception):
 
 class NoImage(Exception):
     """The item is not a photo, or its original cannot be opened."""
+
+
+class FrameTimeNeeded(Exception):
+    """A box on a video needs the time of its frame."""
 
 
 class ModelsUnavailable(Exception):
@@ -487,6 +493,86 @@ def open_photo(item: sqlite3.Row) -> tuple[Image.Image, np.ndarray]:
         raise NoImage("no image")
     img = img.convert("RGB")
     return img, _to_bgr(img)
+
+
+def _video_paths(item: sqlite3.Row) -> list[Any]:
+    """Where a video's frames come from: the original, else the web copy (section 22)."""
+    paths = [storage.original_path(item["uid"], int(item["version"]), item["ext"]),
+             storage.video_preview_path(item["uid"], int(item["version"]))]
+    return [p for p in paths if p.is_file()]
+
+
+def open_frame(item: sqlite3.Row, t: float) -> tuple[Image.Image, np.ndarray]:
+    """A video's frame at t seconds as the analyze stage would see it (display-oriented, at most
+    ANALYSIS_SIDE px): from the original, else from the web copy. Raises NoImage when nothing decodes there."""
+    from app.analysis.pipeline import ANALYSIS_SIDE, _to_bgr
+    from app.media import video
+
+    if item["kind"] != "video":
+        raise NoImage("videos only")
+    img = None
+    for path in _video_paths(item):
+        try:
+            img = video.extract_frame_image(path, float(t), max_side=ANALYSIS_SIDE)
+        except Exception as e:  # noqa: BLE001 - ffmpeg could not run
+            log.warning("frame at %.2fs of %s failed: %s", t, path, e)
+            img = None
+        if img is not None:
+            break
+    if img is None:
+        raise NoImage(f"no frame at {float(t):.2f}s")
+    img = img.convert("RGB")
+    return img, _to_bgr(img)
+
+
+def video_info(item: sqlite3.Row) -> Any:
+    """A MediaInfo from the item row (duration, fps, size): what video.frames_at and poster_time need."""
+    from app.media.probe import MediaInfo
+
+    return MediaInfo(kind="video", mime=item["mime"], ext=item["ext"], width=item["width"], height=item["height"],
+                     duration_s=item["duration_s"], fps=item["fps"])
+
+
+def sample_times(info: Any, k: int = REDETECT_VIDEO_FRAMES) -> list[float]:
+    """The poster time and up to k times spread evenly over the clip (at least SAMPLE_GAP_S apart; one within
+    that of the poster is dropped), sorted (section 22, the second look on a video)."""
+    from app.media import video
+
+    d = max(0.0, float(info.duration_s or 0.0))
+    poster = float(video.poster_time(info))
+    times = [poster]
+    n = min(int(k), int(d / SAMPLE_GAP_S))
+    for i in range(n):
+        t = round(d * (i + 0.5) / n, 3)
+        if abs(t - poster) > SAMPLE_GAP_S:
+            times.append(t)
+    return sorted(times)
+
+
+def video_frames(item: sqlite3.Row) -> list[tuple[float, Image.Image, np.ndarray]]:
+    """(time, PIL RGB, BGR) of a video's poster frame and up to REDETECT_VIDEO_FRAMES sampled frames, from
+    the original, else the web copy. Raises NoImage when no frame decodes."""
+    from app.analysis.pipeline import ANALYSIS_SIDE, _to_bgr
+    from app.media import video
+
+    info = video_info(item)
+    times = sample_times(info)
+    out: list[tuple[float, Image.Image, np.ndarray]] = []
+    for path in _video_paths(item):
+        try:
+            frames = video.frames_at(path, info, times, max_side=ANALYSIS_SIDE)
+        except Exception as e:  # noqa: BLE001 - ffmpeg could not run
+            log.warning("frames of %s failed: %s", path, e)
+            continue
+        for t, f in zip(times, frames):
+            if f is not None:
+                f = f.convert("RGB")
+                out.append((t, f, _to_bgr(f)))
+        if out:
+            break
+    if not out:
+        raise NoImage("no frame decoded")
+    return out
 
 
 def embed_look(engine: Any | None, look: np.ndarray | None) -> np.ndarray | None:
@@ -531,12 +617,13 @@ def _count_animals(conn: sqlite3.Connection, item_id: int) -> None:
 
 
 def add_box(conn: sqlite3.Connection, item: sqlite3.Row, box: tuple[float, float, float, float], *,
-            species: str | None = None, engine: Any | None = None) -> int:
-    """A box the owner drew on a photo (x, y, w, h normalised, inside the frame, at least MIN_BOX_SHARE of
-    it): the padded crop is embedded when SigLIP is loaded, the species is the owner's (species_source
-    'user') or the zero-shot's best answer, else SpeciesNeeded; the row carries det_score 1.0 and source
-    'user'; items.animal_count follows and pets.assign_new_animals matches the box. Returns the box id.
-    Raises NoImage for a video or an unreadable original. Opens its own transaction."""
+            species: str | None = None, engine: Any | None = None, t: float | None = None) -> int:
+    """A box the owner drew on a photo, or on a video's frame at `t` seconds (x, y, w, h normalised, inside
+    the frame, at least MIN_BOX_SHARE of it): the padded crop is embedded when SigLIP is loaded, the species
+    is the owner's (species_source 'user') or the zero-shot's best answer, else SpeciesNeeded; the row
+    carries det_score 1.0, source 'user' and, for a video, frame_time_s = t; items.animal_count follows and
+    pets.assign_new_animals matches the box. Returns the box id. Raises FrameTimeNeeded for a video without
+    t and NoImage for an unreadable original or frame. Opens its own transaction."""
     from app.analysis import pets
 
     x, y, w, h = (float(v) for v in box)
@@ -545,7 +632,14 @@ def add_box(conn: sqlite3.Connection, item: sqlite3.Row, box: tuple[float, float
         raise ValueError("The box must lie inside the photo and cover at least half a percent of it")
     if species is not None and species not in SPECIES:
         raise ValueError(f"Unknown species {species!r}")
-    img, bgr = open_photo(item)
+    if item["kind"] == "video":
+        if t is None:
+            raise FrameTimeNeeded()
+        t = round(max(0.0, float(t)), 3)
+        img, bgr = open_frame(item, t)
+    else:
+        t = None
+        img, bgr = open_photo(item)
     H, W = bgr.shape[:2]
     px = (x * W, y * H, min(float(W), (x + w) * W), min(float(H), (y + h) * H))
     look = padded_crop(bgr, px)
@@ -569,7 +663,7 @@ def add_box(conn: sqlite3.Connection, item: sqlite3.Row, box: tuple[float, float
     now = now_iso()
     with tx(conn):
         aid = _store(conn, item_id, box=(x, y, w, h), det_score=1.0, species=species, species_source=species_source,
-                     scores=scores, frame_time_s=None, crop=crop, embedding=emb, source="user", now=now)
+                     scores=scores, frame_time_s=t, crop=crop, embedding=emb, source="user", now=now)
         _count_animals(conn, item_id)
         try:
             pets.assign_new_animals(conn, item_id)
@@ -580,37 +674,58 @@ def add_box(conn: sqlite3.Connection, item: sqlite3.Row, box: tuple[float, float
 
 def redetect(conn: sqlite3.Connection, item: sqlite3.Row, threshold: float = REDETECT_DEFAULT, *,
              engine: Any | None = None) -> list[int]:
-    """The detector once more on a photo, with `threshold` (floor REDETECT_FLOOR) for the animal classes.
-    Boxes over a stored box (IoU >= EXISTING_IOU) are left out; the rest are stored like the pipeline
-    stores them (source 'detector', the detector's species settled by the zero-shot check and the look-alike
-    vote, the look embedding) and matched to pets. Returns the new ids. Raises ModelsUnavailable without the
-    detector and NoImage for a video or an unreadable original. Opens its own transaction."""
+    """The detector once more, with `threshold` (floor REDETECT_FLOOR) for the animal classes: on a photo, or
+    on a video's poster frame and up to REDETECT_VIDEO_FRAMES frames sampled evenly (video_frames). Boxes over
+    a stored box of the same frame (IoU >= EXISTING_IOU; a video's stored box belongs to the sampled frame
+    nearest its time) are left out; the rest, at most MAX_ANIMALS per run (highest scores
+    first), are stored like the pipeline stores them (source 'detector', the detector's species settled by
+    the zero-shot check and the look-alike vote, the look embedding, a video frame's time) and matched to
+    pets. Returns the new ids. Raises ModelsUnavailable without the detector and NoImage for an unreadable
+    original or video. Opens its own transaction."""
     from app.analysis import pets
     from app.ml import persons
 
     if not available():
         raise ModelsUnavailable()
-    img, bgr = open_photo(item)
+    frames: list[tuple[float | None, Image.Image, np.ndarray]]
+    if item["kind"] == "video":
+        frames = list(video_frames(item))
+    else:
+        img, bgr = open_photo(item)
+        frames = [(None, img, bgr)]
     thr = max(REDETECT_FLOOR, min(0.9, float(threshold)))
-    found = persons.detect_classes(bgr, {c: thr for c in persons.ANIMAL_CLASSES})
-    recs = from_boxes(img, bgr, found)
     item_id = int(item["id"])
-    existing = [(float(r["x"]), float(r["y"]), float(r["w"]), float(r["h"]))
-                for r in conn.execute("SELECT x, y, w, h FROM animals WHERE item_id = ?", (item_id,))]
+    times = [t for t, _, _ in frames]
+
+    def frame_of(stored_t: float | None) -> float | None:
+        """The sampled frame a stored box belongs to: the nearest in time (a photo has one frame)."""
+        if stored_t is None or len(times) == 1:
+            return times[0]
+        return min(times, key=lambda x: abs(float(x) - float(stored_t)))  # type: ignore[arg-type]
+
+    stored: list[tuple[float | None, tuple[float, float, float, float]]] = [
+        (frame_of(r["frame_time_s"]), (float(r["x"]), float(r["y"]), float(r["w"]), float(r["h"])))
+        for r in conn.execute("SELECT x, y, w, h, frame_time_s FROM animals WHERE item_id = ?", (item_id,))]
+    recs: list[AnimalRecord] = []
+    for t, img, bgr in frames:
+        found = persons.detect_classes(bgr, {c: thr for c in persons.ANIMAL_CLASSES})
+        for rec in from_boxes(img, bgr, found, frame_time_s=t):
+            box = (rec.x, rec.y, rec.w, rec.h)
+            if any(ft == t and iou(box, e) >= EXISTING_IOU for ft, e in stored):
+                continue
+            stored.append((t, box))
+            recs.append(rec)
+    recs = sorted(recs, key=lambda r: -r.det_score)[:MAX_ANIMALS]
     engine = engine if engine is not None else look_engine()
     new_ids: list[int] = []
     now = now_iso()
     with tx(conn):
         for rec in recs:
-            box = (rec.x, rec.y, rec.w, rec.h)
-            if any(iou(box, e) >= EXISTING_IOU for e in existing):
-                continue
             emb = embed_look(engine, rec.look)
             species, scores = settle_species(emb, rec.species, engine=engine)
-            aid = _store(conn, item_id, box=box, det_score=rec.det_score, species=species, species_source="auto",
-                         scores=scores, frame_time_s=rec.frame_time_s, crop=rec.crop, embedding=emb,
-                         source="detector", now=now)
-            existing.append(box)
+            aid = _store(conn, item_id, box=(rec.x, rec.y, rec.w, rec.h), det_score=rec.det_score, species=species,
+                         species_source="auto", scores=scores, frame_time_s=rec.frame_time_s, crop=rec.crop,
+                         embedding=emb, source="detector", now=now)
             new_ids.append(aid)
         if new_ids:
             _count_animals(conn, item_id)

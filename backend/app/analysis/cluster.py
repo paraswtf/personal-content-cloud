@@ -675,8 +675,9 @@ def merge_persons(conn: sqlite3.Connection, target_id: int, source_ids: list[int
                 (target_id,),
             )
         conn.execute(
-            "INSERT OR IGNORE INTO item_tags(item_id, person_id, source, created_at) "
-            f"SELECT item_id, ?, MIN(source), MIN(created_at) FROM item_tags WHERE person_id IN ({s}) GROUP BY item_id",
+            "INSERT OR IGNORE INTO item_tags(item_id, person_id, source, relation, created_at) "
+            f"SELECT item_id, ?, MIN(source), MIN(relation), MIN(created_at) FROM item_tags WHERE person_id IN ({s}) "
+            "GROUP BY item_id",
             [target_id, *sources],
         )
         conn.execute(
@@ -769,7 +770,7 @@ def follow_merge(conn: sqlite3.Connection, target_id: int, accepted: float) -> l
         "WITH present AS ("
         "  SELECT item_id, person_id FROM faces WHERE person_id IS NOT NULL UNION "
         "  SELECT item_id, person_id FROM bodies WHERE person_id IS NOT NULL UNION "
-        "  SELECT item_id, person_id FROM item_tags), "
+        "  SELECT item_id, person_id FROM item_tags WHERE relation = 'in'), "
         "mine AS (SELECT p.item_id FROM present p JOIN items i ON i.id = p.item_id AND i.kind != 'video' "
         "         WHERE p.person_id = ?) "
         "SELECT DISTINCT person_id FROM present WHERE item_id IN (SELECT item_id FROM mine) AND person_id != ?",
@@ -834,7 +835,7 @@ def _co_occurring(conn: sqlite3.Connection) -> set[tuple[int, int]]:
             "WITH present AS ("
             "  SELECT item_id, person_id FROM faces WHERE person_id IS NOT NULL UNION "
             "  SELECT item_id, person_id FROM bodies WHERE person_id IS NOT NULL UNION "
-            "  SELECT item_id, person_id FROM item_tags) "
+            "  SELECT item_id, person_id FROM item_tags WHERE relation = 'in') "
             "SELECT DISTINCT a.person_id, b.person_id FROM present a "
             "JOIN present b ON b.item_id = a.item_id AND b.person_id > a.person_id "
             "JOIN items i ON i.id = a.item_id AND i.kind != 'video'"

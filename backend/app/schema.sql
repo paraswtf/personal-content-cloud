@@ -278,6 +278,9 @@ CREATE TABLE IF NOT EXISTS item_tags (
   item_id    INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
   person_id  INTEGER NOT NULL REFERENCES persons(id) ON DELETE CASCADE,
   source     TEXT NOT NULL DEFAULT 'user' CHECK (source IN ('user','guess')),
+  -- 'in': the person or pet is in the item; 'related': the item is about them without them in it
+  -- (a toy, their handwriting), shown under the person's Related tab and found by their name (section 10).
+  relation   TEXT NOT NULL DEFAULT 'in' CHECK (relation IN ('in','related')),
   created_at TEXT NOT NULL,
   PRIMARY KEY (item_id, person_id)
 );
@@ -407,6 +410,18 @@ CREATE TABLE IF NOT EXISTS jobs (
 CREATE INDEX IF NOT EXISTS jobs_pick ON jobs(queue, status, priority, id);
 -- enqueue(unique=True) looks for a live job with the same type and payload.
 CREATE INDEX IF NOT EXISTS jobs_dedup ON jobs(type, payload) WHERE status IN ('queued', 'running');
+
+-- One row per finished job, for the processing speed charts (docs/ARCHITECTURE.md section 32). Rows older
+-- than app.throughput.KEEP_DAYS are deleted at housekeeping.
+CREATE TABLE IF NOT EXISTS job_runs (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  type        TEXT NOT NULL,
+  queue       TEXT NOT NULL,
+  finished_at TEXT NOT NULL,
+  duration_ms INTEGER NOT NULL DEFAULT 0,
+  ok          INTEGER NOT NULL DEFAULT 1
+);
+CREATE INDEX IF NOT EXISTS job_runs_time ON job_runs(finished_at);
 
 -- Albums (docs/ARCHITECTURE.md section 24).
 CREATE TABLE IF NOT EXISTS albums (

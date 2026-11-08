@@ -28,9 +28,11 @@ CONTRACT (docs/ARCHITECTURE.md section 7).
   the attempt of jobs still running at a clean shutdown (jobs.refund_attempt).
 - Housekeeping every CLEANUP_INTERVAL_S on the main thread: stale running jobs, abandoned uploads
   (ingest.cleanup_stale_uploads), failed uploads kept longer than settings.trash_days
-  (ingest.expire_failed), the trash (ingest.expire_trash) and expired sessions
-  (app.auth.sessions.purge_expired). housekeeping() holds housekeeping_lock, so the manual
-  endpoint and the worker loop never run it at once.
+  (ingest.expire_failed), the trash (ingest.expire_trash), expired sessions
+  (app.auth.sessions.purge_expired) and job_runs older than throughput.KEEP_DAYS. housekeeping()
+  holds housekeeping_lock, so the manual endpoint and the worker loop never run it at once.
+- Every job that ran to a verdict (complete, or a failure that used an attempt) is recorded by
+  app.throughput for the processing speed charts (section 32); deferrals are not runs.
 - The orphan file sweep (ingest.sweep_orphan_files) walks every stored file, so it runs on its own
   low-priority thread: first SWEEP_FIRST_DELAY_S after start, then every SWEEP_INTERVAL_S.
 - run_in_background(key, fn, *args): one-off work that should not hold a request thread (page
@@ -54,7 +56,7 @@ import time
 import traceback
 from typing import Any, Callable
 
-from app import jobs
+from app import jobs, throughput
 from app.config import settings
 from app.db import connect, kv_get, kv_set, tx
 
@@ -273,11 +275,13 @@ def _handle(conn: sqlite3.Connection, job: sqlite3.Row) -> None:
                                     retry=False)
             else:
                 retried = _bookkeep(conn, f"record the failure of job {job['id']}", jobs.fail, int(job["id"]), tb)
+            throughput.record(conn, job["type"], job["queue"], False, time.monotonic() - started)
             if not retried:
                 log.error("job %s (%s) failed for good", job["id"], job["type"])
                 _final_failure(conn, job, exc)
             return
         _bookkeep(conn, f"complete job {job['id']}", jobs.complete, int(job["id"]))
+        throughput.record(conn, job["type"], job["queue"], True, time.monotonic() - started)
         log.debug("job %s (%s) done in %.2fs", job["id"], job["type"], time.monotonic() - started)
     finally:
         with _held_lock:
@@ -340,6 +344,10 @@ def _housekeeping(conn: sqlite3.Connection) -> dict[str, int]:
         out["pets"] = animals_mod.housekeeping(conn)
     except Exception:  # noqa: BLE001 - the species backfill never blocks housekeeping
         log.exception("housekeeping: species backfill failed")
+    try:
+        out["job_runs"] = throughput.prune(conn)
+    except Exception:  # noqa: BLE001 - the speed records never block housekeeping
+        log.exception("housekeeping: pruning the job runs failed")
 
     return out
 

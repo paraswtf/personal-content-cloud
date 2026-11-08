@@ -24,6 +24,10 @@
   --color-ok: #2b7a4b;
   --color-warn: #a2600f;
   --color-danger: #c0392b;
+  /* chart marks (Settings > System, Processing speed): finished runs and failures, validated as a pair
+     against the card surface in both modes (the dark failure red sits a step below --color-danger) */
+  --color-chart-1: #3656d1;
+  --color-chart-fail: #c0392b;
 
   /* aliases for the shared components */
   --color-brand: var(--color-accent);
@@ -54,6 +58,8 @@
     --color-ok: #5bbf88;
     --color-warn: #dfa451;
     --color-danger: #ee6a5f;
+    --color-chart-1: #4f6ff0;
+    --color-chart-fail: #e05a50;
     --shadow-card: 0 1px 2px rgb(0 0 0 / 0.4), 0 4px 16px rgb(0 0 0 / 0.25);
   }
 }
@@ -72,6 +78,8 @@
   --color-ok: #5bbf88;
   --color-warn: #dfa451;
   --color-danger: #ee6a5f;
+  --color-chart-1: #4f6ff0;
+  --color-chart-fail: #e05a50;
   --shadow-card: 0 1px 2px rgb(0 0 0 / 0.4), 0 4px 16px rgb(0 0 0 / 0.25);
 }
 :root[data-theme="light"] {

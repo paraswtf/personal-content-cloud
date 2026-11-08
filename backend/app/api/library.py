@@ -75,6 +75,7 @@ from app.schemas import (
     LabelOut,
     Ok,
     PageOut,
+    PersonRef,
     ReprocessIn,
     Stats,
 )
@@ -170,18 +171,23 @@ def _float_scores(raw: str | None) -> dict[str, float] | None:
     return out
 
 
-def _people_ids(conn: sqlite3.Connection, item_id: int) -> list[int]:
-    """Ids of the people and pets in an item (faces, bodies, animal boxes, tags), in display order."""
+def _people_of_item(conn: sqlite3.Connection, item_id: int) -> list[tuple[int, str]]:
+    """(person id, relation) of the people and pets of an item in display order: 'in' when a face, body,
+    animal box or an 'in' tag has them, else the tag's 'related' (section 10)."""
     rows = conn.execute(
-        "SELECT p.id FROM persons p WHERE p.id IN ("
-        "SELECT person_id FROM faces WHERE item_id = ? AND person_id IS NOT NULL UNION "
-        "SELECT person_id FROM bodies WHERE item_id = ? AND person_id IS NOT NULL UNION "
-        "SELECT person_id FROM animals WHERE item_id = ? AND person_id IS NOT NULL UNION "
-        "SELECT person_id FROM item_tags WHERE item_id = ?) "
-        "ORDER BY p.kind = 'pet', p.name IS NULL, p.name_key, p.id",
+        "SELECT p.id, MIN(x.relation) AS relation FROM ("
+        "SELECT person_id, 'in' AS relation FROM faces WHERE item_id = ? AND person_id IS NOT NULL UNION ALL "
+        "SELECT person_id, 'in' FROM bodies WHERE item_id = ? AND person_id IS NOT NULL UNION ALL "
+        "SELECT person_id, 'in' FROM animals WHERE item_id = ? AND person_id IS NOT NULL UNION ALL "
+        "SELECT person_id, relation FROM item_tags WHERE item_id = ?) x JOIN persons p ON p.id = x.person_id "
+        "GROUP BY p.id ORDER BY p.kind = 'pet', p.name IS NULL, p.name_key, p.id",
         (item_id, item_id, item_id, item_id),
     ).fetchall()
-    return [int(r["id"]) for r in rows]
+    return [(int(r["id"]), str(r["relation"])) for r in rows]
+
+
+def _related(ref: PersonRef, relation: str) -> PersonRef:
+    return ref if relation == "in" else ref.model_copy(update={"relation": relation})
 
 
 def _grouped(out, groups: dict[tuple[str, int], int], kind: str):
@@ -205,14 +211,15 @@ def item_detail(conn: sqlite3.Connection, row: sqlite3.Row) -> ItemDetail:
     ).fetchall()
     groups = video_groups(faces, bodies, animals) if row["kind"] == "video" else {}
     tags = conn.execute(
-        "SELECT p.id FROM item_tags t JOIN persons p ON p.id = t.person_id "
+        "SELECT p.id, t.relation FROM item_tags t JOIN persons p ON p.id = t.person_id "
         "WHERE t.item_id = ? ORDER BY p.name IS NULL, p.name_key, p.id",
         (item_id,),
     ).fetchall()
-    people_ids = _people_ids(conn, item_id)
+    people = _people_of_item(conn, item_id)
     # Every person shown on the item (boxes, guesses, tags) in one lookup.
     refs = person_refs(conn, box_person_ids(faces) | box_person_ids(bodies) | {int(t["id"]) for t in tags}
-                       | {int(a["person_id"]) for a in animals if a["person_id"] is not None} | set(people_ids))
+                       | {int(a["person_id"]) for a in animals if a["person_id"] is not None}
+                       | {p for p, _ in people})
     labels = conn.execute("SELECT label, score FROM item_labels WHERE item_id = ? ORDER BY score DESC, label",
                           (item_id,)).fetchall()
     doc = conn.execute("SELECT * FROM documents WHERE item_id = ?", (item_id,)).fetchone()
@@ -230,8 +237,8 @@ def item_detail(conn: sqlite3.Connection, row: sqlite3.Row) -> ItemDetail:
         faces=[_grouped(face_out(conn, f, refs), groups, "face") for f in faces],
         bodies=[_grouped(body_out(conn, b, refs), groups, "body") for b in bodies],
         animals=[_grouped(animal_out(conn, a, refs), groups, "animal") for a in animals],
-        tags=[refs[int(t["id"])] for t in tags if int(t["id"]) in refs],
-        people=[refs[p] for p in people_ids if p in refs],
+        tags=[_related(refs[int(t["id"])], t["relation"]) for t in tags if int(t["id"]) in refs],
+        people=[_related(refs[p], rel) for p, rel in people if p in refs],
         document=document_out(doc, row, wallet_configured=_wallet_configured()) if doc is not None else None,
         text_status=row["text_status"], analysis_status=row["analysis_status"], preview_status=row["preview_status"],
         deleted_at=row["deleted_at"], updated_at=row["updated_at"], urls=item_urls(row, full=True),

@@ -14,8 +14,10 @@ ValueError inside the probe_* helpers means a bad file (probe() then falls back 
 """
 from __future__ import annotations
 
+import functools
 import json
 import logging
+import os
 import re
 import struct
 import subprocess
@@ -50,8 +52,95 @@ MAX_VIDEO_FPS = 300.0
 
 
 class ToolFailure(RuntimeError):
-    """ffmpeg/ffprobe could not do its job (timeout, spawn failure, killed by a signal). Says
-    nothing about the file, so callers must retry later instead of rejecting the upload."""
+    """ffmpeg/ffprobe could not do its job (timeout, spawn failure, killed by a signal, or a resource
+    error such as no memory or too many open files). Says nothing about the file, so callers must
+    retry later instead of rejecting the upload."""
+
+
+# stderr of ffmpeg/ffprobe that exited non-zero for want of resources, not because of the file.
+TOOL_TROUBLE = ("cannot allocate memory", "out of memory", "resource temporarily unavailable",
+                "too many open files", "no space left on device", "input/output error", "error allocating")
+
+
+# Bumped when the probe learns to read files it used to keep as 'other'; ingest.reprobe_plain then
+# probes those again once (kv probe_version). 2: a placeholder index before the real one (input_flags).
+PROBE_VERSION = 2
+
+
+def _top_atoms(path: Path, limit: int = 64) -> list[tuple[bytes, int, int]]:
+    """(type, offset, size) of an ISO media file's top-level atoms; [] when it is not one."""
+    out: list[tuple[bytes, int, int]] = []
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, 2)
+            size = f.tell()
+            pos = 0
+            while pos + 8 <= size and len(out) < limit:
+                f.seek(pos)
+                head = f.read(8)
+                if len(head) < 8:
+                    break
+                n, typ = struct.unpack(">I4s", head)
+                if n == 1:
+                    big = f.read(8)
+                    if len(big) < 8:
+                        break
+                    n = struct.unpack(">Q", big)[0]
+                elif n == 0:
+                    n = size - pos
+                if n < 8:
+                    break
+                if not out and typ != b"ftyp":
+                    return []
+                out.append((typ, pos, n))
+                pos += n
+    except OSError:
+        return []
+    return out
+
+
+@functools.lru_cache(maxsize=1024)
+def _placeholder_index(path: str, size: int, mtime_ns: int) -> bool:
+    atoms = _top_atoms(Path(path))
+    names = [a[0] for a in atoms]
+    if b"moov" not in names:
+        return False
+    first_moov = names.index(b"moov")
+    try:
+        with open(path, "rb") as f:
+            for typ, pos, n in atoms[:first_moov]:
+                if typ in (b"hoov", b"free") and n >= 16:
+                    f.seek(pos + 8)
+                    child = f.read(8)
+                    if len(child) == 8 and child[4:8] in (b"mvhd", b"cmov"):
+                        return True
+    except OSError:
+        return False
+    return False
+
+
+def input_flags(path: Path | str) -> list[str]:
+    """Input options ffmpeg and ffprobe need for this file: ["-strict", "strict"] when a placeholder
+    index (a 'hoov' or 'free' atom holding an 'mvhd', as some Apple encoders leave it) comes before the
+    real 'moov'. ffmpeg's lenient default reads the placeholder, finds no packets and calls the video
+    undecodable; strict mode skips it and reads the real index. [] for every other file."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return []
+    return ["-strict", "strict"] if _placeholder_index(str(path), st.st_size, st.st_mtime_ns) else []
+
+
+def tool_trouble(stderr: bytes | str | None) -> str | None:
+    """The resource problem a tool's stderr names, or None when it describes the file."""
+    if not stderr:
+        return None
+    text = stderr.decode("utf-8", "replace") if isinstance(stderr, bytes) else stderr
+    low = text.lower()
+    for mark in TOOL_TROUBLE:
+        if mark in low:
+            return mark
+    return None
 
 
 @dataclass
@@ -87,6 +176,7 @@ class MediaInfo:
     raw: bool = False  # camera RAW (decoded through app.media.raw)
     reason: str | None = None  # 'other' files that sniffed as a known type but did not decode: why
     content_id: str | None = None  # Apple ContentIdentifier shared by a Live Photo's still and MOV
+    strict_input: bool = False  # video with a placeholder index (input_flags): never streamed as it is
 
     @property
     def pixels(self) -> int:
@@ -665,7 +755,8 @@ def _video_time(tags: dict) -> str | None:
 
 
 def _ffprobe(path: Path) -> dict:
-    cmd = ["ffprobe", "-v", "error", "-print_format", "json", "-show_format", "-show_streams", str(path)]
+    cmd = ["ffprobe", "-v", "error", *input_flags(path), "-print_format", "json", "-show_format", "-show_streams",
+           str(path)]
     try:
         res = subprocess.run(cmd, capture_output=True, timeout=FFPROBE_TIMEOUT_S, stdin=subprocess.DEVNULL)
     except subprocess.TimeoutExpired as e:
@@ -675,6 +766,9 @@ def _ffprobe(path: Path) -> dict:
     if res.returncode < 0:
         raise ToolFailure(f"ffprobe was killed by signal {-res.returncode}")
     if res.returncode != 0:
+        trouble = tool_trouble(res.stderr)
+        if trouble:
+            raise ToolFailure(f"ffprobe could not run properly ({trouble})")
         raise ValueError(f"ffprobe failed: {res.stderr.decode('utf-8', 'replace').strip()[:300]}")
     try:
         return json.loads(res.stdout or b"{}")
@@ -685,7 +779,7 @@ def _ffprobe(path: Path) -> dict:
 def _decodes_one_frame(path: Path) -> bool:
     """True if ffmpeg decodes at least one frame of the first real video stream.
     ToolFailure if ffmpeg itself could not run to completion."""
-    cmd = ["ffmpeg", "-hide_banner", "-nostdin", "-v", "error", "-i", str(path), "-map", "0:V:0",
+    cmd = ["ffmpeg", "-hide_banner", "-nostdin", "-v", "error", *input_flags(path), "-i", str(path), "-map", "0:V:0",
            "-frames:v", "1", "-f", "framemd5", "-"]
     try:
         res = subprocess.run(cmd, capture_output=True, timeout=DECODE_CHECK_TIMEOUT_S, stdin=subprocess.DEVNULL)
@@ -696,6 +790,9 @@ def _decodes_one_frame(path: Path) -> bool:
     if res.returncode < 0:
         raise ToolFailure(f"ffmpeg was killed by signal {-res.returncode}")
     if res.returncode != 0:
+        trouble = tool_trouble(res.stderr)
+        if trouble:
+            raise ToolFailure(f"ffmpeg could not run properly ({trouble})")
         return False
     return any(line and not line.startswith(b"#") for line in res.stdout.splitlines())
 
@@ -768,6 +865,7 @@ def probe_video(path: Path, kind_mime_ext: tuple[str, str, str]) -> MediaInfo:
         taken_at=_video_time(tags),
         gps_lat=gps[0] if gps else None, gps_lon=gps[1] if gps else None, gps_alt=gps[2] if gps else None,
         content_id=_live_content_id(tags),
+        strict_input=bool(input_flags(path)),
     )
 
 

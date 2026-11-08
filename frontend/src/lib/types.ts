@@ -87,12 +87,16 @@ export type Species = 'bird' | 'cat' | 'dog' | 'horse' | 'sheep' | 'cow' | 'elep
 /** The species the detector knows (section 22), in the order the pickers show them. */
 export const SPECIES: readonly Species[] = ['cat', 'dog', 'bird', 'horse', 'cow', 'sheep', 'elephant', 'bear', 'zebra', 'giraffe']
 export type PersonKind = 'person' | 'pet'
+/** How a tag ties someone to an item (section 10, related items): in the picture, or about them without them in it. */
+export type TagRelation = 'in' | 'related'
 export interface PersonRef {
   id: number
   name: string | null
   cover_url: string | null
   /** Older servers omit it: treat a missing kind as 'person'. */
   kind: PersonKind
+  /** ItemDetail.people and tags: 'related' when the item is about them without them in it. Older servers omit it ('in'). */
+  relation?: TagRelation
 }
 export interface GuessOut {
   person: PersonRef
@@ -168,6 +172,8 @@ export interface PersonOut {
   confirmed_faces?: number
   /** Merge responses: unnamed look-alikes merged along with the owner's merge (section 10). */
   followed?: number
+  /** Items tagged as related to them without them in it (section 10). Older servers omit it. */
+  related_count?: number
 }
 export interface PersonPage {
   items: PersonOut[]
@@ -265,6 +271,11 @@ export interface SuggestionList {
 export interface TagIn {
   person_id?: number | null
   new_person_name?: string | null
+  /** A new name makes a pet with `kind: 'pet'` and its `species` (400 species_needed without one). */
+  kind?: PersonKind
+  species?: Species | null
+  /** 'in' (the default) or 'related'; posting the other relation for someone already tagged switches it. */
+  relation?: TagRelation
 }
 
 // free-form tags (section 19): the owner's own tags, and the ones the tag learner suggests
@@ -649,6 +660,90 @@ export interface SystemOut {
   video: VideoStatus | null
   /** Section 29: items analysed before forwards existed that still wait for their signals. */
   forwards?: { unchecked: number; running: boolean } | null
+  /** Section 31: the storage tiers and the move of an earlier layout's originals. */
+  storage?: StorageOut | null
+  /** Section 31: nightly snapshots. */
+  backup?: BackupOut | null
+}
+// processing speed (section 32)
+export type ThroughputRange = 'hour' | 'day' | 'week'
+export interface ThroughputType {
+  type: string
+  label: string
+  total: number
+  failed: number
+  avg_ms: number | null
+  counts: number[]
+  failed_counts: number[]
+}
+export interface ThroughputOut {
+  range: ThroughputRange
+  bucket_s: number
+  start: string
+  end: string
+  /** UTC ISO start of each bucket; the last one holds now. */
+  buckets: string[]
+  types: ThroughputType[]
+  /** Finished per minute over the last ten minutes, by job type. */
+  per_minute: Record<string, number>
+}
+// storage tiers and backups (section 31)
+export interface TierOut {
+  key: 'originals' | 'data' | 'backup' | string
+  path: string
+  holds: string
+  free_bytes: number
+  total_bytes: number
+  /** An earlier tier on the same filesystem: one disk, shown once. */
+  shared_with: string | null
+}
+export interface MigrationStatus {
+  active: boolean
+  running: boolean
+  pending_files: number
+  pending_bytes: number
+  moved_files: number
+  moved_bytes: number
+  error: string | null
+  started_at: string | null
+  finished_at: string | null
+}
+export interface StorageOut {
+  tiered: boolean
+  tiers: TierOut[]
+  migration: MigrationStatus
+}
+export interface BackupRecord {
+  started_at: string
+  finished_at: string | null
+  ok: boolean
+  error: string | null
+  snapshot: string | null
+  files: number
+  bytes_copied: number
+  bytes_linked: number
+  duration_s: number
+  reason: string
+}
+export interface BackupProgress {
+  phase: string
+  files_total: number
+  files_done: number
+  bytes_copied: number
+  bytes_linked: number
+}
+export interface BackupOut {
+  enabled: boolean
+  dir: string | null
+  hour: number
+  keep: number
+  running: boolean
+  progress: BackupProgress | null
+  last: BackupRecord | null
+  snapshots: string[]
+  next_run_at: string | null
+  free_bytes: number | null
+  total_bytes: number | null
 }
 // learning (section 18): what the small models learned from the owner's corrections
 export type LearningEventKind = 'category' | 'vault' | 'misclick' | 'doc_type' | 'guess' | 'tag' | 'forward' | 'species'
@@ -704,5 +799,7 @@ export interface AddAnimalIn {
   w: number
   h: number
   species?: Species
+  /** Videos: the time of the frame the box was drawn on, in seconds (400 frame_time_needed without it). */
+  t?: number
 }
 /** The boxes a second detector run added (section 22). */

@@ -12,7 +12,8 @@ Routes (all under /api, all require a logged-in session; writes need the CSRF he
   POST   /guesses/confirm {faces, bodies} -> BulkOut;  POST /guesses/reject -> BulkOut
   GET    /review/guesses?cursor&limit -> GuessPage
   GET    /suggestions?limit -> SuggestionList;  POST /suggestions/dismiss {a, b} -> Ok
-  POST   /items/{uid}/tags {person_id | new_person_name} -> [PersonRef];  DELETE /items/{uid}/tags/{person_id}
+  POST   /items/{uid}/tags {person_id | new_person_name, kind?, species?, relation?} -> [PersonRef] (a person or a
+         pet, section 22; relation in|related, section 10);  DELETE /items/{uid}/tags/{person_id}
   POST   /recluster -> Ok
 Faces, bodies and counts in NSFW or trashed items are never shown here (person items take vault=1
 with an unlocked session). With the vault locked, acting on a box or the tags of an NSFW item is
@@ -91,8 +92,8 @@ _PRESENT = (
     "SELECT person_id, item_id FROM faces WHERE person_id IS NOT NULL UNION "
     "SELECT person_id, item_id FROM bodies WHERE person_id IS NOT NULL UNION "
     "SELECT person_id, item_id FROM animals WHERE person_id IS NOT NULL UNION "
-    "SELECT person_id, item_id FROM item_tags"
-)
+    "SELECT person_id, item_id FROM item_tags WHERE relation = 'in'"
+)  # who is in which item; a 'related' tag (section 10) is not presence
 PERSON_COLUMNS = "id, name, name_key, cover_face_id, created_at, kind, species"
 
 
@@ -171,10 +172,11 @@ def _visible_person_row(conn: sqlite3.Connection, session: SessionInfo, person_i
     return row
 
 
-def _stats(conn: sqlite3.Connection, ids: list[int]) -> dict[int, tuple[int, int, int, int, int]]:
-    """{person_id: (face_count, item_count, guess_count, animal_count, confirmed)} over live,
-    non-NSFW items; confirmed = faces and crops the owner assigned."""
-    out: dict[int, list[int]] = {i: [0, 0, 0, 0, 0] for i in ids}
+def _stats(conn: sqlite3.Connection, ids: list[int]) -> dict[int, tuple[int, int, int, int, int, int]]:
+    """{person_id: (face_count, item_count, guess_count, animal_count, confirmed, related_count)} over
+    live, non-NSFW items; confirmed = faces and crops the owner assigned; related_count = items tagged
+    'related' to them (section 10), which item_count leaves out."""
+    out: dict[int, list[int]] = {i: [0, 0, 0, 0, 0, 0] for i in ids}
     for start in range(0, len(ids), 500):
         chunk = ids[start:start + 500]
         ph = _ids_sql(chunk)
@@ -209,7 +211,12 @@ def _stats(conn: sqlite3.Connection, ids: list[int]) -> dict[int, tuple[int, int
             f"WHERE a.person_id IN ({ph}) AND a.assigned_by = 'user') GROUP BY pid", [*chunk, *chunk],
         ):
             out[int(r[0])][4] = int(r[1])
-    return {k: (v[0], v[1], v[2], v[3], v[4]) for k, v in out.items()}
+        for r in conn.execute(
+            f"SELECT t.person_id, COUNT(*) FROM item_tags t JOIN items i ON i.id = t.item_id AND {LIVE} "
+            f"WHERE t.person_id IN ({ph}) AND t.relation = 'related' GROUP BY t.person_id", chunk,
+        ):
+            out[int(r[0])][5] = int(r[1])
+    return {k: (v[0], v[1], v[2], v[3], v[4], v[5]) for k, v in out.items()}
 
 
 def _covers(conn: sqlite3.Connection, rows: list[sqlite3.Row]) -> dict[int, str | None]:
@@ -250,13 +257,13 @@ def person_outs(conn: sqlite3.Connection, rows: list[sqlite3.Row]) -> list[Perso
     covers = _covers(conn, rows) if rows else {}
     out = []
     for r in rows:
-        fc, ic, gc, ac, cf = st.get(int(r["id"]), (0, 0, 0, 0, 0))
+        fc, ic, gc, ac, cf, rc = st.get(int(r["id"]), (0, 0, 0, 0, 0, 0))
         pet = r["kind"] == "pet"
         out.append(PersonOut(id=int(r["id"]), name=r["name"], cover_url=covers.get(int(r["id"])),
                              cover_face_id=None if pet else r["cover_face_id"],
                              face_count=fc, item_count=ic, guess_count=gc, created_at=r["created_at"],
                              kind=r["kind"] or "person", species=r["species"] if pet else None, animal_count=ac,
-                             confirmed_faces=cf))
+                             confirmed_faces=cf, related_count=rc))
     return out
 
 
@@ -345,13 +352,14 @@ def _drop_body_tags(conn: sqlite3.Connection, rows: list[sqlite3.Row]) -> None:
 
 
 def _tags_of(conn: sqlite3.Connection, item_id: int) -> list[PersonRef]:
+    """The item's tags as PersonRefs carrying each tag's relation (section 10)."""
     rows = conn.execute(
-        "SELECT p.id FROM item_tags t JOIN persons p ON p.id = t.person_id "
+        "SELECT p.id, t.relation FROM item_tags t JOIN persons p ON p.id = t.person_id "
         "WHERE t.item_id = ? ORDER BY p.name_key IS NULL, p.name_key, p.id",
         (item_id,),
     ).fetchall()
     refs = person_refs(conn, [int(r["id"]) for r in rows])
-    return [refs[int(r["id"])] for r in rows if int(r["id"]) in refs]
+    return [refs[int(r["id"])].model_copy(update={"relation": r["relation"]}) for r in rows if int(r["id"]) in refs]
 
 
 FACE_SELECT = (
@@ -604,17 +612,28 @@ def person_faces(
 @router.get("/people/{person_id}/items", response_model=ItemPage)
 def person_items(
     person_id: int,
+    relation: Literal["in", "related", "all"] = "in",
     cursor: str | None = Query(default=None, max_length=512),
     limit: int = Query(default=60, ge=1, le=200),
     vault: bool = Depends(want_vault),
     conn: sqlite3.Connection = Depends(get_db),
     session: SessionInfo = Depends(require_user),
 ) -> ItemPage:
+    """The person's items: `in` (faces, bodies, animal boxes and 'in' tags), `related` (the items about
+    them without them in it, section 10) or `all`."""
     _visible_person_row(conn, session, person_id)
-    conds = [visible_sql(vault=vault, misclicks="exclude", dups="all"),
-             "i.id IN (SELECT item_id FROM faces WHERE person_id = ? UNION SELECT item_id FROM bodies WHERE person_id = ? "
-             "UNION SELECT item_id FROM animals WHERE person_id = ? UNION SELECT item_id FROM item_tags WHERE person_id = ?)"]
-    params: list[Any] = [person_id, person_id, person_id, person_id]
+    boxes = ("SELECT item_id FROM faces WHERE person_id = ? UNION SELECT item_id FROM bodies WHERE person_id = ? "
+             "UNION SELECT item_id FROM animals WHERE person_id = ? UNION ")
+    if relation == "related":
+        present = "SELECT item_id FROM item_tags WHERE person_id = ? AND relation = 'related'"
+        params: list[Any] = [person_id]
+    elif relation == "all":
+        present = boxes + "SELECT item_id FROM item_tags WHERE person_id = ?"
+        params = [person_id] * 4
+    else:
+        present = boxes + "SELECT item_id FROM item_tags WHERE person_id = ? AND relation = 'in'"
+        params = [person_id] * 4
+    conds = [visible_sql(vault=vault, misclicks="exclude", dups="all"), f"i.id IN ({present})"]
     sort_key = "COALESCE(i.taken_at, i.created_at)"
     v = _keyset(cursor, 2)
     # The total comes with the first page only (clients read it there); later pages carry 0.
@@ -846,15 +865,22 @@ def set_person_species(person_id: int, body: PersonSpeciesIn, conn: sqlite3.Conn
 @router.post("/items/{uid}/animals", response_model=AnimalOut, status_code=201)
 def add_animal_box(uid: str, body: AnimalBoxIn, conn: sqlite3.Connection = Depends(get_db),
                    session: SessionInfo = Depends(require_user)) -> AnimalOut:
-    """A box the owner drew on a photo (section 22, boxes the owner adds): crop, look embedding, species
-    (the owner's, else the zero-shot's, else 400 species_needed), the pet match; photos only (400)."""
-    item = _photo_or_400(conn, session, uid)
+    """A box the owner drew on a photo or a video frame (section 22, boxes the owner adds): crop, look
+    embedding, species (the owner's, else the zero-shot's, else 400 species_needed), the pet match. A video
+    takes `t`, the frame's time (400 frame_time_needed without it); other kinds answer 400."""
+    item = _boxable_or_400(conn, session, uid)
+    video = item["kind"] == "video"
+    if video and body.t is None:
+        raise HTTPException(status_code=400, detail="frame_time_needed")
     try:
-        aid = animals_mod.add_box(conn, item, (body.x, body.y, body.w, body.h), species=body.species)
+        aid = animals_mod.add_box(conn, item, (body.x, body.y, body.w, body.h), species=body.species,
+                                  t=body.t if video else None)
+    except animals_mod.FrameTimeNeeded:
+        raise HTTPException(status_code=400, detail="frame_time_needed") from None
     except animals_mod.SpeciesNeeded:
         raise HTTPException(status_code=400, detail="species_needed") from None
     except animals_mod.NoImage:
-        raise HTTPException(status_code=409, detail="The photo could not be opened") from None
+        raise HTTPException(status_code=409, detail="The photo or frame could not be opened") from None
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e)) from e
     with tx(conn):
@@ -867,9 +893,10 @@ def add_animal_box(uid: str, body: AnimalBoxIn, conn: sqlite3.Connection = Depen
 @router.post("/items/{uid}/animals/detect", response_model=list[AnimalOut])
 def redetect_animals(uid: str, body: RedetectIn | None = None, conn: sqlite3.Connection = Depends(get_db),
                      session: SessionInfo = Depends(require_user)) -> list[AnimalOut]:
-    """The detector once more on a photo at a lower threshold (section 22): the boxes it adds, matched to
-    pets; 409 models_unavailable without the detector; photos only (400)."""
-    item = _photo_or_400(conn, session, uid)
+    """The detector once more at a lower threshold (section 22): on a photo, or on a video's poster and up to
+    REDETECT_VIDEO_FRAMES sampled frames; the boxes it adds, matched to pets; 409 models_unavailable without
+    the detector; other kinds answer 400."""
+    item = _boxable_or_400(conn, session, uid)
     if not animals_mod.available():
         raise HTTPException(status_code=409, detail="models_unavailable")
     threshold = body.threshold if body is not None else animals_mod.REDETECT_DEFAULT
@@ -878,7 +905,7 @@ def redetect_animals(uid: str, body: RedetectIn | None = None, conn: sqlite3.Con
     except animals_mod.ModelsUnavailable:
         raise HTTPException(status_code=409, detail="models_unavailable") from None
     except animals_mod.NoImage:
-        raise HTTPException(status_code=409, detail="The photo could not be opened") from None
+        raise HTTPException(status_code=409, detail="The photo or frames could not be opened") from None
     if ids:
         with tx(conn):
             bump_faces_version(conn)
@@ -888,13 +915,14 @@ def redetect_animals(uid: str, body: RedetectIn | None = None, conn: sqlite3.Con
     return [animal_out(conn, r) for r in rows]
 
 
-def _photo_or_400(conn: sqlite3.Connection, session: SessionInfo, uid: str) -> sqlite3.Row:
+def _boxable_or_400(conn: sqlite3.Connection, session: SessionInfo, uid: str) -> sqlite3.Row:
+    """A live photo or video the session may see; other kinds answer 400 (section 22)."""
     item = conn.execute("SELECT * FROM items WHERE uid = ? AND deleted_at IS NULL", (uid,)).fetchone()
     if item is None:
         raise HTTPException(status_code=404, detail="Item not found")
     _check_items_vault(conn, session, [int(item["id"])])
-    if item["kind"] != "image":
-        raise HTTPException(status_code=400, detail="Boxes can be drawn on photos only")
+    if item["kind"] not in ("image", "video"):
+        raise HTTPException(status_code=400, detail="Boxes can be drawn on photos and videos only")
     return item
 
 
@@ -1061,9 +1089,27 @@ def dismiss_suggestion(body: DismissIn, conn: sqlite3.Connection = Depends(get_d
 
 
 # ------------------------------------------------------------------ tags
+def _tag_target(conn: sqlite3.Connection, body: TagIn, session: SessionInfo) -> int:
+    """The person or pet a tag names: an existing id of either kind, or a new name; a new pet needs its
+    species (400 species_needed, section 22). Call inside a tx."""
+    if body.person_id is not None:
+        return int(_visible_person_row(conn, session, body.person_id)["id"])
+    if body.kind == "pet":
+        if body.species is None:
+            raise HTTPException(status_code=400, detail="species_needed")
+        pid = _target_person(conn, None, body.new_person_name, True, session, species=body.species)
+    else:
+        pid = _target_person(conn, None, body.new_person_name, True, session)
+    assert pid is not None
+    return pid
+
+
 @router.post("/items/{uid}/tags", response_model=list[PersonRef])
 def add_tag(uid: str, body: TagIn, conn: sqlite3.Connection = Depends(get_db),
             session: SessionInfo = Depends(require_user)) -> list[PersonRef]:
+    """Tag a person or a pet on an item: relation 'in' (they are in it) or 'related' (it is about them,
+    section 10); posting the other relation for someone already tagged switches it. Answers the item's
+    tags with their relation."""
     name_given = body.new_person_name is not None
     if (body.person_id is None) == (not name_given):
         raise HTTPException(status_code=400, detail="Choose an existing person or a new name")
@@ -1072,19 +1118,28 @@ def add_tag(uid: str, body: TagIn, conn: sqlite3.Connection = Depends(get_db),
         if item["nsfw"] and not session.vault_unlocked:
             raise _vault_locked()
         item_id = int(item["id"])
-        pid = _target_person(conn, body.person_id, body.new_person_name, name_given, session)
-        assert pid is not None
+        pid = _tag_target(conn, body, session)
+        now = now_iso()
         on_item = conn.execute(
             "SELECT 1 FROM faces WHERE item_id = ? AND person_id = ? UNION ALL "
-            "SELECT 1 FROM bodies WHERE item_id = ? AND person_id = ? LIMIT 1",
-            (item_id, pid, item_id, pid),
+            "SELECT 1 FROM bodies WHERE item_id = ? AND person_id = ? UNION ALL "
+            "SELECT 1 FROM animals WHERE item_id = ? AND person_id = ? LIMIT 1",
+            (item_id, pid, item_id, pid, item_id, pid),
         ).fetchone()
-        if on_item is None:
-            conn.execute("INSERT OR IGNORE INTO item_tags(item_id, person_id, source, created_at) VALUES (?, ?, 'user', ?)",
-                         (item_id, pid, now_iso()))
-        conn.execute("UPDATE persons SET updated_at = ? WHERE id = ?", (now_iso(), pid))
+        # A box of theirs already says 'in'; 'related' is recorded whatever the boxes say, and the
+        # owner's relation replaces an earlier tag's.
+        if body.relation == "related" or on_item is None:
+            conn.execute(
+                "INSERT INTO item_tags(item_id, person_id, source, relation, created_at) VALUES (?, ?, 'user', ?, ?) "
+                "ON CONFLICT(item_id, person_id) DO UPDATE SET relation = excluded.relation, source = 'user'",
+                (item_id, pid, body.relation, now),
+            )
+        conn.execute("UPDATE persons SET updated_at = ? WHERE id = ?", (now, pid))
+        kind = conn.execute("SELECT kind FROM persons WHERE id = ?", (pid,)).fetchone()[0]
         bump_faces_version(conn)
-    _after_people_change(conn, {item_id}, {(pid, item_id)})
+    # The guess job looks around the item for the person's other appearances: only when they are in it.
+    guesses = {(pid, item_id)} if body.relation == "in" and kind == "person" else set()
+    _after_people_change(conn, {item_id}, guesses)
     return _tags_of(conn, item_id)
 
 

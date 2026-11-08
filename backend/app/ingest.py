@@ -91,7 +91,7 @@ def _place(src: Path, dest: Path) -> bool:
     Returns False when src already is dest. Falls back to a copy where links are not possible."""
     if _same_path(src, dest):
         return False
-    tmp = storage.tmp_path(".link")
+    tmp = storage.scratch_beside(dest, ".link")  # beside dest: originals may live on another disk than tmp/
     try:
         try:
             os.link(src, tmp)
@@ -346,9 +346,10 @@ def pair_live(conn: sqlite3.Connection, item_id: int, pair_key: str | None) -> b
     return True
 
 
-def _insert_item(conn: sqlite3.Connection, uid: str, info: MediaInfo, sha: str, fp: Fingerprint | None,
-                 size: int, filename: str, now: str, forward: dict[str, Any] | None = None) -> tuple[int, dict[str, str]]:
-    item_id = next_item_id(conn)
+def _item_columns(info: MediaInfo, fp: Fingerprint | None, now: str,
+                  forward: dict[str, Any] | None = None) -> tuple[dict[str, Any], dict[str, str]]:
+    """The item columns a probe result decides (everything but identity, name, bytes and timestamps),
+    and the stage statuses, shared by a new item and a plain file probed again (reprobe_plain)."""
     statuses = {
         "analysis_status": "pending" if info.kind in ANALYSED_KINDS else "done",
         "text_status": "pending" if info.kind in TEXT_KINDS else "none",
@@ -366,8 +367,7 @@ def _insert_item(conn: sqlite3.Connection, uid: str, info: MediaInfo, sha: str, 
     elif forward is not None:
         forward_checked = 1
     cols = dict(
-        id=item_id, uid=uid, kind=info.kind, version=1, original_filename=filename, ext=info.ext, mime=info.mime,
-        sha256=sha, size_bytes=size, width=info.width, height=info.height, duration_s=info.duration_s,
+        kind=info.kind, ext=info.ext, mime=info.mime, width=info.width, height=info.height, duration_s=info.duration_s,
         bitrate=info.bitrate, video_codec=info.video_codec, fps=info.fps,
         has_audio=None if info.has_audio is None else int(bool(info.has_audio)), page_count=info.page_count,
         animated=int(bool(info.animated)), taken_at=info.taken_at, exif_datetime=info.exif_datetime,
@@ -376,10 +376,107 @@ def _insert_item(conn: sqlite3.Connection, uid: str, info: MediaInfo, sha: str, 
         sig=fp.sig if fp else None, frames=json_dumps(fp.frames) if fp and fp.frames is not None else None,
         category="documents" if info.kind in TEXT_KINDS else "misc", content_id=info.content_id, **statuses,
         received_via=received_via, forward_signals=json_dumps(forward) if forward is not None else None,
-        forward_checked=forward_checked, created_at=now, updated_at=now,
+        forward_checked=forward_checked, updated_at=now,
     )
+    return cols, statuses
+
+
+def _insert_item(conn: sqlite3.Connection, uid: str, info: MediaInfo, sha: str, fp: Fingerprint | None,
+                 size: int, filename: str, now: str, forward: dict[str, Any] | None = None) -> tuple[int, dict[str, str]]:
+    item_id = next_item_id(conn)
+    cols, statuses = _item_columns(info, fp, now, forward)
+    cols = dict(id=item_id, uid=uid, version=1, original_filename=filename, sha256=sha, size_bytes=size,
+                created_at=now, **cols)
     conn.execute(f"INSERT INTO items({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))})", tuple(cols.values()))
     return item_id, statuses
+
+
+# ------------------------------------------------------------------ plain files probed again
+PROBE_VERSION_KEY = "probe_version"  # kv: the probe.PROBE_VERSION whose re-probe pass has completed
+PLAIN_MEDIA_SQL = ("kind = 'other' AND deleted_at IS NULL AND companion_of IS NULL AND "
+                   "(mime LIKE 'image/%' OR mime LIKE 'video/%' OR mime = 'application/pdf')")
+
+
+def plain_media_count(conn: sqlite3.Connection) -> int:
+    """Items kept as plain files although their bytes claim to be a photo, a video or a PDF."""
+    return int(conn.execute(f"SELECT COUNT(*) FROM items WHERE {PLAIN_MEDIA_SQL}").fetchone()[0])
+
+
+def reprobe_plain(conn: sqlite3.Connection) -> dict[str, int]:
+    """Probe again the items kept as 'other' whose bytes sniff as a photo, video or PDF (section 7): the
+    probe has learned to read some of them since (probe.PROBE_VERSION). One that now probes as a real
+    kind is rebuilt in place: derivatives written, the row's kind, media columns, fingerprint and
+    statuses set from the probe, the analysis, text and streaming-copy jobs queued and a Live Photo
+    pairing tried. A file whose storage extension would change is left alone (the row and the file name
+    must change together). A ToolFailure ends the pass early. Returns {"checked", "fixed", "complete"}:
+    complete is False when the pass stopped early, so the next start tries again."""
+    rows = conn.execute(f"SELECT * FROM items WHERE {PLAIN_MEDIA_SQL} ORDER BY id").fetchall()
+    out = {"checked": 0, "fixed": 0, "complete": 1}
+    for row in rows:
+        out["checked"] += 1
+        try:
+            if _reprobe_item(conn, row):
+                out["fixed"] += 1
+        except ToolFailure as e:
+            log.warning("reprobe: %s; the rest waits for the next start", e)
+            out["complete"] = 0
+            break
+        except Exception:  # noqa: BLE001 - one bad file never stops the pass
+            log.exception("reprobe: item %s could not be rebuilt", row["uid"])
+    if out["fixed"]:
+        log.info("reprobe: %d of %d plain files were photos, videos or documents after all", out["fixed"], out["checked"])
+    return out
+
+
+def _reprobe_item(conn: sqlite3.Connection, row: sqlite3.Row) -> bool:
+    uid, version = row["uid"], int(row["version"])
+    original = storage.original_path(uid, version, row["ext"])
+    if not original.is_file():
+        return False
+    info = probe(original, row["original_filename"])
+    if info is None or info.kind == "other" or info.ext != row["ext"]:
+        return False
+    info, fp, img = _decode(info, original, row["original_filename"])
+    if info.kind == "other":
+        return False
+    written: list[Path] = []
+    try:
+        clip_path = _write_motion_clip(info, uid, version, original)
+        if clip_path is not None:
+            written.append(clip_path)
+        files, doc_fp = _write_derivatives(info, uid, version, original, img)
+        written += files
+        if doc_fp is not None:
+            fp = doc_fp
+        del img
+        now = now_iso()
+        from app.analysis import forwards as forwards_mod
+
+        forward = forwards_mod.file_signals(
+            kind=info.kind, ext=info.ext, width=info.width, height=info.height, camera=info.camera,
+            exif_datetime=info.exif_datetime, gps_lat=info.gps_lat, bitrate=info.bitrate,
+            filename=row["original_filename"], path=original if info.kind == "image" else None)
+        cols, statuses = _item_columns(info, fp, now, forward)
+        if clip_path is not None:
+            cols["live"] = 1
+        with tx(conn):
+            if conn.execute("SELECT 1 FROM items WHERE id = ? AND version = ? AND kind = 'other'",
+                            (int(row["id"]), version)).fetchone() is None:
+                raise _Stale("the item changed meanwhile")
+            sets = ", ".join(f"{k} = ?" for k in cols)
+            conn.execute(f"UPDATE items SET {sets} WHERE id = ?", (*cols.values(), int(row["id"])))
+            _enqueue_followups(conn, int(row["id"]), version, info.kind, statuses)
+            pair_live(conn, int(row["id"]), None)
+            bump_search_version(conn)
+    except _Stale:
+        _cleanup_unreferenced(conn, written)
+        return False
+    except BaseException:
+        _cleanup_unreferenced(conn, written)
+        raise
+    _refresh_fts(conn, int(row["id"]))
+    log.info("reprobe: item %s is a %s after all (%s)", uid, info.kind, row["original_filename"])
+    return True
 
 
 def _enqueue_followups(conn: sqlite3.Connection, item_id: int, version: int, kind: str,
@@ -631,7 +728,7 @@ def retry_failed(conn: sqlite3.Connection) -> int:
 
 def expire_failed(conn: sqlite3.Connection) -> int:
     """Delete kept failed uploads (failed/*.part) older than settings.trash_days."""
-    base = storage.root() / "failed"
+    base = storage.originals_root() / "failed"
     if not base.is_dir():
         return 0
     cutoff = time.time() - settings.trash_days * 86400
@@ -948,7 +1045,7 @@ def cleanup_stale_uploads(conn: sqlite3.Connection) -> int:
         if cur.rowcount == 1:
             storage.safe_unlink(storage.staging_path(r["uid"]))
             cleaned += 1
-    staging = storage.root() / "staging"
+    staging = storage.originals_root() / "staging"
     if staging.is_dir():
         now_s = time.time()
         for p in staging.iterdir():
@@ -985,7 +1082,6 @@ def sweep_orphan_files(conn: sqlite3.Connection, min_age_s: float = ORPHAN_AGE_S
     (worker._sweep_loop) while jobs run, so every delete re-checks the database: _is_referenced and
     the upload's status (an ingest may have started after the snapshot below). Stops early when the
     threading.Event stop is set."""
-    root = storage.root()
     items = {(r[0], int(r[1])): r[2] for r in conn.execute("SELECT uid, version, ext FROM items")}
     crops = {
         "faces": {int(r[0]) for r in conn.execute("SELECT id FROM faces")},
@@ -999,8 +1095,7 @@ def sweep_orphan_files(conn: sqlite3.Connection, min_age_s: float = ORPHAN_AGE_S
         return conn.execute(f"SELECT 1 FROM uploads WHERE uid = ? AND status IN ({marks})",
                             (uid, *ACTIVE)).fetchone() is not None
 
-    for top in storage.SWEPT_DIRS:
-        base = root / top
+    for top, base in storage.swept_bases():
         if not base.is_dir():
             continue
         for p in base.rglob("*"):
@@ -1032,10 +1127,10 @@ def sweep_orphan_files(conn: sqlite3.Connection, min_age_s: float = ORPHAN_AGE_S
                     (_ORIGINAL_NAME if top == "originals" else _DERIVED_NAME).match(p.name)
                 if m and live_upload(m["uid"]):
                     continue
-            log.info("cleanup: removing orphaned file %s", p.relative_to(root))
+            log.info("cleanup: removing orphaned file %s", storage.rel(p))
             storage.safe_unlink(p)
             removed += 1
-    pages = root / "pages"
+    pages = storage.root() / "pages"
     if pages.is_dir():
         for d in sorted(pages.rglob("*"), key=lambda x: len(x.parts), reverse=True):
             try:
@@ -1106,12 +1201,30 @@ def _documents_for_new_rules(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     return out
 
 
+def _reprobe_in_background() -> dict[str, int]:
+    """reprobe_plain on its own connection (worker.run_in_background; drain() waits for it in tests);
+    records probe.PROBE_VERSION in kv when the pass completed."""
+    from app.db import connect
+    from app.media.probe import PROBE_VERSION
+
+    conn = connect()
+    try:
+        out = reprobe_plain(conn)
+        if out["complete"]:
+            with tx(conn):
+                kv_set(conn, PROBE_VERSION_KEY, PROBE_VERSION)
+        return out
+    finally:
+        conn.close()
+
+
 def recover_on_startup(conn: sqlite3.Connection) -> None:
     """Rebuild the full-text index when init_db asked for it (kv fts_rebuild); re-queue interrupted
     jobs; make sure every queued/processing upload has an ingest job and every item whose analysis,
     text or streaming copy is pending has its job; queue a reparse of the automatic 'other' documents a
     newer detection rule set now types (kv doc_rules_version, section 30); apply a changed guessing window
-    (guess.apply_window_change); wipe data_dir/tmp."""
+    (guess.apply_window_change); when kv probe_version is below probe.PROBE_VERSION, probe again on a
+    background thread the plain files whose bytes claim a media type (reprobe_plain); wipe data_dir/tmp."""
     _rebuild_fts_if_flagged(conn)
     n, exhausted = jobs.requeue_running(conn)
     if n:
@@ -1157,6 +1270,19 @@ def recover_on_startup(conn: sqlite3.Connection) -> None:
             log.info("startup: withdrew %d guess(es) outside the guessing window", withdrawn)
     except Exception:
         log.exception("startup: the guess window check failed")
+    try:
+        from app.media.probe import PROBE_VERSION
+
+        if int(kv_get(conn, PROBE_VERSION_KEY, "1") or 1) < PROBE_VERSION:
+            if plain_media_count(conn):
+                from app import worker
+
+                worker.run_in_background("reprobe-plain", _reprobe_in_background)
+            else:
+                with tx(conn):
+                    kv_set(conn, PROBE_VERSION_KEY, PROBE_VERSION)
+    except Exception:
+        log.exception("startup: could not start the re-probe of plain files")
     tmp = storage.root() / "tmp"
     if tmp.is_dir():
         for p in tmp.iterdir():

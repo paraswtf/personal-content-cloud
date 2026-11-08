@@ -204,7 +204,7 @@ def _present_people(conn: sqlite3.Connection, item_id: int) -> set[int]:
     return {int(r[0]) for r in conn.execute(
         "SELECT person_id FROM faces WHERE item_id = ? AND person_id IS NOT NULL UNION "
         "SELECT person_id FROM bodies WHERE item_id = ? AND person_id IS NOT NULL UNION "
-        "SELECT person_id FROM item_tags WHERE item_id = ?",
+        "SELECT person_id FROM item_tags WHERE item_id = ? AND relation = 'in'",
         (item_id, item_id, item_id),
     )}
 
@@ -482,7 +482,7 @@ def propagate(conn: sqlite3.Connection, person_id: int, item_id: int | None) -> 
         anchors = conn.execute(
             "SELECT id, uid, taken_at FROM items WHERE deleted_at IS NULL AND taken_at IS NOT NULL AND id IN ("
             "SELECT item_id FROM faces WHERE person_id = ? UNION SELECT item_id FROM bodies WHERE person_id = ? "
-            "UNION SELECT item_id FROM item_tags WHERE person_id = ?) ORDER BY taken_at LIMIT ?",
+            "UNION SELECT item_id FROM item_tags WHERE person_id = ? AND relation = 'in') ORDER BY taken_at LIMIT ?",
             (person_id, person_id, person_id, MAX_WINDOW_ITEMS),
         ).fetchall()
     targets: set[int] = set()
@@ -670,7 +670,8 @@ def confirm(conn: sqlite3.Connection, face_ids: list[int], body_ids: list[int]) 
                 )
                 if r["face_id"] is None:
                     conn.execute(
-                        "INSERT OR IGNORE INTO item_tags(item_id, person_id, source, created_at) VALUES (?, ?, 'guess', ?)",
+                        "INSERT INTO item_tags(item_id, person_id, source, relation, created_at) VALUES (?, ?, 'guess', 'in', ?) "
+                        "ON CONFLICT(item_id, person_id) DO UPDATE SET relation = 'in'",
                         (r["item_id"], pid, now),
                     )
                 pairs.add((pid, int(r["item_id"])))

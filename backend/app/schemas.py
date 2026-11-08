@@ -126,11 +126,17 @@ PersonKind = Literal["person", "pet"]
 Species = Literal["bird", "cat", "dog", "horse", "sheep", "cow", "elephant", "bear", "zebra", "giraffe"]
 
 
+TagRelation = Literal["in", "related"]
+
+
 class PersonRef(BaseModel):
     id: int
     name: str | None = None
     cover_url: str | None = None
     kind: PersonKind = "person"
+    # In an item's people and tags lists (section 10): 'related' when the item is about them without them
+    # in it. A reference from a box is always 'in'.
+    relation: TagRelation = "in"
 
 
 class GuessOut(BaseModel):
@@ -425,6 +431,7 @@ class PersonOut(BaseModel):
     animal_count: int = 0         # pets: crops in visible items
     confirmed_faces: int = 0      # faces (or crops) the owner assigned: the anchors of the reference
     followed: int = 0             # merge responses (section 10): unnamed look-alikes merged along with the owner's merge
+    related_count: int = 0        # live items tagged 'related' to them (section 10); item_count keeps meaning 'in'
 
 
 class PersonPage(BaseModel):
@@ -516,13 +523,15 @@ MIN_BOX_SHARE = 0.005  # analysis.animals.MIN_BOX_SHARE
 
 
 class AnimalBoxIn(BaseModel):
-    """A box the owner draws on a photo (section 22): normalised, inside the frame, at least half a percent
-    of it; the species when the owner picked one (else the zero-shot answers, else 400 species_needed)."""
+    """A box the owner draws on a photo or a video frame (section 22): normalised, inside the frame, at least
+    half a percent of it; the species when the owner picked one (else the zero-shot answers, else 400
+    species_needed); `t`, the frame's time in seconds, for a video (400 frame_time_needed without it)."""
     x: float = Field(ge=0.0, le=1.0)
     y: float = Field(ge=0.0, le=1.0)
     w: float = Field(gt=0.0, le=1.0)
     h: float = Field(gt=0.0, le=1.0)
     species: str | None = Field(default=None, max_length=20)
+    t: float | None = Field(default=None, ge=0.0, le=86400.0)
 
     @model_validator(mode="after")
     def _inside_and_large_enough(self) -> "AnimalBoxIn":
@@ -575,8 +584,21 @@ class DismissIn(BaseModel):
 
 
 class TagIn(BaseModel):
+    """A person or pet tagged on an item: an existing `person_id` (a person or a pet), or `new_person_name`
+    (with `kind` 'pet' and its `species` for a new pet, section 22). `relation` 'related' says the item is
+    about them without them in it (section 10); posting the other relation for someone already tagged
+    switches it."""
     person_id: int | None = None
     new_person_name: str | None = Field(default=None, max_length=120)
+    kind: PersonKind = "person"
+    species: str | None = Field(default=None, max_length=20)
+    relation: TagRelation = "in"
+
+    @model_validator(mode="after")
+    def _known_species(self) -> "TagIn":
+        if self.species is not None and self.species not in SPECIES_NAMES:
+            raise ValueError("Unknown species")
+        return self
 
 
 # ---------------------------------------------------------------- documents
@@ -679,6 +701,64 @@ class ModelStatus(BaseModel):
     error: str | None = None
 
 
+class TierOut(BaseModel):
+    """One storage tier (section 31)."""
+    key: str                        # originals | data | backup
+    path: str
+    holds: str
+    free_bytes: int
+    total_bytes: int
+    shared_with: str | None = None  # an earlier tier on the same filesystem: one disk, not two
+
+
+class StorageOut(BaseModel):
+    """Section 31: the tiers, and the move of an earlier layout's originals (app.tiers.status)."""
+    tiered: bool
+    tiers: list[TierOut]
+    migration: dict[str, Any]
+
+
+class BackupOut(BaseModel):
+    """Section 31: app.backup.status."""
+    enabled: bool
+    dir: str | None = None
+    hour: int
+    keep: int
+    running: bool
+    progress: dict[str, Any] | None = None
+    last: dict[str, Any] | None = None
+    snapshots: list[str] = []
+    next_run_at: str | None = None
+    free_bytes: int | None = None
+    total_bytes: int | None = None
+
+
+class BackupStartOut(BaseModel):
+    started: bool
+    running: bool
+
+
+class ThroughputType(BaseModel):
+    """Section 32: one job type's finished runs per bucket."""
+    type: str
+    label: str
+    total: int
+    failed: int
+    avg_ms: int | None = None
+    counts: list[int]
+    failed_counts: list[int]
+
+
+class ThroughputOut(BaseModel):
+    range: str          # hour | day | week
+    bucket_s: int
+    start: str
+    end: str
+    buckets: list[str]  # UTC ISO start of each bucket, aligned to the local clock
+    types: list[ThroughputType]
+    per_minute: dict[str, float]  # finished per minute over the last ten minutes, by type
+
+
 class SystemOut(BaseModel):
     version: str
     site_title: str
@@ -694,6 +774,8 @@ class SystemOut(BaseModel):
     video: dict[str, Any] | None = None  # section 27: encoder and web copy counts
     forwards: dict[str, Any] | None = None  # section 29: {enabled, unchecked, forwards, received, running}
     pets: dict[str, Any] | None = None  # section 22: {enabled, unchecked, running}: the species backfill
+    storage: StorageOut | None = None  # section 31: tiers and the move of legacy originals
+    backup: BackupOut | None = None  # section 31: nightly snapshots
 
 
 class TagOut(BaseModel):

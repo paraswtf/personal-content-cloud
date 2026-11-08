@@ -1,12 +1,14 @@
-// Settings > System: GPU, models, queues, disk and helpers, from GET /api/system polled every 8 s
+// Settings > System: GPU, models, queues, storage tiers, backups and helpers, from GET /api/system polled every 8 s
 // while this tab is open (the hub's dashboard cards, adapted). Missing models can be downloaded from
 // here; housekeeping runs the cleanup jobs now instead of waiting for their schedule, and failed
 // uploads can be queued for processing again.
 import VideoCard from './VideoCard'
+import { BackupSection, StorageSection } from './StorageCards'
+import ThroughputCard from './ThroughputCard'
 import { useState, type ReactNode } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import clsx from 'clsx'
-import { Cpu, Download, HardDrive, ListTodo, RefreshCw, RotateCcw, Server, Sparkles } from 'lucide-react'
+import { Cpu, Download, ListTodo, RefreshCw, RotateCcw, Server, Sparkles } from 'lucide-react'
 import { api } from '../../../lib/api'
 import { formatBytes } from '../../../lib/format'
 import type { ModelStatus, SystemOut } from '../../../lib/types'
@@ -28,21 +30,6 @@ function Stat({ label, value, tone }: { label: string; value: ReactNode; tone?: 
     <div>
       <p className={clsx('text-2xl font-bold tabular-nums', tone === 'danger' && 'text-danger')}>{value}</p>
       <p className="text-sm text-ink-soft">{label}</p>
-    </div>
-  )
-}
-
-function Bar({ pct, label, tone }: { pct: number; label: string; tone?: 'danger' }) {
-  return (
-    <div
-      role="progressbar"
-      aria-label={label}
-      aria-valuemin={0}
-      aria-valuemax={100}
-      aria-valuenow={pct}
-      className="h-2.5 overflow-hidden rounded-full bg-ink/10"
-    >
-      <div className={clsx('h-full rounded-full', tone === 'danger' ? 'bg-danger' : 'bg-ink')} style={{ width: `${pct}%` }} />
     </div>
   )
 }
@@ -140,8 +127,6 @@ export default function SystemTab() {
   const missing = s.models.filter((m) => !m.present || m.error)
   const dl = s.download
   const dlRunning = !!dl?.running || s.models.some((m) => m.downloading)
-  const usedPct = s.disk.total_bytes > 0 ? Math.min(100, Math.round((1 - s.disk.free_bytes / s.disk.total_bytes) * 100)) : 0
-  const lowDisk = s.disk.total_bytes > 0 && s.disk.free_bytes / s.disk.total_bytes < 0.1
   const byQueue = Object.entries(s.queues.by_queue ?? {})
 
   return (
@@ -282,23 +267,11 @@ export default function SystemTab() {
         </Section>
 
         <VideoCard video={s.video} onRefresh={() => void q.refetch()} />
-        <Section title="Disk">
-          <div className="flex items-center gap-2 text-sm text-ink-soft">
-            <HardDrive className="size-4 text-ink-faint" aria-hidden />
-            {formatBytes(s.disk.free_bytes)} free of {formatBytes(s.disk.total_bytes)}
-          </div>
-          <div className="mt-3">
-            <Bar pct={usedPct} label="Disk used" tone={lowDisk ? 'danger' : undefined} />
-          </div>
-          <p className={clsx('mt-2 text-xs', lowDisk ? 'font-medium text-danger' : 'text-ink-soft')}>
-            {usedPct}% used{lowDisk ? '. Free space is low; new uploads may be refused.' : ''}
-          </p>
-          <dl className="mt-4 border-t border-line pt-3 text-sm">
-            <dt className="text-ink-soft">Original files</dt>
-            <dd className="text-lg font-semibold">{formatBytes(s.disk.originals_bytes)}</dd>
-          </dl>
-        </Section>
+        <StorageSection s={s} />
+        <BackupSection s={s} />
       </div>
+
+      <ThroughputCard />
 
       <Section
         title="Failed uploads"

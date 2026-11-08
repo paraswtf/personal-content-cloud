@@ -3,8 +3,10 @@
 CONTRACT (docs/ARCHITECTURE.md sections 1, 4 and 13).
 - create_app() -> FastAPI. lifespan: exclusive flock on DATA_DIR/.instance.lock (refuses to start
   without it); storage.ensure_dirs(); db.init_db(); images.register_heif(); a warning when ffmpeg
-  or ffprobe is missing; precompress_assets(); ingest.recover_on_startup(); worker.start() when
-  settings.workers_enabled; worker.stop() and the lock released on shutdown.
+  or ffprobe is missing; precompress_assets(); tiers.move_staged() (staged uploads an earlier layout
+  left under DATA_DIR go to ORIGINALS_DIR, section 31); ingest.recover_on_startup(); when
+  settings.workers_enabled: worker.start(), tiers.start() (the background move of legacy originals) and
+  backup.start() (the nightly snapshot thread); all three stopped and the lock released on shutdown.
 - Routers (each a plain APIRouter without a prefix; main mounts it): app.api.auth at /api/auth,
   app.api.library at /api, app.api.people at /api, app.api.documents at /api/documents,
   app.api.search at /api/search, app.api.uploads at /api/uploads, app.api.files at /files,
@@ -128,7 +130,7 @@ def _startup_recovery() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    from app import worker
+    from app import backup, tiers, worker
     from app.media import images
 
     lock_fd = _acquire_instance_lock()
@@ -149,15 +151,23 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             precompress_assets()
         except Exception:  # never block startup: the plain assets are served then
             log.exception("Could not precompress the frontend assets")
+        try:
+            tiers.move_staged()
+        except Exception:  # the uploads concerned start over; the server still runs
+            log.exception("Could not move the staged uploads to ORIGINALS_DIR; they stay under DATA_DIR")
         # Not swallowed: without it, queued uploads and pending jobs would never run.
         _startup_recovery()
         if settings.workers_enabled:
             worker.start()
             started = True
+            tiers.start()
+            backup.start()
         yield
     finally:
         try:
             if started:
+                tiers.stop()
+                backup.stop()
                 worker.stop()
         finally:
             _release_instance_lock(lock_fd)

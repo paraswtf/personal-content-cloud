@@ -552,6 +552,10 @@ function ViewerInner({ uid, onClose, onPrev, onNext, position, startAt = null, v
             face={shown}
             onDismissFace={dismissSeekFace}
             frameTimeRef={frameTimeRef}
+            drawing={drawing}
+            onDrawEnd={() => setDrawing(false)}
+            frameTime={frameTime}
+            onToast={showToast}
           />
         )
       }

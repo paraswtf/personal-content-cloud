@@ -32,7 +32,7 @@ from PIL import Image
 
 from app.config import settings
 from app.media import encoders, images
-from app.media.probe import MediaInfo, ToolFailure
+from app.media.probe import MediaInfo, ToolFailure, input_flags, tool_trouble
 
 log = logging.getLogger(__name__)
 
@@ -84,10 +84,10 @@ def extract_frame_image(path: Path, t: float, max_side: int | None = None, *, ex
     t = max(0.0, float(t))
     if exact_seek:
         pre = max(0.0, t - 3.0)
-        seek = ["-ss", f"{pre:.3f}", *(["-threads", "2"] if gentle else []), "-i", str(path),
+        seek = ["-ss", f"{pre:.3f}", *(["-threads", "2"] if gentle else []), *input_flags(path), "-i", str(path),
                 "-ss", f"{t - pre:.3f}"]
     else:
-        seek = ["-ss", f"{t:.3f}", *(["-threads", "2"] if gentle else []), "-i", str(path)]
+        seek = ["-ss", f"{t:.3f}", *(["-threads", "2"] if gentle else []), *input_flags(path), "-i", str(path)]
     cmd = [*_FF, *seek, "-map", "0:V:0", "-an", "-sn", "-dn", "-frames:v", "1"]
     if max_side:
         cmd += ["-vf", _limit_filter(max_side)]
@@ -101,6 +101,10 @@ def extract_frame_image(path: Path, t: float, max_side: int | None = None, *, ex
         raise ToolFailure(f"ffmpeg frame extraction failed: {e}") from e
     if res.returncode < 0:
         raise ToolFailure(f"ffmpeg was killed by signal {-res.returncode}")
+    if res.returncode != 0:
+        trouble = tool_trouble(res.stderr)
+        if trouble:
+            raise ToolFailure(f"ffmpeg could not run properly ({trouble})")
     if res.returncode != 0 or not res.stdout:
         return None
     try:
@@ -122,7 +126,7 @@ def shown_frame_time(path: Path, t: float) -> float | None:
     # -read_intervals takes the file's own timestamps, which start at format start_time.
     first = _timeline_start(path)
     origin = float(first) if first is not None else 0.0
-    cmd = ["ffprobe", "-v", "error", "-select_streams", "V:0", "-read_intervals",
+    cmd = ["ffprobe", "-v", "error", *input_flags(path), "-select_streams", "V:0", "-read_intervals",
            f"{max(0.0, t - 3.0) + origin:.3f}%{t + 2.0 + origin:.3f}", "-show_entries",
            "packet=pts_time:format=start_time", "-of", "json", str(path)]
     try:
@@ -206,7 +210,8 @@ def _timeline_start(path: Path) -> Fraction | None:
     earlier than the first video frame when another stream, usually audio, starts first."""
     try:
         res = subprocess.run(
-            ["ffprobe", "-v", "error", "-show_entries", "format=start_time", "-of", "default=nw=1:nk=1", str(path)],
+            ["ffprobe", "-v", "error", *input_flags(path), "-show_entries", "format=start_time", "-of", "default=nw=1:nk=1",
+             str(path)],
             capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL,
         )
         value = res.stdout.strip()
@@ -255,7 +260,7 @@ def iter_frames(
     if duration > SEEK_SAMPLING_MIN_S:
         yield from _seek_frames(path, duration, interval, max_frames, w, h, timeout)
         return
-    cmd = [*_FF_INFO, "-i", str(path), "-map", "0:V:0", "-an", "-sn", "-dn",
+    cmd = [*_FF_INFO, *input_flags(path), "-i", str(path), "-map", "0:V:0", "-an", "-sn", "-dn",
            "-vf", _sample_filter(interval, w, h), "-fps_mode", "passthrough",
            "-f", "rawvideo", "-pix_fmt", "bgr24", "pipe:1"]
     try:
@@ -328,7 +333,7 @@ def _seek_frames(path: Path, duration: float, interval: float, max_frames: int, 
             log.warning("frame sampling of %s stopped at %.0fs: time limit reached", path, t)
             return
         seek = ["-ss", f"{t:.3f}"] if count > 0 else []
-        cmd = [*_FF_INFO, "-copyts", *seek, "-i", str(path), "-map", "0:V:0", "-an", "-sn", "-dn",
+        cmd = [*_FF_INFO, "-copyts", *seek, *input_flags(path), "-i", str(path), "-map", "0:V:0", "-an", "-sn", "-dn",
                "-frames:v", "1", "-vf", f"scale={w}:{h}:flags=bicubic,showinfo", "-fps_mode", "passthrough",
                "-f", "rawvideo", "-pix_fmt", "bgr24", "pipe:1"]
         try:
@@ -386,7 +391,10 @@ def stream_friendly(codec: str | None, ext: str | None, width: int | None, heigh
 
 
 def needs_web_preview(info: MediaInfo, ext: str) -> bool:
-    """True unless the original is stream_friendly: every other video gets a compressed copy."""
+    """True unless the original is stream_friendly: every other video gets a compressed copy. A video
+    with a placeholder index (probe.input_flags) always gets one: browsers trip over it as ffmpeg does."""
+    if info.strict_input:
+        return True
     return not stream_friendly(info.video_codec, ext, info.width, info.height, info.bitrate)
 
 
@@ -400,7 +408,7 @@ def _low_priority(cmd: list[str]) -> list[str]:
 def _transcode_cmd(src: Path, tmp: Path, encoder: str, max_height: int) -> list[str]:
     pre, video_args = encoders.build_video_args(encoder, int(max_height), int(settings.video_preview_crf),
                                                 int(settings.video_preview_maxrate_kbps))
-    return [*_FF, "-y", *pre, "-i", str(src), "-map", "0:V:0", "-map", "0:a:0?", "-sn", "-dn",
+    return [*_FF, "-y", *pre, *input_flags(src), "-i", str(src), "-map", "0:V:0", "-map", "0:a:0?", "-sn", "-dn",
             "-map_metadata", "-1", *video_args, "-fps_mode", "passthrough",
             "-force_key_frames", f"expr:gte(t,n_forced*{KEYFRAME_INTERVAL_S})",
             "-c:a", "aac", "-b:a", f"{int(settings.video_preview_audio_kbps)}k", "-ac", "2",
@@ -420,7 +428,8 @@ def _output_problem(path: Path) -> str | None:
     """None when `path` is a readable file with one video stream and a positive duration (ffprobe),
     else why not. An encoder that exits 0 and leaves a broken file must not be served."""
     try:
-        res = subprocess.run(["ffprobe", "-v", "error", "-print_format", "json", "-show_format", "-show_streams", str(path)],
+        res = subprocess.run(["ffprobe", "-v", "error", *input_flags(path), "-print_format", "json", "-show_format",
+                              "-show_streams", str(path)],
                              capture_output=True, timeout=PROBE_TIMEOUT_S, stdin=subprocess.DEVNULL)
     except (subprocess.TimeoutExpired, OSError) as e:
         return f"ffprobe could not read the copy: {e}"

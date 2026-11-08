@@ -88,6 +88,21 @@ export function formatRelative(iso: string | null | undefined, now = Date.now())
   return formatDate(iso)
 }
 
+/** "in 8 h", "in 25 min", "in 2 days" for a time ahead; "now" once it has come. */
+export function formatUntil(iso: string | null | undefined, now = Date.now()): string {
+  if (!iso) return ''
+  const t = new Date(iso).getTime()
+  if (Number.isNaN(t)) return ''
+  const s = Math.round((t - now) / 1000)
+  if (s < 45) return 'now'
+  const m = Math.round(s / 60)
+  if (m < 60) return `in ${m} min`
+  const h = Math.round(m / 60)
+  if (h < 24) return `in ${h} h`
+  const d = Math.round(h / 24)
+  return `in ${d} ${d === 1 ? 'day' : 'days'}`
+}
+
 /** Heading for a day group: "Today", "Yesterday", or "Mon, 3 Nov 2026". */
 export function formatDayHeading(iso: string, now = new Date()): string {
   const d = new Date(iso)

@@ -325,9 +325,13 @@ def person_out(conn: sqlite3.Connection, row: sqlite3.Row) -> PersonOut:
         "SELECT COUNT(DISTINCT item_id) FROM ("
         "SELECT f.item_id FROM faces f WHERE f.person_id = ? UNION ALL "
         "SELECT b.item_id FROM bodies b WHERE b.person_id = ? UNION ALL "
-        "SELECT t.item_id FROM item_tags t WHERE t.person_id = ?) x "
+        "SELECT t.item_id FROM item_tags t WHERE t.person_id = ? AND t.relation = 'in') x "
         "JOIN items i ON i.id = x.item_id AND i.deleted_at IS NULL",
         (pid, pid, pid),
+    ).fetchone()[0]
+    related_count = conn.execute(
+        "SELECT COUNT(*) FROM item_tags t JOIN items i ON i.id = t.item_id AND i.deleted_at IS NULL "
+        "WHERE t.person_id = ? AND t.relation = 'related'", (pid,),
     ).fetchone()[0]
     guess_count = conn.execute(
         "SELECT (SELECT COUNT(*) FROM faces WHERE guess_person_id = ? AND person_id IS NULL) + "
@@ -339,6 +343,7 @@ def person_out(conn: sqlite3.Connection, row: sqlite3.Row) -> PersonOut:
         id=pid, name=row["name"], cover_url=face_url(cover) if cover else None, cover_face_id=row["cover_face_id"],
         face_count=face_count,
         item_count=item_count, guess_count=guess_count, created_at=row["created_at"],
+        related_count=related_count,
     )
 
 
@@ -481,7 +486,8 @@ def document_out(row: sqlite3.Row, item_row: sqlite3.Row, *, wallet_configured: 
 
 
 def people_filter_sql(person_ids: list[int], alias: str = "i") -> tuple[str, list[int]]:
-    """SQL condition: the item contains ALL the given people (faces, bodies, animal boxes or tags)."""
+    """SQL condition: the item contains ALL the given people (faces, bodies, animal boxes or 'in' tags;
+    an item merely related to someone is not theirs here, section 10)."""
     ids = sorted({int(p) for p in person_ids})
     ph = ",".join("?" * len(ids))
     sql = (
@@ -489,7 +495,7 @@ def people_filter_sql(person_ids: list[int], alias: str = "i") -> tuple[str, lis
         f"SELECT item_id, person_id FROM faces WHERE person_id IN ({ph}) UNION "
         f"SELECT item_id, person_id FROM bodies WHERE person_id IN ({ph}) UNION "
         f"SELECT item_id, person_id FROM animals WHERE person_id IN ({ph}) UNION "
-        f"SELECT item_id, person_id FROM item_tags WHERE person_id IN ({ph})"
+        f"SELECT item_id, person_id FROM item_tags WHERE person_id IN ({ph}) AND relation = 'in'"
         ") GROUP BY item_id HAVING COUNT(DISTINCT person_id) = ?)"
     )
     return sql, [*ids, *ids, *ids, *ids, len(ids)]
