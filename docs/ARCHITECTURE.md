@@ -201,7 +201,8 @@ The full DDL is `backend/app/schema.sql`. Summary of tables and the columns code
   capture (`taken_at` UTC, `exif_datetime`, `exif_subsec`, `camera`, `gps_lat`, `gps_lon`, `gps_alt`);
   fingerprints (`phash`, `dhash`, `sig`, `frames`); classification (`category`, `category_source CHECK
   ('auto','user')`, `category_scores` JSON, `doc_likeness` REAL, `nsfw` INT, `nsfw_score`, `nsfw_source`,
-  `misclick` INT, `misclick_reasons` JSON, `misclick_source`, `quality_scores` JSON); duplicates
+  `misclick` INT, `misclick_reasons` JSON, `misclick_source`, `quality_scores` JSON); forwards (section 29:
+  `received_via`, `forward` INT, `forward_reasons` JSON, `forward_source`, `forward_signals` JSON, `forward_checked`); duplicates
   (`dup_group_id` = id of the group's best item, `dup_role CHECK ('best','copy')`, `dup_detail`);
   state (`analysis_status CHECK ('pending','done','error')`, `text_status CHECK ('none','pending','done','error')`,
   `preview_status CHECK ('none','pending','done','error')`, `face_count`, `body_count`, `favorite`,
@@ -266,8 +267,8 @@ all GPU work except OCR so two heavy models never contend. Handlers are idempote
    search (`media.dedup.find_similar`: same thresholds as the hub; the result links, never replaces: the new item
    gets `dup_group_id` of the best item in the group, and the group's best item is re-chosen by the hub's quality
    ranking), place original, derivatives (thumb + previews; page 1 render for documents; poster for videos),
-   insert item (`analysis_status='pending'`, `text_status='pending'` for `pdf` and `document`, else `'none'`),
-   enqueue `analyze`, plus `video_preview` when `needs_web_preview`, plus `text` for documents.
+   insert item (`analysis_status='pending'`, `text_status='pending'` for `pdf` and `document`, else `'none'`,
+   the file-level forward signals and `received_via` of section 29), enqueue `analyze`, plus `video_preview` when `needs_web_preview`, plus `text` for documents.
 2. `analyze` (`analysis.pipeline.analyze_item`): load the analysis image (oriented original at most 2048 px; page 1
    render for documents; sampled frames for videos: 1 per second, at most 150); SigLIP embeddings (whole image and
    frames) stored in `item_embeddings`; category scores and labels; NSFW score; quality scores and mis-click
@@ -275,7 +276,7 @@ all GPU work except OCR so two heavy models never contend. Handlers are idempote
    class 0) matched to faces by containment; torso crops (3.2 face widths wide, from y-0.25h to y+4h; for a body
    without a face the upper 60 percent of the box) embedded with SigLIP into `torso_embedding`; write faces and
    bodies with crops; `cluster.assign_new_faces`; `guess.guess_item` for still-unassigned faces and bodies;
-   decide category and nsfw; `analysis_status='done'`; enqueue `text` when `doc_likeness >= DOC_LIKENESS_MIN`
+   decide category and nsfw, then the forward decision (section 29); `analysis_status='done'`; enqueue `text` when `doc_likeness >= DOC_LIKENESS_MIN`
    and `text_status='none'`. A reprocess that runs without one of the models keeps that model's earlier rows
    (embeddings and labels, faces, bodies and their covers, the nsfw decision and the scene category) instead of
    deleting them. A reprocess requested while a run is in progress is not lost: the run commits its results
@@ -364,6 +365,8 @@ Decision order for an item (user overrides win: `*_source='user'` is never chang
 4. `doc_likeness` = max(document zero-shot, text-density heuristic from edges); `>= DOC_LIKENESS_MIN` (0.55) -> `documents`.
 5. At least one good face or body -> `personal`.
 6. Best of `places`, `food`, `pets`, `objects` when its probability `>= 0.35`, else `misc`.
+7. Forwards (section 29, after the category and the vault): `forwards.apply` decides `received_via` and `forward`
+   from the file's signals and the `meme_p` zero-shot; a `forward_source='user'` row keeps the owner's decision.
 
 Mis-click reasons (`quality.py`, images only, documents and screenshots excluded; a video only gets `dark`):
 - `blurry`: variance of the Laplacian on the grey image scaled to 1024 px long side `< BLUR_VAR_MIN` (40),
@@ -535,15 +538,16 @@ Auth (`/api/auth`): `GET state`; `POST setup`; `POST login`; `POST logout`; `POS
 `AuthState = {setup_required, authenticated, username, passkeys, vault_until, session_id, site_title}`.
 
 Library (`/api`): `GET items` (query: `category`, `kind`, `person` repeated, `from`, `to` (ISO dates),
-`favorite`, `misclicks=exclude|include|only` (default exclude), `dups=collapse|all` (default collapse), `vault`,
+`favorite`, `misclicks=exclude|include|only` (default exclude), `forwards=exclude|include|only` (default exclude) and
+`received=<app>|any` (section 29), `dups=collapse|all` (default collapse), `vault`,
 `sort=taken|added` (default taken desc), `cursor`, `limit` 1..200 default 60) -> `ItemPage{items, next_cursor, total}`;
-`GET items/{uid}` -> `ItemDetail`; `PATCH items/{uid} {category?, nsfw?, misclick?, favorite?, filename?}`;
-`DELETE items/{uid}` (trash); `POST items/{uid}/restore`; `POST items/bulk {uids, action: delete|restore|keep|category|nsfw|favorite|unfavorite, value?}`;
+`GET items/{uid}` -> `ItemDetail`; `PATCH items/{uid} {category?, nsfw?, misclick?, forward?, favorite?, filename?}`;
+`DELETE items/{uid}` (trash); `POST items/{uid}/restore`; `POST items/bulk {uids, action: delete|restore|keep|category|nsfw|favorite|unfavorite|forward|unforward, value?}`;
 `POST items/{uid}/reprocess {stages?: [analyze, text, preview]}`; `GET items/{uid}/pages`; `GET items/{uid}/text`;
 `GET trash` -> `ItemPage`; `POST trash/empty`; `DELETE trash/{uid}` (purge one);
-`GET review/misclicks` -> `ItemPage` (with `misclick_reasons`); `GET review/guesses?person=` -> `GuessPage` (served by the people router);
+`GET review/misclicks` -> `ItemPage` (with `misclick_reasons`); `GET review/forwards` -> `ItemPage` (the forwards set apart, section 29); `GET review/guesses?person=` -> `GuessPage` (served by the people router);
 `GET duplicates` -> `DupGroupPage{groups:[{best: ItemCard, copies: [ItemCard]}]}`; `POST duplicates/{uid}/best`;
-`GET stats` -> `Stats{items, by_kind, by_category, people, documents, misclicks, guesses, trash, queue{queued, running, failed, by_queue}, disk{free_bytes, total_bytes, originals_bytes}, analysis{pending, done, error}, text{pending, done}}`.
+`GET stats` -> `Stats{items, by_kind, by_category, people, documents, misclicks, forwards, guesses, trash, queue{queued, running, failed, by_queue}, disk{free_bytes, total_bytes, originals_bytes}, analysis{pending, done, error}, text{pending, done}}`.
 Listing rules: `total` is counted on the first page only (cursor pages carry `total: 0`) for `items`, `trash`,
 `review/misclicks` and `people/{id}/items`; pages come from the `items_order` and `items_added` indexes
 (`common.page_sql`, card columns joined for the page rows only). Duplicate collapse (`dups=collapse`, shared
@@ -593,7 +597,8 @@ served from `original` with `content-security-policy: default-src 'none'; sandbo
 browser's viewer works.
 
 System (`/api/system`): `GET` -> `{version, gpu{available, name, provider}, models[{key, present, loaded, provider}],
-queues, disk, wallet{configured, missing[]}, timezone, data_dir_free_bytes}`; `POST models/download` (starts the
+queues, disk, wallet{configured, missing[]}, timezone, data_dir_free_bytes, forwards{enabled, unchecked, forwards, received,
+running} (section 29)}`; `POST models/download` (starts the
 downloader in a thread; progress via `GET`); `POST housekeeping` (no orphan sweep); `POST retry-failed` ->
 `{requeued}` (failed uploads whose bytes are kept, errored jobs, item statuses back to `pending`).
 
@@ -604,13 +609,14 @@ Timeline, albums, map and places, share links, video encoders and device uploads
 Routes: `/setup`, `/login`, `/s/:token` (shared link, section 26; no shell); everything else inside
 `AppShell` (session guard: redirects to `/login?next=`, `/setup` when `setup_required`): `/` Library
 (the timeline grid, section 23), `/people`, `/people/:id`, `/documents`, `/albums`, `/albums/:id`
-(section 24), `/map` (section 25), `/review` (tabs Mis-clicks, Duplicates, Guesses), `/vault`, `/upload`,
+(section 24), `/map` (section 25), `/review` (tabs Mis-clicks, Forwards (section 29), Duplicates, Guesses), `/vault`, `/upload`,
 `/trash`, `/settings` (Account and passkeys, Sessions, System, Learning, Sharing, Wallet, Appearance),
 `/m/:uid` (standalone viewer), `*`.
 
-Library: filter bar (category chips, kind, people, dates, favourites), search box (one box; results page
+Library: filter bar (category chips, kind, people, dates, favourites, mis-clicks and forwards included on request), search box (one box; results page
 shows the semantic and text hits with a mode switch), `MediaGrid` with document tiles (page 1 render in
-a paper frame, type badge), video duration, mis-click and duplicate badges, multi-select with bulk actions.
+a paper frame, type badge), video duration, mis-click, forward and duplicate badges, multi-select with bulk actions
+(section 29: the viewer's info panel names the app an item came through, with the forward reasons and a keep or mark button).
 Viewer: the hub's viewer with a document mode (a page strip of 30 pages either side of the current one plus the first and last, text, the virtual document card), face and
 body boxes with guess chips (confirm, reject, assign), an info panel (category with override, quality
 scores, labels, camera, dates), download original.
@@ -664,6 +670,7 @@ serving sources against a stale API) and any other mix.
 | `DOC_LIKENESS_MIN` | 0.55 | triggers OCR for images |
 | `BLUR_VAR_MIN`, `BURST_WINDOW_S` | 40, 3 | mis-clicks |
 | `GUESS_WINDOW_H`, `GUESS_SCENE_SIM`, `GUESS_CLOTHES_SIM`, `GUESS_GPS_M` | 1, 0.80, 0.85, 250 | person guessing: the hours before and after a photo whose tagged people are references |
+| `FORWARDS_ENABLED`, `FORWARD_MAX_SIDE`, `FORWARD_JPEG_QUALITY_MAX`, `FORWARD_MEME_MIN` | true, 1600, 82, 0.5 | forwards (section 29) |
 | `SEARCH_*` | as the hub | semantic search gates |
 | `OCR_ENABLED`, `OCR_MAX_PAGES` | true, 50 | |
 | `WALLET_PASS_TYPE_ID`, `WALLET_TEAM_ID`, `WALLET_ORG_NAME`, `WALLET_DIR`, `WALLET_KEY_PASSWORD` | unset, unset, site title, `DATA_DIR/wallet`, unset | Apple Wallet (the key password only when key.pem is encrypted) |
@@ -671,6 +678,7 @@ serving sources against a stale API) and any other mix.
 | `VIDEO_ENCODER`, `VAAPI_DEVICE` | `auto`, `/dev/dri/renderD128` | web copy encoder: `auto`, `h264_nvenc`, `h264_vaapi`, `h264_qsv`, `libx264` (section 27) |
 | `VIDEO_PREVIEW_MAX_HEIGHT`, `VIDEO_PREVIEW_MAXRATE_KBPS`, `VIDEO_PREVIEW_CRF`, `VIDEO_STREAM_MAX_KBPS` | 1080, 6000, 23, 8000 | web copy rendition and the bitrate up to which H.264 originals stream as they are |
 | `GEO_ENABLED` | true | download and use the GeoNames gazetteer for place names (section 25) |
+| `FORWARDS_ENABLED`, `FORWARD_MAX_SIDE`, `FORWARD_JPEG_QUALITY_MAX`, `FORWARD_MEME_MIN` | true, 1600, 82, 0.5 | media received through messaging apps (section 29) |
 | `MAP_TILES`, `MAP_TILE_STYLE` | `offline`, OpenFreeMap liberty | default basemap and the online style URL (section 25) |
 
 ## 16. Testing
@@ -753,7 +761,8 @@ Signals (read from existing tables; `learning_events` adds what is otherwise los
 the guess code through `learning.events.record(conn, kind, label, features, item_id=None, person_id=None)`:
 kind `guess` (label 1 confirm / 0 reject, features = the guess evidence), `category`, `vault`, `misclick`
 and `doc_type` (label None, features `{"from": .., "to": ..}` plus the scores at the time), and `merge` (label 1,
-features `{accepted, sources, followed}`, `person_id` the person merged into). Events also feed
+features `{accepted, sources, followed}`, `person_id` the person merged into), and `forward` (label 1 set apart / 0
+kept, features = the forward signals, section 29). Events also feed
 the status page ("learned from N corrections").
 
 Learners (one module each, all pure numpy, all with a `status()` and a `train(conn)` that writes the model):
@@ -767,7 +776,8 @@ Learners (one module each, all pure numpy, all with a `status()` and a `train(co
   `documents` by kind and the vault; `predict_nsfw(emb, nsfw_score) -> bool | None` answers from a
   user-labelled neighbour at cosine >= 0.85, else from a calibrated threshold (the cut on `nsfw_score`
   that best separates the user's vault labels, searched in [0.5, 0.95], used only with at least 8 labels
-  and at least 3 on each side), else None (the rules decide).
+  and at least 3 on each side), else None (the rules decide). `forward_vote(emb) -> bool | None` (section 29)
+  answers from the owner's kept or set-apart look-alikes with the same neighbour rule.
 - `misclick.py`: per reason (`blurry` on blur_var, `dark` on mean_lum, `blown_out` on clipped_frac,
   `pocket` on accident_p) the cut that best separates kept from confirmed mis-clicks, searched within
   [0.25x, 4x] of the default and used only with at least 5 examples on each side; `thresholds() ->
@@ -783,6 +793,9 @@ Learners (one module each, all pure numpy, all with a `status()` and a `train(co
   merged often is matched more readily and one they corrected is matched more carefully. `guess_probability(features) -> float | None`: a logistic
   regression on [clothes, scene_term, face_term, same_day, has_gps] fitted on `guess` events (needs 30
   events with both outcomes); `guess.guess_score` returns it instead of the fixed 0.5/0.3/0.2 mix.
+- `forwards.py` (section 29): `probability(signals) -> float | None`, a logistic regression over the forward
+  signals fitted on the owner's choices (`forward_source='user'` rows and `forward` events), used once 10
+  examples with both labels exist; `forwards.decide` takes it in place of its rule for the second step.
 - `train.py`: `train_all(conn) -> dict` (every learner, writes `learned/status.json` with `trained_at`,
   per-learner example counts and what was learned), `maybe_train(conn)` (trains when a choice is newer
   than `trained_at`; called by worker housekeeping every 10 minutes), `pending(conn) -> int` (choices
@@ -1246,3 +1259,110 @@ waits for the picker (section 14): iOS hands files over late when originals live
 Web: `DropZone` polls the file input after the picker opens (90 s at most) and shows a waiting notice,
 because WebKit may deliver the files seconds after the picker closes or without a change event
 while iCloud originals download.
+
+## 29. Forwards: media received through messaging apps (`app/analysis/forwards.py`, `app/learning/forwards.py`)
+
+WhatsApp and the other messaging apps re-encode what they deliver and strip the camera's metadata, and a
+library synced from a phone fills with memes, greetings, posters and screenshots of posts that are not the
+owner's photos. A friend's photo of the owner, received the same way, is a real photo. So: media that came
+through an app is recognised (`received_via`), the made-for-sharing part of it is set apart (`forward`), a
+real photo received through an app stays in the library with its source noted, and the owner's corrections
+train a learner that replaces the rule.
+
+Measured on the owner's library (1,592 items, 2026-11-08): no filename carried an app's pattern (the iPhone
+Photos app renames saved media to `IMG_nnnn`, the PWA sends UUID names), 138 JPEGs had neither camera nor
+EXIF time, 122 of them with a longest side of at most 1600 px (WhatsApp's cap) against 3 of 900 camera JPEGs;
+the JPEG luma quantisation of those sat at 23 to 45 (quality 60 to 80, WhatsApp's range) while every camera
+JPEG sat at 6.6 to 8.6 (quality 92 to 96). Filenames matter for Android exports and web uploads; on an iPhone
+library the metadata and content signals do the work.
+
+Schema (`items`, every column through `MIGRATED_COLUMNS`):
+- `received_via TEXT`: NULL, or the app: `whatsapp`, `telegram`, `facebook`, `snapchat`, `messenger`, or `app`
+  when the file carries a messaging app's marks without a known name;
+- `forward INTEGER NOT NULL DEFAULT 0` (set apart), `forward_reasons TEXT` (JSON: the signals that spoke for
+  it, see below), `forward_source TEXT NOT NULL DEFAULT 'auto' CHECK (forward_source IN ('auto','user'))`;
+- `forward_signals TEXT` (JSON of every signal, so a rule change, the learner or the backfill re-decides
+  without opening the file again); `forward_checked INTEGER NOT NULL DEFAULT 0` (the signals were computed);
+- index `items_forward ON items(forward, deleted_at)`.
+
+Signals (`forwards.file_signals(kind=, ext=, width=, height=, camera=, exif_datetime=, gps_lat=, bitrate=,
+filename=, path=) -> dict` at ingest from the probe result and the file header, stored in `forward_signals`;
+`forwards.model_signals(meme_p=, doc_likeness=, screenshot_p=, people=) -> dict` in the analyze stage):
+- `name_app`: from the original filename: `IMG-YYYYMMDD-WAnnnn`, `VID-`, `AUD-`, `PTT-`, `DOC-` and
+  `WhatsApp Image|Video|Audio YYYY-MM-DD at ...` give `whatsapp`; `photo_YYYY-MM-DD_HH-MM-SS` and `video_...`
+  give `telegram`; `FB_IMG_<digits>` gives `facebook`; `Snapchat-<digits>` gives `snapchat`;
+  `received_<digits>` gives `messenger`; else null;
+- `stripped`: an image (JPEG or WebP; PNG is screenshots, HEIC from a phone always has EXIF) with no camera
+  make or model and no EXIF capture time;
+- `small`: an image whose longest side is at most `FORWARD_MAX_SIDE` (1600); `wa_size`: the longest side is one
+  of WhatsApp's outputs (1600, 1280, 1024, 960, 800);
+- `jpeg_quality`: the IJG quality estimated from the luma quantisation table (`s = mean(table) / 58.3`, the
+  standard table's mean; `q = 100 - 50 s` when `s <= 1`, else `50 / s`), read from the file header only; null
+  for anything but JPEG. WhatsApp sends 60 to 80, a phone camera 92 to 96, a screenshot saved as JPEG 90+;
+- `video_small`: a video with a longest side of at most 1280 px, no GPS and a bitrate of at most 2,500 kbps
+  (WhatsApp re-encodes to 480p or 720p H.264; phones record 1080p and more, with GPS; screen recordings are
+  taller than 1280 px);
+- `meme_p`: SigLIP zero-shot on the frame-0 embedding (`categories.binary_p`, prompts `MEME_PROMPTS` against
+  `NOT_MEME_PROMPTS`): "a meme", "a greeting image such as good morning with text", "a motivational quote on a
+  picture", "a poster, flyer or advertisement", "a screenshot of a social media post or a news clipping", "an
+  infographic or chart", "a cartoon or comic" against "a photo taken with a phone camera", "a photo of people",
+  "a selfie", "a landscape or street photo", "a photo of food"; stored in `category_scores['meme_p']`; null
+  without the model;
+- `text`: `doc_likeness >= DOC_LIKENESS_MIN` or `screenshot_p >= 0.6` (section 9);
+- `people`: at least one good face or body in the item (sections 9 and 10).
+
+Decision (`forwards.decide(signals, *, learned=None, vote=None) -> Decision(received_via, forward, reasons)`,
+applied by `forwards.apply(conn, item_id, signals, emb=)` at the end of the analyze stage after the category and
+the vault; a row with `forward_source='user'` keeps its forward and reasons; documents and other files only get
+`received_via`, the forward rule is for images and videos):
+1. `received_via` = `name_app`, else `app` for an image with `stripped` and `small` and (`jpeg_quality` at
+   most `FORWARD_JPEG_QUALITY_MAX` (82) or `wa_size`), else `app` for a video with `video_small`, else null.
+2. With `received_via` set: `forward` when (`text` and not `people`), or `meme_p >= FORWARD_MEME_MIN` (0.5)
+   and not `people`, or `meme_p >= 0.7` whatever is in the picture (posters with faces). Everything else
+   received stays a normal library item with its source noted.
+3. `forward_reasons` lists the signals that decided (`{name: app, stripped, small, jpeg_quality, meme_p,
+   text}`), shown in the viewer like mis-click reasons.
+4. The learner (below) replaces step 2 once it has enough examples; step 1 stays a rule.
+
+Learning (`learning/forwards.py`, registered in `train.LEARNERS`): a logistic regression over
+`[name_app set, stripped, small, wa_size, jpeg_quality / 100 (1.0 when null), meme_p (0 when null), text,
+people, video_small]` fitted on the owner's choices: rows with `forward_source = 'user'` (label = `forward`)
+and `learning_events` kind `forward` (label 1 when the owner marked a forward, 0 when they kept one; features
+= the signals at the time). Used once `MIN_EVENTS` (10) examples with both labels exist; then an item received
+through an app is a forward when the learned probability is at least 0.5. Before that, and on top of it, the
+look-alike vote of `learning/images.py` applies to forwards as it does to categories: an item whose frame-0
+embedding has a neighbour at cosine 0.85 or more among the items the owner kept or marked, with the winner
+holding 60 percent of the weight, follows that answer (`images.forward_vote(embedding) -> bool | None`).
+`learning.events.record(conn, "forward", label, signals, item_id=...)` is written by the item and bulk
+actions when the owner changes the flag. `train.status()` gains `forwards: {examples, learned, weights}`.
+
+Backfill: items analysed before this section have `forward_checked = 0`. Worker housekeeping
+(`forwards.housekeeping(conn, budget_s)`) computes their signals in batches of 200 from the stored metadata,
+the file header (JPEG quantisation) and the stored frame-0 embedding (`meme_p` through the SigLIP engine
+when it is loaded; null when models are off), decides, and sets `forward_checked = 1`; `GET /api/system`
+reports `forwards: {unchecked, running}` and Settings > Learning shows it.
+
+API (section 13):
+- `GET /api/items`, the timeline buckets, the map, albums and people items take `forwards=exclude|include|only`
+  (default `exclude`) through `visible_sql`, and `received=<app>|any` to list what came through an app;
+- `ItemOut` and `ItemDetail` carry `received_via`, `forward`, `forward_reasons`; `ItemDetail` also
+  `forward_source`;
+- `PATCH /api/items/{uid}` takes `forward: bool` (`forward_source = 'user'`; reasons cleared when false; a
+  `forward` learning event); `POST /api/items/bulk` actions `forward` and `unforward`;
+- `GET /api/review/forwards` lists the flagged items (newest first, same shape as `review/misclicks`);
+  `stats.forwards` counts them.
+
+Frontend (section 14): the Filter bar gets a "Forwards" chip like "Mis-clicks" (hidden by default; the chip
+includes them); Review gets a "Forwards" tab (Keep = not a forward, which teaches the learner; Delete = trash;
+a count badge from stats); the viewer's info panel shows "Received on WhatsApp" (or "through a messaging app")
+with the reasons and a "Not a forward" / "Mark as forward" button; the bulk bar offers "Not forwards" and
+"Forwards"; Settings > Learning shows the learner (examples, learned or rule) and the backfill progress.
+
+Configuration (section 15): `FORWARDS_ENABLED` (true), `FORWARD_MAX_SIDE` (1600), `FORWARD_JPEG_QUALITY_MAX`
+(82), `FORWARD_MEME_MIN` (0.5).
+
+Tests: filename patterns per app; the JPEG quality estimate on PIL-written JPEGs at quality 75 and 95; the
+decision table (received photo of people stays, meme goes apart, text without people goes apart, a camera
+JPEG is never received); the learner (rule until 10 examples, then the fitted cut; the look-alike vote); the
+filters, the review bin and the bulk actions through the API; the backfill marks rows checked and never
+touches a user decision.

@@ -285,6 +285,8 @@ export interface ItemUrls {
   /** Live Photo or motion photo clip (section 20): the companion's web video or /files/live/{uid}?v=; null otherwise. */
   live: string | null
 }
+/** The messaging app an item came through (section 29); 'app' when the file carries an app's marks without a known name. */
+export type ReceivedVia = 'whatsapp' | 'telegram' | 'facebook' | 'snapchat' | 'messenger' | 'app'
 export interface ItemCard {
   uid: string
   kind: ItemKind
@@ -299,6 +301,11 @@ export interface ItemCard {
   nsfw: boolean
   misclick: boolean
   misclick_reasons: Record<string, unknown> | null
+  /** Section 29: the app the item came through, null when it did not come through one. */
+  received_via: ReceivedVia | null
+  /** Set apart as a forward (a meme, greeting, poster or text image received through an app). */
+  forward: boolean
+  forward_reasons: Record<string, unknown> | null
   favorite: boolean
   /** uid of the group's best item when the item is a near-duplicate of others. */
   dup_group: string | null
@@ -370,6 +377,8 @@ export interface ItemDetail extends ItemCard {
   gps: GpsOut | null
   exif_datetime: string | null
   category_source: 'auto' | 'user'
+  /** Who decided the forward flag (section 29). */
+  forward_source: 'auto' | 'user'
   category_scores: Record<string, number> | null
   nsfw_score: number | null
   quality_scores: Record<string, unknown> | null
@@ -397,6 +406,8 @@ export interface ItemUpdate {
   category?: Category
   nsfw?: boolean
   misclick?: boolean
+  /** Section 29: true sets the item apart as a forward, false keeps it in the library. */
+  forward?: boolean
   favorite?: boolean
   filename?: string
 }
@@ -404,6 +415,9 @@ export type BulkAction =
   | 'delete'
   | 'restore'
   | 'keep'
+  /** Section 29: set apart as forwards, or keep in the library. */
+  | 'forward'
+  | 'unforward'
   | 'category'
   | 'nsfw'
   | 'favorite'
@@ -474,6 +488,8 @@ export interface Stats {
   named_people: number
   documents: number
   misclicks: number
+  /** Flagged forwards (section 29). Optional: older servers lack it. */
+  forwards?: number
   guesses: number
   duplicates: number
   trash: number
@@ -614,9 +630,11 @@ export interface SystemOut {
   workers: boolean
   download: { running: boolean; progress: string | null; error: string | null } | null
   video: VideoStatus | null
+  /** Section 29: items analysed before forwards existed that still wait for their signals. */
+  forwards?: { unchecked: number; running: boolean } | null
 }
 // learning (section 18): what the small models learned from the owner's corrections
-export type LearningEventKind = 'category' | 'vault' | 'misclick' | 'doc_type' | 'guess' | 'tag'
+export type LearningEventKind = 'category' | 'vault' | 'misclick' | 'doc_type' | 'guess' | 'tag' | 'forward'
 export type MisclickThresholdKey = 'blur_var_min' | 'dark_mean' | 'clipped_frac' | 'accident_min'
 /** How readily photos go to the vault: low sends fewer, high also sends suggestive but not explicit ones. */
 export type VaultSensitivity = 'low' | 'normal' | 'high'
@@ -638,6 +656,8 @@ export interface LearningStatus {
     people: { persons: number; events: number; weights: Record<string, number> | null }
     /** Section 19: tags learned, items tagged by the owner, suggestions removed. Optional: older servers lack it. */
     tags?: { tags: number; examples: number; rejections: number }
+    /** Section 29: the owner's keep or forward decisions; `learned` once the fitted cut replaces the rule. */
+    forwards?: { examples: number; learned: boolean; weights: Record<string, number> | null }
   }
   events: Partial<Record<LearningEventKind, number>>
 }

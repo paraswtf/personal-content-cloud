@@ -6,7 +6,7 @@
 import { useState, type ReactNode } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import clsx from 'clsx'
-import { EyeOff, FileText, GraduationCap, ImageOff, RotateCcw, ScanSearch, Shapes, Tags, UsersRound, Wand2 } from 'lucide-react'
+import { EyeOff, FileText, Forward, GraduationCap, ImageOff, RotateCcw, ScanSearch, Shapes, Tags, UsersRound, Wand2 } from 'lucide-react'
 import { api } from '../../../lib/api'
 import { formatCount, formatDate, formatRelative } from '../../../lib/format'
 import { useRefreshLibrary } from '../../../lib/hooks'
@@ -38,6 +38,8 @@ const MISCLICK_NAMES: Record<MisclickThresholdKey, string> = {
 const MIN_GUESS_EVENTS = 30
 // Vault: a calibrated cut needs this many labels (images.py, section 18).
 const MIN_VAULT_LABELS = 8
+// Forwards: the fitted cut needs this many keep or forward decisions, with both answers (section 29).
+const MIN_FORWARD_EXAMPLES = 10
 
 const SENSITIVITY_OPTIONS: { value: VaultSensitivity; label: string }[] = [
   { value: 'low', label: 'Low' },
@@ -70,6 +72,7 @@ const EVENT_LABELS: Record<LearningEventKind, string> = {
   misclick: 'Mis-click decisions',
   guess: 'Guesses confirmed or rejected',
   tag: 'Suggested tags removed',
+  forward: 'Forward decisions',
 }
 
 /** "Aadhaar card, PAN card, Passport and 2 more" */
@@ -107,7 +110,9 @@ function nothingLearned(s: LearningStatus): boolean {
     (l.people?.persons ?? 0) === 0 &&
     !l.people?.weights &&
     (l.tags?.tags ?? 0) === 0 &&
-    (l.tags?.examples ?? 0) === 0
+    (l.tags?.examples ?? 0) === 0 &&
+    (l.forwards?.examples ?? 0) === 0 &&
+    !l.forwards?.learned
   )
 }
 
@@ -218,6 +223,30 @@ function SensitivityControl({
 
 type SensitivityProps = { onSensitivity: (v: VaultSensitivity) => void; savingSensitivity: boolean }
 
+/** Section 29: the keep or forward decisions, and the check of older items (GET /api/system forwards). */
+function ForwardsCard({ forwards }: { forwards: LearningStatus['learners']['forwards'] }) {
+  const system = useQuery({ queryKey: SYSTEM_KEY, queryFn: () => api.system(), staleTime: 15_000 })
+  const n = forwards?.examples ?? 0
+  const backlog = system.data?.forwards
+  return (
+    <LearnerCard icon={<Forward className="size-5" />} title="Forwards" learned={!!forwards?.learned}>
+      <p>
+        {forwards?.learned
+          ? `Learned from ${formatCount(n, 'decision')}: what comes through a messaging app is set apart or kept the way you decided.`
+          : n > 0
+            ? `${formatCount(n, 'decision')} so far. The built-in rule decides until ${MIN_FORWARD_EXAMPLES} decisions with both answers exist.`
+            : 'Nothing yet. Keep a forward, or mark one, in the forwards review to teach it.'}
+      </p>
+      {backlog && (backlog.unchecked > 0 || backlog.running) && (
+        <p className="mt-1">
+          {backlog.running ? 'Checking older items for forwards' : 'Older items waiting for a check'}
+          {backlog.unchecked > 0 ? `: ${backlog.unchecked.toLocaleString()} to go.` : '.'}
+        </p>
+      )}
+    </LearnerCard>
+  )
+}
+
 function VaultCard({ s, onSensitivity, savingSensitivity }: { s: LearningStatus } & SensitivityProps) {
   const vault = s.learners.vault
   const vaultN = vault?.examples ?? 0
@@ -246,7 +275,7 @@ function VaultCard({ s, onSensitivity, savingSensitivity }: { s: LearningStatus 
 }
 
 function Learners({ s, ...sensitivity }: { s: LearningStatus } & SensitivityProps) {
-  const { doc_type, category, misclick, people, tags } = s.learners
+  const { doc_type, category, misclick, people, tags, forwards } = s.learners
   const docN = doc_type?.examples ?? 0
   const catN = category?.examples ?? 0
   const missN = misclick?.examples ?? 0
@@ -332,6 +361,8 @@ function Learners({ s, ...sensitivity }: { s: LearningStatus } & SensitivityProp
           'Nothing yet. Add your own tags to items, and look-alikes get them suggested.'
         )}
       </LearnerCard>
+
+      <ForwardsCard forwards={forwards} />
     </div>
   )
 }
@@ -497,7 +528,7 @@ export default function LearningTab() {
             <GraduationCap className="size-8 text-ink-faint" aria-hidden />
             <h3 className="text-base font-semibold">Nothing learned yet</h3>
             <p className="max-w-md text-sm text-ink-soft">
-              Correct a category, a document type, a mis-click or a person, or add your own tags, and the next training learns from it.
+              Correct a category, a document type, a mis-click, a forward or a person, or add your own tags, and the next training learns from it.
             </p>
           </div>
         ) : (
@@ -553,7 +584,7 @@ export default function LearningTab() {
         description={
           <>
             Make corrections where you always have: change a photo&apos;s category or move it to the vault on the item, keep or
-            delete flagged photos in the mis-click review, fix a document&apos;s type or fields on the document, and assign faces,
+            delete flagged photos in the mis-click review, keep or mark forwards in the forwards review, fix a document&apos;s type or fields on the document, and assign faces,
             confirm or reject guesses on the people pages. Add your own tags on an item, and accept or remove the tags it
             suggests. Your own choices are never changed by what is learned.
           </>

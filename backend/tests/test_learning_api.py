@@ -13,7 +13,7 @@ def test_learning_routes_round_trip(client):
     assert r.status_code == 200
     st = r.json()
     assert st["enabled"] is True and st["trained_at"] is None
-    assert set(st["learners"]) == {"doc_type", "category", "vault", "misclick", "people", "tags"}
+    assert set(st["learners"]) == {"doc_type", "category", "vault", "misclick", "people", "tags", "forwards"}
 
     r = client.patch("/api/system/learning", json={"enabled": False}, headers=H)
     assert r.status_code == 200 and r.json()["enabled"] is False

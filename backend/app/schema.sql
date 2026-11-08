@@ -147,6 +147,13 @@ CREATE TABLE IF NOT EXISTS items (
   place_country     TEXT,
   place_source      TEXT,                      -- NULL until looked up, then 'geonames' or 'none'
   gps_checked       INTEGER NOT NULL DEFAULT 0, -- the original was re-read for GPS by the backfill
+  received_via      TEXT,                      -- the messaging app the file came through (section 29): whatsapp,
+                                                --   telegram, facebook, snapchat, messenger, or 'app' when unnamed
+  forward           INTEGER NOT NULL DEFAULT 0, -- set apart as a forward (section 29)
+  forward_reasons   TEXT,                       -- JSON: the signals that decided ({name, stripped, small, jpeg_quality, meme_p, text})
+  forward_source    TEXT NOT NULL DEFAULT 'auto' CHECK (forward_source IN ('auto','user')),
+  forward_signals   TEXT,                       -- JSON: every signal, so a rule change re-decides without the file
+  forward_checked   INTEGER NOT NULL DEFAULT 0, -- the signals were computed (the backfill works through the rest)
   deleted_at        TEXT,                      -- in the trash since (NULL = live)
   created_at        TEXT NOT NULL,
   updated_at        TEXT NOT NULL
@@ -161,6 +168,7 @@ CREATE INDEX IF NOT EXISTS items_added     ON items(nsfw, created_at, id) WHERE 
 CREATE INDEX IF NOT EXISTS items_kind      ON items(kind, deleted_at);
 CREATE INDEX IF NOT EXISTS items_category  ON items(category, deleted_at);
 CREATE INDEX IF NOT EXISTS items_flags     ON items(deleted_at, nsfw, misclick);
+CREATE INDEX IF NOT EXISTS items_forward   ON items(forward, deleted_at);
 CREATE INDEX IF NOT EXISTS items_dup       ON items(dup_group_id);
 CREATE INDEX IF NOT EXISTS items_content   ON items(content_id);
 CREATE INDEX IF NOT EXISTS items_companion ON items(companion_of);
@@ -370,7 +378,7 @@ CREATE TABLE IF NOT EXISTS tag_rejections (   -- a suggestion the owner removed:
 -- Corrections and outcomes the learners need beyond the main tables (docs/ARCHITECTURE.md section 18).
 CREATE TABLE IF NOT EXISTS learning_events (
   id         INTEGER PRIMARY KEY AUTOINCREMENT,
-  kind       TEXT NOT NULL CHECK (kind IN ('guess','category','vault','misclick','doc_type','tag','merge')),
+  kind       TEXT NOT NULL CHECK (kind IN ('guess','category','vault','misclick','doc_type','tag','merge','forward')),
   label      INTEGER,                       -- 1 / 0 for outcomes, NULL for a plain correction
   features   TEXT NOT NULL DEFAULT '{}',    -- JSON: evidence terms, or {from, to, scores}
   item_id    INTEGER,                       -- kept after the item is gone

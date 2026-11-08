@@ -7,21 +7,25 @@ with vault=1 and an unlocked session (403 vault_locked otherwise), and then only
 GET    /config                     ConfigOut
 GET    /items                      ItemPage; query: category, kind, person (repeated, AND), from, to
                                    (local dates, inclusive), favorite, misclicks=exclude|include|only,
+                                   forwards=exclude|include|only and received=<app>|any (section 29),
                                    dups=collapse|all, vault, sort=taken|added, cursor, limit 1..200.
                                    Keyset cursors: taken = COALESCE(taken_at, created_at) DESC, id DESC;
                                    added = created_at DESC, id DESC. Bad cursor: 400 "Invalid cursor".
 GET    /items/{uid}                ItemDetail (trashed items too; NSFW needs the vault)
 PATCH  /items/{uid}                ItemUpdate -> ItemDetail. User edits set *_source='user'. nsfw moves
                                    the category to 'nsfw' and back (the best non-nsfw auto score, else
-                                   'misc'); misclick=false clears the reasons.
+                                   'misc'); misclick=false clears the reasons; forward (section 29) sets
+                                   forward_source='user' and records a learning event.
 DELETE /items/{uid}                to the trash -> Ok
 POST   /items/{uid}/restore        -> ItemDetail
-POST   /items/bulk                 BulkIn -> BulkOut (keep = not a mis-click; purge only for trashed)
+POST   /items/bulk                 BulkIn -> BulkOut (keep = not a mis-click; forward/unforward set the
+                                   forward flag; purge only for trashed)
 POST   /items/{uid}/reprocess      ReprocessIn -> Ok
 GET    /items/{uid}/pages          [PageOut];  GET /items/{uid}/text -> ItemTextOut
 GET    /trash                      ItemPage (deleted_at DESC);  POST /trash/empty -> BulkOut;
 DELETE /trash/{uid}                purge one trashed item -> Ok
 GET    /review/misclicks           ItemPage of flagged items (with their reasons)
+GET    /review/forwards            ItemPage of the forwards set apart (section 29), newest first
 GET    /duplicates                 DupGroupPage;  POST /duplicates/{uid}/best -> Ok
 GET    /stats                      Stats (recent = the 12 latest cards)
 """
@@ -86,7 +90,8 @@ SORT_KEYS = {"taken": "COALESCE(i.taken_at, i.created_at)", "added": "i.created_
 DETAIL_COLUMNS = (
     f"{ITEM_CARD_COLUMNS}, i.mime, i.size_bytes, i.fps, i.has_audio, i.camera, i.gps_lat, i.gps_lon, i.gps_alt, "
     "i.exif_datetime, i.category_source, i.category_scores, i.nsfw_score, i.nsfw_source, i.quality_scores, "
-    "i.text_status, i.analysis_status, i.deleted_at, i.updated_at, i.misclick_source, i.place"
+    "i.text_status, i.analysis_status, i.deleted_at, i.updated_at, i.misclick_source, i.place, "
+    "i.forward_source, i.forward_signals"
 )
 RECENT_LIMIT = 12
 
@@ -227,6 +232,7 @@ def item_detail(conn: sqlite3.Connection, row: sqlite3.Row) -> ItemDetail:
 
     data["user_tags"] = item_tags_out(conn, int(row["id"]))
     data["place"] = row["place"] if "place" in row.keys() else None
+    data["forward_source"] = row["forward_source"] if "forward_source" in row.keys() else "auto"
     data["albums"] = [
         {"id": int(a["id"]), "name": a["name"]}
         for a in conn.execute(
@@ -285,6 +291,10 @@ def _apply_update(conn: sqlite3.Connection, row: sqlite3.Row, body: ItemUpdate) 
         sets.update(misclick=int(body.misclick), misclick_source="user")
         if not body.misclick:
             sets["misclick_reasons"] = None
+    if body.forward is not None:  # section 29
+        sets.update(forward=int(body.forward), forward_source="user", forward_checked=1)
+        if not body.forward:
+            sets["forward_reasons"] = None
     if body.favorite is not None:
         sets["favorite"] = int(body.favorite)
     renamed = False
@@ -325,6 +335,10 @@ def _record_corrections(conn: sqlite3.Connection, row: sqlite3.Row, sets: dict[s
             events.record(conn, "misclick", None, {"from": int(row["misclick"]), "to": int(sets["misclick"]),
                                                    "scores": json_loads(row["quality_scores"], None),
                                                    "reasons": json_loads(row["misclick_reasons"], None)}, item_id=item_id)
+        if "forward" in sets and int(sets["forward"]) != int(row["forward"]):
+            signals = json_loads(row["forward_signals"], None) if "forward_signals" in row.keys() else None
+            events.record(conn, "forward", int(sets["forward"]), signals if isinstance(signals, dict) else {},
+                          item_id=item_id)
     except Exception:  # noqa: BLE001 - learning never blocks an edit
         log.exception("learning: could not record a correction")
 
@@ -359,12 +373,20 @@ def item_filters(
     sort: str = "taken",
     vault: bool = False,
     album: int | None = None,
+    forwards: str = "exclude",
+    received: str | None = None,
 ) -> tuple[list[str], list[Any], str]:
     """The WHERE parts, their parameters and the sort expression for a library query (alias i).
     Shared by GET /items, the timeline buckets (section 23), the map (section 25) and shares, so a
     filter added here applies everywhere. An unknown album is 404."""
-    where = [visible_sql(vault=vault, misclicks=misclicks, dups=dups)]
+    where = [visible_sql(vault=vault, misclicks=misclicks, dups=dups, forwards=forwards)]
     params: list[Any] = []
+    if received:  # section 29: what came through a messaging app
+        if received == "any":
+            where.append("i.received_via IS NOT NULL")
+        else:
+            where.append("i.received_via = ?")
+            params.append(received)
     if category is not None:
         where.append("i.category = ?")
         params.append(category)
@@ -411,6 +433,8 @@ def list_items(
     date_to: str | None = Query(default=None, alias="to", max_length=10),
     favorite: bool | None = None,
     misclicks: Literal["exclude", "include", "only"] = "exclude",
+    forwards: Literal["exclude", "include", "only"] = "exclude",
+    received: str | None = Query(default=None, max_length=20),
     dups: Literal["collapse", "all"] = "collapse",
     sort: Literal["taken", "added"] = "taken",
     album: int | None = Query(default=None, ge=1),
@@ -422,6 +446,7 @@ def list_items(
     where, params, sort_expr = item_filters(
         conn, category=category, kind=kind, person=person, tag=tag, live=live, date_from=date_from,
         date_to=date_to, favorite=favorite, misclicks=misclicks, dups=dups, sort=sort, vault=vault, album=album,
+        forwards=forwards, received=received,
     )
     return _page(conn, where, params, sort_expr, cursor, limit)
 
@@ -502,6 +527,8 @@ def bulk(body: BulkIn, session: SessionInfo = Depends(require_user),
         update = ItemUpdate(nsfw=_bulk_value_bool(body.value))
     elif action in ("favorite", "unfavorite"):
         update = ItemUpdate(favorite=action == "favorite")
+    elif action in ("forward", "unforward"):
+        update = ItemUpdate(forward=action == "forward")
     elif action in ("tag", "untag"):
         from app.api.tags import clean_tag_name
 
@@ -675,6 +702,15 @@ def review_misclicks(cursor: str | None = Query(default=None, max_length=512),
     return _page(conn, where, [], SORT_KEYS["taken"], cursor, limit)
 
 
+@router.get("/review/forwards", response_model=ItemPage)
+def review_forwards(cursor: str | None = Query(default=None, max_length=512),
+                    limit: int = Query(default=60, ge=1, le=200), vault: bool = Depends(want_vault),
+                    conn: sqlite3.Connection = Depends(get_db)) -> ItemPage:
+    """The forwards set apart (section 29), newest first, mis-clicks among them included."""
+    where = [visible_sql(vault=vault, misclicks="include", dups="all", forwards="only")]
+    return _page(conn, where, [], SORT_KEYS["taken"], cursor, limit)
+
+
 @router.get("/duplicates", response_model=DupGroupPage)
 def duplicates(cursor: str | None = Query(default=None, max_length=512), limit: int = Query(default=30, ge=1, le=100),
                vault: bool = Depends(want_vault), conn: sqlite3.Connection = Depends(get_db)) -> DupGroupPage:
@@ -756,6 +792,7 @@ def stats(conn: sqlite3.Connection = Depends(get_db)) -> Stats:
         documents=n("SELECT COUNT(*) FROM documents d JOIN items i ON i.id = d.item_id "
                     "WHERE i.deleted_at IS NULL AND i.nsfw = 0"),
         misclicks=n(f"SELECT COUNT(*) FROM items WHERE {live} AND misclick = 1"),
+        forwards=n(f"SELECT COUNT(*) FROM items WHERE {live} AND forward = 1"),
         guesses=n("SELECT (SELECT COUNT(*) FROM faces f JOIN items i ON i.id = f.item_id "
                   "WHERE f.person_id IS NULL AND f.guess_person_id IS NOT NULL AND i.deleted_at IS NULL AND i.nsfw = 0) + "
                   "(SELECT COUNT(*) FROM bodies b JOIN items i ON i.id = b.item_id "

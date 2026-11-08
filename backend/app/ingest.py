@@ -28,6 +28,7 @@ lose the upload's bytes.
 from __future__ import annotations
 
 import json
+from typing import Any
 import logging
 import os
 import re
@@ -346,13 +347,24 @@ def pair_live(conn: sqlite3.Connection, item_id: int, pair_key: str | None) -> b
 
 
 def _insert_item(conn: sqlite3.Connection, uid: str, info: MediaInfo, sha: str, fp: Fingerprint | None,
-                 size: int, filename: str, now: str) -> tuple[int, dict[str, str]]:
+                 size: int, filename: str, now: str, forward: dict[str, Any] | None = None) -> tuple[int, dict[str, str]]:
     item_id = next_item_id(conn)
     statuses = {
         "analysis_status": "pending" if info.kind in ANALYSED_KINDS else "done",
         "text_status": "pending" if info.kind in TEXT_KINDS else "none",
         "preview_status": _preview_status(info),
     }
+    # Section 29: what the file alone says; the analyze stage adds the model's signals and decides.
+    # A file that is never analysed is decided here from the file signals.
+    received_via = None
+    forward_checked = 0
+    if forward is not None and settings.forwards_enabled:
+        from app.analysis import forwards as forwards_mod
+
+        received_via = forwards_mod.decide(forward).received_via
+        forward_checked = 0 if statuses["analysis_status"] == "pending" else 1
+    elif forward is not None:
+        forward_checked = 1
     cols = dict(
         id=item_id, uid=uid, kind=info.kind, version=1, original_filename=filename, ext=info.ext, mime=info.mime,
         sha256=sha, size_bytes=size, width=info.width, height=info.height, duration_s=info.duration_s,
@@ -363,7 +375,8 @@ def _insert_item(conn: sqlite3.Connection, uid: str, info: MediaInfo, sha: str, 
         gps_alt=info.gps_alt, phash=fp.phash if fp else None, dhash=fp.dhash if fp else None,
         sig=fp.sig if fp else None, frames=json_dumps(fp.frames) if fp and fp.frames is not None else None,
         category="documents" if info.kind in TEXT_KINDS else "misc", content_id=info.content_id, **statuses,
-        created_at=now, updated_at=now,
+        received_via=received_via, forward_signals=json_dumps(forward) if forward is not None else None,
+        forward_checked=forward_checked, created_at=now, updated_at=now,
     )
     conn.execute(f"INSERT INTO items({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))})", tuple(cols.values()))
     return item_id, statuses
@@ -455,12 +468,18 @@ def _store_new(conn: sqlite3.Connection, up: sqlite3.Row, src: Path, info: Media
             fp = doc_fp
         del img
         now = now_iso()
+        from app.analysis import forwards as forwards_mod
+
+        forward = forwards_mod.file_signals(
+            kind=info.kind, ext=info.ext, width=info.width, height=info.height, camera=info.camera,
+            exif_datetime=info.exif_datetime, gps_lat=info.gps_lat, bitrate=info.bitrate,
+            filename=up["original_filename"], path=dest if info.kind == "image" else None)
         with tx(conn):
             if conn.execute("SELECT 1 FROM items WHERE uid = ?", (uid,)).fetchone():
                 raise RuntimeError(f"item {uid} already exists")
             if conn.execute("SELECT 1 FROM items WHERE sha256 = ?", (sha,)).fetchone():
                 raise _Stale("an identical file was stored meanwhile")
-            item_id, statuses = _insert_item(conn, uid, info, sha, fp, size, up["original_filename"], now)
+            item_id, statuses = _insert_item(conn, uid, info, sha, fp, size, up["original_filename"], now, forward)
             if clip_path is not None:
                 conn.execute("UPDATE items SET live = 1 WHERE id = ?", (item_id,))
             if decision.action == "link" and decision.target_id is not None:

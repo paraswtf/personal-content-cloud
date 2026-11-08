@@ -54,6 +54,8 @@ def filter_params(
     date_to: str | None = Query(default=None, alias="to", max_length=10),
     favorite: bool | None = None,
     misclicks: Literal["exclude", "include", "only"] = "exclude",
+    forwards: Literal["exclude", "include", "only"] = "exclude",
+    received: str | None = Query(default=None, max_length=20),
     dups: Literal["collapse", "all"] = "collapse",
     sort: Literal["taken", "added"] = "taken",
     album: int | None = Query(default=None, ge=1),
@@ -61,7 +63,7 @@ def filter_params(
 ) -> dict[str, Any]:
     """The GET /api/items filters, as keyword arguments for library.item_filters."""
     return dict(category=category, kind=kind, person=person, tag=tag, live=live, date_from=date_from,
-                date_to=date_to, favorite=favorite, misclicks=misclicks, dups=dups, sort=sort, vault=vault,
+                date_to=date_to, favorite=favorite, misclicks=misclicks, forwards=forwards, received=received, dups=dups, sort=sort, vault=vault,
                 album=album)
 
 

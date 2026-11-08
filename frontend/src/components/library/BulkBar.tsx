@@ -4,7 +4,7 @@ import AlbumBulkActions from '../albums/BulkActions'
 import ShareBulkAction from '../share/BulkAction'
 import { useId, useState, type FormEvent } from 'react'
 import { useMutation } from '@tanstack/react-query'
-import { Lock, Star, StarOff, Tag, Trash2, Unlock, X } from 'lucide-react'
+import { Forward, Lock, Star, StarOff, Tag, Trash2, Unlock, X } from 'lucide-react'
 import { api } from '../../lib/api'
 import { CATEGORIES, CATEGORY_LABELS, type BulkAction, type ItemCard } from '../../lib/types'
 import { formatCount } from '../../lib/format'
@@ -31,6 +31,8 @@ interface Props {
 const DONE: Partial<Record<BulkAction, string>> = {
   delete: 'moved to the trash',
   keep: 'kept',
+  forward: 'set apart as forwards',
+  unforward: 'kept in the library',
   favorite: 'added to favourites',
   unfavorite: 'removed from favourites',
   category: 'moved to a new category',
@@ -109,6 +111,7 @@ export default function BulkBar({ items, selected, onClear, onSelectAll, total, 
   const [tagMode, setTagMode] = useState<'tag' | 'untag' | null>(null)
   const uids = [...selected]
   const anyMisclick = items.some((i) => selected.has(i.uid) && i.misclick)
+  const anyForward = items.some((i) => selected.has(i.uid) && i.forward)
   const allFav = uids.length > 0 && items.filter((i) => selected.has(i.uid)).every((i) => i.favorite)
 
   const bulk = useMutation({
@@ -152,6 +155,10 @@ export default function BulkBar({ items, selected, onClear, onSelectAll, total, 
             Keep
           </Button>
         )}
+        <Button variant="secondary" disabled={busy} onClick={() => bulk.mutate({ action: anyForward ? 'unforward' : 'forward' })}>
+          <Forward className="size-4" aria-hidden />
+          {anyForward ? 'Not forwards' : 'Forwards'}
+        </Button>
         {!vault && (
           <Select
             label="Set category"

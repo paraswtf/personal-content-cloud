@@ -10,6 +10,7 @@ import {
   AlertCircle,
   Download,
   EyeOff,
+  Forward,
   Loader2,
   Lock,
   PawPrint,
@@ -28,6 +29,7 @@ import { formatBytes, formatDate, formatDuration, formatPercent, formatResolutio
 import Select from '../Select'
 import { errorMessage } from '../admin/adminHooks'
 import VirtualDocument from '../documents/VirtualDocument'
+import { forwardReasons, receivedLabel } from '../library/forwards'
 import { burstBestUid, reasonKeys, reasonLabel } from '../library/misclick'
 import PersonPicker, { choiceBody, type PersonChoice } from '../people/PersonPicker'
 import { boxKey, type BoxTarget } from './boxes'
@@ -219,6 +221,8 @@ export default function InfoPanel({
         onToast(body.nsfw ? 'Moved to the vault' : 'Moved out of the vault')
         onLeave()
       } else if (body.misclick === false) onToast('Kept. It is no longer flagged.')
+      else if (body.forward === false) onToast('Kept. It stays in the library.')
+      else if (body.forward === true) onToast('Set apart as a forward.')
       else if (body.category) onToast(`Category set to ${CATEGORY_LABELS[body.category]}`)
       else if (body.favorite !== undefined) onToast(body.favorite ? 'Added to favourites' : 'Removed from favourites')
     },
@@ -244,6 +248,8 @@ export default function InfoPanel({
 
   const reasons = reasonKeys(detail.misclick_reasons)
   const bestUid = burstBestUid(detail.misclick_reasons)
+  const forwardLabels = forwardReasons(detail.forward_reasons)
+  const receivedTitle = receivedLabel(detail.received_via)
   const quality = detail.quality_scores ?? {}
   const qualityRows = QUALITY_ROWS.filter((r) => typeof quality[r.key] === 'number')
   const categoryOptions = CATEGORIES.filter((c) => c !== 'nsfw').map((c) => ({ value: c, label: CATEGORY_LABELS[c] }))
@@ -314,6 +320,47 @@ export default function InfoPanel({
               Move to trash
             </button>
           </div>
+        </Section>
+      )}
+
+      {(receivedTitle || detail.forward) && (
+        <Section title={receivedTitle ?? 'Forward'}>
+          {detail.forward ? (
+            <>
+              <p className="text-sm text-white/75">Set apart as a forward. It is not in the library unless forwards are included.</p>
+              {forwardLabels.length > 0 && (
+                <ul className="mt-2 flex flex-wrap gap-1.5" aria-label="Reasons">
+                  {forwardLabels.map((r) => (
+                    <li key={r} className="inline-flex items-center gap-1 rounded-full bg-sky-400/15 px-2.5 py-1 text-xs font-semibold text-sky-200">
+                      <Forward className="size-3" aria-hidden />
+                      {r}
+                    </li>
+                  ))}
+                </ul>
+              )}
+              <div className="mt-3 flex flex-wrap gap-2">
+                <button type="button" className={darkButton('primary')} disabled={update.isPending} onClick={() => update.mutate({ forward: false })}>
+                  Not a forward
+                </button>
+                <button type="button" className={darkButton('danger')} onClick={onRequestDelete}>
+                  <Trash2 className="size-4" aria-hidden />
+                  Move to trash
+                </button>
+              </div>
+            </>
+          ) : (
+            <>
+              <p className="text-sm text-white/75">
+                Kept in the library as a photo{detail.forward_source === 'user' ? ', as you decided' : ''}.
+              </p>
+              <div className="mt-3 flex flex-wrap gap-2">
+                <button type="button" className={darkButton()} disabled={update.isPending} onClick={() => update.mutate({ forward: true })}>
+                  <Forward className="size-4" aria-hidden />
+                  Mark as forward
+                </button>
+              </div>
+            </>
+          )}
         </Section>
       )}
 

@@ -90,6 +90,7 @@ class Result:
     safe_p: float | None = None
     screenshot_p: float | None = None
     doc_p: float | None = None
+    meme_p: float | None = None  # section 29
     density: float | None = None
     faces: list[faces_mod.FaceRecord] = field(default_factory=list)
     face_torsos: list[np.ndarray | None] = field(default_factory=list)  # SigLIP vectors per face
@@ -333,6 +334,9 @@ def _run_models(item: sqlite3.Row, v: Visual, siglip: ModuleType | None, nsfw: M
             r.category_scores["screenshot_p"] = round(r.screenshot_p, 4)
             r.quality_scores["accident_p"] = round(float(quality.accident_probability(engine, frame0)[0]), 4)
             r.quality_scores["motion_blur_p"] = round(float(quality.motion_blur_probability(engine, frame0)[0]), 4)
+        if kind in ("image", "video"):
+            r.meme_p = categories.binary_p(engine, frame0, categories.MEME_PROMPTS, categories.NOT_MEME_PROMPTS)
+            r.category_scores["meme_p"] = round(r.meme_p, 4)
         crops = [f.torso for f in r.faces] + [b.torso for b in r.bodies] + [a.look for a in r.animals]
         valid = [i for i, c in enumerate(crops) if c is not None and c.size]
         vecs: list[np.ndarray | None] = [None] * len(crops)
@@ -720,6 +724,12 @@ def analyze_item(conn: sqlite3.Connection, item_id: int, version: int) -> None:
                  json_dumps(r.quality_scores) if r.quality_scores else None, face_count, body_count, animal_count,
                  status, now, item_id),
             )
+            # Forwards (section 29): the file's signals (from ingest, or now for older items) plus
+            # the model's; the owner's decision stays.
+            try:
+                _decide_forward(conn, cur, kind, r.category_scores, doc_like, has_person, emb0)
+            except Exception:  # noqa: BLE001 - never lose the analysis over the forward decision
+                log.exception("forwards: decision failed for item %s", item_id)
             if cur["live_video_item_id"]:
                 from app.media import live as live_media
 
@@ -751,6 +761,31 @@ def analyze_item(conn: sqlite3.Connection, item_id: int, version: int) -> None:
     log.info("analyze: %s %s v%s -> %s, %d faces, %d bodies, %d animals%s", kind, uid, version, category,
              len(r.faces), len(r.bodies), len(r.animals), f", skipped {sorted(set(r.skipped))}" if r.skipped else "")
     _after(conn, item_id, int(version), kind, doc_like, bool(r.labels) or people_changed or tags_added > 0)
+
+
+def _decide_forward(conn: sqlite3.Connection, cur: sqlite3.Row, kind: str, scores: dict[str, Any],
+                    doc_like: float | None, has_person: bool, emb0: np.ndarray | None) -> None:
+    """Section 29 inside the analysis transaction: the file-level signals ingest stored (computed now
+    for an item from before the section), the model-level ones, then forwards.apply. Documents and
+    other files only get received_via: the forward rule is for images and videos."""
+    from app.analysis import forwards
+
+    sig = json_loads(cur["forward_signals"], None) if cur["forward_signals"] else None
+    if not isinstance(sig, dict) or "stripped" not in sig:
+        path = None
+        if kind == "image" and (cur["ext"] or "").lower() in (".jpg", ".jpeg"):
+            p = storage.original_path(cur["uid"], int(cur["version"]), cur["ext"])
+            path = p if p.exists() else None
+        sig = forwards.file_signals(
+            kind=kind, ext=cur["ext"], width=cur["width"], height=cur["height"], camera=cur["camera"],
+            exif_datetime=cur["exif_datetime"], gps_lat=cur["gps_lat"], bitrate=cur["bitrate"],
+            filename=cur["original_filename"], path=path)
+    if kind in ("image", "video"):
+        sig.update(forwards.model_signals(meme_p=scores.get("meme_p"), doc_likeness=doc_like,
+                                          screenshot_p=scores.get("screenshot_p"), people=has_person))
+    else:
+        sig.update(forwards.model_signals(meme_p=None, doc_likeness=None, screenshot_p=None, people=False))
+    forwards.apply(conn, int(cur["id"]), sig, emb=emb0)
 
 
 def _after(conn: sqlite3.Connection, item_id: int, version: int, kind: str, doc_like: float | None,

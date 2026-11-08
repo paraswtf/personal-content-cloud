@@ -38,6 +38,10 @@ What it does with each file:
   pet you can name, and the People page lists your pets with their photos.
 - **Ways in.** Drag and drop in the browser, the camera inside the app, and the phone's Share menu
   (install the app from the browser menu first).
+- **Forwards.** Media that came through WhatsApp or another messaging app is recognised (the app's
+  filename, stripped camera metadata, WhatsApp's sizes and JPEG quality, and a model's view of the content),
+  memes, greetings, posters and screenshots of posts are set apart under Review > Forwards, and a real photo
+  received the same way stays in the library with its source noted. Keeping or marking one teaches the rule.
 - **Learning from your choices.** Corrections to categories, the vault, mis-clicks, document types
   and people teach small local models, so the next automatic decision of the same kind follows them.
   Taking a face away from a person takes the faces that look like it along, and they never come back
@@ -119,6 +123,7 @@ Environment variables (all optional):
 | `DOC_LIKENESS_MIN` | `0.55` | Images at or above this are sent to OCR. |
 | `BLUR_VAR_MIN`, `BURST_WINDOW_S` | `40`, `3` | Mis-click thresholds. |
 | `GUESS_WINDOW_H`, `GUESS_SCENE_SIM`, `GUESS_CLOTHES_SIM`, `GUESS_GPS_M` | `1`, `0.80`, `0.85`, `250` | Person guessing by clothes: only photos taken within this many hours before or after a tagged one. |
+| `FORWARDS_ENABLED`, `FORWARD_MAX_SIDE`, `FORWARD_JPEG_QUALITY_MAX`, `FORWARD_MEME_MIN` | `true`, `1600`, `82`, `0.5` | Forwards: the longest side and JPEG quality that mark an image as received through an app, and the content score that sets it apart. |
 | `PETS_ENABLED`, `ANIMAL_DET_THRESHOLD` | `true`, `0.45` | Pet identities (section 22) and the animal detection cut. |
 | `PET_MATCH_THRESHOLD`, `PET_NEW_THRESHOLD` | `0.82`, `0.86` | Cosine cuts for matching a crop to a known pet and for pairing two crops into a new pet. |
 | `WALLET_PASS_TYPE_ID`, `WALLET_TEAM_ID`, `WALLET_ORG_NAME` | unset | Apple Wallet passes (see below). |

@@ -56,6 +56,7 @@ UPLOAD_MESSAGES = {
 ITEM_CARD_COLUMNS = (
     "i.id, i.uid, i.kind, i.version, i.original_filename, i.width, i.height, i.duration_s, i.taken_at, i.created_at, "
     "i.category, i.nsfw, i.misclick, i.misclick_reasons, i.favorite, i.dup_group_id, i.dup_role, i.page_count, "
+    "i.received_via, i.forward, i.forward_reasons, "
     "i.preview_status, i.video_codec, i.ext, i.bitrate, i.live, i.live_video_item_id, "
     "(SELECT c.uid FROM items c WHERE c.id = i.live_video_item_id) AS live_uid, "
     "(SELECT d.doc_type FROM documents d WHERE d.item_id = i.id) AS doc_type, "
@@ -86,10 +87,10 @@ DOC_GROUP_OF = {
 
 
 def visible_sql(*, vault: bool = False, misclicks: str = "exclude", dups: str = "collapse",
-                alias: str = "i") -> str:
+                alias: str = "i", forwards: str = "exclude") -> str:
     """WHERE fragment (no leading AND) selecting the items a listing may show.
     vault: True shows only NSFW items (the vault), False hides them.
-    misclicks: exclude | include | only. dups: collapse | all.
+    misclicks: exclude | include | only. forwards: exclude | include | only (section 29). dups: collapse | all.
     collapse works within the visible side of the vault: an item of a duplicate group shows when it is
     the group's best, or when the best is not a live item on the same side (a normal copy under a vault
     best shows in the library, a vault copy under a normal best shows in the vault)."""
@@ -98,6 +99,10 @@ def visible_sql(*, vault: bool = False, misclicks: str = "exclude", dups: str = 
         parts.append(f"{alias}.misclick = 0")
     elif misclicks == "only":
         parts.append(f"{alias}.misclick = 1")
+    if forwards == "exclude":
+        parts.append(f"{alias}.forward = 0")
+    elif forwards == "only":
+        parts.append(f"{alias}.forward = 1")
     if dups == "collapse":
         parts.append(
             f"({alias}.dup_group_id IS NULL OR {alias}.dup_role = 'best' OR NOT EXISTS ("
@@ -181,6 +186,9 @@ def item_card(row: sqlite3.Row) -> ItemCard:
         nsfw=bool(row["nsfw"]),
         misclick=bool(row["misclick"]),
         misclick_reasons=json_loads(row["misclick_reasons"]) if row["misclick"] else None,
+        received_via=row["received_via"] if "received_via" in keys else None,
+        forward=bool(row["forward"]) if "forward" in keys else False,
+        forward_reasons=json_loads(row["forward_reasons"]) if "forward" in keys and row["forward"] else None,
         favorite=bool(row["favorite"]),
         dup_group=row["dup_group_uid"] if "dup_group_uid" in keys else None,
         dup_count=int(row["dup_count"] or 0) if "dup_count" in keys else 0,

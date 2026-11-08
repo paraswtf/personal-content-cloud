@@ -441,7 +441,7 @@ def _filters(*, vault: bool, category: str | None, kind: str | None, person_ids:
              tag_names: list[str] | None = None, live: bool | None = None) -> _Filters:
     from app.api.common import people_filter_sql, tags_filter_sql, visible_sql
 
-    parts = [visible_sql(vault=vault, misclicks="include", dups="collapse", alias="i")]
+    parts = [visible_sql(vault=vault, misclicks="include", dups="collapse", alias="i", forwards="include")]
     params: list[Any] = []
     if category:
         parts.append("i.category = ?")

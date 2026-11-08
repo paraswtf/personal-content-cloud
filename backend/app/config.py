@@ -137,6 +137,12 @@ class Settings:
     video_encoder: str         # auto | h264_nvenc | h264_vaapi | h264_qsv | libx264 (section 27)
     vaapi_device: str
 
+    # forwards (section 29)
+    forwards_enabled: bool
+    forward_max_side: int
+    forward_jpeg_quality_max: float
+    forward_meme_min: float
+
     # map and places (section 25)
     geo_enabled: bool
     map_tiles: str             # offline | online
@@ -241,6 +247,10 @@ def _load(**overrides) -> Settings:
         video_faces_max_s=_float("VIDEO_FACES_MAX_S", 900.0),
         video_encoder=(_env("VIDEO_ENCODER", "auto") or "auto").strip().lower(),
         vaapi_device=_env("VAAPI_DEVICE", "/dev/dri/renderD128"),
+        forwards_enabled=_bool("FORWARDS_ENABLED", True),
+        forward_max_side=_int("FORWARD_MAX_SIDE", 1600),
+        forward_jpeg_quality_max=_float("FORWARD_JPEG_QUALITY_MAX", 82.0),
+        forward_meme_min=_float("FORWARD_MEME_MIN", 0.5),
         geo_enabled=_bool("GEO_ENABLED", True),
         map_tiles=(_env("MAP_TILES", "offline") or "offline").strip().lower(),
         map_tile_style=_env("MAP_TILE_STYLE", "https://tiles.openfreemap.org/styles/liberty"),

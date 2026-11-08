@@ -328,6 +328,12 @@ def _housekeeping(conn: sqlite3.Connection) -> dict[str, int]:
         out["geo"] = geo_places.housekeeping(conn)
     except Exception:  # noqa: BLE001 - places never block housekeeping
         log.exception("housekeeping: places failed")
+    try:
+        from app.analysis import forwards as forwards_mod
+
+        out["forwards"] = forwards_mod.housekeeping(conn)
+    except Exception:  # noqa: BLE001 - forwards never block housekeeping
+        log.exception("housekeeping: forwards failed")
 
     return out
 

@@ -191,6 +191,10 @@ export interface ItemsQuery {
   /** Live Photos and motion photos only (live=1). Pass true or leave it out: false sends live=0. */
   live?: boolean
   misclicks?: 'exclude' | 'include' | 'only'
+  /** Forwards (section 29) are left out unless asked for. */
+  forwards?: 'exclude' | 'include' | 'only'
+  /** Items that came through a messaging app: an app name, or 'any'. */
+  received?: string
   dups?: 'collapse' | 'all'
   vault?: boolean
   sort?: 'taken' | 'added'
@@ -383,6 +387,8 @@ export const api = {
 
   review: {
     misclicks: (cursor?: string | null, limit = 60) => get<ItemPage>(`/api/review/misclicks${qs({ cursor, limit })}`),
+    /** The flagged forwards, newest first (section 29). */
+    forwards: (cursor?: string | null, limit = 60) => get<ItemPage>(`/api/review/forwards${qs({ cursor, limit })}`),
     guesses: (cursor?: string | null, limit = 60, person?: number) =>
       get<GuessPage>(`/api/review/guesses${qs({ cursor, limit, person })}`),
     duplicates: (cursor?: string | null, limit = 30) => get<DupGroupPage>(`/api/duplicates${qs({ cursor, limit })}`),

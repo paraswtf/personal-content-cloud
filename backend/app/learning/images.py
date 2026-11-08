@@ -16,6 +16,7 @@ from app.util import now_iso
 MODEL = "images"
 CAT_ARRAY = "images_category"
 NSFW_ARRAY = "images_vault"
+FORWARD_ARRAY = "images_forward"  # section 29: the items the owner kept or set apart as forwards
 NEIGHBOUR_MIN = 0.80   # a neighbour counts from this cosine
 BEST_MIN = 0.85        # the best neighbour must be at least this close
 VOTE_MIN = 0.6         # the winner's share of the neighbours' weight
@@ -80,7 +81,13 @@ def train(conn: sqlite3.Connection) -> dict[str, Any]:
         "SELECT id, nsfw, nsfw_score, category_scores FROM items WHERE nsfw_source = 'user' AND deleted_at IS NULL "
         "AND kind IN ('image', 'video') ORDER BY id"
     ).fetchall()
-    embs = _embeddings(conn, sorted({int(r["id"]) for r in [*cat_rows, *nsfw_rows]}))
+    fwd_rows = conn.execute(
+        "SELECT id, forward FROM items WHERE forward_source = 'user' AND deleted_at IS NULL "
+        "AND kind IN ('image', 'video') ORDER BY id"
+    ).fetchall()
+    embs = _embeddings(conn, sorted({int(r["id"]) for r in [*cat_rows, *nsfw_rows, *fwd_rows]}))
+    fwd_x, fwd_ids = _matrix(embs, [int(r["id"]) for r in fwd_rows])
+    fwd_label = {int(r["id"]): int(r["forward"]) for r in fwd_rows}
     cat_x, cat_ids = _matrix(embs, [int(r["id"]) for r in cat_rows])
     cat_label = {int(r["id"]): str(r["category"]) for r in cat_rows}
     nsfw_x, nsfw_ids = _matrix(embs, [int(r["id"]) for r in nsfw_rows])
@@ -96,11 +103,16 @@ def train(conn: sqlite3.Connection) -> dict[str, Any]:
         store.save_array(NSFW_ARRAY, nsfw_x)
     else:
         store.remove(NSFW_ARRAY)
+    if fwd_ids:
+        store.save_array(FORWARD_ARRAY, fwd_x)
+    else:
+        store.remove(FORWARD_ARRAY)
     labels = [cat_label[i] for i in cat_ids]
     model = {
         "category": {"ids": cat_ids, "labels": labels, "examples": len(cat_ids), "names": sorted(set(labels))},
         "vault": {"ids": nsfw_ids, "labels": [nsfw_label[i] for i in nsfw_ids], "examples": len(nsfw_rows),
                   "threshold": threshold, "scored": len(pairs), "weights": weights},
+        "forward": {"ids": fwd_ids, "labels": [fwd_label[i] for i in fwd_ids], "examples": len(fwd_rows)},
         "trained_at": now_iso(),
     }
     store.save(MODEL, model)
@@ -174,6 +186,32 @@ def predict_category(emb: np.ndarray | None) -> tuple[str, float] | None:
     return winner, round(close[0][1], 4)
 
 
+def forward_vote(emb: np.ndarray | None) -> bool | None:
+    """Section 29: True or False when the owner's kept or set-apart look-alikes decide (a neighbour at
+    cosine >= BEST_MIN, the winner holding VOTE_MIN of the close neighbours' weight), else None."""
+    if emb is None or not store.enabled():
+        return None
+    model = store.load(MODEL)
+    fwd = (model or {}).get("forward") or {}
+    if not fwd.get("ids"):
+        return None
+    sims = _neighbours(FORWARD_ARRAY, emb)
+    if sims is None:
+        return None
+    labels = fwd["labels"]
+    order = np.argsort(-sims)[:TOP_K]
+    close = [(int(labels[i]), float(sims[i])) for i in order if sims[i] >= NEIGHBOUR_MIN]
+    if not close or close[0][1] < BEST_MIN:
+        return None
+    weight = {0: 0.0, 1: 0.0}
+    for label, s in close:
+        weight[label] += s
+    winner = 1 if weight[1] >= weight[0] else 0
+    if weight[winner] / (weight[0] + weight[1]) < VOTE_MIN:
+        return None
+    return bool(winner)
+
+
 def predict_nsfw(emb: np.ndarray | None, signals: dict[str, Any] | float | None, *,
                  sensitivity: str = "normal") -> bool | None:
     """True/False from a very close labelled neighbour, else from the weights learned over the vault
@@ -208,8 +246,10 @@ def status() -> dict[str, Any]:
     model = store.load(MODEL) or {}
     cat = model.get("category", {})
     vault = model.get("vault", {})
+    fwd = model.get("forward", {})
     return {
         "category": {"examples": int(cat.get("examples", 0)), "labels": list(cat.get("names", []))},
         "vault": {"examples": int(vault.get("examples", 0)), "threshold": vault.get("threshold"),
                   "weights": ((vault.get("weights") or {}).get("w") if vault.get("weights") else None)},
+        "forward": {"examples": int(fwd.get("examples", 0))},
     }

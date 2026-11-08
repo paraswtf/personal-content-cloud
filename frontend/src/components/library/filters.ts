@@ -18,6 +18,8 @@ export interface LibraryFilters {
   /** Live Photos and motion photos only (URL live=1). */
   live: boolean
   misclicks: 'exclude' | 'include' | 'only'
+  /** Forwards (section 29, URL fwd=): left out unless included. */
+  forwards: 'exclude' | 'include' | 'only'
   dups: 'collapse' | 'all'
   sort: 'taken' | 'added'
 }
@@ -48,6 +50,7 @@ export function readFilters(params: URLSearchParams, vault: boolean): LibraryFil
   const kind = params.get('kind') as ItemKind | null
   const mode = params.get('mode')
   const mis = params.get('mis')
+  const fwd = params.get('fwd')
   const from = params.get('from') ?? ''
   const to = params.get('to') ?? ''
   return {
@@ -62,6 +65,7 @@ export function readFilters(params: URLSearchParams, vault: boolean): LibraryFil
     favorite: params.get('fav') === '1',
     live: params.get('live') === '1',
     misclicks: mis === 'include' || mis === 'only' ? mis : 'exclude',
+    forwards: fwd === 'include' || fwd === 'only' ? fwd : 'exclude',
     dups: params.get('dups') === 'all' ? 'all' : 'collapse',
     sort: params.get('sort') === 'added' ? 'added' : 'taken',
   }
@@ -79,6 +83,7 @@ export function itemsQuery(f: LibraryFilters, vault: boolean, album?: number): O
     favorite: f.favorite || undefined,
     live: f.live || undefined,
     misclicks: f.misclicks === 'exclude' ? undefined : f.misclicks,
+    forwards: f.forwards === 'exclude' ? undefined : f.forwards,
     dups: f.dups === 'all' ? 'all' : undefined,
     sort: f.sort === 'added' ? 'added' : undefined,
     vault: vault || undefined,
@@ -104,5 +109,5 @@ export function searchQuery(f: LibraryFilters, vault: boolean): Omit<SearchQuery
 
 /** Any filter beyond the category chips is set (opens the filter panel on load). */
 export function hasExtraFilters(f: LibraryFilters): boolean {
-  return !!(f.kind || f.people.length || f.tags.length || f.from || f.to || f.favorite || f.live || f.misclicks !== 'exclude' || f.dups === 'all')
+  return !!(f.kind || f.people.length || f.tags.length || f.from || f.to || f.favorite || f.live || f.misclicks !== 'exclude' || f.forwards !== 'exclude' || f.dups === 'all')
 }

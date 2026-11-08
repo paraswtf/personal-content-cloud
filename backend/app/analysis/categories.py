@@ -3,8 +3,8 @@
 
 CONTRACT.
 - CATEGORY_PROMPTS: {group: [prompts]} for personal, places, food, pets, objects, documents,
-  screenshots. DOCUMENT_PROMPTS / SCREENSHOT_PROMPTS / EXPLICIT_PROMPTS are binary groups scored
-  against their NOT_* counterparts; EXPLICIT is a second NSFW signal only. ACCIDENT_PROMPTS lives in
+  screenshots. DOCUMENT_PROMPTS / SCREENSHOT_PROMPTS / EXPLICIT_PROMPTS / MEME_PROMPTS (section 29) are
+  binary groups scored against their NOT_* counterparts; EXPLICIT is a second NSFW signal only. ACCIDENT_PROMPTS lives in
   quality.py and is re-exported here. LABELS: vocabulary for the top-5 item labels.
 - category_scores(engine, embs) -> {group: p} (mean over the embeddings), plus binary_p(...).
 - top_labels(engine, embs, k=5) -> [(label, score)].
@@ -131,6 +131,24 @@ NOT_SCREENSHOT_PROMPTS = [
     "a photo of a printed document",
     "a photo of an object",
 ]
+# Section 29: made-for-sharing graphics against photos someone took.
+MEME_PROMPTS = [
+    "a meme",
+    "a greeting image such as good morning with text",
+    "a motivational quote on a picture",
+    "a poster, flyer or advertisement",
+    "a screenshot of a social media post or a news clipping",
+    "an infographic or chart",
+    "a cartoon or comic",
+]
+NOT_MEME_PROMPTS = [
+    "a photo taken with a phone camera",
+    "a photo of people",
+    "a selfie",
+    "a landscape or street photo",
+    "a photo of food",
+]
+
 EXPLICIT_PROMPTS = [
     "a nude photo",
     "an explicit sexual photo",

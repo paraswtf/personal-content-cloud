@@ -438,7 +438,9 @@ def test_c24_recovery_enqueues_in_one_transaction_without_duplicates(conn):
         second = sum(s.strip().upper().startswith("BEGIN") for s in statements)
     finally:
         conn.set_trace_callback(None)
-    assert first <= 2 and second <= 2  # requeue_running and the enqueue batch, not one per item
+    # requeue_running, the enqueue batch and (first start only) the guess window record of section 10:
+    # never one per item
+    assert first <= 3 and second <= 2
     assert conn.execute("SELECT COUNT(*) FROM jobs WHERE type = 'analyze'").fetchone()[0] == 300
     assert conn.execute("SELECT COUNT(DISTINCT payload) FROM jobs").fetchone()[0] == 300
     plan = " ".join(str(r[-1]) for r in conn.execute("EXPLAIN QUERY PLAN " + jobs._dup_sql("analyze"), ("a", "b")))

@@ -79,7 +79,7 @@ def list_documents(
     vault: bool = Depends(want_vault),
     conn: sqlite3.Connection = Depends(get_db),
 ) -> DocumentPage:
-    where = [visible_sql(vault=vault, misclicks="include", dups="all"),
+    where = [visible_sql(vault=vault, misclicks="include", dups="all", forwards="include"),
              "EXISTS (SELECT 1 FROM documents d WHERE d.item_id = i.id"
              + (" AND d.doc_type = ?" if type else "") + (" AND d.doc_group = ?" if group else "") + ")"]
     params: list = [p for p in (type, group) if p]
@@ -118,7 +118,7 @@ def list_documents(
 def document_types(vault: bool = Depends(want_vault), conn: sqlite3.Connection = Depends(get_db)) -> list[DocumentTypeOut]:
     counts = {r["doc_type"]: int(r["n"]) for r in conn.execute(
         f"SELECT d.doc_type, COUNT(*) AS n FROM documents d JOIN items i ON i.id = d.item_id "
-        f"WHERE {visible_sql(vault=vault, misclicks='include', dups='all')} GROUP BY d.doc_type")}
+        f"WHERE {visible_sql(vault=vault, misclicks='include', dups='all', forwards='include')} GROUP BY d.doc_type")}
     out = [DocumentTypeOut(type=t, group=spec.group, label=spec.label, count=counts.get(t, 0))
            for t, spec in REGISTRY.items()]
     order = {g: i for i, g in enumerate(GROUPS)}

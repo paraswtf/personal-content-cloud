@@ -1,10 +1,11 @@
-// Review (/review): the bins that need a decision. Mis-clicks (keep or delete), duplicates (pick
-// the best copy, delete the others) and person guesses (confirm or reject).
+// Review (/review): the bins that need a decision. Mis-clicks (keep or delete), forwards (keep or
+// delete, section 29), duplicates (pick the best copy, delete the others) and person guesses (confirm
+// or reject).
 import { useCallback, useMemo, useState, type ReactNode } from 'react'
 import { useSearchParams } from 'react-router'
 import { useMutation, useQuery } from '@tanstack/react-query'
 import clsx from 'clsx'
-import { CheckCheck, Copy, Crown, Sparkles, Trash2, TriangleAlert, UsersRound } from 'lucide-react'
+import { CheckCheck, Copy, Crown, Forward, Sparkles, Trash2, TriangleAlert, UsersRound } from 'lucide-react'
 import { api } from '../lib/api'
 import type { DupGroup, GuessItem, ItemCard } from '../lib/types'
 import { formatCount, formatDate, formatResolution } from '../lib/format'
@@ -12,6 +13,7 @@ import { useInfiniteSentinel, usePageTitle, useRefreshLibrary, useStableCallback
 import { useItemList } from '../lib/useItemList'
 import MediaGrid from '../components/MediaGrid'
 import Viewer from '../components/Viewer'
+import { forwardReasons } from '../components/library/forwards'
 import GuessCard from '../components/people/GuessCard'
 import { guessKey, useGuessReview } from '../components/people/useGuessReview'
 import { useToast } from '../components/Toast'
@@ -21,9 +23,10 @@ import { LoadMore, SelectionBar } from '../components/admin/fields'
 import { useViewerParam } from '../components/public/useViewerParam'
 import { Button, EmptyState, ErrorState } from '../components/ui'
 
-type Tab = 'misclicks' | 'duplicates' | 'guesses'
+type Tab = 'misclicks' | 'forwards' | 'duplicates' | 'guesses'
 const TABS: { value: Tab; label: string; icon: typeof Copy }[] = [
   { value: 'misclicks', label: 'Mis-clicks', icon: TriangleAlert },
+  { value: 'forwards', label: 'Forwards', icon: Forward },
   { value: 'duplicates', label: 'Duplicates', icon: Copy },
   { value: 'guesses', label: 'Guesses', icon: UsersRound },
 ]
@@ -89,6 +92,94 @@ function MisclicksTab() {
       {sel.count > 0 && (
         <SelectionBar count={sel.count} noun={sel.count === 1 ? 'item' : 'items'} onClear={sel.clear} onSelectAll={() => sel.setAll(list.items.map((i) => i.uid))} allSelected={sel.count >= list.items.length} total={list.items.length}>
           <Button loading={bulk.isPending && bulk.variables === 'keep'} disabled={bulk.isPending} onClick={() => bulk.mutate('keep')}>
+            Keep
+          </Button>
+          <Button variant="danger" disabled={bulk.isPending} onClick={() => setConfirmDelete(true)}>
+            <Trash2 className="size-4" aria-hidden />
+            Delete
+          </Button>
+        </SelectionBar>
+      )}
+      <Confirm
+        open={confirmDelete}
+        title={`Move ${formatCount(sel.count, 'item')} to the trash?`}
+        body="They can be restored from Trash until it is emptied."
+        confirmLabel="Move to trash"
+        danger
+        loading={bulk.isPending}
+        onConfirm={() => bulk.mutate('delete')}
+        onClose={() => !bulk.isPending && setConfirmDelete(false)}
+      />
+      {viewer.uid && (
+        <Viewer uid={viewer.uid} onClose={viewer.close} onPrev={viewer.onPrev} onNext={viewer.onNext} position={viewer.position} />
+      )}
+    </div>
+  )
+}
+
+function ForwardsTab() {
+  const toast = useToast()
+  const refresh = useRefreshLibrary()
+  const fetchPage = useCallback((c: string | null) => api.review.forwards(c, 60), [])
+  const list = useItemList(['review', 'forwards'], fetchPage)
+  const sel = useSelection<string>()
+  const viewer = useViewerParam(list.items, list.hasMore, list.loadMore, list.total)
+  const openItem = useStableCallback((uid: string) => viewer.open(uid))
+  const [confirmDelete, setConfirmDelete] = useState(false)
+  const reasonsOf = useCallback((i: ItemCard) => forwardReasons(i.forward_reasons), [])
+
+  const bulk = useMutation({
+    mutationFn: (action: 'unforward' | 'delete') => api.items.bulk({ uids: [...sel.selected], action }),
+    onSuccess: (r, action) => {
+      toast.success(`${formatCount(r.updated, 'item')} ${action === 'unforward' ? 'kept in the library' : 'moved to the trash'}.`)
+      setConfirmDelete(false)
+      sel.clear()
+      void refresh()
+    },
+    onError: (e) => toast.error(errorMessage(e, 'Could not update the selection.')),
+  })
+
+  return (
+    <div>
+      <p className="mb-3 text-sm text-ink-soft">
+        Memes, greetings, posters and text images that came through WhatsApp or another messaging app. A real photo received the
+        same way stays in the library. Keep returns an item to the library and teaches the app; nothing is deleted until you say so.
+      </p>
+      {list.error && !list.items.length ? (
+        <ErrorState error={list.error} onRetry={list.refetch} />
+      ) : (
+        <>
+          {list.items.length > 0 && (
+            <div className="mb-3 flex flex-wrap gap-2">
+              <Button variant="secondary" onClick={() => sel.setAll(list.items.map((i) => i.uid))}>
+                Select all {list.items.length < list.total ? 'loaded' : ''}
+              </Button>
+            </div>
+          )}
+          <div className="-mx-4 sm:mx-0">
+            <MediaGrid
+              items={list.items}
+              onOpen={openItem}
+              hasMore={list.hasMore}
+              loadMore={list.loadMore}
+              loading={list.loading}
+              selectable={sel.count > 0}
+              selected={sel.selected}
+              onToggleSelect={sel.toggle}
+              selectOnHover
+              reasonsOf={reasonsOf}
+              empty={
+                <EmptyState icon={<CheckCheck className="size-8" aria-hidden />} title="No forwards to review">
+                  Media received through a messaging app that looks made for sharing shows up here after upload.
+                </EmptyState>
+              }
+            />
+          </div>
+        </>
+      )}
+      {sel.count > 0 && (
+        <SelectionBar count={sel.count} noun={sel.count === 1 ? 'item' : 'items'} onClear={sel.clear} onSelectAll={() => sel.setAll(list.items.map((i) => i.uid))} allSelected={sel.count >= list.items.length} total={list.items.length}>
+          <Button loading={bulk.isPending && bulk.variables === 'unforward'} disabled={bulk.isPending} onClick={() => bulk.mutate('unforward')}>
             Keep
           </Button>
           <Button variant="danger" disabled={bulk.isPending} onClick={() => setConfirmDelete(true)}>
@@ -314,10 +405,11 @@ export default function ReviewPage() {
   usePageTitle('Review')
   const [params, setParams] = useSearchParams()
   const raw = params.get('tab')
-  const tab: Tab = raw === 'duplicates' || raw === 'guesses' ? raw : 'misclicks'
+  const tab: Tab = raw === 'forwards' || raw === 'duplicates' || raw === 'guesses' ? raw : 'misclicks'
   const stats = useQuery({ queryKey: ['stats'], queryFn: api.stats, staleTime: 15_000 })
   const counts: Record<Tab, number | undefined> = {
     misclicks: stats.data?.misclicks,
+    forwards: stats.data?.forwards,
     duplicates: stats.data?.duplicates,
     guesses: stats.data?.guesses,
   }
@@ -359,6 +451,7 @@ export default function ReviewPage() {
       </div>
       <div role="tabpanel" className="pb-8">
         {tab === 'misclicks' && <MisclicksTab />}
+        {tab === 'forwards' && <ForwardsTab />}
         {tab === 'duplicates' && <DuplicatesTab />}
         {tab === 'guesses' && <GuessesTab />}
       </div>

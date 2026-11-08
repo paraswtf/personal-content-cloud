@@ -217,6 +217,9 @@ class ItemCard(BaseModel):
     nsfw: bool = False
     misclick: bool = False
     misclick_reasons: dict[str, Any] | None = None
+    received_via: str | None = None            # section 29: the messaging app the file came through
+    forward: bool = False                      # section 29: set apart as a forward
+    forward_reasons: dict[str, Any] | None = None
     favorite: bool = False
     dup_group: str | None = None   # uid of the group's best item
     dup_count: int = 0             # copies in the group (0 when not in a group)
@@ -278,6 +281,7 @@ class ItemDetail(ItemCard):
     gps: GpsOut | None = None
     exif_datetime: str | None = None
     category_source: Literal["auto", "user"] = "auto"
+    forward_source: Literal["auto", "user"] = "auto"  # section 29
     category_scores: dict[str, float] | None = None
     nsfw_score: float | None = None
     quality_scores: dict[str, Any] | None = None
@@ -309,6 +313,7 @@ class ItemUpdate(BaseModel):
     category: Category | None = None
     nsfw: bool | None = None
     misclick: bool | None = None
+    forward: bool | None = None  # section 29
     favorite: bool | None = None
     filename: str | None = Field(default=None, min_length=1, max_length=255)
 
@@ -316,7 +321,7 @@ class ItemUpdate(BaseModel):
 class BulkIn(BaseModel):
     uids: list[str] = Field(min_length=1, max_length=1000)
     action: Literal["delete", "restore", "keep", "category", "nsfw", "favorite", "unfavorite", "purge", "tag", "untag",
-                    "album", "unalbum"]
+                    "album", "unalbum", "forward", "unforward"]
     value: str | None = None
 
 
@@ -387,6 +392,7 @@ class Stats(BaseModel):
     named_people: int
     documents: int
     misclicks: int
+    forwards: int = 0  # section 29
     guesses: int
     duplicates: int
     trash: int
@@ -638,6 +644,7 @@ class SystemOut(BaseModel):
     workers: bool
     download: dict[str, Any] | None = None
     video: dict[str, Any] | None = None  # section 27: encoder and web copy counts
+    forwards: dict[str, Any] | None = None  # section 29: {enabled, unchecked, forwards, received, running}
 
 
 class TagOut(BaseModel):

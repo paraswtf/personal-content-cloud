@@ -4,7 +4,7 @@
 // search hits can show the matched moment and a text snippet.
 import { memo, useState, type ReactNode } from 'react'
 import clsx from 'clsx'
-import { Check, Copy, FileText, ImageOff, Play, Star, TriangleAlert } from 'lucide-react'
+import { Check, Copy, FileText, Forward, ImageOff, Play, Star, TriangleAlert } from 'lucide-react'
 import type { ItemCard } from '../lib/types'
 import { formatDate, formatDuration } from '../lib/format'
 import { useInfiniteSentinel } from '../lib/hooks'
@@ -32,6 +32,8 @@ interface Props {
   selectOnHover?: boolean
   /** Show mis-click reasons as chips on the tiles (review bin). */
   showReasons?: boolean
+  /** Chips of another kind on the tiles, such as forward reasons (section 29); wins over showReasons. */
+  reasonsOf?: (item: GridItem) => string[]
   /** Show search snippets on the tiles. */
   showSnippets?: boolean
   /** Vault items: file URLs carry vault=1. */
@@ -57,7 +59,7 @@ function describe(item: GridItem): string {
   const at = matchTime(item)
   const match = at === null ? '' : `, match at ${formatDuration(at)}`
   const when = formatDate(item.taken_at ?? item.created_at)
-  const flags = [item.favorite && 'favourite', item.misclick && 'possible mis-click', item.dup_count > 0 && `${item.dup_count} similar`]
+  const flags = [item.favorite && 'favourite', item.misclick && 'possible mis-click', item.forward && 'forward', item.dup_count > 0 && `${item.dup_count} similar`]
     .filter(Boolean)
     .join(', ')
   return `${what}${len}${match}${when ? `, ${when}` : ''}${flags ? `, ${flags}` : ''}`
@@ -75,6 +77,7 @@ export const Tile = memo(function Tile({
   selectOnHover,
   isSelected,
   showReasons,
+  reasonsOf,
   showSnippets,
   vault,
   onOpen,
@@ -86,6 +89,7 @@ export const Tile = memo(function Tile({
   selectOnHover: boolean
   isSelected: boolean
   showReasons: boolean
+  reasonsOf?: (item: GridItem) => string[]
   showSnippets: boolean
   vault: boolean
   onOpen: (uid: string, index: number) => void
@@ -96,7 +100,7 @@ export const Tile = memo(function Tile({
   const label = describe(item)
   const doc = isDocument(item)
   const thumb = withVault(item.urls.thumb, vault)
-  const reasons = showReasons ? reasonKeys(item.misclick_reasons) : []
+  const reasons = reasonsOf ? reasonsOf(item) : showReasons ? reasonKeys(item.misclick_reasons).map(reasonLabel) : []
   const at = matchTime(item)
 
   const img = failed ? (
@@ -181,6 +185,12 @@ export const Tile = memo(function Tile({
             <span className="hidden sm:inline">Mis-click</span>
           </span>
         )}
+        {item.forward && !reasonsOf && (
+          <span className="inline-flex items-center gap-1 rounded-full bg-black/60 px-1.5 py-0.5 text-[11px] font-semibold text-white" title="Forward">
+            <Forward className="size-3" aria-hidden />
+            <span className="hidden sm:inline">Forward</span>
+          </span>
+        )}
         {item.dup_count > 0 && (
           <span className="inline-flex items-center gap-0.5 rounded-full bg-black/60 px-1.5 py-0.5 text-[11px] font-semibold text-white" title="Similar copies">
             <Copy className="size-3" aria-hidden />+{item.dup_count}
@@ -192,7 +202,7 @@ export const Tile = memo(function Tile({
         <span className="pointer-events-none absolute inset-x-1 bottom-1 flex flex-wrap gap-1">
           {reasons.map((r) => (
             <span key={r} className="rounded-full bg-warn px-1.5 py-0.5 text-[11px] font-semibold text-white">
-              {reasonLabel(r)}
+              {r}
             </span>
           ))}
         </span>
@@ -242,6 +252,7 @@ export default function MediaGrid({
   onToggleSelect,
   selectOnHover = false,
   showReasons = false,
+  reasonsOf,
   showSnippets = false,
   vault = false,
   empty,
@@ -271,6 +282,7 @@ export default function MediaGrid({
                 selectOnHover={selectOnHover}
                 isSelected={!!selected?.has(item.uid)}
                 showReasons={showReasons}
+                reasonsOf={reasonsOf}
                 showSnippets={showSnippets}
                 vault={vault}
                 onOpen={onOpen}

@@ -11,14 +11,15 @@ import sqlite3
 import threading
 from typing import Any
 
-from app.learning import doc_type, events, images, misclick, people, store, tags
+from app.learning import doc_type, events, forwards, images, misclick, people, store, tags
 from app.util import now_iso
 
 log = logging.getLogger(__name__)
 
 STATUS = "status"
 _lock = threading.Lock()
-LEARNERS = (("doc_type", doc_type), ("images", images), ("misclick", misclick), ("people", people), ("tags", tags))
+LEARNERS = (("doc_type", doc_type), ("images", images), ("misclick", misclick), ("people", people), ("tags", tags),
+            ("forwards", forwards))
 
 
 def signature(conn: sqlite3.Connection) -> list[Any]:
@@ -28,8 +29,10 @@ def signature(conn: sqlite3.Connection) -> list[Any]:
         return row[0] if row else None
 
     return [
-        one("SELECT MAX(updated_at) FROM items WHERE category_source = 'user' OR nsfw_source = 'user' OR misclick_source = 'user'"),
-        one("SELECT COUNT(*) FROM items WHERE category_source = 'user' OR nsfw_source = 'user' OR misclick_source = 'user'"),
+        one("SELECT MAX(updated_at) FROM items WHERE category_source = 'user' OR nsfw_source = 'user' "
+            "OR misclick_source = 'user' OR forward_source = 'user'"),
+        one("SELECT COUNT(*) FROM items WHERE category_source = 'user' OR nsfw_source = 'user' OR misclick_source = 'user' "
+            "OR forward_source = 'user'"),
         one("SELECT COUNT(*) FROM items WHERE deleted_at IS NOT NULL AND misclick = 1"),
         one("SELECT MAX(updated_at) FROM documents WHERE source = 'user'"),
         one("SELECT COUNT(*) FROM documents WHERE source = 'user'"),
@@ -74,8 +77,8 @@ def pending(conn: sqlite3.Connection) -> int:
     st = store.load(STATUS) or {}
     since = st.get("trained_at") or ""
     n = conn.execute(
-        "SELECT COUNT(*) FROM items WHERE (category_source = 'user' OR nsfw_source = 'user' OR misclick_source = 'user') "
-        "AND updated_at > ?", (since,)
+        "SELECT COUNT(*) FROM items WHERE (category_source = 'user' OR nsfw_source = 'user' OR misclick_source = 'user' "
+        "OR forward_source = 'user') AND updated_at > ?", (since,)
     ).fetchone()[0]
     n += conn.execute("SELECT COUNT(*) FROM documents WHERE source = 'user' AND updated_at > ?", (since,)).fetchone()[0]
     n += conn.execute("SELECT COUNT(*) FROM learning_events WHERE created_at >= ?", (since,)).fetchone()[0]
@@ -102,6 +105,7 @@ def status(conn: sqlite3.Connection) -> dict[str, Any]:
             "misclick": misclick.status(),
             "people": people.status(),
             "tags": tags.status(),
+            "forwards": forwards.status(),
         },
         "events": _event_counts(conn),
         "errors": st.get("errors") or {},

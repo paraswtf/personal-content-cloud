@@ -4,7 +4,7 @@
 import { useState } from 'react'
 import { Link, useLocation, useSearchParams } from 'react-router'
 import clsx from 'clsx'
-import { Copy, MapPin, SlidersHorizontal, Star, Tag, TriangleAlert, X } from 'lucide-react'
+import { Copy, Forward, MapPin, SlidersHorizontal, Star, Tag, TriangleAlert, X } from 'lucide-react'
 import { CATEGORIES, CATEGORY_LABELS, type ItemKind } from '../../lib/types'
 import Select from '../Select'
 import Segmented from '../public/Segmented'
@@ -193,6 +193,15 @@ export default function FilterBar({ filters: f, set, clearAll, vault, searching 
                 >
                   <TriangleAlert className="size-4" aria-hidden />
                   Include mis-clicks
+                </button>
+                <button
+                  type="button"
+                  className={chip(f.forwards !== 'exclude')}
+                  aria-pressed={f.forwards !== 'exclude'}
+                  onClick={() => set('fwd', f.forwards === 'exclude' ? 'include' : null)}
+                >
+                  <Forward className="size-4" aria-hidden />
+                  Include forwards
                 </button>
                 <button type="button" className={chip(f.dups === 'all')} aria-pressed={f.dups === 'all'} onClick={() => set('dups', f.dups === 'all' ? null : 'all')}>
                   <Copy className="size-4" aria-hidden />
