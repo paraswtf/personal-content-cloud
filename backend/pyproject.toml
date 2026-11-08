@@ -37,4 +37,6 @@ package = false
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Keep the temp dirs of failed tests only: a passing full run used to leave about 0.5 GB behind (x3).
+tmp_path_retention_policy = "failed"
 pythonpath = ["."]

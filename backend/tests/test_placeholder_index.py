@@ -107,8 +107,9 @@ def test_reprobe_rebuilds_a_plain_clip_and_pairs_it_with_its_still(conn, tmp_pat
     row = conn.execute("SELECT * FROM items WHERE id = ?", (clip["id"],)).fetchone()
     assert row["kind"] == "video" and row["width"] == 320 and row["duration_s"] == pytest.approx(2.0, abs=0.1)
     assert row["preview_status"] == "pending" and row["phash"]
-    assert storage.thumb_path(row["uid"], 1).is_file()
     assert row["companion_of"] == still["id"]  # the Live Photo pair, found by the file stem
+    # a Live Photo clip keeps no pictures of its own (section 20): the still's stand for it
+    assert not storage.thumb_path(row["uid"], 1).exists() and storage.thumb_path(still["uid"], 1).is_file()
     s = conn.execute("SELECT live, live_video_item_id FROM items WHERE id = ?", (still["id"],)).fetchone()
     assert s["live"] == 1 and s["live_video_item_id"] == clip["id"]
     types = {r["type"] for r in conn.execute("SELECT type FROM jobs WHERE json_extract(payload, '$.item_id') = ?",

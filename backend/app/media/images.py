@@ -4,7 +4,8 @@ CONTRACT. Originals are never modified; everything here reads them and writes We
 atomically (temp file in the same dir + os.replace).
 - load_oriented(path, max_side=None, *, raw=None) -> RGB PIL image, EXIF orientation applied.
   Camera RAW files (by extension, or raw=True for files without one) go through app.media.raw.
-- make_image_derivatives(img, thumb_path, preview_path, preview_small_path)
+- make_image_derivatives(img, thumb_path, preview_path, preview_small_path) (no small file when the
+  large preview already fits the small size; small_is_large(size) says when)
 - save_webp(img, path, max_side, quality); to_bgr(img) -> contiguous HxWx3 uint8 BGR array.
 """
 from __future__ import annotations
@@ -133,13 +134,25 @@ def make_image_derivatives(img: Image.Image, thumb_path: Path, preview_path: Pat
                            preview_small_path: Path) -> None:
     """Write the large preview (settings.preview_size), the small preview (settings.preview_small_size,
     resized from the large one) and the grid thumbnail (settings.thumb_size, quality 80) from an
-    already-oriented RGB image. Both previews use settings.preview_quality."""
+    already-oriented RGB image. Both previews use settings.preview_quality. When the large preview
+    already fits the small size, the small one would be the same bytes: none is written (a stale one is
+    removed) and the small preview URL serves the large file (api/files.py, docs section 3)."""
     quality = settings.preview_quality
     preview = _fit(img, settings.preview_size)
     save_webp(preview, preview_path, settings.preview_size, quality)
-    small = _fit(preview, settings.preview_small_size)
-    save_webp(small, preview_small_path, settings.preview_small_size, quality)
+    if small_is_large(preview.size):
+        small = preview
+        Path(preview_small_path).unlink(missing_ok=True)
+    else:
+        small = _fit(preview, settings.preview_small_size)
+        save_webp(small, preview_small_path, settings.preview_small_size, quality)
     save_webp(small, thumb_path, settings.thumb_size, 80)
+
+
+def small_is_large(size: tuple[int, int]) -> bool:
+    """True when a large preview of this pixel size is no bigger than the small preview size, so the
+    small preview would repeat it."""
+    return max(int(size[0]), int(size[1])) <= int(settings.preview_small_size)
 
 
 def to_bgr(img: Image.Image) -> np.ndarray:

@@ -510,8 +510,20 @@ def valid_cursor_scalar(value: object) -> bool:
 
 UPLOAD_SELECT = (
     "SELECT u.*, i.uid AS item_uid, i.version AS item_version, i.deleted_at AS item_deleted, "
-    "i.nsfw AS item_nsfw FROM uploads u LEFT JOIN items i ON i.id = u.item_id"
+    "i.nsfw AS item_nsfw, s.uid AS still_uid, s.version AS still_version "
+    "FROM uploads u LEFT JOIN items i ON i.id = u.item_id LEFT JOIN items s ON s.id = i.companion_of"
 )
+
+
+def _upload_thumb(row: sqlite3.Row, item_uid: str | None, nsfw: bool) -> str | None:
+    """The upload's thumbnail: its item's, or for a Live Photo clip (no pictures of its own, section 20)
+    its still's."""
+    if not item_uid:
+        return None
+    keys = row.keys()
+    if "still_uid" in keys and row["still_uid"]:
+        return thumb_url(row["still_uid"], url_version(row["still_version"], nsfw))
+    return thumb_url(item_uid, url_version(row["item_version"], nsfw))
 
 
 def upload_out(row: sqlite3.Row, vault_open: bool = False) -> UploadOut:
@@ -532,7 +544,7 @@ def upload_out(row: sqlite3.Row, vault_open: bool = False) -> UploadOut:
         message=message,
         chunk_size=settings.chunk_size,
         item_uid=item_uid,
-        item_thumb_url=thumb_url(item_uid, url_version(row["item_version"], nsfw)) if item_uid else None,  # type: ignore[arg-type]
+        item_thumb_url=_upload_thumb(row, item_uid, nsfw),
         item_nsfw=bool(nsfw and item_uid),
         created_at=row["created_at"],
     )

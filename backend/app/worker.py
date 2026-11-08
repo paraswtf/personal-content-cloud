@@ -29,7 +29,8 @@ CONTRACT (docs/ARCHITECTURE.md section 7).
 - Housekeeping every CLEANUP_INTERVAL_S on the main thread: stale running jobs, abandoned uploads
   (ingest.cleanup_stale_uploads), failed uploads kept longer than settings.trash_days
   (ingest.expire_failed), the trash (ingest.expire_trash), expired sessions
-  (app.auth.sessions.purge_expired) and job_runs older than throughput.KEEP_DAYS. housekeeping()
+  (app.auth.sessions.purge_expired), job_runs older than throughput.KEEP_DAYS and, once per
+  ingest.TIDY_VERSION, the derived files the app no longer keeps (ingest.tidy_derivatives). housekeeping()
   holds housekeeping_lock, so the manual endpoint and the worker loop never run it at once.
 - Every job that ran to a verdict (complete, or a failure that used an attempt) is recorded by
   app.throughput for the processing speed charts (section 32); deferrals are not runs.
@@ -348,6 +349,10 @@ def _housekeeping(conn: sqlite3.Connection) -> dict[str, int]:
         out["job_runs"] = throughput.prune(conn)
     except Exception:  # noqa: BLE001 - the speed records never block housekeeping
         log.exception("housekeeping: pruning the job runs failed")
+    try:
+        out["tidied"] = ingest.tidy_derivatives(conn)
+    except Exception:  # noqa: BLE001 - tidying never blocks housekeeping
+        log.exception("housekeeping: tidying derived files failed")
 
     return out
 

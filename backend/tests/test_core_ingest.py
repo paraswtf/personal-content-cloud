@@ -78,9 +78,10 @@ def test_ingest_photo(conn, quiet_jobs):
     assert item["phash"] and item["sig"]
     original = storage.original_path(item["uid"], 1, ".jpg")
     assert original.read_bytes() == data
-    for p in (storage.thumb_path(item["uid"], 1), storage.preview_path(item["uid"], 1),
-              storage.preview_small_path(item["uid"], 1)):
+    for p in (storage.thumb_path(item["uid"], 1), storage.preview_path(item["uid"], 1)):
         assert p.is_file()
+    # 800 px already fits the small size: no small preview is stored, its URL serves the large file (section 3)
+    assert not storage.preview_small_path(item["uid"], 1).exists()
     assert not storage.staging_path(row["uid"]).exists()
     payload = f'{{"item_id":{item["id"]},"version":1}}'
     assert [(j["type"], j["payload"]) for j in job_rows(conn)] == [("analyze", payload)]

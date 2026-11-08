@@ -89,7 +89,7 @@ _frame_cache: OrderedDict[tuple[str, int, str, int], Image.Image] = OrderedDict(
 _frame_cache_lock = threading.Lock()
 
 _ITEM_COLUMNS = ("id, uid, kind, version, ext, mime, original_filename, nsfw, preview_status, page_count, "
-                 "taken_at, duration_s, fps, camera, deleted_at")
+                 "taken_at, duration_s, fps, camera, deleted_at, companion_of")
 
 
 def _not_found() -> HTTPException:
@@ -146,32 +146,54 @@ def content_disposition(filename: str, ext: str = "", disposition: str = "attach
 
 
 # --------------------------------------------------------------------- items
+def _picture_row(conn: sqlite3.Connection, row: sqlite3.Row, session: SessionInfo) -> sqlite3.Row:
+    """The row whose thumb and previews stand for this item. A Live Photo clip (companion) keeps none of
+    its own (section 20): its pictures are the still's, so an old link to the clip's thumb still shows
+    the Live Photo."""
+    if row["companion_of"]:
+        still = conn.execute(f"SELECT {_ITEM_COLUMNS} FROM items WHERE id = ?", (int(row["companion_of"]),)).fetchone()
+        if still is not None:
+            if still["nsfw"] and not session.vault_unlocked:
+                raise _vault_locked()
+            return still
+    return row
+
+
 @router.api_route("/thumb/{uid}", methods=METHODS)
 def thumb(uid: str, v: str | None = None, session: SessionInfo = Depends(require_user),
           conn: sqlite3.Connection = Depends(get_db)) -> FileResponse:
-    row = _item(conn, uid, session)
+    row = _picture_row(conn, _item(conn, uid, session), session)
     return _send(storage.thumb_path(row["uid"], row["version"]), "image/webp", _cache(row, v))
 
 
 @router.api_route("/preview/{uid}", methods=METHODS)
 def preview(uid: str, v: str | None = None, session: SessionInfo = Depends(require_user),
             conn: sqlite3.Connection = Depends(get_db)) -> FileResponse:
-    row = _item(conn, uid, session)
+    row = _picture_row(conn, _item(conn, uid, session), session)
     return _send(storage.preview_path(row["uid"], row["version"]), "image/webp", _cache(row, v))
 
 
-def _ensure_small_preview(uid: str, version: int) -> bool:
-    """Make the small preview from the large one if it is missing. True when the small file exists
-    afterwards; False when it could not be made (no large preview, decode or disk error)."""
+def small_preview_file(uid: str, version: int) -> Path | None:
+    """The file the small preview URL serves: the small preview; the large one when it already fits the
+    small size (no small file is stored then, section 3); otherwise a small preview made now from the
+    large one when it is missing. None when no large preview exists or the small one could not be made
+    (decode or disk error)."""
     small = storage.preview_small_path(uid, version)
     if small.is_file():
-        return True
+        return small
+    large = storage.preview_path(uid, version)
+    if not large.is_file():
+        return None
+    try:
+        with Image.open(large) as im:
+            if images.small_is_large(im.size):
+                return large
+    except Exception as e:  # noqa: BLE001 - a corrupt preview is served as it is by the caller
+        log.warning("could not read the preview of %s v%s: %s", uid, version, e)
+        return None
     with _lock_for(f"small:{uid}"):
         if small.is_file():
-            return True
-        large = storage.preview_path(uid, version)
-        if not large.is_file():
-            return False
+            return small
         try:
             with Image.open(large) as im:
                 im.load()
@@ -179,17 +201,18 @@ def _ensure_small_preview(uid: str, version: int) -> bool:
             images.save_webp(img, small, settings.preview_small_size, settings.preview_quality)
         except Exception as e:  # corrupt preview, full disk: serve the large one instead
             log.warning("could not make the small preview of %s v%s: %s", uid, version, e)
-            return False
+            return None
     log.info("made the missing small preview of %s v%s", uid, version)
-    return True
+    return small
 
 
 @router.api_route("/preview-small/{uid}", methods=METHODS)
 def preview_small(uid: str, v: str | None = None, session: SessionInfo = Depends(require_user),
                   conn: sqlite3.Connection = Depends(get_db)) -> FileResponse:
-    row = _item(conn, uid, session)
-    if _ensure_small_preview(row["uid"], row["version"]):
-        return _send(storage.preview_small_path(row["uid"], row["version"]), "image/webp", _cache(row, v))
+    row = _picture_row(conn, _item(conn, uid, session), session)
+    path = small_preview_file(row["uid"], row["version"])
+    if path is not None:
+        return _send(path, "image/webp", _cache(row, v))
     # Stopgap (no small file could be made): never cache the large file under the small URL.
     return _send(storage.preview_path(row["uid"], row["version"]), "image/webp",
                  NO_STORE if row["nsfw"] else NO_CACHE)

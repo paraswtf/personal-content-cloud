@@ -40,7 +40,7 @@ DERIVED_DIRS = ("thumbs", "previews", "pages", "videos", "faces", "bodies", "ani
                 "learned")
 DIRS = TIER_DIRS + DERIVED_DIRS
 # Directories the orphan sweeper walks (names must match the patterns in app.ingest).
-SWEPT_DIRS = ("originals", "thumbs", "previews", "pages", "videos", "faces", "bodies", "docphoto")
+SWEPT_DIRS = ("originals", "thumbs", "previews", "pages", "videos", "faces", "bodies", "animals", "docphoto")
 
 
 def root() -> Path:

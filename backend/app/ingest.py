@@ -62,7 +62,7 @@ _ORIGINAL_NAME = re.compile(r"^(?P<uid>[a-z0-9]+)\.v(?P<version>\d+)(?P<ext>\.[a
 _DERIVED_NAME = re.compile(r"^(?P<uid>[a-z0-9]+)\.v(?P<version>\d+)\.(?:sm\.webp|webp|mp4|live\.mp4)$")
 _PAGES_DIR_NAME = re.compile(r"^(?P<uid>[a-z0-9]+)\.v(?P<version>\d+)$")
 _PAGE_NAME = re.compile(r"^(?P<page>\d+)\.webp$")
-_CROP_NAME = re.compile(r"^(?P<id>\d+)\.webp$")  # faces/<id//1000>/<id>.webp, bodies/...
+_CROP_NAME = re.compile(r"^(?P<id>\d+)\.webp$")  # faces/<id//1000>/<id>.webp, bodies/..., animals/...
 
 
 class _Stale(Exception):
@@ -134,10 +134,9 @@ def _is_referenced(conn: sqlite3.Connection, path: Path) -> bool:
         return bool(m and _PAGE_NAME.match(name) and conn.execute(
             "SELECT 1 FROM items WHERE uid = ? AND version = ?", (m["uid"], int(m["version"]))
         ).fetchone())
-    if top in ("faces", "bodies"):
+    if top in ("faces", "bodies", "animals"):
         m = _CROP_NAME.match(name)
-        table = "faces" if top == "faces" else "bodies"
-        return bool(m and conn.execute(f"SELECT 1 FROM {table} WHERE id = ?", (int(m["id"]),)).fetchone())
+        return bool(m and conn.execute(f"SELECT 1 FROM {top} WHERE id = ?", (int(m["id"]),)).fetchone())
     return False
 
 
@@ -391,6 +390,63 @@ def _insert_item(conn: sqlite3.Connection, uid: str, info: MediaInfo, sha: str, 
     return item_id, statuses
 
 
+# ------------------------------------------------------------------ derived files the app no longer keeps
+TIDY_KEY = "derivatives_tidy"  # kv: the TIDY_VERSION whose pass has completed
+TIDY_VERSION = 1
+
+
+def _unlink_pictures(uid: str, version: int) -> int:
+    """Delete an item version's thumb and both previews; returns how many existed."""
+    n = 0
+    for p in (storage.thumb_path(uid, version), storage.preview_path(uid, version),
+              storage.preview_small_path(uid, version)):
+        if p.is_file():
+            storage.safe_unlink(p)
+            n += 1
+    return n
+
+
+def _drop_companion_pictures(conn: sqlite3.Connection, item_id: int) -> int:
+    """After a commit that may have paired a Live Photo (item_id is either half): delete the clip's own
+    thumb and previews. The library never shows them and the file routes serve the still's (section 20)."""
+    rows = conn.execute(
+        "SELECT uid, version FROM items WHERE companion_of IS NOT NULL AND (id = ? OR companion_of = ?)",
+        (int(item_id), int(item_id)),
+    ).fetchall()
+    return sum(_unlink_pictures(r["uid"], int(r["version"])) for r in rows)
+
+
+def tidy_derivatives(conn: sqlite3.Connection, force: bool = False) -> int:
+    """Remove derived files the app no longer keeps (docs section 3), once per TIDY_VERSION (kv
+    derivatives_tidy; force runs it again): the thumb and previews of Live Photo clips (companions, whose
+    pictures are the still's, section 20) and small previews that repeat their large preview (the large
+    one already fits the small size; the small URL serves the large file). Runs from housekeeping. Only
+    files whose replacement is in place are removed. Returns the number of files removed."""
+    if not force and int(kv_get(conn, TIDY_KEY, "0") or 0) >= TIDY_VERSION:
+        return 0
+    removed = 0
+    for r in conn.execute("SELECT uid, version FROM items WHERE companion_of IS NOT NULL").fetchall():
+        removed += _unlink_pictures(r["uid"], int(r["version"]))
+    for r in conn.execute("SELECT uid, version FROM items WHERE companion_of IS NULL").fetchall():
+        uid, version = r["uid"], int(r["version"])
+        small = storage.preview_small_path(uid, version)
+        if not small.is_file():
+            continue
+        try:
+            with Image.open(storage.preview_path(uid, version)) as im:
+                same = images.small_is_large(im.size)
+        except (OSError, ValueError):
+            continue  # no readable large preview: the small one is all there is
+        if same:
+            storage.safe_unlink(small)
+            removed += 1
+    with tx(conn):
+        kv_set(conn, TIDY_KEY, TIDY_VERSION)
+    if removed:
+        log.info("tidy: removed %d derived files the app no longer keeps", removed)
+    return removed
+
+
 # ------------------------------------------------------------------ plain files probed again
 PROBE_VERSION_KEY = "probe_version"  # kv: the probe.PROBE_VERSION whose re-probe pass has completed
 PLAIN_MEDIA_SQL = ("kind = 'other' AND deleted_at IS NULL AND companion_of IS NULL AND "
@@ -475,6 +531,7 @@ def _reprobe_item(conn: sqlite3.Connection, row: sqlite3.Row) -> bool:
         _cleanup_unreferenced(conn, written)
         raise
     _refresh_fts(conn, int(row["id"]))
+    _drop_companion_pictures(conn, int(row["id"]))
     log.info("reprobe: item %s is a %s after all (%s)", uid, info.kind, row["original_filename"])
     return True
 
@@ -599,6 +656,7 @@ def _store_new(conn: sqlite3.Connection, up: sqlite3.Row, src: Path, info: Media
         _cleanup_unreferenced(conn, written)
         raise
     _refresh_fts(conn, item_id)
+    _drop_companion_pictures(conn, item_id)
     _drop_source(conn, src, dest)
     log.info("ingest: upload %s stored as item %s (%s)", uid, item_id, info.kind)
 
@@ -828,6 +886,8 @@ def _regenerate_derivatives(row: sqlite3.Row, conn: sqlite3.Connection | None = 
     and swapped in page by page (_swap_pages), and only while the item (with conn) still exists at
     this version."""
     uid, version = row["uid"], int(row["version"])
+    if "companion_of" in row.keys() and row["companion_of"]:
+        return  # a Live Photo clip keeps no pictures of its own (section 20)
     original = storage.original_path(uid, version, row["ext"])
     if not original.is_file():
         return
@@ -971,14 +1031,15 @@ def _item_files(uid: str) -> tuple[list[Path], list[Path]]:
 def _purge_one(conn: sqlite3.Connection, item_id: int) -> None:
     """Delete an item for good: its rows (faces, bodies, embeddings, text, pages, document and tags
     cascade; uploads keep their outcome with item_id NULL), its full-text row, unnamed people left
-    empty, and every file (original, thumbs, previews, page renders, streaming copy, face and body
-    crops, ID photo). The duplicate group re-chooses its best first."""
+    empty, and every file (original, thumbs, previews, page renders, streaming copy, face, body and
+    pet crops, ID photo). The duplicate group re-chooses its best first."""
     row = conn.execute("SELECT id, uid FROM items WHERE id = ?", (item_id,)).fetchone()
     if row is None:
         return
     with tx(conn):
         face_ids = [int(r[0]) for r in conn.execute("SELECT id FROM faces WHERE item_id = ?", (item_id,))]
         body_ids = [int(r[0]) for r in conn.execute("SELECT id FROM bodies WHERE item_id = ?", (item_id,))]
+        animal_ids = [int(r[0]) for r in conn.execute("SELECT id FROM animals WHERE item_id = ?", (item_id,))]
         people = {int(r[0]) for r in conn.execute(
             "SELECT person_id FROM faces WHERE item_id = ? AND person_id IS NOT NULL UNION "
             "SELECT person_id FROM bodies WHERE item_id = ? AND person_id IS NOT NULL UNION "
@@ -1001,6 +1062,7 @@ def _purge_one(conn: sqlite3.Connection, item_id: int) -> None:
         bump_search_version(conn)
     files, dirs = _item_files(row["uid"])
     files += [storage.face_crop_path(i) for i in face_ids] + [storage.body_crop_path(i) for i in body_ids]
+    files += [storage.animal_crop_path(i) for i in animal_ids]
     for p in files:
         storage.safe_unlink(p)
     for d in dirs:
@@ -1086,6 +1148,7 @@ def sweep_orphan_files(conn: sqlite3.Connection, min_age_s: float = ORPHAN_AGE_S
     crops = {
         "faces": {int(r[0]) for r in conn.execute("SELECT id FROM faces")},
         "bodies": {int(r[0]) for r in conn.execute("SELECT id FROM bodies")},
+        "animals": {int(r[0]) for r in conn.execute("SELECT id FROM animals")},
     }
     marks = ",".join("?" * len(ACTIVE))
     active = {r[0] for r in conn.execute(f"SELECT uid FROM uploads WHERE status IN ({marks})", tuple(ACTIVE))}

@@ -123,11 +123,12 @@ makes; `ORIGINALS_DIR` (unset by default, then the same folder) holds the bytes 
 | `.instance.lock` | flock |
 | `originals/<sh>/<uid>.v<n><ext>` | untouched upload bytes (under `ORIGINALS_DIR`) |
 | `thumbs/<sh>/<uid>.v<n>.webp` | 480 px thumbnail (page 1 for documents, poster for videos) |
-| `previews/<sh>/<uid>.v<n>.webp`, `.sm.webp` | 2048 / 1280 px previews (images, video posters, document page 1) |
+| `previews/<sh>/<uid>.v<n>.webp`, `.sm.webp` | 2048 / 1280 px previews (images, video posters, document page 1); no `.sm.webp` is stored when the large preview already fits 1280 px (it would be the same bytes): `/files/preview-small` then serves the large file with the same cache headers, and makes a missing small preview from the large one only for bigger pictures |
 | `pages/<sh>/<uid>.v<n>/<page>.webp` | document page renders, 1600 px long side (PDF pages; office documents get text-rendered pages) |
 | `videos/<sh>/<uid>.v<n>.mp4` | 720p H.264 streaming copy |
 | `faces/<id//1000>/<id>.webp` | face crops 192 px |
 | `bodies/<id//1000>/<id>.webp` | person crops 256 px long side |
+| `animals/<id//1000>/<id>.webp` | pet crops (section 22) |
 | `docphoto/<sh>/<uid>.v<n>.webp` | photo cropped out of an ID document |
 | `staging/<uid>.part` | uploads in progress (under `ORIGINALS_DIR`) |
 | `failed/<uid>.part` | uploads whose ingest failed for good (under `ORIGINALS_DIR`); deleted after `TRASH_DAYS`; Settings > System > Retry failed uploads queues them again |
@@ -140,12 +141,19 @@ Staging and originals share one filesystem (hard link placement); an original pl
 file on another disk is copied to a scratch name beside its destination and renamed from there
 (`storage.move_into_place` handles `EXDEV`). `storage.rel(path)` names a file by its root and top folder
 whichever root holds it, so `_is_referenced` works for both. The orphan sweeper walks originals, thumbs,
-previews, pages, videos, faces, bodies, docphoto (`storage.swept_bases()`: each under its root, plus
+previews, pages, videos, faces, bodies, animals, docphoto (`storage.swept_bases()`: each under its root, plus
 `DATA_DIR/originals` while files of the earlier single-folder layout are still being moved, section 31) and
 deletes files older than an hour that no row references (names parsed by regex; `_is_referenced` guards
 every delete). `storage.disk_usage()` and `Stats.disk` report the disk that receives uploads (the
 originals root); `storage.has_room_for(n)` also asks the data root to keep `MIN_FREE_DISK_MB` for the
 derived files when it is another disk.
+
+Derived files are kept once (2026-11-08): a Live Photo clip (companion, section 20) keeps no thumb or
+previews of its own, since the library never shows it; `/files/thumb`, `/files/preview` and
+`/files/preview-small` of a companion serve its still's pictures and the upload list shows the still's
+thumb. Purge removes face, body and pet crops. `ingest.tidy_derivatives` removes what an earlier version
+stored (companion pictures, small previews that repeat the large one) once per `ingest.TIDY_VERSION` (kv
+`derivatives_tidy`), from housekeeping.
 
 ## 4. Authentication and sessions
 
@@ -1024,6 +1032,11 @@ items(id)` (set on the MOV: the still it belongs to; a companion is hidden every
 INTEGER REFERENCES items(id)` (set on the still: its MOV item), `live INTEGER NOT NULL DEFAULT 0` (the
 still has a clip: a paired MOV or an embedded motion clip). `uploads.pair_key TEXT` (optional, from the
 client: the iOS app sends the asset's local identifier with both files so they pair without metadata).
+
+Pictures: the companion keeps no thumb or previews. Ingest writes them like any video's before the
+pairing commits, then `_drop_companion_pictures` deletes them (whichever half arrived second); reprocess
+never remakes them; the file routes serve the still's pictures for a companion's uid (section 3). Its web
+copy stays: it is the clip that plays.
 
 Pairing (ingest, after the item row of the second file exists, in the same transaction): a still and a
 MOV pair when they share a `content_id`, or a `pair_key` on their uploads, or the same file stem
