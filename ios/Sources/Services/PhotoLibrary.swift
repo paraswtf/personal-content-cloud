@@ -86,8 +86,15 @@ enum PhotoLibrary {
         let handle = try FileHandle(forReadingFrom: url)
         defer { try? handle.close() }
         var hasher = SHA256()
-        while let chunk = try handle.read(upToCount: 4 * 1024 * 1024), !chunk.isEmpty {
-            hasher.update(data: chunk)
+        // Each chunk is released before the next is read. Without the pool, every chunk of a large
+        // video stayed in memory until the whole file was hashed, and iOS killed the app.
+        while true {
+            let more: Bool = try autoreleasepool {
+                guard let chunk = try handle.read(upToCount: 4 * 1024 * 1024), !chunk.isEmpty else { return false }
+                hasher.update(data: chunk)
+                return true
+            }
+            if !more { break }
         }
         return hasher.finalize().map { String(format: "%02x", $0) }.joined()
     }

@@ -328,7 +328,11 @@ final class SyncEngine: ObservableObject {
     private func prepare(_ rec: SyncRecord, asset: PHAsset, api: APIClient) async throws {
         let old = rec.files
         UploadPaths.removeAsset(rec.assetId)
+        let what = asset.mediaType == .video ? "video (\(Int(asset.duration)) s)" : "photo"
+        SyncStore.shared.log("Preparing a \(what) from \(asset.creationDate?.formatted(date: .abbreviated, time: .shortened) ?? "unknown date")")
         let exported = try await PhotoLibrary.export(asset, to: UploadPaths.assetDir(rec.assetId))
+        let total = exported.reduce(Int64(0)) { $0 + $1.bytes }
+        SyncStore.shared.log("Hashing \(exported.first?.filename ?? "file") (\(ByteCountFormatter.string(fromByteCount: total, countStyle: .file)))")
         guard let main = exported.first(where: { !$0.isClip }) else { throw APIError(status: 0, detail: "No original file") }
         var files: [UploadFile] = []
         for f in exported {

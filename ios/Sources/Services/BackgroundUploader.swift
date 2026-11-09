@@ -651,10 +651,12 @@ final class BackgroundUploader: NSObject, ObservableObject {
         let handle = try FileHandle(forReadingFrom: source)
         defer { try? handle.close() }
         try handle.seek(toOffset: UInt64(offset))
-        guard let data = try handle.read(upToCount: Int(length)), data.count == Int(length) else {
-            throw CocoaError(.fileReadCorruptFile)
+        try autoreleasepool {
+            guard let data = try handle.read(upToCount: Int(length)), data.count == Int(length) else {
+                throw CocoaError(.fileReadCorruptFile)
+            }
+            try data.write(to: target, options: .atomic)
         }
-        try data.write(to: target, options: .atomic)
     }
 
     private func emptyFile() throws -> URL {
