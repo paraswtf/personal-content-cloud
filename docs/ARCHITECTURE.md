@@ -657,11 +657,24 @@ Face boxes the owner draws (2026-11-09), around a face the detector missed: `POS
   for the detector, so a small or soft face it missed in the whole picture is often found; of several, the one most
   inside the box (`pick_face`). It must find one: 422 `no_face` otherwise (a helmet, a back or someone far away is a
   person box), 409 `models_unavailable` without the face model.
+- Tilted and overlapping faces (2026-11-09, `person_boxes.find_faces`): the detector misses faces tilted much past
+  30 degrees (a head lying sideways, two faces cheek to cheek in a selfie; IMG_5192 scored 0.28 upright against the
+  0.5 cut). When the upright search finds no face whose centre lies in the box, copies of the padded region turned
+  by 30, 60 and 90 degrees each way are searched too (`_faces_turned`), and the faces found are mapped back: the box
+  becomes the upright bounds of the turned face box, and the vector, made from the turned copy where the face
+  stands upright, is as good as an upright face's. The same face found at several angles is kept once (best
+  score). On a photo, a found face that is a neighbour's stored face is left out: a stored face the drawn box does
+  not surround (IoU under 0.4 and neither box at least 80 percent inside the other, `surrounds`), with the found
+  face over it (IoU `>= 0.4`) and its vector alike (cosine `>= 0.4`, `NEIGHBOUR_SIM`). So a box drawn over the
+  second of two overlapping faces never takes the first one's face, and two faces that overlap heavily are told
+  apart by their vectors. Moving a face box (`box_edit`) uses the same search, with the item's other faces as the
+  neighbours. A person box the owner draws gets the turned search for the face inside it too.
 - The row keeps the owner's box with `source 'user'` (drawn, `FaceOut.source`), `assigned_by 'user'` for the person
   (a new name makes them),
   the found face's vector, score, size, quality, clarity and sharpness, the head-and-torso vector with SigLIP, and
   its crop; on a video `frame_time_s = t` and spans `t +- 0.5 s`. On a photo a stored face under it (IoU `>= 0.4`
-  with the found face) is assigned instead, as a hand assignment is. A new face inside a person box the detector
+  with the found face, the drawn box around it as above, and the two vectors alike) is assigned instead, as a hand
+  assignment is. A new face inside a person box the detector
   found with no face of its own (the face's centre in the box's upper half; not a box the owner drew or tagged)
   becomes that box's face, as a detected one would, and the box follows its person (its unnamed group goes when
   nothing else holds it). items.face_count follows, and the person's guesses run as after any tag. Undo takes the

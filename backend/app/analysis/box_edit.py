@@ -8,7 +8,8 @@ CONTRACT.
   small detector box always works) and does the slow part:
   - every box: its crop, made as the pipeline makes it (a face: faces.crop_face around the box; a person or
     pet box: the box itself);
-  - a face: the face detector inside the new box (person_boxes._face_in, padded by FACE_PAD). A face whose
+  - a face: the face detector inside the new box (person_boxes.find_faces, padded by FACE_PAD, turned when the
+    upright search finds nothing, leaving out other stored faces the box does not surround). A face whose
     centre lies inside the box gives the new face vector, detector score, size (original pixels), quality,
     clarity and sharpness; of several, the one most inside the box (person_boxes.pick_face). None found: the
     old vector stays while the new box is still around the old face (near_old: overlapping, covering most of
@@ -130,7 +131,11 @@ def prepare(conn: sqlite3.Connection, table: str, box_id: int, box: tuple[float,
     updates: dict[str, Any] = {"moved": 1}
     if table == "faces":
         # the face the box means: centre inside, most inside it (not a neighbour's it takes in part of)
-        found = person_boxes.pick_face(person_boxes._faces_in(bgr, px), px)
+        near = [] if item["kind"] == "video" else person_boxes.neighbour_boxes(
+            conn.execute("SELECT x, y, w, h, embedding FROM faces WHERE item_id = ? AND id != ? "
+                         "AND frame_time_s IS NULL",
+                         (int(row["item_id"]), int(box_id))).fetchall(), (x, y, w, h), W, H)
+        found = person_boxes.pick_face(person_boxes.find_faces(bgr, px, neighbours=near), px)
         if found is not None:
             longest = max(int(item["width"] or 0), int(item["height"] or 0))
             scale = max(1.0, longest / max(W, H)) if longest else 1.0

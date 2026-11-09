@@ -71,7 +71,7 @@ def test_no_face_inside_no_detector_and_bad_boxes_are_refused(client, conn, monk
 def test_a_stored_face_under_the_box_is_assigned_instead(client, conn, monkeypatch):
     item = _photo(conn)
     asha = make_person(conn, "Asha")
-    stored = make_face(conn, item["id"], None, box=(262 / 800, 140 / 600, 118 / 800, 140 / 600))
+    stored = make_face(conn, item["id"], None, box=(262 / 800, 140 / 600, 118 / 800, 140 / 600), embedding=_unit(7))
     _detector(monkeypatch, FakeFace(bbox=np.array(FOUND, dtype=np.float32)))
     r = client.post(f"/api/items/{item['uid']}/faces", json={**BOX, "person_id": asha})
     assert r.status_code == 201, r.text
@@ -157,8 +157,81 @@ def test_the_only_face_of_an_unnamed_group_moves_to_someone(client, conn, monkey
     assert conn.execute("SELECT COUNT(*) FROM persons WHERE id = ?", (group,)).fetchone()[0] == 0
     # and through a face box drawn over it
     other = make_person(conn, None)
-    f2 = make_face(conn, item["id"], other, box=(0.6, 0.2, 0.15, 0.2))
+    f2 = make_face(conn, item["id"], other, box=(0.6, 0.2, 0.15, 0.2), embedding=_unit(7))
     _detector(monkeypatch, FakeFace(bbox=np.array((480.0, 120.0, 600.0, 240.0), dtype=np.float32)))
     r = client.post(f"/api/items/{item['uid']}/faces", json={"x": 0.59, "y": 0.19, "w": 0.17, "h": 0.22, "new_person_name": "Buzz"})
     assert r.status_code == 201, r.text
     assert r.json()["id"] == f2 and r.json()["person"]["name"] == "Buzz"
+
+
+# Overlapping faces (IMG_5192: two faces cheek to cheek, the second tilted): a box drawn over the second face never
+# takes the first one's stored face, and a face the upright search misses is found in a turned copy.
+
+PARAS = (240 / 800, 60 / 600, 160 / 800, 180 / 600)          # stored, named: (240, 60) to (400, 240)
+OVER = {"x": 0.42, "y": 0.25, "w": 0.25, "h": 0.4}         # drawn over the second face: (336, 150) to (536, 390)
+
+
+def test_a_box_over_a_neighbours_face_never_takes_it(client, conn, monkeypatch):
+    item = _photo(conn)
+    paras, anagha = make_person(conn, "Paras"), make_person(conn, "Anagha")
+    stored = make_face(conn, item["id"], paras, box=PARAS, assigned_by="user", embedding=_unit(3))
+    # the upright search only finds Paras's face, its centre just inside the drawn box
+    _detector(monkeypatch, FakeFace(bbox=np.array((300.0, 70.0, 400.0, 230.0), dtype=np.float32), embedding=_unit(3)))
+    monkeypatch.setattr(person_boxes, "_faces_turned", lambda bgr, px: [])
+    r = client.post(f"/api/items/{item['uid']}/faces", json={**OVER, "person_id": anagha})
+    assert r.status_code == 422 and r.json()["detail"] == "no_face"
+    assert _face(conn, stored)["person_id"] == paras            # Paras keeps his face
+
+
+def test_a_tilted_second_face_is_found_turned_and_stored_as_its_own(client, conn, monkeypatch):
+    item = _photo(conn)
+    paras, anagha = make_person(conn, "Paras"), make_person(conn, "Anagha")
+    stored = make_face(conn, item["id"], paras, box=PARAS, assigned_by="user", embedding=_unit(3))
+    _detector(monkeypatch, FakeFace(bbox=np.array((300.0, 70.0, 400.0, 230.0), dtype=np.float32), embedding=_unit(3)))
+    turned = FakeFace(bbox=np.array((350.0, 170.0, 520.0, 370.0), dtype=np.float32), embedding=_unit(11))
+    monkeypatch.setattr(person_boxes, "_faces_turned", lambda bgr, px: [turned])
+    r = client.post(f"/api/items/{item['uid']}/faces", json={**OVER, "person_id": anagha})
+    assert r.status_code == 201, r.text
+    out = r.json()
+    assert out["id"] != stored and out["person"]["id"] == anagha
+    assert np.allclose(np.frombuffer(_face(conn, out["id"])["embedding"], dtype=np.float32), _unit(11))
+    assert _face(conn, stored)["person_id"] == paras
+    assert conn.execute("SELECT face_count FROM items WHERE id = ?", (item["id"],)).fetchone()[0] == 2
+
+
+def test_two_heavily_overlapping_faces_are_told_apart_by_their_vectors(client, conn, monkeypatch):
+    item = _photo(conn)
+    paras, anagha = make_person(conn, "Paras"), make_person(conn, "Anagha")
+    stored = make_face(conn, item["id"], paras, box=PARAS, assigned_by="user", embedding=_unit(3))
+    # the found face lies over Paras's stored box (IoU >= 0.4) but is someone else (a different vector)
+    other = FakeFace(bbox=np.array((270.0, 90.0, 420.0, 260.0), dtype=np.float32), embedding=_unit(11))
+    _detector(monkeypatch, other)
+    r = client.post(f"/api/items/{item['uid']}/faces",
+                    json={"x": 0.33, "y": 0.14, "w": 0.2, "h": 0.3, "person_id": anagha})
+    assert r.status_code == 201, r.text
+    assert r.json()["id"] != stored and r.json()["person"]["id"] == anagha
+    assert _face(conn, stored)["person_id"] == paras
+
+
+def test_the_turned_search_maps_faces_back(monkeypatch):
+    """_faces_turned turns the padded region, and a face the engine finds in the middle of the turned copy maps back
+    to the middle of the region, whatever the angle; the same face found at several angles is kept once."""
+    from types import SimpleNamespace
+
+    class Engine:
+        def analyze(self, img, sizes, threshold, min_size):
+            h, w = img.shape[:2]
+            return [FakeFace(bbox=np.array((w / 2 - 20, h / 2 - 25, w / 2 + 20, h / 2 + 25), dtype=np.float32),
+                             kps=np.array([[w / 2, h / 2]] * 5, dtype=np.float32), det_score=0.7)]
+
+    monkeypatch.setattr(pipeline, "_model", lambda name: SimpleNamespace(get_engine=Engine) if name == "faces" else None)
+    bgr = np.zeros((600, 800, 3), dtype=np.uint8)
+    px = (300.0, 200.0, 500.0, 400.0)                          # padded by 15 %: (270, 170) to (530, 430), centre (400, 300)
+    found = person_boxes._faces_turned(bgr, px)
+    assert len(found) == 1
+    cx, cy = (found[0].bbox[0] + found[0].bbox[2]) / 2, (found[0].bbox[1] + found[0].bbox[3]) / 2
+    assert abs(cx - 400) < 1.5 and abs(cy - 300) < 1.5
+    assert np.allclose(found[0].kps.mean(axis=0), (400, 300), atol=1.5)
+    # without the face engine there is no turned search
+    monkeypatch.setattr(pipeline, "_model", lambda name: None)
+    assert person_boxes._faces_turned(bgr, px) == []

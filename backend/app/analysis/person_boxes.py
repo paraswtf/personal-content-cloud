@@ -20,14 +20,18 @@ CONTRACT.
   video frame at t (inside the frame, at least box_edit.MIN_SIDE_PX a side in the analysed frame). The face
   detector looks inside it (padded by FACE_PAD; the region is enlarged, so a small or soft face it missed in
   the whole picture is often found): a face whose centre lies in the box gives the vector, score, size,
-  quality, clarity and sharpness. None: NoFace (a box where no face shows belongs to a person box); no
-  detector loaded: animals.ModelsUnavailable. The row keeps the owner's box with source 'user' (a re-analysis
-  keeps it on a photo), assigned_by 'user' for the person, frame_time_s = t and spans t +- VIDEO_SPAN_S on a
-  video, the head-and-torso vector when SigLIP is loaded, and its crop; on a photo a stored face over the found
-  one (IoU >= EXISTING_IOU) is used instead and returned as existing, for the caller to assign through the
-  people API; a new face inside a detector's faceless person box (its centre in the box's upper half) becomes that
-  box's face, as a detected one would, and the box follows its person. items.face_count follows. Opens its own
-  transaction (nested in the caller's when one is open).
+  quality, clarity and sharpness. find_faces: when the upright search finds no face there, copies of the region
+  turned by TURNS degrees are searched too (a head lying sideways, cheek to cheek in a selfie: the detector misses
+  faces tilted much past 30 degrees) and the faces found are mapped back. On a photo, faces over a stored face
+  the drawn box does not surround (IoU < EXISTING_IOU) belong to the neighbour and are left out, so a box drawn
+  over two overlapping faces never takes the other one's face. None: NoFace (a box where no face shows belongs to
+  a person box); no detector loaded: animals.ModelsUnavailable. The row keeps the owner's box with source 'user'
+  (a re-analysis keeps it on a photo), assigned_by 'user' for the person, frame_time_s = t and spans t +-
+  VIDEO_SPAN_S on a video, the head-and-torso vector when SigLIP is loaded, and its crop; on a photo a stored face
+  over the found one (IoU >= EXISTING_IOU) that the drawn box also surrounds is used instead and returned as
+  existing, for the caller to assign through the people API; a new face inside a detector's faceless person box
+  (its centre in the box's upper half) becomes that box's face, as a detected one would, and the box follows its
+  person. items.face_count follows. Opens its own transaction (nested in the caller's when one is open).
 - drawn_body_rows(rows) / protected_face_ids(rows): a re-analysis keeps the owner's drawn boxes and the
   faces they point at (app.analysis.pipeline).
 - drop_over_drawn(conn, table, new_ids, drawn_rows) -> dropped ids: new detector boxes over a kept drawn
@@ -52,6 +56,7 @@ log = logging.getLogger(__name__)
 
 FACE_PAD = 0.15  # the face search looks this far (share of the box) around the drawn box
 EXISTING_IOU = 0.4  # a stored face over the found one by this much is the same face
+TURNS = (30.0, -30.0, 60.0, -60.0, 90.0, -90.0)  # degrees the region is turned when the upright search finds nothing
 VIDEO_SPAN_S = 0.5
 
 
@@ -117,9 +122,143 @@ def _faces_in(bgr: np.ndarray, px: tuple[float, float, float, float]) -> list[An
     return out
 
 
+def _faces_turned(bgr: np.ndarray, px: tuple[float, float, float, float]) -> list[Any]:
+    """The faces the detector finds in copies of the padded box turned by TURNS degrees, mapped back to bgr
+    (bbox: the upright bounds of the turned face box; kps turned back). The vector comes from the turned copy,
+    where the face stands upright, so it is as good as an upright face's. Empty without the face engine."""
+    import cv2
+
+    from app.analysis.pipeline import _model
+
+    mod = _model("faces")
+    if mod is None or not hasattr(mod, "get_engine"):
+        return []
+    H, W = bgr.shape[:2]
+    x1, y1, x2, y2 = px
+    pw, ph = (x2 - x1) * FACE_PAD, (y2 - y1) * FACE_PAD
+    l, t = max(0, int(x1 - pw)), max(0, int(y1 - ph))
+    r, b = min(W, int(round(x2 + pw))), min(H, int(round(y2 + ph)))
+    if r - l < 8 or b - t < 8:
+        return []
+    region = np.ascontiguousarray(bgr[t:b, l:r])
+    h, w = region.shape[:2]
+    out: list[Any] = []
+    for angle in TURNS:
+        m = cv2.getRotationMatrix2D((w / 2.0, h / 2.0), angle, 1.0)
+        c, s = abs(m[0, 0]), abs(m[0, 1])
+        nw, nh = int(round(h * s + w * c)), int(round(h * c + w * s))
+        m[0, 2] += nw / 2.0 - w / 2.0
+        m[1, 2] += nh / 2.0 - h / 2.0
+        turned = cv2.warpAffine(region, m, (nw, nh), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT)
+        try:
+            found = mod.get_engine().analyze(turned, sizes=(640,), threshold=settings.face_det_threshold, min_size=0)
+        except Exception:  # noqa: BLE001 - the upright result stands
+            log.exception("face search: turned search failed")
+            return out
+        back = cv2.invertAffineTransform(m)
+        for f in found:
+            if f.embedding is None:
+                continue
+            fx1, fy1, fx2, fy2 = (float(v) for v in f.bbox)
+            pts = np.array([[fx1, fy1], [fx2, fy1], [fx2, fy2], [fx1, fy2]], dtype=np.float32)
+            pts = pts @ back[:, :2].T + back[:, 2]
+            f.bbox = np.array([max(0.0, pts[:, 0].min() + l), max(0.0, pts[:, 1].min() + t),
+                               min(float(W), pts[:, 0].max() + l), min(float(H), pts[:, 1].max() + t)],
+                              dtype=np.float32)
+            kps = np.asarray(f.kps, dtype=np.float32).reshape(-1, 2)
+            f.kps = (kps @ back[:, :2].T + back[:, 2] + np.array([l, t], dtype=np.float32)).astype(np.float32)
+            out.append(f)
+    # one face per place: the best score of the turns that found it
+    out.sort(key=lambda f: -float(f.det_score))
+    kept: list[Any] = []
+    for f in out:
+        cx, cy = _centre(f)
+        side = min(float(f.bbox[2] - f.bbox[0]), float(f.bbox[3] - f.bbox[1]))
+        if all(np.hypot(cx - _centre(k)[0], cy - _centre(k)[1]) > 0.5 * side for k in kept):
+            kept.append(f)
+    return kept
+
+
+def _centre(f: Any) -> tuple[float, float]:
+    return (float(f.bbox[0]) + float(f.bbox[2])) / 2.0, (float(f.bbox[1]) + float(f.bbox[3])) / 2.0
+
+
+def _centre_in(f: Any, px: tuple[float, float, float, float]) -> bool:
+    cx, cy = _centre(f)
+    return px[0] <= cx <= px[2] and px[1] <= cy <= px[3]
+
+
+NEIGHBOUR_SIM = 0.4  # a found face over a neighbour's stored box is that face unless their vectors differ this much
+
+
+@dataclass
+class Neighbour:
+    """A stored face the owner's box does not surround: its box in pixels and its vector (None when unknown)."""
+
+    px: tuple[float, float, float, float]
+    embedding: np.ndarray | None = None
+
+
+def _over_neighbour(f: Any, neighbours: list[Neighbour]) -> bool:
+    """True when the found face is a neighbour's stored face: over its box (IoU >= EXISTING_IOU) and, when both
+    vectors are known, alike (cosine >= NEIGHBOUR_SIM). Two different faces cheek to cheek can overlap that much;
+    their vectors tell them apart."""
+    from app.analysis.cluster import iou
+
+    box = (float(f.bbox[0]), float(f.bbox[1]), float(f.bbox[2] - f.bbox[0]), float(f.bbox[3] - f.bbox[1]))
+    for n in neighbours:
+        if iou(box, (n.px[0], n.px[1], n.px[2] - n.px[0], n.px[3] - n.px[1])) < EXISTING_IOU:
+            continue
+        found = getattr(f, "embedding", None)
+        if n.embedding is None or found is None or _alike(np.asarray(found, dtype=np.float32), n.embedding):
+            return True
+    return False
+
+
+def find_faces(bgr: np.ndarray, px: tuple[float, float, float, float], *,
+               neighbours: list[Neighbour] | None = None) -> list[Any]:
+    """The faces for a box the owner drew or moved (coordinates of bgr): the upright search, and when it finds no
+    face whose centre lies in the box, the turned search too. Faces that are a neighbour's stored face
+    (neighbours: stored faces the box does not surround) are left out: they are the other person's."""
+    near = neighbours or []
+    faces = [f for f in _faces_in(bgr, px) if not _over_neighbour(f, near)]
+    if any(_centre_in(f, px) for f in faces):
+        return faces
+    return faces + [f for f in _faces_turned(bgr, px) if not _over_neighbour(f, near)]
+
+
+SAME_SHARE = 0.8  # a box at least this much inside the other (either way) is around the same face
+
+
+def surrounds(box: tuple[float, float, float, float], stored: tuple[float, float, float, float]) -> bool:
+    """True when the owner's box (x, y, w, h) is around the stored face: IoU >= EXISTING_IOU, or one of the two
+    lies at least SAME_SHARE inside the other (a tight box in a loose one, or a loose box around a small face)."""
+    from app.analysis.cluster import iou
+
+    if iou(box, stored) >= EXISTING_IOU:
+        return True
+    ix = max(0.0, min(box[0] + box[2], stored[0] + stored[2]) - max(box[0], stored[0]))
+    iy = max(0.0, min(box[1] + box[3], stored[1] + stored[3]) - max(box[1], stored[1]))
+    inter = ix * iy
+    return inter >= SAME_SHARE * box[2] * box[3] or inter >= SAME_SHARE * stored[2] * stored[3]
+
+
+def neighbour_boxes(rows: Any, box: tuple[float, float, float, float], W: int, H: int) -> list[Neighbour]:
+    """The stored faces (rows with x, y, w, h normalised and embedding) that box (normalised) does not surround."""
+    out = []
+    for r in rows:
+        nb = (float(r["x"]), float(r["y"]), float(r["w"]), float(r["h"]))
+        if not surrounds(box, nb):
+            emb = r["embedding"] if "embedding" in r.keys() else None
+            out.append(Neighbour(px=(nb[0] * W, nb[1] * H, (nb[0] + nb[2]) * W, (nb[1] + nb[3]) * H),
+                                 embedding=np.frombuffer(emb, dtype=np.float32) if emb else None))
+    return out
+
+
 def _face_in(bgr: np.ndarray, px: tuple[float, float, float, float]) -> Any | None:
-    """The best face the detector finds in the padded box (coordinates of bgr), or None."""
-    faces = _faces_in(bgr, px)
+    """The best face the detector finds in the padded box (coordinates of bgr, turned when upright finds none),
+    or None."""
+    faces = find_faces(bgr, px)
     return max(faces, key=lambda f: f.det_score * min(f.size_px, 160)) if faces else None
 
 
@@ -324,7 +463,8 @@ def prepare_face(item: sqlite3.Row, box: tuple[float, float, float, float], *, t
     if _model("faces") is None:
         raise ModelsUnavailable()
     px = (x * W, y * H, min(float(W), (x + w) * W), min(float(H), (y + h) * H))
-    found = pick_face(_faces_in(bgr, px), px)
+    near = [] if video else neighbour_boxes(_stored_faces(int(item["id"])), (x, y, w, h), W, H)
+    found = pick_face(find_faces(bgr, px, neighbours=near), px)
     if found is None:
         raise NoFace()
     longest = max(int(item["width"] or 0), int(item["height"] or 0))
@@ -342,6 +482,26 @@ def prepare_face(item: sqlite3.Row, box: tuple[float, float, float, float], *, t
     )
 
 
+def _alike(a: np.ndarray, b: np.ndarray) -> bool:
+    """Two face vectors of the same face (cosine >= NEIGHBOUR_SIM); unknown or empty vectors count as alike."""
+    na, nb = float(np.linalg.norm(a)), float(np.linalg.norm(b))
+    if na == 0 or nb == 0 or a.shape != b.shape:
+        return True
+    return float(a @ b) / (na * nb) >= NEIGHBOUR_SIM
+
+
+def _stored_faces(item_id: int) -> list[sqlite3.Row]:
+    """The photo's stored faces (a short read on its own connection: prepare_face runs before any write)."""
+    from app.db import connect
+
+    c = connect()
+    try:
+        return c.execute("SELECT x, y, w, h, embedding FROM faces WHERE item_id = ? AND frame_time_s IS NULL",
+                         (item_id,)).fetchall()
+    finally:
+        c.close()
+
+
 def store_face(conn: sqlite3.Connection, prep: PreparedFace, person_id: int) -> DrawnFace:
     """Write a prepared face box for person_id in one transaction (nested in the caller's when one is open)."""
     from app.analysis import faces as faces_mod
@@ -353,9 +513,17 @@ def store_face(conn: sqlite3.Connection, prep: PreparedFace, person_id: int) -> 
     try:
         with tx(conn):
             if not prep.video:
-                for r in conn.execute("SELECT id, x, y, w, h FROM faces WHERE item_id = ? ORDER BY id", (item_id,)):
-                    if iou(prep.found_box, (r["x"], r["y"], r["w"], r["h"])) >= EXISTING_IOU:
-                        return DrawnFace(face_id=int(r["id"]), existing=True)
+                # the same face only when the owner's box surrounds the stored one too: two faces cheek to cheek
+                # overlap, and a box drawn over the second must never take the first one's face
+                mine = np.frombuffer(prep.embedding, dtype=np.float32)
+                for r in conn.execute("SELECT id, x, y, w, h, embedding FROM faces WHERE item_id = ? ORDER BY id",
+                                      (item_id,)):
+                    stored = (r["x"], r["y"], r["w"], r["h"])
+                    if iou(prep.found_box, stored) < EXISTING_IOU or not surrounds(prep.box, stored):
+                        continue
+                    if r["embedding"] and not _alike(mine, np.frombuffer(r["embedding"], dtype=np.float32)):
+                        continue
+                    return DrawnFace(face_id=int(r["id"]), existing=True)
             spans = None
             if prep.video and t is not None:
                 end = prep.duration_s or (t + VIDEO_SPAN_S)
