@@ -34,6 +34,7 @@ from typing import Any
 import numpy as np
 
 from app import storage
+from app.analysis import ages as ages_mod
 
 log = logging.getLogger(__name__)
 
@@ -145,7 +146,10 @@ def prepare(conn: sqlite3.Connection, table: str, box_id: int, box: tuple[float,
         torso = _siglip(faces_mod.torso_crop(bgr, px))
         if torso is not None:
             updates["torso_embedding"] = torso.tobytes()
-        crop = _encode_face_crop(faces_mod.crop_face(img, px))
+        face_img = faces_mod.crop_face(img, px)
+        crop = _encode_face_crop(face_img)
+        # section 10: the face's age from its new crop (none without the model: never the old crop's)
+        updates["age_groups"] = ages_mod.measure([face_img])[0]
     elif table == "bodies":
         clothes = person_boxes._clothes(bgr, px)
         if clothes is not None:

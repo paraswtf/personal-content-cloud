@@ -232,7 +232,8 @@ CREATE TABLE IF NOT EXISTS faces (
   sharpness       REAL,                         -- Laplacian variance of the aligned face; NULL = not measured
   source          TEXT NOT NULL DEFAULT 'detector' CHECK (source IN ('detector','user')),  -- 'user': the owner drew the face box (section 10)
   by_guess        INTEGER NOT NULL DEFAULT 0,   -- 1: the person came from a guess the owner confirmed (shown as the system's)
-  moved           INTEGER NOT NULL DEFAULT 0    -- 1: the owner moved or resized the box (a re-analysis keeps it)
+  moved           INTEGER NOT NULL DEFAULT 0,   -- 1: the owner moved or resized the box (a re-analysis keeps it)
+  age_groups      BLOB                          -- float32[9]: FairFace age-group probabilities of the crop, youngest first; NULL = not measured (section 10)
 );
 CREATE INDEX IF NOT EXISTS faces_item   ON faces(item_id);
 CREATE INDEX IF NOT EXISTS faces_person ON faces(person_id, quality);

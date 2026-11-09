@@ -646,6 +646,19 @@ class Suggestion(BaseModel):
     similarity: float
     a_samples: list[str] = []
     b_samples: list[str] = []
+    kind: Literal["same", "childhood"] = "same"  # 'childhood': their childhood photos look alike (section 10)
+
+
+class ChildhoodCandidate(BaseModel):
+    person: PersonOut
+    similarity: float
+
+
+class ChildhoodOut(BaseModel):
+    """Who an unnamed group of childhood photos may be as a child (section 10), best first; empty when the group
+    is not mostly childhood photos."""
+
+    candidates: list[ChildhoodCandidate]
 
 
 class SuggestionList(BaseModel):

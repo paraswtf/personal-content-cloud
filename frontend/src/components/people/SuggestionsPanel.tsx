@@ -1,4 +1,5 @@
-// Merge suggestions: pairs of people who look alike, with "Same person" and "Different people".
+// Merge suggestions: pairs of people who look alike, with "Same person" and "Different people". A 'childhood'
+// pair (section 10) is two people whose childhood photos look alike: "Same child?", their childhood photos shown.
 import { useState } from 'react'
 import { Link } from 'react-router'
 import { useMutation, useQuery } from '@tanstack/react-query'
@@ -19,7 +20,7 @@ function Side({ person, samples }: { person: PersonOut; samples: string[] }) {
         <Avatar src={person.cover_url} name={person.name} size={44} />
         <span className="min-w-0">
           <span className="block truncate text-sm font-semibold">{personName(person)}</span>
-          <span className="block text-xs text-ink-faint">{formatCount(person.item_count, 'item')}</span>
+          <span className="block text-xs text-ink-soft">{formatCount(person.item_count, 'item')}</span>
         </span>
       </Link>
       <ul className="mt-2 grid grid-cols-4 gap-1" aria-label={`Sample faces of ${personName(person)}`}>
@@ -80,12 +81,21 @@ export default function SuggestionsPanel() {
         {items.map((s) => (
           <li key={`${s.a.id}-${s.b.id}`} className="w-[19rem] shrink-0 rounded-2xl border border-line bg-surface p-3">
             <div className="mb-2 flex justify-center">
-              <Badge tone={s.similarity >= 0.6 ? 'ok' : 'neutral'}>{Math.round(s.similarity * 100)}% alike</Badge>
+              {s.kind === 'childhood' ? (
+                <Badge tone="neutral">Same child?</Badge>
+              ) : (
+                <Badge tone={s.similarity >= 0.6 ? 'ok' : 'neutral'}>{Math.round(s.similarity * 100)}% alike</Badge>
+              )}
             </div>
             <div className="flex gap-3">
               <Side person={s.a} samples={s.a_samples} />
               <Side person={s.b} samples={s.b_samples} />
             </div>
+            {s.kind === 'childhood' && (s.a.name || s.b.name) && (
+              <p className="mt-2 text-xs text-ink-soft">
+                Compared with the childhood photos already on {personName(s.a.name ? s.a : s.b)}.
+              </p>
+            )}
             <div className="mt-3 flex gap-2">
               <Button size="md" className="flex-1" disabled={!!pairBusy(s) || merge.isPending} onClick={() => startMerge(s)}>
                 <GitMerge className="size-4" aria-hidden />

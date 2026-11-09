@@ -44,6 +44,9 @@ def signature(conn: sqlite3.Connection) -> list[Any]:
         one("SELECT COUNT(*) FROM item_user_tags WHERE source = 'user'"),
         one("SELECT COUNT(*) FROM tag_rejections"),
         one("SELECT COUNT(*) FROM not_faces"),
+        # the rules themselves: a new learner rule, or the library's ages becoming ready (section 10), retrains
+        people.RULES_REV,
+        one("SELECT value FROM kv WHERE key = 'face_ages_ready'"),
     ]
 
 

@@ -5,8 +5,10 @@ threshold drops towards the weighted 10th percentile of those faces' similarity 
 FLOOR),
 a person the owner merged others into (or moved faces to, section 10) is matched down to the similarity
 they accepted in the least alike of those merges (learning_events kind 'merge', features.accepted, minus
-LOOSEN, floor FLOOR), and one the owner rejected a guess for or took faces away from is matched more
-carefully (the threshold rises above the closest rejected face, which wins over any loosening). Every
+LOOSEN, floor FLOOR; a merge under cluster.PULL_FLOOR teaches nothing, a cross-age link has no value), and one the
+owner rejected a guess for or took faces away from is matched more carefully (the threshold rises above
+the closest rejected face, which wins over any loosening). Faces in the child band (app.analysis.ages,
+once the library's ages are read) are left out: a baby photo says nothing about the adult. Every
 face counts by its face weight (app.analysis.faces.face_weight, section 10): a blurred, masked or
 turned-away face moves a threshold little or not at all, so unclear faces cannot bias it. Pets
 learn the same way from their crops (section 22): the owner's crops set the threshold, and a crop the
@@ -27,6 +29,7 @@ from app.learning import events, store
 from app.util import json_loads, now_iso
 
 MODEL = "people"
+RULES_REV = 2  # 2 (2026-11-09): merges under PULL_FLOOR teach nothing; childhood photos left out (train.signature)
 MIN_GUESS_EVENTS = 30
 MIN_USER_FACES = 3
 FLOOR = 0.30
@@ -54,41 +57,54 @@ def _vec(blob: bytes | None) -> np.ndarray | None:
 def person_thresholds(conn: sqlite3.Connection) -> dict[int, float]:
     """{person_id: match threshold} for the people (faces) and the pets (animal crops, section 22)
     whose owner-assigned examples say the default is too loose or too tight."""
+    from app.analysis import ages
+    from app.analysis.cluster import PULL_FLOOR
+
+    # Faces in the child band (section 10) say nothing about the person as an adult, whose threshold this is.
+    young = ages.ready(conn)
+
+    def adult(r: sqlite3.Row, w: float) -> bool:
+        return not (young and ages.in_child_band(r["age_groups"], w))
+
     by_person: dict[int, list[np.ndarray]] = {}
     weights: dict[int, list[float]] = {}
     for r in conn.execute(
-        "SELECT person_id, embedding, det_score, size_px, clarity, sharpness FROM faces "
+        "SELECT person_id, embedding, det_score, size_px, clarity, sharpness, age_groups FROM faces "
         "WHERE assigned_by = 'user' AND person_id IS NOT NULL"
     ):
         v, w = _vec(r["embedding"]), _weight(r)
-        if v is not None and w > 0:
+        if v is not None and w > 0 and adult(r, w):
             by_person.setdefault(int(r["person_id"]), []).append(v)
             weights.setdefault(int(r["person_id"]), []).append(w)
     rejected: dict[int, list[np.ndarray]] = {}
     rejected_weights: dict[int, list[float]] = {}
     for r in conn.execute(
-        "SELECT g.person_id, f.embedding, f.det_score, f.size_px, f.clarity, f.sharpness FROM guess_rejections g "
-        "JOIN faces f ON f.id = g.ref_id WHERE g.kind = 'face' "
+        "SELECT g.person_id, f.embedding, f.det_score, f.size_px, f.clarity, f.sharpness, f.age_groups "
+        "FROM guess_rejections g JOIN faces f ON f.id = g.ref_id WHERE g.kind = 'face' "
         "AND f.person_id IS NOT g.person_id"  # a face that is theirs again (a merge) is no rejection
     ):
         v, w = _vec(r["embedding"]), _weight(r)
-        if v is not None and w > 0:
+        if v is not None and w > 0 and adult(r, w):
             rejected.setdefault(int(r["person_id"]), []).append(v)
             rejected_weights.setdefault(int(r["person_id"]), []).append(w)
     merged: dict[int, float] = {}
     for r in conn.execute("SELECT person_id, features FROM learning_events WHERE kind = 'merge' AND person_id IS NOT NULL"):
-        a = (json_loads(r["features"], {}) or {}).get("accepted")
-        if isinstance(a, (int, float)):
+        f = json_loads(r["features"], {}) or {}
+        a = f.get("accepted")
+        # A merge the matching saw as under PULL_FLOOR (recorded before the merge itself checked, 2026-11-09)
+        # teaches nothing: it would loosen the person to the floor for good. A link across the child band
+        # records no adult value (cluster.learn_accepted), so it teaches nothing either.
+        if isinstance(a, (int, float)) and a >= PULL_FLOOR:
             pid = int(r["person_id"])
             merged[pid] = min(merged.get(pid, 1.0), float(a))
     # A person without confirmed faces still needs a reference for the rejection rule: their faces.
     reference: dict[int, np.ndarray] = {}
     for pid in (set(rejected) | set(merged)) - set(by_person):
         vs, ws = [], []
-        for r in conn.execute("SELECT embedding, det_score, size_px, clarity, sharpness FROM faces WHERE person_id = ? "
-                              "ORDER BY quality DESC LIMIT 200", (pid,)):
+        for r in conn.execute("SELECT embedding, det_score, size_px, clarity, sharpness, age_groups FROM faces "
+                              "WHERE person_id = ? ORDER BY quality DESC LIMIT 200", (pid,)):
             v, w = _vec(r["embedding"]), _weight(r)
-            if v is not None and w > 0:
+            if v is not None and w > 0 and adult(r, w):
                 vs.append(v)
                 ws.append(w)
         if vs:

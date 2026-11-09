@@ -75,6 +75,8 @@ from app.schemas import (
     AssignFacesIn,
     AssignOut,
     BulkOut,
+    ChildhoodCandidate,
+    ChildhoodOut,
     DismissIn,
     FaceListItem,
     FacePage,
@@ -1258,12 +1260,21 @@ def review_guesses(
 
 
 # ------------------------------------------------------------------ suggestions
+CHILD_SUGGEST_MAX = 5  # "Same child?" cards shown after the usual suggestions
+
+
 @router.get("/suggestions", response_model=SuggestionList)
 def suggestions(
     limit: int = Query(default=30, ge=1, le=200),
     conn: sqlite3.Connection = Depends(get_db),
 ) -> SuggestionList:
-    pairs = cluster.merge_suggestions(conn, limit)
+    """Merge suggestions, best first: people who look alike (cluster.merge_suggestions, up to `limit`), then up to
+    CHILD_SUGGEST_MAX pairs whose childhood photos look alike (cluster.childhood_suggestions, kind 'childhood',
+    section 10; their samples are those childhood photos)."""
+    young = cluster.childhood_suggestions(conn, CHILD_SUGGEST_MAX)
+    kinds = {(int(a), int(b)): "childhood" for a, b, _ in young}
+    same = [t for t in cluster.merge_suggestions(conn, limit + len(kinds)) if (int(t[0]), int(t[1])) not in kinds][:limit]
+    pairs = [*same, *young]  # the childhood pairs after the usual ones, not counted against `limit`: they are rare
     if not pairs:
         return SuggestionList(items=[])
     ids = sorted({int(a) for a, _, _ in pairs} | {int(b) for _, b, _ in pairs})
@@ -1281,14 +1292,57 @@ def suggestions(
         ids,
     ):
         samples.setdefault(int(r["pid"]), []).append(face_url(int(r["fid"])))
+    young_samples = _childhood_samples(conn, {p for a, b, _ in pairs if (int(a), int(b)) in kinds for p in (int(a), int(b))})
     items: list[Suggestion] = []
     for a, b, sim in pairs:
         oa, ob = outs.get(int(a)), outs.get(int(b))
         if oa is None or ob is None or oa.item_count == 0 or ob.item_count == 0:
             continue
-        items.append(Suggestion(a=oa, b=ob, similarity=float(sim), a_samples=samples.get(oa.id, []),
-                                b_samples=samples.get(ob.id, [])))
+        kind = kinds.get((int(a), int(b)), "same")
+        pick = young_samples if kind == "childhood" else samples
+        if kind == "childhood" and not (pick.get(oa.id) and pick.get(ob.id)):
+            continue  # their childhood photos are in the vault or the trash: nothing to compare here
+        items.append(Suggestion(a=oa, b=ob, similarity=float(sim), a_samples=pick.get(oa.id, []),
+                                b_samples=pick.get(ob.id, []), kind=kind))
     return SuggestionList(items=items)
+
+
+def _childhood_samples(conn: sqlite3.Connection, person_ids: set[int], n: int = 4) -> dict[int, list[str]]:
+    """Up to n of each person's childhood photos (faces in the child band, section 10), best first."""
+    out: dict[int, list[str]] = {}
+    if not person_ids:
+        return out
+    idx = get_index()
+    with idx.lock:
+        idx.sync(conn)
+        for pid in sorted(person_ids):
+            rows = conn.execute(f"SELECT f.id FROM faces f JOIN items i ON i.id = f.item_id AND {LIVE} "
+                                "WHERE f.person_id = ? ORDER BY f.quality DESC, f.id", (pid,)).fetchall()
+            ids = [int(r[0]) for r in rows]
+            flags = idx.child_flags(ids)
+            out[pid] = [face_url(f) for f, young in zip(ids, flags) if young][:n]
+    return out
+
+
+@router.get("/people/{person_id}/childhood", response_model=ChildhoodOut)
+def person_childhood(
+    person_id: int,
+    limit: int = Query(default=3, ge=1, le=10),
+    conn: sqlite3.Connection = Depends(get_db),
+    session: SessionInfo = Depends(require_user),
+) -> ChildhoodOut:
+    """Who an unnamed group of childhood photos may be as a child (section 10): named people ranked by how their
+    adult photos look like the group's childhood photos (cluster.childhood_candidates). No bar: the owner picks
+    (a merge, learned as a cross-age link) or ignores it."""
+    _visible_person_row(conn, session, person_id)
+    ranked = cluster.childhood_candidates(conn, person_id, limit)
+    if not ranked:
+        return ChildhoodOut(candidates=[])
+    rows = conn.execute(f"SELECT {PERSON_COLUMNS} FROM persons WHERE id IN ({_ids_sql([p for p, _ in ranked])})",
+                        [p for p, _ in ranked]).fetchall()
+    outs = {o.id: o for o in person_outs(conn, rows)}
+    return ChildhoodOut(candidates=[ChildhoodCandidate(person=outs[p], similarity=round(float(sv), 4))
+                                    for p, sv in ranked if p in outs and not _hidden_person(conn, session, p)])
 
 
 @router.post("/suggestions/dismiss", response_model=Ok)

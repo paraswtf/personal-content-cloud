@@ -41,6 +41,7 @@ import numpy as np
 from PIL import Image
 
 from app import storage
+from app.analysis import ages as ages_mod
 from app.analysis import animals as animals_mod
 from app.analysis import bodies as bodies_mod
 from app.analysis import categories, cluster, quality
@@ -551,6 +552,7 @@ def analyze_item(conn: sqlite3.Connection, item_id: int, version: int) -> None:
         _drop_animal_faces(r)
     _settle_species(r, siglip)
     face_crops = [_encode_face_crop(f.crop) for f in r.faces]
+    face_ages = ages_mod.measure([f.crop for f in r.faces])  # section 10: None each without the age model
     body_crops = [bodies_mod.encode_crop(b.crop) for b in r.bodies]
     animal_crops = [animals_mod.encode_crop(a.crop) for a in r.animals]
     has_animal = any(a.w * a.h >= ANIMAL_MIN_AREA for a in r.animals)
@@ -609,15 +611,15 @@ def analyze_item(conn: sqlite3.Connection, item_id: int, version: int) -> None:
             old_ids = [int(f["id"]) for f in old_faces]
             old_people = {int(f["person_id"]) for f in old_faces if f["person_id"] is not None}
             new_face_ids: list[int] = []
-            for rec, crop, torso in zip(r.faces, face_crops, r.face_torsos):
+            for rec, crop, torso, age in zip(r.faces, face_crops, r.face_torsos, face_ages):
                 fid = int(conn.execute(
                     "INSERT INTO faces(item_id, person_id, assigned_by, x, y, w, h, det_score, size_px, quality, "
-                    "frame_time_s, spans, embedding, torso_embedding, created_at, clarity, sharpness) "
-                    "VALUES (?, NULL, 'auto', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "frame_time_s, spans, embedding, torso_embedding, created_at, clarity, sharpness, age_groups) "
+                    "VALUES (?, NULL, 'auto', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (item_id, rec.x, rec.y, rec.w, rec.h, rec.det_score, int(rec.size_px), rec.quality,
                      rec.frame_time_s, json_dumps(rec.spans) if rec.spans is not None else None,
                      np.asarray(rec.embedding, dtype=np.float32).tobytes(), _blob(torso), now,
-                     rec.clarity, rec.sharpness),
+                     rec.clarity, rec.sharpness, age),
                 ).lastrowid)
                 new_face_ids.append(fid)
                 path = storage.face_crop_path(fid)

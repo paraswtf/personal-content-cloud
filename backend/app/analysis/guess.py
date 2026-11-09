@@ -291,8 +291,9 @@ def _face_scores(conn: sqlite3.Connection, boxes: list[Box]) -> dict[int, dict[i
     idx = get_index()
     with idx.lock:
         idx.sync(conn)
+        # a face in the child band meets childhood photos only (section 10)
         scores = idx.person_scores_many(np.stack([b.face for b in faces]), settings.cluster_topk,
-                                        frozenset(b.id for b in faces))
+                                        frozenset(b.id for b in faces), child=idx.child_flags([b.id for b in faces]))
     return {b.id: dict(s) for b, s in zip(faces, scores)}
 
 

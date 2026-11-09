@@ -98,6 +98,10 @@ class Settings:
     cluster_match_threshold_low: float
     cluster_topk: int
     suggest_threshold: float
+    face_age_matching: bool  # section 10: children's faces matched within the child band
+    cluster_child_threshold: float  # the cut for a face in the child band (against childhood photos only)
+    child_lead: float  # a face in the child band joins only a person it matches this much better than the next
+    child_suggest_threshold: float  # "Same child?" suggestions: childhood centroids at least this alike
 
     # bodies
     bodies_enabled: bool
@@ -235,6 +239,10 @@ def _load(**overrides) -> Settings:
         cluster_match_threshold_low=_float("CLUSTER_MATCH_THRESHOLD_LOW", 0.52),
         cluster_topk=_int("CLUSTER_TOPK", 3),
         suggest_threshold=_float("SUGGEST_THRESHOLD", 0.35),
+        face_age_matching=_bool("FACE_AGE_MATCHING", True),
+        cluster_child_threshold=_float("CLUSTER_CHILD_THRESHOLD", 0.48),
+        child_lead=_float("CHILD_LEAD", 0.08),
+        child_suggest_threshold=_float("CHILD_SUGGEST_THRESHOLD", 0.40),
         bodies_enabled=_bool("BODIES_ENABLED", True),
         body_det_threshold=_float("BODY_DET_THRESHOLD", 0.5),
         pets_enabled=_bool("PETS_ENABLED", True),

@@ -70,7 +70,7 @@ def fake_registry(tmp_path, monkeypatch, models_mod):
 
 
 def test_registry_keys_and_pins(models_mod):
-    assert set(models_mod.REGISTRY) == {"faces", "siglip", "nsfw", "persons", "ocr", "ocr_devanagari"}
+    assert set(models_mod.REGISTRY) == {"faces", "siglip", "nsfw", "ages", "persons", "ocr", "ocr_devanagari"}
     for key, spec in models_mod.REGISTRY.items():
         assert spec.key == key and spec.label and spec.files
         for f in spec.files:
@@ -80,6 +80,7 @@ def test_registry_keys_and_pins(models_mod):
     assert models_mod.REGISTRY["faces"].archive_url.endswith("/v0.7/buffalo_l.zip")
     assert "c3b037a9ef99ed5f116440790f1e098fb388db49" in models_mod.REGISTRY["siglip"].files[0].url
     assert "1ceb3c7fe1e9f3f2507e6df577437f23a9149fd5" in models_mod.REGISTRY["nsfw"].files[0].url
+    assert "fd04cddf04982f6acc1ac76fb1a31b44c9285596" in models_mod.REGISTRY["ages"].files[0].url
 
 
 def test_models_module_does_not_import_onnxruntime():

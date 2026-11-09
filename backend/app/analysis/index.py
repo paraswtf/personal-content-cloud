@@ -51,6 +51,7 @@ class FaceIndex:
         self._item = np.zeros(0, dtype=np.int64)
         self._user = np.zeros(0, dtype=bool)
         self._weight = np.zeros(0, dtype=np.float32)  # face weight: how much each face counts as an example
+        self._child = np.zeros(0, dtype=bool)  # in the child band (app.analysis.ages.is_child_band)
         self._emb = np.zeros((0, DIM), dtype=np.float32)
         self._pos: dict[int, int] = {}
         self._tentative_conn: int | None = None  # id(conn) of a sync made inside a transaction
@@ -106,7 +107,8 @@ class FaceIndex:
             return
         reload_ids = self._tentative_ids
         rows = conn.execute(
-            "SELECT id, person_id, assigned_by, item_id, det_score, size_px, clarity, sharpness FROM faces ORDER BY id"
+            "SELECT id, person_id, assigned_by, item_id, det_score, size_px, clarity, sharpness, age_groups FROM faces "
+            "ORDER BY id"
         ).fetchall()
         n = len(rows)
         ids = np.fromiter((r[0] for r in rows), dtype=np.int64, count=n)
@@ -114,6 +116,7 @@ class FaceIndex:
         user = np.fromiter((r[2] == "user" for r in rows), dtype=bool, count=n)
         item = np.fromiter((r[3] for r in rows), dtype=np.int64, count=n)
         weight = _weight_of(rows)
+        child = _child_of(rows, weight, _ages_ready(conn))
         emb = np.zeros((n, DIM), dtype=np.float32)
         # Carry cached embeddings over (both id arrays are sorted).
         hit = np.zeros(n, dtype=bool)
@@ -127,14 +130,15 @@ class FaceIndex:
         missing = np.nonzero(~hit)[0].tolist()
         if missing:
             self._load_embeddings(conn, ids, missing, emb)
-        self._set_state(ids, person, user, item, emb, version, weight=weight)
+        self._set_state(ids, person, user, item, emb, version, weight=weight, child=child)
         self._mark(conn, in_tx, {int(ids[i]) for i in missing})
         log.debug("face index synced: %d faces (%d loaded), version %d", n, len(missing), version)
 
     def _set_state(self, ids, person, user, item, emb, version: int | None,
-                   pos: dict[int, int] | None = None, *, weight: np.ndarray) -> None:
+                   pos: dict[int, int] | None = None, *, weight: np.ndarray, child: np.ndarray | None = None) -> None:
         self._ids, self._person, self._user, self._item, self._emb = ids, person, user, item, emb
         self._weight = weight
+        self._child = child if child is not None else np.zeros(ids.shape[0], dtype=bool)
         self._pos = pos if pos is not None else {fid: i for i, fid in enumerate(ids.tolist())}
         self._version = version
         self._changed()
@@ -181,7 +185,7 @@ class FaceIndex:
                 self._sync(conn, False, in_tx=conn.in_transaction)
                 return
             rows = conn.execute(
-                "SELECT id, person_id, assigned_by, item_id, det_score, size_px, clarity, sharpness FROM faces "
+                "SELECT id, person_id, assigned_by, item_id, det_score, size_px, clarity, sharpness, age_groups FROM faces "
                 "WHERE item_id = ? ORDER BY id",
                 (int(item_id),),
             ).fetchall()
@@ -191,16 +195,18 @@ class FaceIndex:
             r_user = np.fromiter((r[2] == "user" for r in rows), dtype=bool, count=n)
             r_item = np.full(n, int(item_id), dtype=np.int64)
             r_weight = _weight_of(rows)
+            r_child = _child_of(rows, r_weight, _ages_ready(conn))
             r_emb = np.zeros((n, DIM), dtype=np.float32)
             if n:
                 self._load_by_id(conn, r_ids, list(range(n)), r_emb)
             keep = self._item != int(item_id)
             kept_all = bool(keep.all())
-            parts = [self._ids, self._person, self._user, self._item, self._emb, self._weight]
+            parts = [self._ids, self._person, self._user, self._item, self._emb, self._weight, self._child]
             if not kept_all:
                 parts = [a[keep] for a in parts]
             if n:
-                parts = [np.concatenate([a, b]) for a, b in zip(parts, [r_ids, r_person, r_user, r_item, r_emb, r_weight])]
+                parts = [np.concatenate([a, b]) for a, b in
+                         zip(parts, [r_ids, r_person, r_user, r_item, r_emb, r_weight, r_child])]
             pos = None
             if n and parts[0].size > n and r_ids[0] < parts[0][parts[0].size - n - 1]:
                 # Some new id sorts before a kept one (rare: ids grow): restore the id order.
@@ -212,8 +218,8 @@ class FaceIndex:
                 base = parts[0].size - n
                 for k, fid in enumerate(r_ids.tolist()):
                     pos[int(fid)] = base + k
-            *state, weight = parts
-            self._set_state(*state, faces_version(conn), pos=pos, weight=weight)
+            *state, weight, child = parts
+            self._set_state(*state, faces_version(conn), pos=pos, weight=weight, child=child)
             self._mark(conn, True, {int(f) for f in r_ids.tolist()})
             log.debug("face index: item %s refreshed (%d faces), version %d", item_id, n, self._version)
 
@@ -249,7 +255,7 @@ class FaceIndex:
             self._set_state(
                 np.zeros(0, dtype=np.int64), np.zeros(0, dtype=np.int64), np.zeros(0, dtype=bool),
                 np.zeros(0, dtype=np.int64), np.zeros((0, DIM), dtype=np.float32), None,
-                weight=np.zeros(0, dtype=np.float32),
+                weight=np.zeros(0, dtype=np.float32), child=np.zeros(0, dtype=bool),
             )
             self._tentative_conn = None
             self._tentative_ids = set()
@@ -263,18 +269,21 @@ class FaceIndex:
             return
         with self.lock:
             changed = False
+            ready = _ages_ready(conn)
             for start in range(0, len(ids), _IN_CHUNK):
                 chunk = ids[start:start + _IN_CHUNK]
                 marks = ",".join("?" * len(chunk))
                 for r in conn.execute(
-                    "SELECT id, person_id, assigned_by, item_id, det_score, size_px, clarity, sharpness, embedding "
-                    f"FROM faces WHERE id IN ({marks})", chunk,
+                    "SELECT id, person_id, assigned_by, item_id, det_score, size_px, clarity, sharpness, age_groups, "
+                    f"embedding FROM faces WHERE id IN ({marks})", chunk,
                 ):
                     pos = self._pos.get(int(r[0]))
                     if pos is None:
                         continue
-                    self._emb[pos] = _decode(r[8])
-                    self._weight[pos] = _weight_of([r])[0]
+                    self._emb[pos] = _decode(r[9])
+                    w = _weight_of([r])
+                    self._weight[pos] = w[0]
+                    self._child[pos] = _child_of([r], w, ready, col=8)[0]
                     changed = True
             if changed:
                 self._changed()
@@ -306,9 +315,13 @@ class FaceIndex:
         return self.person_scores_many(np.asarray(emb, dtype=np.float32)[None, :], topk, exclude_face_ids)[0]
 
     def person_scores_many(
-        self, embs: np.ndarray, topk: int, exclude_face_ids: set[int] | frozenset[int] = frozenset()
+        self, embs: np.ndarray, topk: int, exclude_face_ids: set[int] | frozenset[int] = frozenset(),
+        child: np.ndarray | list[bool] | None = None,
     ) -> list[list[tuple[int, float]]]:
-        """person_scores for each row of embs (B, 512), with one matrix product for the batch."""
+        """person_scores for each row of embs (B, 512), with one matrix product for the batch. `child` (one flag
+        per row, section 10): a row in the child band is scored against each person's child-band faces only, so a
+        child's photo meets the person's other childhood photos and never their adult ones; every other row
+        exactly as before."""
         embs = np.asarray(embs, dtype=np.float32).reshape(-1, DIM)
         with self.lock:
             if self._ids.shape[0] == 0 or embs.shape[0] == 0:
@@ -316,12 +329,27 @@ class FaceIndex:
             base = (self._person >= 0) & (self._weight > 0)
             if exclude_face_ids:
                 base &= ~np.isin(self._ids, np.fromiter(exclude_face_ids, dtype=np.int64))
+            flags = None if child is None else np.asarray(child, dtype=bool).reshape(-1)
+            base_child = base & self._child if flags is not None and flags.any() else None
             out: list[list[tuple[int, float]]] = []
             for start in range(0, embs.shape[0], _SCORE_BATCH):
                 sims = self._emb @ embs[start:start + _SCORE_BATCH].T  # (N, b)
-                out.extend(_topk_means(self._person, base, sims[:, b], topk, self._user, self._weight)
-                           for b in range(sims.shape[1]))
+                for b in range(sims.shape[1]):
+                    use = base_child if base_child is not None and flags[start + b] else base
+                    out.append(_topk_means(self._person, use, sims[:, b], topk, self._user, self._weight))
             return out
+
+    def weights_of(self, face_ids: list[int]) -> np.ndarray:
+        """The face weight of each face (in order); 0 for a face the index does not hold."""
+        with self.lock:
+            return np.array([float(self._weight[self._pos[int(f)]]) if int(f) in self._pos else 0.0
+                             for f in face_ids], dtype=np.float32)
+
+    def child_flags(self, face_ids: list[int]) -> np.ndarray:
+        """Whether each face (in order) is in the child band; False for a face the index does not hold."""
+        with self.lock:
+            return np.array([bool(self._child[self._pos[int(f)]]) if int(f) in self._pos else False
+                             for f in face_ids], dtype=bool)
 
     def least_best_match(self, target_id: int, person_ids: list[int] | set[int]) -> dict[int, float]:
         """{person: the least, over every face of theirs, of that face's best similarity to a face of target_id
@@ -353,11 +381,15 @@ class FaceIndex:
             least = np.minimum.reduceat(best, starts)
             return {int(p): float(v) for p, v in zip(pids[starts].tolist(), least.tolist())}
 
-    def centroids(self, person_ids: list[int] | None = None) -> tuple[np.ndarray, np.ndarray]:
+    def centroids(self, person_ids: list[int] | None = None,
+                  child: bool | None = None) -> tuple[np.ndarray, np.ndarray]:
         """(person_ids array, L2-normalised mean embeddings (P, 512)) for people with faces of weight
-        > 0, each face counted by its face weight."""
+        > 0, each face counted by its face weight. child True / False: from their child-band faces only, or from
+        the others only (section 10); None: every face."""
         with self.lock:
             mask = (self._person >= 0) & (self._weight > 0)
+            if child is not None:
+                mask &= self._child if child else ~self._child
             if person_ids is not None:
                 mask &= np.isin(self._person, np.asarray(list(person_ids), dtype=np.int64))
             sel = np.nonzero(mask)[0]
@@ -432,6 +464,33 @@ def _weight_of(rows: list[sqlite3.Row] | list[tuple]) -> np.ndarray:
     clarity = np.fromiter((nan if r[6] is None else r[6] for r in rows), dtype=np.float64, count=n)
     sharp = np.fromiter((nan if r[7] is None else r[7] for r in rows), dtype=np.float64, count=n)
     return face_weights(det, size, clarity, sharp).astype(np.float32)
+
+
+def _child_of(rows: list[sqlite3.Row] | list[tuple], weight: np.ndarray, ready: bool, col: int = 8) -> np.ndarray:
+    """Whether each face row (its age_groups at `col`) is in the child band, given its face weight; none before
+    the ages of the library are all read (app.analysis.ages.ready)."""
+    from app.analysis.ages import is_child_band
+
+    n = len(rows)
+    if not ready or not n:
+        return np.zeros(n, dtype=bool)
+    u10 = np.full(n, np.nan, dtype=np.float32)
+    for i, r in enumerate(rows):
+        blob = r[col]
+        if blob:
+            g = np.frombuffer(blob, dtype=np.float32)
+            if g.shape[0] == 9:
+                u10[i] = g[0] + g[1]
+    return is_child_band(u10, weight)
+
+
+def _ages_ready(conn: sqlite3.Connection) -> bool:
+    from app.analysis.ages import ready
+
+    try:
+        return ready(conn)
+    except sqlite3.Error:  # an older database without the kv row reads as not ready
+        return False
 
 
 def _decode(blob: bytes) -> np.ndarray:

@@ -21,7 +21,8 @@ CONTRACT.
   goes too when that one has a body; an unnamed group left empty goes. Not an owner action (no undo). Returns
   the faces removed.
 - start(conn): on startup (app.ingest.recover_on_startup): drop_nested_twins, retrack_videos, and
-  measure_photo_faces on a background thread when photos are left to measure.
+  measure_photo_faces on a background thread when photos are left to measure; app.analysis.ages
+  measure_stored_faces on another when the age model is present and a face has no age yet.
 """
 from __future__ import annotations
 
@@ -228,6 +229,19 @@ def _measure_in_background() -> dict[str, Any]:
         conn.close()
 
 
+def _ages_in_background() -> dict[str, Any]:
+    from app.analysis import ages
+    from app.db import connect
+
+    conn = connect()
+    try:
+        out = ages.measure_stored_faces(conn)
+        log.info("face ages: %d stored faces measured (complete: %s)", out["faces"], out["complete"])
+        return out
+    finally:
+        conn.close()
+
+
 def start(conn: sqlite3.Connection) -> None:
     try:
         drop_nested_twins(conn)
@@ -244,3 +258,16 @@ def start(conn: sqlite3.Connection) -> None:
             worker.run_in_background("face-measure", _measure_in_background)
     except Exception:
         log.exception("startup: could not start measuring the faces of analysed photos")
+    try:
+        from app.analysis import ages
+
+        if ages.available():
+            if conn.execute("SELECT 1 FROM faces WHERE age_groups IS NULL LIMIT 1").fetchone():
+                from app import worker
+
+                worker.run_in_background("face-ages", _ages_in_background)
+            elif not ages.ready(conn):
+                with tx(conn):
+                    ages.mark_ready(conn)  # nothing to read (an empty library, or every face measured)
+    except Exception:
+        log.exception("startup: could not start reading the ages of stored faces")

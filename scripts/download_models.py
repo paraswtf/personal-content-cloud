@@ -6,7 +6,7 @@ Missing files are streamed to '.part' files, checked (size and sha256) and renam
 that fails does not stop the others; the exit status is 1 and stderr names each failed model.
 
 Usage: download_models.py [--only KEY ...] [--verify] [--quiet]
-  --only KEY   download only these models (faces, siglip, nsfw, persons, ocr, ocr_devanagari)
+  --only KEY   download only these models (faces, siglip, nsfw, ages, persons, ocr, ocr_devanagari)
   --verify     also hash every present file and report mismatches (slow: about 1.4 GB of reads)
   --no-geo     skip the GeoNames place data (also skipped when GEO_ENABLED=false)
   --quiet      print only failures

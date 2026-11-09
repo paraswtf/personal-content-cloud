@@ -353,6 +353,12 @@ export interface Suggestion {
   similarity: number
   a_samples: string[]
   b_samples: string[]
+  /** 'childhood': their childhood photos look alike (section 10); the samples are those childhood photos. */
+  kind?: 'same' | 'childhood'
+}
+/** Who an unnamed group of childhood photos may be as a child, best first (no bar, section 10). */
+export interface ChildhoodOut {
+  candidates: { person: PersonOut; similarity: number }[]
 }
 export interface SuggestionList {
   items: Suggestion[]

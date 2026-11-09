@@ -27,6 +27,7 @@ import heapq
 import logging
 import sqlite3
 from collections import defaultdict
+from dataclasses import dataclass
 
 import numpy as np
 
@@ -247,28 +248,50 @@ def _score(idx: FaceIndex, faces: list[sqlite3.Row], exclude: frozenset[int],
     owner taught about the person (section 18): a learned threshold replaces the good-face default
     (lower after confirmations and merges, higher after rejections) and a weaker face keeps its
     extra margin on top. A person whose rejected examples (faces the owner took away from them)
-    look more like the face than the person's own faces do is left out. Call with idx.lock held,
+    look more like the face than the person's own faces do is left out.
+    A face in the child band (section 10, app.analysis.ages: a baby or young child) is scored against
+    each person's child-band faces only, its cut is settings.cluster_child_threshold plus the same
+    low-quality extra (or `threshold` when that is higher), a learned threshold only ever raises it
+    (it was learned from adults), and it needs a lead of CHILD_LEAD over the next person (young
+    children, siblings above all, look alike to the face model; settings.child_lead). Call with idx.lock held,
     after idx.sync."""
     if not faces:
         return []
-    embs = idx.embeddings_of([r["id"] for r in faces])
+    ids = [r["id"] for r in faces]
+    embs = idx.embeddings_of(ids)
+    child = idx.child_flags(ids)
     out: list[list[tuple[int, float]]] = []
+    scored: list[list[tuple[int, float]]] = []
     good = float(settings.cluster_match_threshold)
-    for r, scores in zip(faces, idx.person_scores_many(embs, settings.cluster_topk, exclude)):
+    for r, scores, young in zip(faces, idx.person_scores_many(embs, settings.cluster_topk, exclude, child=child),
+                                child):
         thr = _threshold(r)
         margin = thr - good  # 0 for a good face, the low-quality extra otherwise
         kept: list[tuple[int, float]] = []
+        child_cut = float(settings.cluster_child_threshold) + margin
         for pid, score in scores:
-            if threshold is not None:
+            learned = _learned(pid) if threshold is None else None
+            if young:
+                cut = child_cut if threshold is None else max(float(threshold), child_cut)
+                if learned is not None:
+                    cut = max(cut, learned + margin)
+            elif threshold is not None:
                 cut = float(threshold)
             else:
-                learned = _learned(pid)
                 cut = thr if learned is None else learned + margin
             if score >= cut:
                 kept.append((pid, score))
         out.append(kept)
+        scored.append(scores)
     if conn is not None:
         out = _drop_rejected_lookalikes(conn, embs, out)
+    for i, young in enumerate(child):
+        if young and out[i]:
+            # One option only, with the lead over every other person scored (below the cut too): a best that is
+            # taken in the photo, or dropped as a rejected look-alike, never falls through to an ambiguous second.
+            best_pid, best = out[i][0]
+            runner = max((sc for pid, sc in scored[i] if pid != best_pid), default=0.0)
+            out[i] = out[i][:1] if best - runner >= float(settings.child_lead) else []
     return out
 
 
@@ -813,87 +836,143 @@ PULL_FLOOR = 0.30   # a look-alike is never pulled along below this similarity, 
 PULL_MARGIN = 0.05  # the merged person must lead the runner-up by this much for a look-alike to be pulled along
 
 
-def merge_similarity(conn: sqlite3.Connection, target_id: int, source_ids: list[int]) -> float | None:
-    """How alike the people being merged are, as the matching sees it: for each source, the mean over
-    its faces of the top-k mean similarity to the target's faces (0 for a face below the index's
-    MIN_SIM); the least of those. None when the target or every source has no face."""
+@dataclass
+class Accepted:
+    """What a merge or a move teaches (section 18, section 10 for the child band)."""
+
+    accepted: float | None = None  # how alike the adult faces are: may loosen the person and pulls look-alikes
+    child_accepted: float | None = None  # how alike the child-band faces are: pulls childhood groups only
+    cross_age: bool = False  # child-band faces met only adult faces, or adult faces only child-band ones
+    below_floor: float | None = None  # an adult similarity under PULL_FLOOR, kept for the record only
+    young: bool = False  # child-band faces were among those added (the person's childhood photos grew)
+
+    def features(self) -> dict:
+        """The learning event's fields (app.learning.people reads `accepted`)."""
+        return {
+            "accepted": None if self.accepted is None else round(float(self.accepted), 4),
+            "below_floor": None if self.below_floor is None else round(float(self.below_floor), 4),
+            "child_accepted": None if self.child_accepted is None else round(float(self.child_accepted), 4),
+            "cross_age": self.cross_age or None,
+        }
+
+
+def _person_face_ids(conn: sqlite3.Connection, person_id: int) -> list[int]:
+    return [int(r[0]) for r in conn.execute(
+        "SELECT id FROM faces WHERE person_id = ? AND embedding IS NOT NULL", (int(person_id),))]
+
+
+def _alike(idx: FaceIndex, target_id: int, ids: list[int], exclude: frozenset[int]) -> float:
+    """The mean over these faces of their top-k score for the target (0 below MIN_SIM). Child-band faces meet the
+    target's child-band faces only (FaceIndex.person_scores_many). Call with idx.lock held, after sync."""
+    sims = []
+    for scores in idx.person_scores_many(idx.embeddings_of(ids), settings.cluster_topk, exclude,
+                                         child=idx.child_flags(ids)):
+        sims.append(next((sc for pid, sc in scores if pid == int(target_id)), 0.0))
+    return float(np.mean(sims)) if sims else 0.0
+
+
+def learn_accepted(conn: sqlite3.Connection, target_id: int, groups: list[list[int]],
+                   left_out: set[int] | frozenset[int] = frozenset()) -> Accepted:
+    """How alike each group of faces is to the target's other faces, band by band (section 10): adult faces
+    against the target's adult faces (its child-band faces left out of the reference), child-band faces against
+    its child-band faces; per band, the least over the groups. A band with no reference on the target side is a
+    cross-age link: the owner's say, nothing to learn. An adult value under PULL_FLOOR is kept as below_floor and
+    teaches nothing either (a face the matching sees as unlike the person would loosen them for good). `left_out`:
+    faces that are neither group nor reference (look-alikes that came along). Call inside a tx."""
     idx = get_index()
-    worst: float | None = None
+    out = Accepted()
     with idx.lock:
         idx.sync(conn)
-        if not conn.execute("SELECT 1 FROM faces WHERE person_id = ? AND embedding IS NOT NULL LIMIT 1", (target_id,)).fetchone():
-            return None
-        for sid in source_ids:
-            ids = [int(r["id"]) for r in conn.execute(
-                "SELECT id FROM faces WHERE person_id = ? AND embedding IS NOT NULL", (sid,))]
+        moving = {f for g in groups for f in g} | {int(f) for f in left_out}
+        out.young = any(bool(idx.child_flags([int(f) for f in g]).any()) for g in groups if g)
+        target_faces = [f for f in _person_face_ids(conn, target_id) if f not in moving]
+        if not target_faces:
+            return out
+        t_child = idx.child_flags(target_faces)
+        t_child_ids = frozenset(f for f, c in zip(target_faces, t_child) if c)
+        has_adult_ref = len(t_child_ids) < len(target_faces)
+        exclude = frozenset(moving)
+        for ids in groups:
+            ids = [int(f) for f in ids]
             if not ids:
                 continue
-            sims = []
-            for scores in idx.person_scores_many(idx.embeddings_of(ids), settings.cluster_topk, frozenset(ids)):
-                sims.append(next((sc for pid, sc in scores if pid == int(target_id)), 0.0))
-            mean = float(np.mean(sims))
-            worst = mean if worst is None else min(worst, mean)
-    return worst
+            flags = idx.child_flags(ids)
+            adult = [f for f, c in zip(ids, flags) if not c]
+            young = [f for f, c in zip(ids, flags) if c]
+            if adult:
+                if has_adult_ref:
+                    a = _alike(idx, target_id, adult, exclude | t_child_ids)
+                    out.accepted = a if out.accepted is None else min(out.accepted, a)
+                else:
+                    out.cross_age = True
+            if young:
+                if t_child_ids:
+                    c = _alike(idx, target_id, young, exclude)
+                    out.child_accepted = c if out.child_accepted is None else min(out.child_accepted, c)
+                else:
+                    out.cross_age = True
+    if out.accepted is not None and out.accepted < PULL_FLOOR:
+        out.below_floor, out.accepted = out.accepted, None
+    return out
 
 
 def accept_faces(conn: sqlite3.Connection, target_id: int, face_ids: list[int],
                  came_along: list[int] | tuple[int, ...] = ()) -> tuple[float | None, list[int]]:
     """The owner moved these faces to `target_id` (a bulk move on a selection, section 10): learned like a
-    merge. `accepted` is the faces' mean top-k similarity to the faces the target had before (the moved
-    faces and the look-alikes that `came_along` with them left out; None when there were none); a 'merge'
-    learning event for the target records {accepted, faces, followed} (as merge_and_follow); and with
-    `accepted` the unnamed look-alike groups follow (follow_merge). An `accepted` below PULL_FLOOR is
-    recorded as `below_floor` instead: no loosening, no pull. The faces must already be the target's.
-    Returns (accepted, the pulled person ids). Call inside a tx."""
+    merge (learn_accepted, band by band: the moved faces against the faces the target had before, the
+    look-alikes that `came_along` left out). A 'merge' learning event for the target records the
+    Accepted fields with {faces, followed}; with an adult `accepted` the unnamed look-alike groups
+    follow (follow_merge), and with childhood photos added the childhood groups do (follow_childhood).
+    An adult value below PULL_FLOOR, and a cross-age link, teach nothing and pull nothing. The faces
+    must already be the target's. Returns (accepted, the pulled person ids). Call inside a tx."""
     ids = sorted({int(f) for f in face_ids})
     target_id = int(target_id)
     if not ids:
         return None, []
-    new = sorted(set(ids) | {int(f) for f in came_along})
-    accepted: float | None = None
-    idx = get_index()
-    with idx.lock:
-        idx.sync(conn)
-        marks = ",".join("?" * len(new))
-        if conn.execute(
-            f"SELECT 1 FROM faces WHERE person_id = ? AND embedding IS NOT NULL AND id NOT IN ({marks}) LIMIT 1",
-            [target_id, *new],
-        ).fetchone():
-            sims = []
-            for scores in idx.person_scores_many(idx.embeddings_of(ids), settings.cluster_topk, frozenset(new)):
-                sims.append(next((sc for pid, sc in scores if pid == target_id), 0.0))
-            accepted = float(np.mean(sims)) if sims else None
-    below: float | None = None
-    if accepted is not None and accepted < PULL_FLOOR:
-        # A selection holding a face the matching sees as unlike the target would loosen the target for
-        # good (the learner keeps the least accepted similarity) and pull look-alikes at the floor. The
-        # faces still count as the owner's examples of the target; the move is not learned as a merge.
-        below, accepted = accepted, None
-        log.info("bulk move to person %s: accepted %.2f is below %.2f, not learned as a merge", target_id, below, PULL_FLOOR)
-    pulled = follow_merge(conn, target_id, accepted) if accepted is not None else []
+    learned = learn_accepted(conn, target_id, [ids], left_out={int(f) for f in came_along})
+    if learned.below_floor is not None:
+        log.info("bulk move to person %s: accepted %.2f is below %.2f, not learned as a merge", target_id,
+                 learned.below_floor, PULL_FLOOR)
+    pulled = _follow_learned(conn, target_id, learned)
     try:
         from app.learning import events
 
-        events.record(conn, "merge", 1, {
-            "accepted": None if accepted is None else round(float(accepted), 4),
-            "below_floor": None if below is None else round(float(below), 4),
-            "faces": len(ids), "followed": len(pulled),
-        }, person_id=target_id)
+        events.record(conn, "merge", 1, {**learned.features(), "faces": len(ids), "followed": len(pulled)},
+                      person_id=target_id)
     except Exception:  # noqa: BLE001 - learning never blocks the action
         log.exception("could not record the bulk move for learning")
-    return accepted, pulled
+    return learned.accepted, pulled
 
 
-def follow_merge(conn: sqlite3.Connection, target_id: int, accepted: float) -> list[int]:
+def _follow_learned(conn: sqlite3.Connection, target_id: int, learned: Accepted) -> list[int]:
+    """The look-alike groups a merge or a move justifies: adult ones at the adult value it taught, then childhood
+    ones when childhood photos were added (their own cut, section 10)."""
+    pulled = follow_merge(conn, target_id, learned.accepted) if learned.accepted is not None else []
+    if learned.young:
+        pulled += follow_childhood(conn, target_id, learned.child_accepted)
+    return pulled
+
+
+def follow_childhood(conn: sqlite3.Connection, target_id: int, child_accepted: float | None) -> list[int]:
+    """follow_merge for childhood groups (section 10): unnamed groups whose faces are all in the child band,
+    pulled when every face matches the target's childhood photos first at >= max(child_accepted,
+    settings.cluster_child_threshold), ahead of the next person by PULL_MARGIN (and settings.child_lead, _score)."""
+    cut = max(float(child_accepted or 0.0), float(settings.cluster_child_threshold))
+    return follow_merge(conn, target_id, cut, childhood=True)
+
+
+def follow_merge(conn: sqlite3.Connection, target_id: int, accepted: float, *, childhood: bool = False) -> list[int]:
     """The unnamed, automatically grouped people who look like `target_id` at least as much as the
     people the owner just merged into them (section 10): every face of such a person matches the
     target first, at >= max(accepted, PULL_FLOOR, the target's learned threshold), ahead of any other
     person by PULL_MARGIN, with the rejected look-alikes rule applied. Never a named person, one with a
     face, body or tag the owner assigned, one dismissed against the target, or one seen in the same
-    photo as the target. Merges them into the target; returns their ids."""
+    photo as the target. With `childhood`, only groups whose faces are all in the child band, and the
+    target's learned threshold (taught by adults) is not applied. Merges them into the target; returns
+    their ids."""
     target_id = int(target_id)
     cut = max(float(accepted), PULL_FLOOR)
-    learned = _learned(target_id)
+    learned = None if childhood else _learned(target_id)
     if learned is not None:
         cut = max(cut, float(learned))
     dismissed = {int(r[0]) for r in conn.execute(
@@ -920,6 +999,8 @@ def follow_merge(conn: sqlite3.Connection, target_id: int, accepted: float) -> l
     with idx.lock:
         idx.sync(conn)
         pool = [c for c in candidates if c not in dismissed and c not in together]
+        if childhood:
+            pool = [c for c in pool if _all_child(conn, idx, c)]
         # Quick pass, exact: a person follows only when every face of theirs scores the target at >= cut, and no
         # score exceeds the face's best similarity to a face of the target. One matrix product for all of them
         # (scoring each of a thousand unnamed groups took seconds); the full check runs for the rest.
@@ -946,23 +1027,29 @@ def follow_merge(conn: sqlite3.Connection, target_id: int, accepted: float) -> l
 
 
 def merge_and_follow(conn: sqlite3.Connection, target_id: int, source_ids: list[int]) -> tuple[float | None, list[int]]:
-    """The owner's merge (merge_persons), then the look-alikes it justifies (follow_merge), and a
-    'merge' learning event for the target with the similarity the owner accepted (section 18: the
-    person's threshold loosens to it). Returns (accepted similarity, follower ids)."""
+    """The owner's merge (merge_persons), then the look-alikes it justifies (_follow_learned), and a
+    'merge' learning event for the target with what it taught (learn_accepted, section 18: the
+    person's threshold loosens to the adult similarity the owner accepted; under PULL_FLOOR, or across
+    the child band, nothing is learned and nothing pulled). Returns (accepted similarity, follower ids)."""
     sources = list(dict.fromkeys(int(s) for s in source_ids))
-    accepted = merge_similarity(conn, int(target_id), sources) if sources else None
+    learned = (learn_accepted(conn, int(target_id), [_person_face_ids(conn, s) for s in sources])
+               if sources else Accepted())
     merge_persons(conn, target_id, sources)
-    followers = follow_merge(conn, int(target_id), accepted) if accepted is not None else []
+    followers = _follow_learned(conn, int(target_id), learned)
     try:
         from app.learning import events
 
-        events.record(conn, "merge", 1, {
-            "accepted": None if accepted is None else round(float(accepted), 4),
-            "sources": len(sources), "followed": len(followers),
-        }, person_id=int(target_id))
+        events.record(conn, "merge", 1, {**learned.features(), "sources": len(sources), "followed": len(followers)},
+                      person_id=int(target_id))
     except Exception:  # noqa: BLE001 - learning never blocks the action
         log.exception("could not record the merge for learning")
-    return accepted, followers
+    return learned.accepted, followers
+
+
+def _all_child(conn: sqlite3.Connection, idx: FaceIndex, person_id: int) -> bool:
+    """Every face of the person is in the child band. Call with idx.lock held, after sync."""
+    ids = _person_face_ids(conn, person_id)
+    return bool(ids) and bool(idx.child_flags(ids).all())
 
 
 def _co_occurring(conn: sqlite3.Connection) -> set[tuple[int, int]]:
@@ -1030,3 +1117,79 @@ def merge_suggestions(conn: sqlite3.Connection, limit: int = 30) -> list[tuple[i
                 heapq.heapreplace(heap, item)
     best = sorted(heap, key=lambda t: (-t[0], -t[1], -t[2]))
     return [(-a, -b, float(sv)) for sv, a, b in best]
+
+
+def childhood_suggestions(conn: sqlite3.Connection, limit: int = 30) -> list[tuple[int, int, float]]:
+    """Pairs (a_id, b_id, similarity), a_id < b_id, of people whose childhood photos (faces in the child band,
+    section 10) look alike: the cosine of their child-band centroids >= settings.child_suggest_threshold (0.40,
+    below the child cut as the adult suggestions sit below theirs). Leaves out dismissed pairs and pairs seen in
+    one photo. Best first. (The suggestions route shows such a pair as a childhood one even when
+    merge_suggestions has it too.)"""
+    if limit <= 0:
+        return []
+    idx = get_index()
+    with idx.lock:
+        idx.sync(conn)
+        pids, C = idx.centroids(child=True)
+    if pids.size < 2:
+        return []
+    order = np.argsort(pids)
+    pids, C = pids[order], C[order]
+    excluded = {(r[0], r[1]) for r in conn.execute("SELECT person_a, person_b FROM merge_dismissals")}
+    excluded |= _co_occurring(conn)
+    kinds = {int(r[0]): r[1] for r in conn.execute(
+        f"SELECT id, kind FROM persons WHERE id IN ({','.join('?' * pids.size)})", pids.tolist())}
+    sims = C @ C.T
+    rows, cols = np.nonzero(np.triu(sims >= float(settings.child_suggest_threshold), k=1))
+    pairs = [(int(pids[i]), int(pids[j]), float(sims[i, j])) for i, j in zip(rows.tolist(), cols.tolist())]
+    pairs = [t for t in pairs if (t[0], t[1]) not in excluded and kinds.get(t[0]) == "person" and kinds.get(t[1]) == "person"]
+    pairs.sort(key=lambda t: (-t[2], t[0], t[1]))
+    return pairs[:limit]
+
+
+CHILDHOOD_SHARE = 0.5  # a group is a childhood group when this much of its face weight is in the child band
+
+
+def childhood_candidates(conn: sqlite3.Connection, person_id: int, limit: int = 3) -> list[tuple[int, float]]:
+    """For an unnamed group of childhood photos (CHILDHOOD_SHARE of its face weight in the child band, section
+    10): the named people it may be as a child, best first. First those whose own childhood photos look like the
+    group's (child-band centroids at >= settings.child_suggest_threshold), by that; then the rest by the cosine of
+    the group's child-band centroid and the person's adult centroid. No bar: the face model links a young child to
+    their adult self only weakly (about 0.2 to 0.35), so this ranks for the owner, who decides. Leaves out people
+    seen in one photo with the group and pairs the owner dismissed. [] for a named person or a group that is not
+    mostly childhood photos."""
+    person_id = int(person_id)
+    row = conn.execute("SELECT name, kind FROM persons WHERE id = ?", (person_id,)).fetchone()
+    if row is None or row["name"] or row["kind"] != "person" or limit <= 0:
+        return []
+    idx = get_index()
+    with idx.lock:
+        idx.sync(conn)
+        ids = _person_face_ids(conn, person_id)
+        if not ids:
+            return []
+        flags = idx.child_flags(ids)
+        weights = idx.weights_of(ids)
+        total = float(weights.sum())
+        if total <= 0 or float(weights[flags].sum()) / total < CHILDHOOD_SHARE:
+            return []
+        gp, gc = idx.centroids([person_id], child=True)
+        ap, ac = idx.centroids(child=False)
+        cp, cc = idx.centroids(child=True)
+    if gp.size == 0 or (ap.size == 0 and cp.size == 0):
+        return []
+    named = {int(r[0]) for r in conn.execute("SELECT id FROM persons WHERE kind = 'person' AND name IS NOT NULL")}
+    dismissed = {int(r[0]) for r in conn.execute(
+        "SELECT CASE WHEN person_a = ? THEN person_b ELSE person_a END FROM merge_dismissals "
+        "WHERE person_a = ? OR person_b = ?", (person_id, person_id, person_id))}
+    together = {b if a == person_id else a for a, b in _co_occurring(conn) if person_id in (a, b)}
+    def fits(pid: int) -> bool:
+        return pid in named and pid not in dismissed and pid not in together and pid != person_id
+
+    young = {int(p): float(sv) for p, sv in zip(cp.tolist(), (cc @ gc[0]).tolist())
+             if fits(int(p)) and float(sv) >= float(settings.child_suggest_threshold)}
+    grown = {int(p): float(sv) for p, sv in zip(ap.tolist(), (ac @ gc[0]).tolist()) if fits(int(p))}
+    ranked = [(1, sv, pid) for pid, sv in young.items()]
+    ranked += [(0, sv, pid) for pid, sv in grown.items() if pid not in young]
+    ranked.sort(reverse=True)
+    return [(pid, sv) for _, sv, pid in ranked[:limit]]

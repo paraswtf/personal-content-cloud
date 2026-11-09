@@ -50,6 +50,7 @@ import type {
   SessionOut,
   Stats,
   SuggestionList,
+  ChildhoodOut,
   SystemOut,
   TagIn,
   TagOut,
@@ -481,6 +482,7 @@ export const api = {
     confirmGuesses: (body: GuessIdsIn) => post<BulkOut>('/api/guesses/confirm', body),
     rejectGuesses: (body: GuessIdsIn) => post<BulkOut>('/api/guesses/reject', body),
     suggestions: (limit = 30) => get<SuggestionList>(`/api/suggestions${qs({ limit })}`),
+    childhood: (id: number) => get<ChildhoodOut>(`/api/people/${id}/childhood`),
     dismissSuggestion: (a: number, b: number) => post<OkOut>('/api/suggestions/dismiss', { a, b }),
     recluster: () => post<OkOut>('/api/recluster'),
     /** Section 10, people on a selection: who the selected items show (faces, bodies, pet boxes, tags). */

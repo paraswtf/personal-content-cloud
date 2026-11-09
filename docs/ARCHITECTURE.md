@@ -377,6 +377,7 @@ pinned and checksummed, skipped when present):
 | `faces` | `buffalo_l/det_10g.onnx`, `buffalo_l/w600k_r50.onnx` | InsightFace release v0.7 zip | non-commercial research (personal use) |
 | `siglip` | `search/ViT-B-16-SigLIP__webli/{visual,textual}/model.onnx`, tokenizer | immich-app on Hugging Face, commit c3b037a | Apache 2.0 |
 | `nsfw` | `nsfw/model.onnx` (+ `config.json`, `preprocessor_config.json`) | onnx-community/nsfw_image_detection-ONNX, pinned commit | Apache 2.0 (Falconsai ViT) |
+| `ages` | `ages/onnx/model_int8.onnx` (87 MB, + `config.json`, `preprocessor_config.json`): nine FairFace age groups per face crop (`app/ml/ages.py`, section 10) | onnx-community/fairface_age_image_detection-ONNX, commit fd04cdd (int8 export of dima806/fairface_age_image_detection) | Apache 2.0 |
 | `persons` | `yolox/yolox_s.onnx` | Megvii YOLOX release 0.1.1rc0 (35.9 MB) | Apache 2.0 |
 | `ocr` | rapidocr's bundled models (`PP-OCRv6_det_small`, `PP-OCRv6_rec_small`, `ch_ppocr_mobile_v2.0_cls`; installed with the package, nothing downloaded at run time) | RapidAI | Apache 2.0 |
 | `ocr_devanagari` | `ocr/devanagari_PP-OCRv5_rec_mobile.onnx` (7.9 MB, Hindi and Marathi recogniser, character list in the ONNX metadata) and `fonts/NotoSansDevanagari-Regular.ttf` (page renders and test fixtures) | RapidOCR model zoo (modelscope, release v3.10.0); Noto fonts | Apache 2.0; SIL OFL 1.1 |
@@ -468,8 +469,9 @@ person's own faces do, so look-alikes of a rejected face never return to that pe
 recluster.
 
 Merging pulls look-alikes along (`cluster.merge_and_follow`, behind `POST people/merge` and behind renaming a
-person to a name that exists). The similarity the owner accepted is measured first (`merge_similarity`: for each
-merged person, the mean over its faces of the top-3 mean to the target's faces; the least of those), the merge
+person to a name that exists). The similarity the owner accepted is measured first (`learn_accepted`: for each
+merged person, the mean over its faces of the top-3 mean to the target's faces, band by band; the least of those;
+under 0.30 or across the child band nothing is learned, see "Ages and childhood photos" below), the merge
 happens, and then every unnamed person whose faces are all automatic and who matches the merged person at
 `>= max(accepted, 0.30, the person's learned threshold)`, ahead of any other person by 0.05, with the rejected
 look-alikes rule applied, is merged in too (`follow_merge`): never a named person, one with a face, body or tag
@@ -780,6 +782,74 @@ Tests (`tests/test_people_bulk.py`): the list with faces, bodies, pet boxes and 
 existing person and to a new name, with look-alikes following and the tags re-pointed (relation kept, `in`
 winning); a pet moved to a pet and refused to a person or another species; remove; a bulk tag of both kinds
 and relations with `species_needed`; vault items with the vault locked; the same person as target.
+
+### Ages and childhood photos (2026-11-09)
+
+The owner keeps childhood photos of people who are in the library as adults, mostly re-shot prints and forwards, so
+their capture dates (all 2026 on the owner's library) say nothing about when they were taken. The age comes from the
+face. Measured on the owner's 9,456 faces: InsightFace's own age model read children of 10 to 12 as 24 to 32 and
+blurred adults as children; SigLIP zero-shot called about 1 adult in 10 young; the FairFace ViT kept 405 of 418
+sampled faces in the adult groups and found every baby and child that could be seen, so it is the model.
+
+- Storage: `faces.age_groups` BLOB, float32[9], the FairFace probabilities of the face's crop (0-2, 3-9, 10-19, 20-29,
+  ..., 70+); NULL = not measured. Written for every face analysis finds (`pipeline`: from the in-memory crop, outside
+  the write transaction), every face the owner draws or a person box finds (`person_boxes`), and a moved face box
+  (`box_edit`: the new crop's, NULL without the model, never the old crop's; undo puts the old one back, it is a
+  `FACE_VECTOR_COLUMNS` entry). `app/analysis/ages.py` reads it (`youth`: P(under 10), `band`, `expected_age`).
+- Backfill: `ages.measure_stored_faces` on a startup thread (`face_upkeep.start`, when the model is present and a face
+  has no age) reads the stored 192 px crops, 32 at a time, one short transaction each, about 70 to 90 ms a face on
+  this CPU (about 13 minutes for the owner's library). Not an owner action. When no face is left it sets kv
+  `face_ages_ready` to `ages.MODEL_REV` and moves `faces_version` once (a later pass, for faces stored while the
+  model was missing, moves it too); an empty or fully measured library is marked at startup. Until then nothing
+  below applies, so the child band switches on for the whole library at once. A crop the model cannot take is
+  skipped (the batch is read again one crop at a time); a model that fails on a plain grey crop stops the pass until
+  the next start.
+- The child band (`ages.is_child_band`, `in_child_band`): P(under 10) >= 0.5 on a face of face weight >= 0.35.
+  On the owner's library: 24 faces, all babies and young children but one toy. Children of about 10 to 14 read 0.3 to
+  0.5 and stay out on purpose: the face model still links them to their adult selves (0.49 to 0.68 on five such
+  photos), which is the cross-age match the owner wants. `settings.face_age_matching` (FACE_AGE_MATCHING) turns it off.
+- Matching (`FaceIndex._child`, `person_scores_many(child=)`, `cluster._score`): a face in the child band is scored
+  against each person's child-band faces only (a mask, so one tagged childhood photo is enough to draw the next one,
+  where today's top-3 mean would dilute it with adult faces). Its cut is `settings.cluster_child_threshold` (0.48)
+  plus the usual low-quality extra (so 0.48 to 0.55), or the follow cut when that is higher; a learned threshold only
+  ever raises it (it was learned from adults: a person loosened to 0.30 cannot take in a stranger's toddler); and it
+  needs a lead of `settings.child_lead` (0.08) over the next person (young children, siblings above all, look alike to
+  the face model), checked after the rejected look-alikes rule, and it keeps that one option only (a best that is
+  taken in the photo never falls through to an ambiguous second). Same-child leave-one-out scores on the library were 0.41 to 0.64, different children at most
+  0.37. A clear child face with no option starts its own group, as any face. Every other face is scored exactly as
+  before: on a copy of the library, 300 random adult faces kept identical options; 3 of the 24 child faces lost an
+  automatic join (to a blurred one-photo group, or a lead under 0.08 against the same baby split in two groups).
+  Guesses pass the band too.
+- Learning (`cluster.learn_accepted`, used by `merge_and_follow` and `accept_faces`): what a merge or a move taught,
+  band by band. Adult faces against the target's adult faces (`accepted`, which loosens the person, section 18);
+  child-band faces against its childhood photos (`child_accepted`, which pulls childhood groups only). A band with
+  nothing on the target side is a cross-age link (`cross_age`): the owner's say, nothing learned, no adult look-alikes
+  pulled. An adult value under `PULL_FLOOR` (0.30) is `below_floor` and teaches nothing, for merges as for bulk moves
+  (merges lacked this; on the owner's library nine people had been loosened to the 0.30 floor by merges at 0.0 to
+  0.30, and faces scoring under the default cut had joined some of them, a monkey's face among them). When childhood photos
+  were added, `follow_childhood` pulls unnamed groups whose faces are all in the child band and match the target's
+  childhood photos first at >= max(child_accepted, the child cut), with PULL_MARGIN and the child lead. The event
+  records `accepted`, `below_floor`, `child_accepted`, `cross_age`.
+- "Same child?" (`cluster.childhood_suggestions`): pairs of people whose childhood-photo centroids are >=
+  `settings.child_suggest_threshold` (0.40) alike, without dismissed or co-occurring pairs. `GET /api/suggestions`
+  adds up to `CHILD_SUGGEST_MAX` (5) of them after the usual suggestions (not counted against `limit`), as `kind:
+  'childhood'` with childhood photos as samples (a pair in both lists shows as a childhood one; a pair whose
+  childhood photos are all in the vault or the trash shows no card). Accepting one is a merge. Two cards on the
+  owner's library.
+- "Who is this as a child?" (`cluster.childhood_candidates`, `GET /api/people/{id}/childhood -> {candidates:
+  [{person, similarity}]}`): for an unnamed group with at least half its face weight in the child band, up to 3
+  named people: first those whose own childhood photos look like the group's (>= 0.40), then the rest by the group's
+  childhood centroid against their adult centroid. No bar and no percentage shown: the face model links a young
+  child to their adult self only weakly (0.2 to 0.35; on the library the right person still ranked first), so the
+  owner decides. Empty for anyone else.
+- UI: `SuggestionsPanel` shows a childhood pair with the badge "Same child?" and, when one side is named, "Compared
+  with the childhood photos already on NAME."; `PersonPage` shows an unnamed childhood group the card "These look like
+  childhood photos." with "Who is this as a child?" (the candidates, the first marked "Most alike", and "Someone
+  else" for the usual picker); picking one opens the usual merge confirm. No ages are shown anywhere.
+- Tests: `tests/test_face_ages.py` (storage, backfill, readiness, drawn and moved boxes, undo),
+  `tests/test_age_matching.py` (adults bit-identical, the mask, cut, lead and strict-only learned thresholds,
+  cross-age and below-floor merges, old merges under the floor, the learner, childhood follow, suggestions and
+  candidates, the off switch).
 
 ## 11. Documents (`app/documents`)
 
@@ -1318,7 +1388,11 @@ Learners (one module each, all pure numpy, all with a `status()` and a `train(co
   minus 0.02, floor 0.30), from the merges the owner made into the person (loosened to the least
   similarity accepted, `learning_events` kind `merge`, minus 0.02, floor 0.30) and raised above the
   closest rejected face (+0.02; the reference is the confirmed faces, else the person's 200 best faces;
-  a rejection wins over any loosening). `cluster._score` uses the learned threshold in place of the
+  a rejection wins over any loosening). A merge event whose `accepted` is under `cluster.PULL_FLOOR` (0.30, also
+  those recorded before merges checked it) teaches nothing, and a cross-age link records no adult value; once the
+  library's ages are read, faces in the child band are left out of the confirmed, rejected and reference faces (a
+  baby photo says nothing about the adult, section 10). `people.RULES_REV` and kv `face_ages_ready` are part of
+  `train.signature`, so a new rule or the ages becoming ready retrains at the next housekeeping. `cluster._score` uses the learned threshold in place of the
   good-face default (a weaker face keeps its extra margin on top), so a person the owner confirmed or
   merged often is matched more readily and one they corrected is matched more carefully. Every face counts by
   its face weight (section 10): the centroid and the 10th percentile are weighted, `MIN_USER_FACES` counts the

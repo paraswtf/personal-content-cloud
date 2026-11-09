@@ -43,6 +43,7 @@ from typing import Any
 import numpy as np
 
 from app import storage
+from app.analysis import ages as ages_mod
 from app.config import settings
 from app.db import tx
 from app.util import json_dumps, now_iso
@@ -161,6 +162,7 @@ class Prepared:
     face: Any | None
     face_crop: bytes | None
     duration_s: float
+    face_age: bytes | None = None  # the face's age groups (app.analysis.ages), None without the age model
 
 
 def prepare_box(item: sqlite3.Row, box: tuple[float, float, float, float], *, t: float | None = None) -> Prepared:
@@ -184,15 +186,17 @@ def prepare_box(item: sqlite3.Row, box: tuple[float, float, float, float], *, t:
     H, W = bgr.shape[:2]
     px = (x * W, y * H, min(float(W), (x + w) * W), min(float(H), (y + h) * H))
     found = _face_in(bgr, px)
-    face_crop = None
+    face_crop = face_age = None
     if found is not None:
-        face_crop = _encode_face_crop(faces_mod.crop_face(img, tuple(float(v) for v in found.bbox)))  # type: ignore[arg-type]
+        face_img = faces_mod.crop_face(img, tuple(float(v) for v in found.bbox))  # type: ignore[arg-type]
+        face_crop = _encode_face_crop(face_img)
+        face_age = ages_mod.measure([face_img])[0]
     longest = max(int(item["width"] or 0), int(item["height"] or 0))
     return Prepared(
         item_id=int(item["id"]), video=video, t=t, box=(x, y, w, h), size=(W, H),
         scale=max(1.0, longest / max(W, H)) if longest else 1.0, clothes=_clothes(bgr, px),
         body_crop=bodies_mod.encode_crop(bodies_mod._crop_rgb(img, px)), face=found, face_crop=face_crop,
-        duration_s=float(item["duration_s"] or 0.0) if video else 0.0,
+        duration_s=float(item["duration_s"] or 0.0) if video else 0.0, face_age=face_age,
     )
 
 
@@ -227,13 +231,13 @@ def store_box(conn: sqlite3.Connection, prep: Prepared, person_id: int) -> Drawn
                         spans = [[round(max(0.0, t - VIDEO_SPAN_S), 3), round(min(end, t + VIDEO_SPAN_S), 3)]]
                     face_id = int(conn.execute(
                         "INSERT INTO faces(item_id, person_id, assigned_by, x, y, w, h, det_score, size_px, quality, "
-                        "frame_time_s, spans, embedding, torso_embedding, created_at, clarity, sharpness) "
-                        "VALUES (?, ?, 'user', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        "frame_time_s, spans, embedding, torso_embedding, created_at, clarity, sharpness, age_groups) "
+                        "VALUES (?, ?, 'user', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                         (item_id, int(person_id), *fbox, float(found.det_score), size_px,
                          faces_mod.face_quality(found.det_score, size_px), t,
                          json_dumps(spans) if spans is not None else None,
                          np.asarray(found.embedding, dtype=np.float32).tobytes(), clothes, now, found.norm,
-                         found.sharpness),
+                         found.sharpness, prep.face_age),
                     ).lastrowid)
                     path = storage.face_crop_path(face_id)
                     storage.write_bytes_atomic(path, prep.face_crop or b"")
@@ -290,6 +294,7 @@ class PreparedFace:
     torso: bytes | None
     crop: bytes
     duration_s: float
+    age: bytes | None = None  # the face's age groups (app.analysis.ages), None without the age model
 
 
 def prepare_face(item: sqlite3.Row, box: tuple[float, float, float, float], *, t: float | None = None) -> PreparedFace:
@@ -325,13 +330,14 @@ def prepare_face(item: sqlite3.Row, box: tuple[float, float, float, float], *, t
     longest = max(int(item["width"] or 0), int(item["height"] or 0))
     scale = max(1.0, longest / max(W, H)) if longest else 1.0
     torso = box_edit._siglip(faces_mod.torso_crop(bgr, px))
+    face_img = faces_mod.crop_face(img, px)
     return PreparedFace(
         item_id=int(item["id"]), video=video, t=t, box=(x, y, w, h),
         found_box=faces_mod._norm_box(found.bbox, W, H), det_score=float(found.det_score),
         size_px=int(round(float(found.size_px) * scale)), clarity=getattr(found, "norm", None),
         sharpness=getattr(found, "sharpness", None), embedding=np.asarray(found.embedding, dtype=np.float32).tobytes(),
         torso=torso.tobytes() if torso is not None else None,
-        crop=_encode_face_crop(faces_mod.crop_face(img, px)),
+        crop=_encode_face_crop(face_img), age=ages_mod.measure([face_img])[0],
         duration_s=float(item["duration_s"] or 0.0) if video else 0.0,
     )
 
@@ -356,12 +362,12 @@ def store_face(conn: sqlite3.Connection, prep: PreparedFace, person_id: int) -> 
                 spans = [[round(max(0.0, t - VIDEO_SPAN_S), 3), round(min(end, t + VIDEO_SPAN_S), 3)]]
             face_id = int(conn.execute(
                 "INSERT INTO faces(item_id, person_id, assigned_by, x, y, w, h, det_score, size_px, quality, "
-                "frame_time_s, spans, embedding, torso_embedding, created_at, clarity, sharpness, source) "
-                "VALUES (?, ?, 'user', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'user')",
+                "frame_time_s, spans, embedding, torso_embedding, created_at, clarity, sharpness, source, age_groups) "
+                "VALUES (?, ?, 'user', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'user', ?)",
                 (item_id, int(person_id), *prep.box, prep.det_score, prep.size_px,
                  faces_mod.face_quality(prep.det_score, prep.size_px), t,
                  json_dumps(spans) if spans is not None else None, prep.embedding, prep.torso, now,
-                 prep.clarity, prep.sharpness),
+                 prep.clarity, prep.sharpness, prep.age),
             ).lastrowid)
             path = storage.face_crop_path(face_id)
             storage.write_bytes_atomic(path, prep.crop)

@@ -82,6 +82,7 @@ class ModelSpec:
 
 _HF_SIGLIP = "https://huggingface.co/immich-app/ViT-B-16-SigLIP__webli/resolve/c3b037a9ef99ed5f116440790f1e098fb388db49/"
 _HF_NSFW = "https://huggingface.co/onnx-community/nsfw_image_detection-ONNX/resolve/1ceb3c7fe1e9f3f2507e6df577437f23a9149fd5/"
+_HF_AGES = "https://huggingface.co/onnx-community/fairface_age_image_detection-ONNX/resolve/fd04cddf04982f6acc1ac76fb1a31b44c9285596/"
 
 REGISTRY: dict[str, ModelSpec] = {
     "faces": ModelSpec(
@@ -141,6 +142,24 @@ REGISTRY: dict[str, ModelSpec] = {
         source="Hugging Face onnx-community/nsfw_image_detection-ONNX at commit 1ceb3c7",
         license="Apache 2.0",
     ),
+    "ages": ModelSpec(
+        key="ages",
+        label="Face ages (FairFace ViT, nine age groups)",
+        subdir="ages",
+        files=(
+            ModelFile("onnx/model_int8.onnx", 87_339_068,
+                      "c6a6c231140e2111267d9ade2017543c86ff4e685795be4006f1e94e0534c8c0",
+                      url=_HF_AGES + "onnx/model_int8.onnx"),
+            ModelFile("config.json", 1_010, "b7ebbfec7938cc4db21d972bd1aecdaf084204e24ddc1d6bde8ada64bb768652",
+                      url=_HF_AGES + "config.json"),
+            ModelFile("preprocessor_config.json", 353,
+                      "ae9bb157b9629887cc74913a4e7c12c9308f374f0930e8072320e8f2e1583c5e",
+                      url=_HF_AGES + "preprocessor_config.json"),
+        ),
+        source="Hugging Face onnx-community/fairface_age_image_detection-ONNX at commit fd04cdd (int8 export of "
+               "dima806/fairface_age_image_detection, a ViT trained on FairFace)",
+        license="Apache 2.0",
+    ),
     "persons": ModelSpec(
         key="persons",
         label="Person detector (YOLOX-S)",
@@ -196,6 +215,7 @@ _ENGINES = {
     "faces": "app.ml.faces",
     "siglip": "app.ml.siglip",
     "nsfw": "app.ml.nsfw",
+    "ages": "app.ml.ages",
     "persons": "app.ml.persons",
     "ocr": "app.ml.ocr",
     "ocr_devanagari": "app.ml.ocr_devanagari",

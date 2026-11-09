@@ -66,6 +66,7 @@ MIGRATED_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("faces", "moved", "INTEGER NOT NULL DEFAULT 0"),
     ("bodies", "moved", "INTEGER NOT NULL DEFAULT 0"),
     ("animals", "moved", "INTEGER NOT NULL DEFAULT 0"),
+    ("faces", "age_groups", "BLOB"),
 )
 _SCHEMA_FILE = Path(__file__).with_name("schema.sql")
 # Full-text tokenizer of items_fts. unicode61 treats combining marks (Unicode Mn, Mc) as separators,

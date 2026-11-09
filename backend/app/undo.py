@@ -71,7 +71,7 @@ STASH_DIR = "undo"
 # Bookkeeping columns: they never block an undo and are not put back; the counts are counted again.
 NOISE = frozenset({"updated_at", "face_count", "body_count", "animal_count"})
 BOX_COLUMNS = frozenset({"x", "y", "w", "h"})  # a box's place: its crop follows it (keep_copy)
-FACE_VECTOR_COLUMNS = frozenset({"embedding", "det_score", "size_px", "clarity", "sharpness"})
+FACE_VECTOR_COLUMNS = frozenset({"embedding", "det_score", "size_px", "clarity", "sharpness", "age_groups"})
 COUNTS = {"face_count": "faces", "body_count": "bodies", "animal_count": "animals"}
 
 
