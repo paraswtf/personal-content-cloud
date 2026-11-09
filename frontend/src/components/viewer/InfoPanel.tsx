@@ -101,6 +101,8 @@ interface Props {
   /** A tap on a person's badge (section 14): on a video, jump to them as their chip under the video does (onScreen:
    *  to the appearance in the frame now); on a photo, show their box. Badges of people with no box here only link. */
   onShowPerson?: (personId: number, onScreen?: boolean) => void
+  /** A tap on a guessed name (section 14): on a video, the frame of that box; on a photo, the box lights up. */
+  onShowBox?: (target: BoxTarget) => void
   /** The person the stage is showing now (the video's picked track, the photo's highlighted box). */
   activePersonId?: number | null
 }
@@ -446,6 +448,7 @@ export default function InfoPanel({
   onAddPersonBox,
   documentFirst = false,
   onShowPerson,
+  onShowBox,
   activePersonId = null,
 }: Props) {
   const invalidate = useInvalidateItem(detail.uid)
@@ -896,6 +899,10 @@ export default function InfoPanel({
                       busy={guesses.pendingKey === boxKey(t)}
                       onConfirm={() => guesses.confirm(t)}
                       onReject={() => guesses.reject(t)}
+                      onShow={onShowBox && (!isVideo || !!detail.urls.video) ? () => onShowBox(t) : undefined}
+                      showLabel={`Show the ${t.kind === 'face' ? 'face' : 'person'} guessed as ${personName(t.box.guess!.person)} in the ${isVideo ? 'video' : 'photo'}${
+                        isVideo && t.box.frame_time_s !== null ? `, at ${formatDuration(t.box.frame_time_s)}` : ''
+                      }`}
                     />
                   </li>
                 ))}

@@ -80,6 +80,12 @@ function VideoChips({
   // "Show tracks" opens the group so one track can be handled alone. Each name carries its origin: a person
   // icon when the owner tagged or drew any of the tracks, a bot when the system did.
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set())
+  // The chip of the picked track comes into view, also when the pick came from the details.
+  const listRef = useRef<HTMLUListElement>(null)
+  useEffect(() => {
+    if (!activeKey) return
+    listRef.current?.querySelector<HTMLElement>('[aria-pressed="true"]')?.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+  }, [activeKey])
   if (!targets.length) return null
   const groups = groupVideoBoxes(targets)
   const toggle = (key: string) =>
@@ -112,11 +118,11 @@ function VideoChips({
           onClick={() => onSeek(t)}
           aria-pressed={activeKey === key}
           className="flex h-10 items-center gap-2 rounded-full pl-1 pr-3 text-sm text-white hover:bg-white/10"
-          aria-label={(whole ? `Show the first of ${count} tracks of ${name}` : `Show the frame at ${formatDuration(b.frame_time_s)}, ${name}`) + how}
+          aria-label={(whole ? `${name}, ${count} tracks, show the first` : `${name}, ${formatDuration(b.frame_time_s)}, show this frame`) + how}
         >
           <img src={b.url} alt="" className="size-8 rounded-full object-cover" />
           {isAnimal && <PawPrint className="-mr-1 size-3.5 shrink-0 text-white/70" aria-hidden />}
-          <span className={clsx('max-w-[9rem] truncate', b.guess && !b.person && 'text-amber-200')}>{name}</span>
+          <span className={clsx('max-w-[9rem] truncate', b.guess && !b.person && 'text-amber-200')}>{name}</span>{' '}
           {origin && (
             <OriginIcon origin={origin} decorative className={clsx('-ml-1', origin === 'guess' ? 'text-amber-200' : 'text-white/70')} />
           )}
@@ -154,7 +160,7 @@ function VideoChips({
   }
   return (
     <div className="shrink-0 border-t border-white/10 px-2 py-2">
-      <ul className="flex gap-2 overflow-x-auto overscroll-x-contain px-1 pb-1" aria-label="People and pets in this video" data-no-swipe>
+      <ul ref={listRef} className="flex gap-2 overflow-x-auto overscroll-x-contain px-1 pb-1" aria-label="People and pets in this video" data-no-swipe>
         {groups.flatMap((g) => {
           const whole = g.targets.length > 1
           const origin = whole ? mergeOrigins(g.targets.map((t) => boxOrigin(t.box))) : boxOrigin(g.first.box)
@@ -213,9 +219,10 @@ function ViewerInner({ uid, onClose, onPrev, onNext, position, startAt = null, v
   const appToast = useToast()
   const [seekFace, setSeekFace] = useState<{ key: string; shown: boolean } | null>(null)
   const [page, setPage] = useState(0)
-  // A person whose boxes the photo highlights for a moment, after a tap on their badge in the details (section 14);
-  // `at` tells two taps on the same badge apart, so a second tap lights them for the full time again.
-  const [spotlight, setSpotlight] = useState<{ person: number; at: number } | null>(null)
+  // A person whose boxes the photo highlights for a moment, after a tap on their badge in the details (section 14),
+  // or one box (`key`), after a tap on a guess there; `at` tells two taps on the same badge apart, so a second tap
+  // lights them for the full time again.
+  const [spotlight, setSpotlight] = useState<{ person: number | null; key: string | null; at: number } | null>(null)
   const infoToggleRef = useRef<HTMLButtonElement>(null)
   const [livePlaying, setLivePlaying] = useState(false)
 
@@ -375,6 +382,14 @@ function ViewerInner({ uid, onClose, onPrev, onNext, position, startAt = null, v
   /** A tap on a person's badge in the details (section 14): on a video, the same as their chip under the video
    *  (the first of their tracks, or with `now` the one on screen); on a photo, their boxes light up for a moment.
    *  The boxes show, and on a phone the details sheet goes down so the moment is in view. */
+  /** On a phone the details sheet goes down so the stage is in view; the badge goes away with the sheet, so the
+   *  focus waits on the details button, which brings it back. */
+  const revealStage = useCallback(() => {
+    if (typeof window !== 'undefined' && !window.matchMedia('(min-width: 1024px)').matches) {
+      setShowInfo(false)
+      requestAnimationFrame(() => infoToggleRef.current?.focus({ preventScroll: true }))
+    }
+  }, [])
   const showPerson = useCallback(
     (personId: number, now = false) => {
       if (!detail) return
@@ -386,15 +401,27 @@ function ViewerInner({ uid, onClose, onPrev, onNext, position, startAt = null, v
         if (pick) seekTo(pick)
       } else {
         setLivePlaying(false) // boxes are not drawn over a playing Live Photo clip
-        setSpotlight({ person: personId, at: Date.now() })
+        setSpotlight({ person: personId, key: null, at: Date.now() })
       }
-      if (typeof window !== 'undefined' && !window.matchMedia('(min-width: 1024px)').matches) {
-        setShowInfo(false)
-        // The badge goes away with the sheet: the focus waits on the details button, which brings it back.
-        requestAnimationFrame(() => infoToggleRef.current?.focus({ preventScroll: true }))
-      }
+      revealStage()
     },
-    [detail, onScreen, seekTo],
+    [detail, onScreen, seekTo, revealStage],
+  )
+  /** A tap on a guess in the details (section 14): on a video, the frame of that box, picked as its chip under the
+   *  video picks it; on a photo, the box lights up for a moment. */
+  const showBox = useCallback(
+    (t: BoxTarget) => {
+      if (!detail) return
+      setEditing(null)
+      setShowFaces(true)
+      if (detail.kind === 'video') seekTo(t)
+      else {
+        setLivePlaying(false)
+        setSpotlight({ person: null, key: boxKey(t), at: Date.now() })
+      }
+      revealStage()
+    },
+    [detail, seekTo, revealStage],
   )
   // The person the stage shows now: the video's picked track, the photo's highlighted boxes.
   const activePersonId = useMemo(() => {
@@ -403,10 +430,11 @@ function ViewerInner({ uid, onClose, onPrev, onNext, position, startAt = null, v
     if (!seekFace) return null
     return videoBoxes(detail).find((t) => boxKey(t) === seekFace.key)?.box.person?.id ?? null
   }, [detail, seekFace, spotlight])
-  const spotlightKeys = useMemo(
-    () => new Set(detail && spotlight !== null ? stillBoxes(detail).filter((t) => t.box.person?.id === spotlight.person).map(boxKey) : []),
-    [detail, spotlight],
-  )
+  const spotlightKeys = useMemo(() => {
+    if (!detail || spotlight === null) return new Set<string>()
+    if (spotlight.key !== null) return new Set([spotlight.key])
+    return new Set(stillBoxes(detail).filter((t) => t.box.person?.id === spotlight.person).map(boxKey))
+  }, [detail, spotlight])
 
   const closeEditor = useCallback(() => {
     setEditing((cur) => {
@@ -829,6 +857,7 @@ function ViewerInner({ uid, onClose, onPrev, onNext, position, startAt = null, v
                 onAddPetBox={addPetBox}
                 onAddPersonBox={addPersonBox}
                 onShowPerson={showPerson}
+                onShowBox={showBox}
                 activePersonId={activePersonId}
                 documentFirst={mode === 'document'}
               />

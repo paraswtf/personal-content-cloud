@@ -963,7 +963,10 @@ paused frame), and under "In the frame" to the appearance on screen now, once th
 boxes light up for four seconds (a playing Live Photo clip stops, and a second tap lights them again). The boxes are
 turned on for it, the editors close, and on a phone the details sheet goes down so the moment is in view, the focus
 waiting on the details button; the badge of the person the stage shows is marked (`aria-current`, a ring). Someone
-with no box here (a tag alone, "Related to") has a plain name. The arrow beside it ("Open {name}'s page") goes to the person's
+with no box here (a tag alone, "Related to") has a plain name. A guess under "Guessed from the same hour, scene and
+clothes" works the same way (2026-11-09, `onShowBox`, the viewer's `showBox`): a tap on the guessed name shows that
+box, on a video seeking to its frame and drawing it as its chip under the video does, on a photo lighting it for four
+seconds; the face beside it still opens the face editor. The arrow beside it ("Open {name}'s page") goes to the person's
 page, and the pencil ("Edit {name}") opens the menu (arrow keys and Escape) with the changes the face boxes make, for
 everything of theirs on the item at once, without clicking a box. "Change to..." and "Rename" (or "Name" for an unnamed person) open a light card under the chips, which scrolls
 itself into view in the phone sheet: "Change {name} to..." holds a `PersonPicker` (people for a person, pets of the
