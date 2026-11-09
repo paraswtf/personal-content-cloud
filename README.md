@@ -21,6 +21,10 @@ What it does with each file:
 - **Faces and people.** Faces are found in photos and in video frames (about one per second),
   grouped into people, and named once. People are also guessed from earlier photos of the same day,
   the same scene and the same clothes; guesses wait for a confirm or reject.
+- **Tattoos, nails and mehndi.** People boxes whose face does not show are also guessed from a tattoo
+  seen in their other photos at any date (checked point by point, not just by look), and helped by the
+  same nail polish or mehndi a few days apart. Each guess says why and shows the two crops side by side;
+  "Not a tattoo" and "Not this person's" correct it, and a person's page lists their tattoos.
 - **Documents.** Text is extracted (text layer or OCR, in English, Hindi and Marathi) and searchable.
   Traffic challans and parking receipts are read into their own cards: a challan shows its number,
   vehicle, violations, amount and printed payment status with a button that opens the right portal to pay
@@ -136,6 +140,15 @@ Environment variables (all optional):
 | `DOC_LIKENESS_MIN` | `0.55` | Images at or above this are sent to OCR. |
 | `BLUR_VAR_MIN`, `BURST_WINDOW_S` | `40`, `3` | Mis-click thresholds. |
 | `GUESS_WINDOW_H`, `GUESS_SCENE_SIM`, `GUESS_CLOTHES_SIM`, `GUESS_GPS_M` | `1`, `0.80`, `0.85`, `250` | Person guessing by clothes: only photos taken within this many hours before or after a tagged one. |
+| `TRAITS_ENABLED`, `TRAIT_MATCHING` | `true`, `true` | Read tattoos, mehndi and nails from people boxes, and use them in guesses (off: guesses exactly as before). |
+| `TRAIT_ONLY_GUESSES`, `TRAIT_ONLY_MEHNDI` | `true`, `false` | Allow a guess from a tattoo alone (under strict rules); the same from mehndi alone. |
+| `TRAITS_MEHNDI` | `false` | Read mehndi on hands and forearms. Off by default: the detector mistook plain hands for mehndi. |
+| `TRAITS_THREADS` | `2` | CPU threads per traits model. |
+| `TRAIT_MIN_BODY_PX`, `TRAIT_MIN_LIMB_PX`, `NAIL_MIN_HAND_PX` | `200`, `64`, `96` | Smallest people box, limb and hand (pixels) that is read. |
+| `TATTOO_GATE_P`, `TATTOO_MIN_INLIERS`, `MEHNDI_MIN_INLIERS` | `0.80`, `12`, `30` | How sure the tattoo check must be, and how many matching points a tattoo or mehndi pair needs. |
+| `TRAIT_MARGIN_LLR`, `TRAIT_PRIOR_PEOPLE`, `TRAIT_MIN_P` | `2.0`, `20`, `0.90` | The lead a guess from a tattoo alone needs over the next person, the prior used for its sort score, and the floor of the tightening from your answers. |
+| `NAILS_MAX_DAYS`, `MEHNDI_MAX_DAYS` | `14`, `21` | Nails and mehndi are only compared within this many days. |
+| `TRAIT_PROPAGATE_MAX` | `400` | Photos one tagging queues for a new look by tattoos. |
 | `FORWARDS_ENABLED`, `FORWARD_MAX_SIDE`, `FORWARD_JPEG_QUALITY_MAX`, `FORWARD_MEME_MIN` | `true`, `1600`, `82`, `0.5` | Forwards: the longest side and JPEG quality that mark an image as received through an app, and the content score that sets it apart. |
 | `PETS_ENABLED`, `ANIMAL_DET_THRESHOLD` | `true`, `0.45` | Pet identities (section 22) and the animal detection cut. |
 | `PET_MATCH_THRESHOLD`, `PET_NEW_THRESHOLD` | `0.82`, `0.86` | Cosine cuts for matching a crop to a known pet and for pairing two crops into a new pet. |

@@ -47,6 +47,9 @@ import type {
   PersonPage,
   PersonRef,
   PersonUpdate,
+  PersonTraits,
+  TraitHideIn,
+  TraitOut,
   SearchMode,
   SearchPage,
   SessionOut,
@@ -447,8 +450,9 @@ export const api = {
     misclicks: (cursor?: string | null, limit = 60) => get<ItemPage>(`/api/review/misclicks${qs({ cursor, limit })}`),
     /** The flagged forwards, newest first (section 29). */
     forwards: (cursor?: string | null, limit = 60) => get<ItemPage>(`/api/review/forwards${qs({ cursor, limit })}`),
-    guesses: (cursor?: string | null, limit = 60, person?: number) =>
-      get<GuessPage>(`/api/review/guesses${qs({ cursor, limit, person })}`),
+    /** `basis` (section 34): clothes, or trait (tattoos, nails and mehndi, with or without clothes); all when unset. */
+    guesses: (cursor?: string | null, limit = 60, person?: number, basis?: 'all' | 'clothes' | 'trait') =>
+      get<GuessPage>(`/api/review/guesses${qs({ cursor, limit, person, basis: basis === 'all' ? undefined : basis })}`),
     duplicates: (cursor?: string | null, limit = 30) => get<DupGroupPage>(`/api/duplicates${qs({ cursor, limit })}`),
     setBest: (uid: string) => post<OkOut>(`/api/duplicates/${enc(uid)}/best`),
   },
@@ -494,6 +498,8 @@ export const api = {
     childhood: (id: number) => get<ChildhoodOut>(`/api/people/${id}/childhood`),
     /** Items that may be related to the person too (section 10), best first. */
     relatedSuggestions: (id: number, limit = 24) => get<RelatedSuggestionList>(`/api/people/${id}/related-suggestions${qs({ limit })}`),
+    /** Tattoos, and the mehndi and nails of the last 60 days, matched to the person (section 34). */
+    traits: (id: number) => get<PersonTraits>(`/api/people/${id}/traits`),
     /** "Not related to NAME": not suggested again (undoable). */
     dismissRelated: (id: number, uids: string[]) => post<OkOut>(`/api/people/${id}/related-suggestions/dismiss`, { uids }),
     dismissSuggestion: (a: number, b: number) => post<OkOut>('/api/suggestions/dismiss', { a, b }),
@@ -544,6 +550,11 @@ export const api = {
       fd.append('source', source)
       return post<UploadOut>('/api/uploads/simple', fd)
     },
+  },
+  /** Body traits (section 34): hide a trait region ("Not a tattoo", "Not this person's") or show it again on this
+   *  photo. An owner action, undoable like the others. */
+  traits: {
+    hide: (id: number, body: TraitHideIn) => put<TraitOut>(`/api/traits/${id}`, body),
   },
   /** Undo (section 33): put back what an action changed. Undoing the answer's undo_id is a redo. */
   actions: {

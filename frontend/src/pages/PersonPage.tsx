@@ -3,6 +3,7 @@
 // A pet has no cover picker, faces or guesses: it shows its animal crops instead. Both have a Related tab
 // (section 10): the items tagged as about them without them in it. The Items and Related tabs select items
 // for People (section 10, people on a selection): move them to someone else, remove them, tag or rename.
+// A person with tattoos, nails or mehndi matched to them (section 34) also has a "Tattoos and nails" tab.
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
@@ -20,6 +21,7 @@ import FaceGrid from '../components/people/FaceGrid'
 import GuessCard from '../components/people/GuessCard'
 import PeopleBulkAction, { type BulkFrom } from '../components/people/PeopleBulkAction'
 import PersonChoiceModal from '../components/people/PersonChoiceModal'
+import TraitsTab from '../components/people/TraitsTab'
 import { choiceBody, type PersonChoice } from '../components/people/PersonPicker'
 import { guessKey, useGuessReview } from '../components/people/useGuessReview'
 import { useToast } from '../components/Toast'
@@ -29,7 +31,7 @@ import { LoadMore, SelectionBar } from '../components/admin/fields'
 import { useViewerParam } from '../components/public/useViewerParam'
 import { Avatar, Button, EmptyState, ErrorState, PageSpinner, buttonClasses } from '../components/ui'
 
-type Tab = 'items' | 'faces' | 'guesses' | 'animals' | 'related'
+type Tab = 'items' | 'faces' | 'guesses' | 'animals' | 'related' | 'traits'
 
 function NameEditor({ id, name, kind, species }: { id: number; name: string | null; kind: PersonKind; species: Species | null }) {
   const toast = useToast()
@@ -357,7 +359,7 @@ function FacesTab({ id, name, coverId }: { id: number; name: string; coverId: nu
         <PageSpinner />
       ) : list.items.length === 0 ? (
         <EmptyState icon={<ScanFace className="size-8" aria-hidden />} title="No faces">
-          This person was tagged by hand or by clothes only.
+          This person was tagged by hand, or by clothes or a tattoo only.
         </EmptyState>
       ) : (
         <FaceGrid
@@ -547,7 +549,8 @@ function GuessesTab({ id }: { id: number }) {
         <PageSpinner />
       ) : mine.length === 0 && !list.hasMore ? (
         <EmptyState icon={<Sparkles className="size-8" aria-hidden />} title="No guesses for this person">
-          When this person is tagged, other photos within an hour with the same clothes get a guess here.
+          When this person is tagged, other photos within an hour with the same clothes, and photos taken at any time with the same
+          tattoo, get a guess here.
         </EmptyState>
       ) : (
         <ul className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
@@ -685,11 +688,12 @@ function PersonView({ id }: { id: number }) {
   const name = personName(p)
   const pet = p.kind === 'pet'
   const from: BulkFrom = { id: p.id, name: p.name, kind: p.kind, species: p.species }
+  const hasTraits = !pet && (p.trait_count ?? 0) > 0
   const tab: Tab = pet
     ? raw === 'animals' || raw === 'related'
       ? raw
       : 'items'
-    : raw === 'faces' || raw === 'guesses' || raw === 'related'
+    : raw === 'faces' || raw === 'guesses' || raw === 'related' || (raw === 'traits' && hasTraits)
       ? raw
       : 'items'
   const relatedTab = { value: 'related' as const, label: 'Related', count: p.related_count ?? 0 }
@@ -703,6 +707,7 @@ function PersonView({ id }: { id: number }) {
         { value: 'items', label: 'Items', count: p.item_count },
         { value: 'faces', label: 'Faces', count: p.face_count },
         { value: 'guesses', label: 'Guesses', count: p.guess_count },
+        ...(hasTraits ? [{ value: 'traits' as const, label: 'Tattoos and nails', count: p.trait_count ?? 0 }] : []),
         relatedTab,
       ]
 
@@ -777,6 +782,7 @@ function PersonView({ id }: { id: number }) {
         {tab === 'faces' && <FacesTab id={id} name={name} coverId={p.cover_face_id} />}
         {tab === 'animals' && <AnimalsTab id={id} name={name} species={p.species} />}
         {tab === 'guesses' && <GuessesTab id={id} />}
+        {tab === 'traits' && <TraitsTab id={id} name={p.name} />}
       </div>
 
       <PersonChoiceModal

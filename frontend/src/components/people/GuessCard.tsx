@@ -1,17 +1,21 @@
 // One person guess for review: the face or body crop, the item it is in (for a box in a video, the frame at
-// the box's time with the box outlined, not the poster), the guessed person with the score and the
-// evidence ("25 min apart, same scene 0.86, same clothes 0.91"), confirm, reject, and "Someone else" (a name
-// field: the guess is learned as wrong and the box goes to the person picked, in one step).
+// the box's time with the box outlined, not the poster), the guessed person with what the guess rests on and the
+// evidence, confirm, reject, and "Someone else" (a name field: the guess is learned as wrong and the box goes to the
+// person picked, in one step). A clothes guess shows its score ("By clothes, 85% sure") and its line ("25 min apart,
+// same scene 0.86, same clothes 0.91"). Tattoos, nails and mehndi (section 34) show their strongest reason with the
+// two crops side by side, and the other signs folded under "N more signs"; a guess from traits alone says "strong
+// match", never a percentage.
 import { useState } from 'react'
 import { Link } from 'react-router'
-import { Check, Shirt, UserRoundPen, X } from 'lucide-react'
+import { Check, Hand, PenTool, Shirt, UserRoundPen, X } from 'lucide-react'
 import type { GuessItem } from '../../lib/types'
 import { frameUrl } from '../../lib/api'
-import { formatDuration, formatPercent, personName } from '../../lib/format'
+import { formatDuration, personName } from '../../lib/format'
 import { Avatar, Button } from '../ui'
 import OriginIcon from './OriginIcon'
 import PersonPicker, { type PersonChoice } from './PersonPicker'
-import { evidenceLine } from './evidence'
+import TraitCompare from './TraitCompare'
+import { againstReasons, clothesLine, guessIcons, guessLabel, guessSure, traitReasons } from './evidence'
 
 export default function GuessCard({
   g,
@@ -31,7 +35,11 @@ export default function GuessCard({
 }) {
   const [picking, setPicking] = useState(false)
   const name = personName(g.guess.person)
-  const why = evidenceLine(g.guess)
+  const reasons = traitReasons(g.guess)
+  const lead = reasons[0]
+  const clothes = clothesLine(g.guess)
+  const more = [...reasons.slice(1).map((r) => r.text), ...againstReasons(g.guess)]
+  const icons = guessIcons(g.kind, g.guess)
   const t = g.box.frame_time_s
   const inVideo = g.item.kind === 'video' && t !== null && t !== undefined
   const scene = inVideo ? frameUrl(g.item.uid, g.item.version, t, 'preview', false, g.item.nsfw) : g.item.urls.thumb
@@ -60,8 +68,11 @@ export default function GuessCard({
         </button>
         <div className="min-w-0 flex-1">
           <p className="flex items-center gap-1 text-xs text-ink-soft">
-            {g.kind === 'body' && <Shirt className="size-3.5" aria-hidden />}
-            {g.kind === 'face' ? 'Face' : 'By clothes'}, {formatPercent(g.guess.score)} sure{inVideo ? `, at ${formatDuration(t)}` : ''}
+            {icons.includes('clothes') && <Shirt className="size-3.5 shrink-0" aria-hidden />}
+            {icons.includes('tattoo') && <PenTool className="size-3.5 shrink-0" aria-hidden />}
+            {icons.includes('hand') && <Hand className="size-3.5 shrink-0" aria-hidden />}
+            {guessLabel(g.kind, g.guess)}, {guessSure(g.guess)}
+            {inVideo ? `, at ${formatDuration(t)}` : ''}
           </p>
           <Link to={`/people/${g.guess.person.id}`} className="mt-1 flex min-w-0 items-center gap-2 hover:underline">
             <Avatar src={g.guess.person.cover_url} name={g.guess.person.name} size={28} />
@@ -70,7 +81,25 @@ export default function GuessCard({
           </Link>
         </div>
       </div>
-      {why && <p className="text-xs text-ink-soft">{why}</p>}
+      {clothes && <p className="text-xs text-ink-soft">{clothes}</p>}
+      {lead && (
+        <div className="flex flex-col gap-2">
+          <p className="text-xs text-ink-soft">{lead.text}</p>
+          <TraitCompare reason={lead} name={name} onOpenRef={(uid) => onOpenItem(uid)} />
+        </div>
+      )}
+      {more.length > 0 && (
+        <details className="text-xs text-ink-soft">
+          <summary className="flex min-h-10 cursor-pointer items-center rounded-lg font-medium text-ink hover:text-accent-strong focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent">
+            {more.length === 1 ? '1 more sign' : `${more.length} more signs`}
+          </summary>
+          <ul className="flex list-disc flex-col gap-1 pl-5">
+            {more.map((text, i) => (
+              <li key={i}>{text}</li>
+            ))}
+          </ul>
+        </details>
+      )}
       <div className="flex flex-wrap gap-2">
         <Button size="md" className="flex-1" loading={busy === 'confirm'} disabled={!!busy} onClick={onConfirm}>
           {busy !== 'confirm' && <Check className="size-4" aria-hidden />}

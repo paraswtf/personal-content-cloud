@@ -1,6 +1,6 @@
 // Review (/review): the bins that need a decision. Mis-clicks (keep or delete), forwards (keep or
 // delete, section 29), duplicates (pick the best copy, delete the others) and person guesses (confirm
-// or reject).
+// or reject), all of them or only those from clothes, or from tattoos, nails and mehndi (section 34).
 import { useCallback, useMemo, useState, type ReactNode } from 'react'
 import { useSearchParams } from 'react-router'
 import { useMutation, useQuery } from '@tanstack/react-query'
@@ -329,9 +329,19 @@ function DuplicatesTab() {
   )
 }
 
+type Basis = 'all' | 'clothes' | 'trait'
+const BASES: { value: Basis; label: string }[] = [
+  { value: 'all', label: 'All' },
+  { value: 'clothes', label: 'Clothes' },
+  { value: 'trait', label: 'Tattoos and nails' },
+]
+
 function GuessesTab() {
-  const fetchPage = useCallback((c: string | null) => api.review.guesses(c, 60), [])
-  const list = useItemList<GuessItem>(['review', 'guesses'], fetchPage, { keyOf: guessKey })
+  const [basis, setBasis] = useState<Basis>('all')
+  const fetchPage = useCallback((c: string | null) => api.review.guesses(c, 60, undefined, basis), [basis])
+  const list = useItemList<GuessItem>(basis === 'all' ? ['review', 'guesses'] : ['review', 'guesses', 'basis', basis], fetchPage, {
+    keyOf: guessKey,
+  })
   const review = useGuessReview()
   const items = useMemo(() => {
     const seen = new Set<string>()
@@ -344,8 +354,25 @@ function GuessesTab() {
   return (
     <div>
       <p className="mb-3 text-sm text-ink-soft">
-        People guessed from someone tagged within an hour, in the same scene and wearing the same clothes. Confirming tags them; rejecting stops that guess.
+        People guessed from someone tagged within an hour in the same scene and clothes, or from the same tattoo in a photo
+        taken at any time. Confirming tags them; rejecting stops that guess.
       </p>
+      <div role="group" aria-label="Show guesses made from" className="mb-3 flex flex-wrap gap-1.5">
+        {BASES.map((b) => (
+          <button
+            key={b.value}
+            type="button"
+            aria-pressed={basis === b.value}
+            onClick={() => setBasis(b.value)}
+            className={clsx(
+              'h-10 rounded-full border px-4 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent',
+              basis === b.value ? 'border-ink bg-ink text-bg' : 'border-line text-ink-soft hover:bg-ink/5',
+            )}
+          >
+            {b.label}
+          </button>
+        ))}
+      </div>
       {list.items.length > 1 && (
         <div className="mb-3 flex flex-wrap gap-2">
           <Button variant="secondary" disabled={review.pending} onClick={() => setConfirmAll(true)}>
@@ -363,8 +390,9 @@ function GuessesTab() {
           ))}
         </ul>
       ) : list.items.length === 0 ? (
-        <EmptyState icon={<Sparkles className="size-8" aria-hidden />} title="No guesses to review">
-          Tag someone in a photo and other photos within an hour with the same clothes get a guess.
+        <EmptyState icon={<Sparkles className="size-8" aria-hidden />} title={basis === 'all' ? 'No guesses to review' : 'No guesses of this kind'}>
+          Tag someone in a photo: other photos within an hour with the same clothes, and photos taken at any time with the same
+          tattoo, get a guess.
         </EmptyState>
       ) : (
         <ul className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">

@@ -46,3 +46,19 @@ Files: `backend/app/analysis/{pipeline,quality,categories,faces,bodies,guess,clu
 - Video bodies are not detected (person boxes run on photos only); video faces get torso embeddings from
   their best frame, so clothes guessing works for video faces.
 - `faces`/`bodies` of `pdf`/`document` items are not detected (the documents area crops ID photos itself).
+
+## Body traits (2026-11-09, ARCHITECTURE section 34)
+
+- New modules: `analysis/traits.py` (runner, storage, readiness, requeue), `trait_regions.py` (pose geometry,
+  ownership, the SigLIP gate, native crops), `trait_nails.py`, `trait_sift.py` (verification and its caches) and
+  `trait_match.py` (matching, fusion, hides, calibration, the person page).
+- `guess._compute` splits into `_compute_clothes` (the old body, unchanged) and `_compute_fused`; it takes the clothes
+  path whenever `trait_match.context` returns None, so a library without trait rows guesses exactly as before.
+- Hooks: `pipeline._after` kicks the runner after `guess_item`; `ingest.recover_on_startup` calls `traits.start` and
+  `trait_match.apply_settings_change`; `worker._housekeeping` kicks and prunes; `undo.undo` calls
+  `traits.after_undo` after its transaction; `api/people.py` kicks after a person box is moved, drawn or deleted.
+  Each is wrapped so a traits failure never breaks its caller.
+- `analysis.traits` and `analysis.trait_match` must not import `app.api` at module level: the API modules import
+  them at the top.
+- `tests/conftest.py` resets `trait_sift`'s caches and the runner state for every test database, because trait ids
+  restart at 1 in each.

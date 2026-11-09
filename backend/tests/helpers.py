@@ -276,3 +276,170 @@ def make_face(conn: sqlite3.Connection, item_id: int, person_id: int | None = No
         p.parent.mkdir(parents=True, exist_ok=True)
         Image.new("RGB", (192, 192), (120, 120, 120)).save(p, "WEBP")
     return face_id
+
+
+# ------------------------------------------------------------------ body traits (section 34)
+READY_REV = "2:mehndi,nails,tattoo"  # app.analysis.traits.wanted_rev() with TRAITS_MEHNDI on (the tests)
+_TRAIT_SIDE = 448
+_SKIN = (196, 150, 122)
+_INK = (38, 42, 52)
+
+
+def make_body(conn: sqlite3.Connection, item_id: int, person_id: int | None = None, *, face_id: int | None = None,
+              assigned_by: str = "auto", box=(0.1, 0.1, 0.3, 0.6), torso=None, source: str = "detector",
+              det_score: float = 0.9, **extra) -> int:
+    """Insert a person box (bodies row). torso: a vector, stored L2-normalised as float32."""
+    cols = dict(item_id=item_id, face_id=face_id, person_id=person_id, assigned_by=assigned_by, x=box[0], y=box[1],
+                w=box[2], h=box[3], det_score=det_score, source=source, created_at=now_iso())
+    if torso is not None:
+        t = np.asarray(torso, dtype=np.float32)
+        cols["torso_embedding"] = (t / np.linalg.norm(t)).astype(np.float32).tobytes()
+    cols.update(extra)
+    with tx(conn):
+        cur = conn.execute(f"INSERT INTO bodies({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))})",
+                           tuple(cols.values()))
+        return int(cur.lastrowid)
+
+
+def make_scan(conn: sqlite3.Connection, body_id: int, *, status: str = "ok", rev: str = READY_REV,
+              bare: dict | None = None, scanned_at: str | None = None) -> None:
+    """Write (or replace) the body's trait_scans row with its current box, and bring the item fingerprint of every
+    scan row of the item up to date (the item is measured as a whole). bare: {part: {"p", "len"}}; None keeps the
+    bare limbs already recorded for the body ({} for a new row)."""
+    import json
+
+    from app.analysis.traits import BOX_SQL, ITEM_BOXES_SQL
+
+    with tx(conn):
+        row = conn.execute(f"SELECT b.item_id, {BOX_SQL} AS box FROM bodies b WHERE b.id = ?", (body_id,)).fetchone()
+        item_id, box = int(row[0]), row[1]
+        fp = conn.execute(ITEM_BOXES_SQL, (item_id,)).fetchone()[0]
+        conn.execute(
+            "INSERT INTO trait_scans(body_id, item_id, rev, box, item_boxes, status, bare, scanned_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(body_id) DO UPDATE SET rev = excluded.rev, box = excluded.box, "
+            "item_boxes = excluded.item_boxes, status = excluded.status, "
+            "bare = CASE WHEN ? IS NULL THEN trait_scans.bare ELSE excluded.bare END, scanned_at = excluded.scanned_at",
+            (body_id, item_id, rev, box, fp, status, json.dumps(bare or {}, sort_keys=True), scanned_at or now_iso(),
+             None if bare is None else 1))
+        conn.execute("UPDATE trait_scans SET item_boxes = ? WHERE item_id = ?", (fp, item_id))
+
+
+def _webp(rgb: np.ndarray, side: int | None = None, quality: int = 80) -> bytes:
+    img = Image.fromarray(np.ascontiguousarray(rgb, dtype=np.uint8), "RGB")
+    if side is not None:
+        img.thumbnail((side, side))
+    buf = io.BytesIO()
+    img.save(buf, "WEBP", quality=quality)
+    return buf.getvalue()
+
+
+def make_trait(conn: sqlite3.Connection, body_id: int, kind: str, part: str, *, vec=None, detail=None,
+               attrs: dict | None = None, box=(0.2, 0.4, 0.05, 0.1), rev: str = READY_REV, status: str = "ok",
+               quality: float = 0.8, bare: dict | None = None, scan: bool = True) -> int:
+    """Insert a body_traits row and (scan=True) write the body's scan row (make_scan). Returns the row id.
+    - vec: a 384-vector (stored as itself and, as the mirror half, itself again) or a 768-vector; each half is
+      L2-normalised. None leaves vec NULL.
+    - detail: an RGB crop (tattoo_crop) or WebP bytes, stored as the 'detail' BLOB through
+      trait_sift.encode_detail. attrs then gains what extraction writes, unless given: kp (keypoints of the
+      plain crop), small (kp < 60), out (crop side), share (the part's strip), src 'original'.
+    - The 192 px UI crop is made from detail, or is a flat skin swatch."""
+    import json
+
+    from app.analysis import trait_sift
+    from app.analysis.traits import share_for
+
+    attrs = dict(attrs or {})
+    blob = None
+    ui = None
+    if detail is not None:
+        blob = bytes(detail) if isinstance(detail, (bytes, bytearray)) else trait_sift.encode_detail(detail)
+        rgb = trait_sift.decode_detail(blob)
+        share = attrs.get("share", share_for(part))
+        if "kp" not in attrs:
+            attrs["kp"] = int(len(trait_sift.describe(blob, share).plain[0]))
+        attrs.setdefault("small", attrs["kp"] < 60)
+        attrs.setdefault("out", int(max(rgb.shape[:2])))
+        attrs.setdefault("share", share)
+        attrs.setdefault("src", "original")
+        ui = _webp(rgb, 192)
+    if ui is None:
+        ui = _webp(np.full((192, 192, 3), _SKIN, np.uint8))
+    v = None
+    if vec is not None:
+        a = np.asarray(vec, dtype=np.float32).reshape(-1)
+        halves = [a, a] if a.shape[0] == 384 else [a[:384], a[384:]]
+        v = np.concatenate([h / (np.linalg.norm(h) or 1.0) for h in halves]).astype(np.float32).tobytes()
+    with tx(conn):
+        item_id = int(conn.execute("SELECT item_id FROM bodies WHERE id = ?", (body_id,)).fetchone()[0])
+        cur = conn.execute(
+            "INSERT INTO body_traits(body_id, item_id, kind, part, x, y, w, h, quality, vec, detail, attrs, crop, "
+            "created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (body_id, item_id, kind, part, box[0], box[1], box[2], box[3], quality, v, blob,
+             json.dumps(attrs, sort_keys=True), ui, now_iso()))
+        trait_id = int(cur.lastrowid)
+    if scan:
+        make_scan(conn, body_id, status=status, rev=rev, bare=bare)
+    return trait_id
+
+
+def set_traits_ready(conn: sqlite3.Connection, rev: str = READY_REV) -> None:
+    """kv traits_ready = rev: the library counts as measured (matching uses rows of this rev)."""
+    from app.analysis.traits import READY_KEY
+    from app.db import kv_set
+
+    with tx(conn):
+        kv_set(conn, READY_KEY, rev)
+
+
+def adjusted_params(**overrides):
+    """learning.traits defaults with overrides (for monkeypatching app.learning.traits.params). source becomes
+    'adjusted' when anything is overridden, unless source is given."""
+    import dataclasses
+
+    from app.learning.traits import default_params
+
+    if overrides and "source" not in overrides:
+        overrides["source"] = "adjusted"
+    return dataclasses.replace(default_params(), **overrides)
+
+
+fitted_params = adjusted_params  # the design's name; tiers are not fitted in this version
+
+
+def tattoo_crop(seed: int, *, angle: float = 0.0, scale: float = 1.0, mirror: bool = False, small: bool = False,
+                variant: int = 0) -> np.ndarray:
+    """A synthetic tattoo: a design of ink blotches (fixed by `seed`; blurred noise cut at a level, inside an oval of
+    the central strip of a forearm crop) in dark ink on skin, 448 px RGB. angle (degrees) and scale turn and size the
+    design about the centre, mirror flips it left to right; small draws one dot (under 60 keypoints). The skin's
+    faint texture differs with every argument and with `variant` (another photo of the same tattoo).
+    Measured with trait_sift (share 0.6), seeds 0 to 40: 430 to 570 keypoints; the same seed turned 12 to 20
+    degrees, scaled 0.75 to 1.3, mirrored or as another variant keeps 210 or more inliers at ratio 0.85 or more;
+    4,100 pairs of different seeds (plain, turned, variant) reach at most 11 inliers, so none passes at 12; a design
+    at scale 0.4 against scale 1 gives None (outside the scale range)."""
+    import zlib
+
+    import cv2
+
+    rng = np.random.default_rng(seed)
+    big = 2 * _TRAIT_SIDE
+    if small:
+        a = np.zeros((big, big), np.float32)
+        cv2.circle(a, (big // 2, big // 2), 10, 1.0, -1)
+    else:
+        f = cv2.GaussianBlur(rng.normal(0, 1, (big, big)).astype(np.float32), (0, 0), 8.0)
+        a = (f > 0.6 * f.std()).astype(np.float32)
+        yy, xx = np.mgrid[0:big, 0:big]
+        a *= (((xx - big / 2) / 170) ** 2 + ((yy - big / 2) / 320) ** 2 <= 1.0)
+        a = cv2.GaussianBlur(a, (0, 0), 1.0)
+    m = cv2.getRotationMatrix2D((big / 2, big / 2), angle, 0.5 * scale)
+    m[:, 2] += _TRAIT_SIDE / 2 - big / 2
+    a = cv2.warpAffine(a, m, (_TRAIT_SIDE, _TRAIT_SIDE), flags=cv2.INTER_AREA)
+    if mirror:
+        a = cv2.flip(a, 1)
+    nrng = np.random.default_rng(zlib.crc32(repr((seed, angle, scale, mirror, small, variant)).encode()))
+    noise = cv2.GaussianBlur(nrng.normal(0, 6, (_TRAIT_SIDE, _TRAIT_SIDE)).astype(np.float32), (0, 0), 3.0)
+    xx = np.linspace(-1, 1, _TRAIT_SIDE, dtype=np.float32)[None, :]
+    shade = np.repeat(1.0 - 0.08 * xx ** 2, _TRAIT_SIDE, axis=0)  # a rounded limb, darker at the sides
+    skin = np.array(_SKIN, np.float32) * shade[..., None] + noise[..., None]
+    out = skin * (1 - a[..., None]) + np.array(_INK, np.float32) * a[..., None]
+    return np.clip(out, 0, 255).astype(np.uint8)

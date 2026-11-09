@@ -18,7 +18,14 @@ Routes (all under /api, all require a logged-in session; writes need the CSRF he
   POST   /guesses/confirm {faces, bodies} -> BulkOut;  POST /guesses/reject -> BulkOut
   POST   /guesses/correct {faces, bodies, person_id | new_person_name} -> AssignOut ("Someone else": the guess learned
          as wrong and the box given to the right person, one action)
-  GET    /review/guesses?cursor&limit -> GuessPage
+  GET    /review/guesses?cursor&limit&person&basis=all|clothes|trait -> GuessPage (basis, section 34: clothes =
+         guesses from clothes alone, trait = guesses that tattoos, mehndi or nails made or backed)
+  Body traits (section 34):
+  GET    /people/{id}/traits -> PersonTraitsOut (tattoos by design, recent mehndi and nails; empty for a pet)
+  PUT    /traits/{id} {hidden, verdict=not_trait|not_theirs} -> TraitOut: hide a trait, or show it again on this
+         photo only (an unhide never removes a hide placed on another photo; a row still hidden as a look-alike
+         gets a 'shown' hide here). Journalled like every owner action; the not_trait descriptors are copied
+         outside the journal. 404 for a missing row or a trashed item.
   GET    /suggestions?limit -> SuggestionList;  POST /suggestions/dismiss {a, b} -> Ok
   POST   /items/{uid}/tags {person_id | new_person_name, kind?, species?, relation?} -> [PersonRef] (a person or a
          pet, section 22; relation in|related, section 10);  DELETE /items/{uid}/tags/{person_id}
@@ -39,6 +46,7 @@ Faces, bodies and counts in NSFW or trashed items are never shown here (person i
 with an unlocked session). With the vault locked, acting on a box or the tags of an NSFW item is
 403 vault_locked, and a person seen only in vault items is 404 (as in the list). Every write to faces,
 bodies or persons bumps faces_version; deleting a box also bumps search_version (its torso embedding goes).
+Moving, drawing or deleting a person box wakes the traits runner after the commit (the photo is measured again).
 """
 from __future__ import annotations
 
@@ -52,7 +60,8 @@ from app import storage
 from app import undo as undo_mod
 from app.analysis import cluster, guess
 from app.analysis import animals as animals_mod
-from app.analysis import box_edit, person_boxes
+from app.analysis import box_edit, person_boxes, trait_match
+from app.analysis import traits as atraits
 from app.analysis import related as related_mod
 from app.analysis.index import get_index
 from app.analysis import pets as pets_mod
@@ -68,6 +77,7 @@ from app.api.common import (
     page_sql,
     person_refs,
     pet_cover_ids,
+    trait_out,
     valid_cursor_scalar,
     visible_sql,
 )
@@ -119,6 +129,9 @@ from app.schemas import (
     Suggestion,
     SuggestionList,
     TagIn,
+    TraitHideIn,
+    TraitOut,
+    PersonTraitsOut,
     AnimalBoxIn,
     AnimalOut,
     BodyOut,
@@ -456,6 +469,14 @@ def _after_people_change(conn: sqlite3.Connection, items: set[int], guesses: set
     guess.refresh_fts(conn, items)
 
 
+def _kick_traits() -> None:
+    """A person box changed: the traits runner measures the photo again (section 34). After the commit."""
+    try:
+        atraits.kick()
+    except Exception as e:  # the user's action already happened; the runner's own triggers catch up later
+        log.warning("could not wake the traits runner: %s", e)
+
+
 # ------------------------------------------------------------------ people
 @router.get("/people", response_model=PersonPage)
 def list_people(
@@ -578,7 +599,21 @@ def merge_people(body: MergeIn, conn: sqlite3.Connection = Depends(get_db),
 @router.get("/people/{person_id}", response_model=PersonOut)
 def get_person(person_id: int, conn: sqlite3.Connection = Depends(get_db),
                session: SessionInfo = Depends(require_user)) -> PersonOut:
-    return person_outs(conn, [_visible_person_row(conn, session, person_id)])[0]
+    out = person_outs(conn, [_visible_person_row(conn, session, person_id)])[0]
+    if out.kind == "person":
+        out.trait_count = int(trait_match.trait_count(conn, person_id, vault_open=session.vault_unlocked) or 0)
+    return out
+
+
+@router.get("/people/{person_id}/traits", response_model=PersonTraitsOut)
+def person_traits(person_id: int, conn: sqlite3.Connection = Depends(get_db),
+                  session: SessionInfo = Depends(require_user)) -> PersonTraitsOut:
+    """Tattoos, mehndi and nails seen on this person (section 34). Vault photos only with the vault open."""
+    row = _visible_person_row(conn, session, person_id)
+    if row["kind"] == "pet":
+        return PersonTraitsOut()
+    return PersonTraitsOut.model_validate(
+        trait_match.person_groups(conn, int(row["id"]), vault_open=session.vault_unlocked))
 
 
 @router.patch("/people/{person_id}", response_model=PersonOut)
@@ -1018,6 +1053,7 @@ def add_person_box(uid: str, body: PersonBoxIn, conn: sqlite3.Connection = Depen
     if drawn.existing_face and drawn.face_id is not None:
         _assign(conn, "faces", [drawn.face_id], int(target), None, False, session)
     _after_people_change(conn, {int(item["id"])}, {(int(target), int(item["id"]))})
+    _kick_traits()
     body_row = conn.execute("SELECT * FROM bodies WHERE id = ?", (drawn.body_id,)).fetchone()
     face_row = conn.execute("SELECT * FROM faces WHERE id = ?", (drawn.face_id,)).fetchone() if drawn.face_id else None
     return PersonBoxOut(body=body_out(conn, body_row), face=face_out(conn, face_row) if face_row is not None else None)
@@ -1137,6 +1173,8 @@ def _delete_box(conn: sqlite3.Connection, table: str, box_id: int, session: Sess
         bump_search_version(conn)
     for gone in (box_id, *followed):
         undo_mod.discard(_CROP_PATHS[table](gone))  # kept for undo (section 33)
+    if table == "bodies":
+        _kick_traits()
     guess.refresh_fts(conn, touched)
     if followed:
         log.info("not a face: face %s and %d look-alike(s) removed", box_id, len(followed))
@@ -1193,7 +1231,9 @@ def move_face(face_id: int, body: BoxIn, conn: sqlite3.Connection = Depends(get_
 @router.put("/bodies/{body_id}/box", response_model=BodyOut)
 def move_body(body_id: int, body: BoxIn, conn: sqlite3.Connection = Depends(get_db),
               session: SessionInfo = Depends(require_user)) -> BodyOut:
-    return body_out(conn, _move_box(conn, "bodies", body_id, body, session))
+    row = _move_box(conn, "bodies", body_id, body, session)
+    _kick_traits()
+    return body_out(conn, row)
 
 
 @router.put("/animals/{animal_id}/box", response_model=AnimalOut)
@@ -1271,14 +1311,26 @@ def correct_guesses(body: GuessCorrectIn, conn: sqlite3.Connection = Depends(get
     return AssignOut(updated=updated + confirmed, person=_person_out(conn, target), followed=len(followed))
 
 
+# Section 34: evidence.basis is 'trait' (traits alone), 'clothes+trait' (clothes backed by traits) or absent (clothes).
+_BASIS_SQL = {
+    "all": "",
+    # CASE keeps json_extract away from malformed JSON (AND does not promise an order in SQLite)
+    "clothes": " AND (CASE WHEN json_valid(g.guess_evidence) THEN json_extract(g.guess_evidence, '$.basis') END) IS NULL",
+    "trait": " AND (CASE WHEN json_valid(g.guess_evidence) THEN json_extract(g.guess_evidence, '$.basis') END) "
+             "IN ('trait', 'clothes+trait')",
+}
+
+
 @router.get("/review/guesses", response_model=GuessPage)
 def review_guesses(
     cursor: str | None = Query(default=None, max_length=512),
     limit: int = Query(default=60, ge=1, le=200),
     person: int | None = Query(default=None, description="only guesses naming this person"),
+    basis: Literal["all", "clothes", "trait"] = Query(default="all", description="clothes alone, or with traits"),
     conn: sqlite3.Connection = Depends(get_db),
 ) -> GuessPage:
     person_sql = " AND g.guess_person_id = ?" if person is not None else ""
+    person_sql += _BASIS_SQL.get(basis, "") if isinstance(basis, str) else ""  # a direct call gets the Query default
     # The box columns face_out / body_out need come with the page (no per-row re-read).
     base = (
         "SELECT g.* FROM ("
@@ -1322,6 +1374,85 @@ def review_guesses(
         box = face_out(conn, r, refs) if r["kind"] == "face" else body_out(conn, r, refs)
         items.append(GuessItem(kind=r["kind"], id=int(r["box_id"]), item=cards[int(r["item_id"])], box=box, guess=g))
     return GuessPage(items=items, next_cursor=nxt, total=int(total))
+
+
+# ------------------------------------------------------------------ body traits (section 34)
+_TRAIT_ROW = ", ".join(f"t.{c.strip()}" for c in atraits.ROW_COLUMNS.split(","))
+
+
+def _trait_row(conn: sqlite3.Connection, trait_id: int) -> sqlite3.Row | None:
+    return conn.execute(
+        f"SELECT {_TRAIT_ROW}, i.nsfw FROM body_traits t JOIN items i ON i.id = t.item_id "
+        "WHERE t.id = ? AND i.deleted_at IS NULL", (trait_id,)).fetchone()
+
+
+@router.put("/traits/{trait_id}", response_model=TraitOut)
+def hide_trait(trait_id: int, body: TraitHideIn, conn: sqlite3.Connection = Depends(get_db),
+               session: SessionInfo = Depends(require_user)) -> TraitOut:
+    """Hide a trait ("Not a tattoo", "Not this person's") or show it again (section 34). An owner action: the
+    trait_hides rows are journalled (X-Action-Id undoes it). Unhiding is limited to this photo: it removes the
+    hides here that cover the row, and when a look-alike of a hide on another photo still hides it, it adds a
+    'shown' hide here instead of touching that photo. The guesses of the photo (and of photos citing the row)
+    are worked out again after the commit."""
+    row = _trait_row(conn, trait_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Trait not found")
+    if row["nsfw"] and not session.vault_unlocked:
+        raise _vault_locked()
+    item_id = int(row["item_id"])
+    region = (row["x"], row["y"], row["w"], row["h"])
+    now = now_iso()
+    with tx(conn):
+        if conn.execute("SELECT 1 FROM body_traits WHERE id = ?", (trait_id,)).fetchone() is None:
+            raise HTTPException(status_code=404, detail="Trait not found")  # replaced by a rescan meanwhile
+        if body.hidden:
+            _insert_hide(conn, row, body.verdict, region, now)
+        else:
+            covering = [int(h) for h in trait_match.hides_covering(conn, trait_id)]
+            if covering:
+                conn.execute(f"DELETE FROM trait_hides WHERE item_id = ? AND verdict != 'shown' "
+                             f"AND id IN ({_ids_sql(covering)})", [item_id, *covering])
+            # After the delete: the row's own not_trait hide may list the row as its look-alike until it goes.
+            if trait_match.hidden_by_lookalike(conn, trait_id):
+                conn.execute(
+                    "INSERT INTO trait_hides(item_id, kind, verdict, x, y, w, h, src_trait_id, created_at) "
+                    "VALUES (?, ?, 'shown', ?, ?, ?, ?, ?, ?)", (item_id, row["kind"], *region, trait_id, now))
+    try:
+        # The look-alikes of the hide (up to VERIFY_PER_HIDE SIFT checks) and the re-guess run on the traits runner,
+        # never in this request: the row is hidden at once (rules a and b need no verification), the guesses
+        # follow within seconds. Guesses stay out of this action's journal (an undo re-queues through
+        # traits.after_undo), so undoing an older hide is never blocked by guess columns a later one rewrote.
+        from app.analysis import traits as atraits
+
+        atraits.requeue(conn, [item_id])
+        atraits.kick(conn)
+    except Exception:  # the owner's change is saved; the guesses catch up on the next runner pass
+        log.exception("traits: could not queue item %s after a hide change", item_id)
+    fresh = _trait_row(conn, trait_id) or row
+    return trait_out(fresh, trait_id in trait_match.hidden_ids(conn, [fresh]))
+
+
+def _insert_hide(conn: sqlite3.Connection, row: sqlite3.Row, verdict: str, region: tuple, now: str) -> None:
+    """A not_trait or not_theirs hide for the row (once per row and verdict). A not_trait hide of a tattoo or
+    mehndi also keeps the row's descriptors in trait_hide_desc (not journalled, no FK: an undone unhide finds
+    them again), so look-alikes on other photos can be found (rule c)."""
+    trait_id, item_id = int(row["id"]), int(row["item_id"])
+    if conn.execute("SELECT 1 FROM trait_hides WHERE item_id = ? AND src_trait_id = ? AND verdict = ?",
+                    (item_id, trait_id, verdict)).fetchone():
+        return
+    box: tuple = (None, None, None, None)
+    if verdict == "not_theirs":
+        b = conn.execute("SELECT x, y, w, h FROM bodies WHERE id = ?", (int(row["body_id"]),)).fetchone()
+        if b is not None:
+            box = (b["x"], b["y"], b["w"], b["h"])
+    hide_id = int(conn.execute(
+        "INSERT INTO trait_hides(item_id, kind, verdict, x, y, w, h, bx, by, bw, bh, src_trait_id, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (item_id, row["kind"], verdict, *region, *box, trait_id, now)).lastrowid)
+    if verdict == "not_trait" and row["kind"] in ("tattoo", "mehndi"):
+        conn.execute("INSERT OR REPLACE INTO trait_hide_desc(hide_id, vec, detail, created_at) "
+                     "SELECT ?, vec, detail, ? FROM body_traits WHERE id = ? AND vec IS NOT NULL "
+                     "AND detail IS NOT NULL", (hide_id, now, trait_id))
 
 
 # ------------------------------------------------------------------ suggestions

@@ -11,7 +11,9 @@ GET    /items                      ItemPage; query: category, kind, person (repe
                                    dups=collapse|all, vault, sort=taken|added, cursor, limit 1..200.
                                    Keyset cursors: taken = COALESCE(taken_at, created_at) DESC, id DESC;
                                    added = created_at DESC, id DESC. Bad cursor: 400 "Invalid cursor".
-GET    /items/{uid}                ItemDetail (trashed items too; NSFW needs the vault)
+GET    /items/{uid}                ItemDetail (trashed items too; NSFW needs the vault). A photo's person
+                                   boxes carry their traits (section 34: tattoos, mehndi, nails; hidden
+                                   ones marked; none for a trashed photo)
 PATCH  /items/{uid}                ItemUpdate -> ItemDetail. User edits set *_source='user'. nsfw moves
                                    the category to 'nsfw' and back (the best non-nsfw auto score, else
                                    'misc'); misclick=false clears the reasons; forward (section 29) sets
@@ -38,6 +40,8 @@ from typing import Any, Literal
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from app import jobs, storage
+from app.analysis import trait_match
+from app.analysis import traits as atraits
 from app.api.common import (
     ITEM_CARD_COLUMNS,
     animal_out,
@@ -49,6 +53,7 @@ from app.api.common import (
     item_urls,
     people_filter_sql,
     tags_filter_sql,
+    trait_out,
     live_video_out,
     page_sql,
     person_refs,
@@ -78,6 +83,7 @@ from app.schemas import (
     PersonRef,
     ReprocessIn,
     Stats,
+    TraitOut,
 )
 from app.urls import page_url
 from app.util import decode_cursor, encode_cursor, json_loads, name_key, now_iso, safe_filename
@@ -227,6 +233,7 @@ def item_detail(conn: sqlite3.Connection, row: sqlite3.Row) -> ItemDetail:
     refs = person_refs(conn, box_person_ids(faces) | box_person_ids(bodies) | {int(t["id"]) for t in tags}
                        | {int(a["person_id"]) for a in animals if a["person_id"] is not None}
                        | {p for p, _ in people})
+    traits = _body_traits(conn, row, bodies)
     labels = conn.execute("SELECT label, score FROM item_labels WHERE item_id = ? ORDER BY score DESC, label",
                           (item_id,)).fetchall()
     doc = conn.execute("SELECT * FROM documents WHERE item_id = ?", (item_id,)).fetchone()
@@ -242,7 +249,7 @@ def item_detail(conn: sqlite3.Connection, row: sqlite3.Row) -> ItemDetail:
         quality_scores=json_loads(row["quality_scores"]) if row["quality_scores"] else None,
         labels=[LabelOut(label=r["label"], score=float(r["score"])) for r in labels],
         faces=[_grouped(face_out(conn, f, refs), groups, "face") for f in faces],
-        bodies=[_grouped(body_out(conn, b, refs), groups, "body") for b in bodies],
+        bodies=[_grouped(body_out(conn, b, refs, traits.get(int(b["id"]))), groups, "body") for b in bodies],
         animals=[_grouped(animal_out(conn, a, refs), groups, "animal") for a in animals],
         tags=[_tag_ref(refs[int(t["id"])], t["relation"], t["source"]) for t in tags if int(t["id"]) in refs],
         people=[_related(refs[p], rel) for p, rel in people if p in refs],
@@ -267,6 +274,21 @@ def item_detail(conn: sqlite3.Connection, row: sqlite3.Row) -> ItemDetail:
     if live_video is not None:
         data["urls"].live = live_video.url
     return ItemDetail(**data)
+
+
+def _body_traits(conn: sqlite3.Connection, row: sqlite3.Row, bodies: list[sqlite3.Row]) -> dict[int, list[TraitOut]]:
+    """{body id: its traits} for a photo's person boxes (section 34): one rows_for_bodies read (no BLOBs) and one
+    hidden_ids pass, no verification. Hidden rows are kept, marked (the editor offers "Show again"). Videos have
+    none; a trashed photo gets empty lists, since its crops answer 404."""
+    if row["kind"] != "image" or not bodies:
+        return {}
+    ids = [int(b["id"]) for b in bodies]
+    if row["deleted_at"] is not None:
+        return {b: [] for b in ids}
+    by_body = atraits.rows_for_bodies(conn, ids)
+    flat = [r for rs in by_body.values() for r in rs]
+    hidden = trait_match.hidden_ids(conn, flat) if flat else set()
+    return {b: [trait_out(r, int(r["id"]) in hidden) for r in by_body.get(b, [])] for b in ids}
 
 
 def _refresh_fts(conn: sqlite3.Connection, item_id: int) -> None:

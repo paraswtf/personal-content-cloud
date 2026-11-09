@@ -195,3 +195,17 @@ output with and without the second recogniser.
 - `ARCHITECTURE.md`:
   - section 8 model table: add the `ocr_devanagari` row;
   - line 371 ("Devanagari is not read"): Devanagari is now read when the model is present.
+
+## Body traits models (2026-11-09, ARCHITECTURE sections 8 and 34)
+
+- Three registry keys: `pose` (`pose/end2end.onnx`, DWPose-m from the Tau-J/RTMPose zip; the archive member is found
+  by its basename `end2end.onnx`), `hands` (`hands/handpose.onnx`, MediaPipe handpose from OpenCV Zoo) and `dino`
+  (`dino/dinov2_small.onnx`, DINOv2-small fp32). All three are pinned by size and sha256. The pose weights are
+  trained on COCO-WholeBody, which is research and non-commercial use only; the registry's licence text says so.
+- The engines follow `ml/ages.py` (lazy singleton, one lock, `runtime.session(path, threads=TRAITS_THREADS)`).
+  `hands` tells its four outputs apart by shape at load time and refuses a graph with other shapes; the handedness
+  polarity is not checked on labelled hands.
+- `tests/test_ml_models.py` lists the new keys; `tests/test_ml_traits.py` needs the real files and runs alone with
+  `ORT_THREADS=2`.
+- SigLIP is used by the traits runner through the shared `siglip.get_engine()` (at `SEARCH_THREADS`). Crops go in as
+  PIL RGB images: `_to_pil_rgb` reads a numpy array as BGR.

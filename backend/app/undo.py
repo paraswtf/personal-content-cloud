@@ -21,7 +21,10 @@ CONTRACT.
   undone, changed the same rows and columns; `blocking` lists them), 409 conflict (the old row no longer
   fits, for example a name taken since). Crop files the action removed come back from its stash; the crops
   of rows the undo removes go to the undo's own stash. Afterwards faces_version and search_version move and
-  the caller refreshes the items' full-text rows (`items` in the answer).
+  the caller refreshes the items' full-text rows (`items` in the answer). After the transaction,
+  app.analysis.traits.after_undo(conn, tables, items) hears which tables and items were replayed (a box put
+  back re-measures its photo's traits; a trait hide put back recomputes its look-alikes); a failure there is
+  logged, never raised.
 - item_ids(conn, action_id): the items an action touched (the vault check of the route).
 - discard(path): during an action a removed crop moves to DATA_DIR/undo/<action>/ instead of being deleted.
 - keep_copy(path): during an action a crop about to be replaced (a moved box, section 10) is copied there
@@ -62,7 +65,7 @@ NOT_UNDOABLE = re.compile(
 JOURNALED: tuple[str, ...] = (
     "items", "faces", "bodies", "animals", "persons", "item_tags", "guess_rejections", "merge_dismissals",
     "learning_events", "not_faces", "albums", "album_items", "shares", "share_items", "tags", "item_user_tags",
-    "tag_rejections", "documents", "related_dismissals",
+    "tag_rejections", "documents", "related_dismissals", "trait_hides",
 )
 CROPS: dict[str, Callable[[int], Path]] = {
     "faces": storage.face_crop_path, "bodies": storage.body_crop_path, "animals": storage.animal_crop_path,
@@ -318,6 +321,7 @@ def undo(conn: sqlite3.Connection, action_id: str) -> dict[str, Any]:
     vectors: list[int] = []  # faces whose vectors or weights came back: the face index takes them again
     skipped = 0
     items: set[int] = set()
+    tables: set[str] = set()  # the tables whose rows were replayed (app.analysis.traits.after_undo)
     try:
         with tx(conn):
             conn.execute("PRAGMA defer_foreign_keys = ON")
@@ -328,6 +332,7 @@ def undo(conn: sqlite3.Connection, action_id: str) -> dict[str, Any]:
                     skipped += 1
                     continue
                 pk, blobs = _pk(cols), {n for n, b, _p in cols if b}
+                tables.add(table)
                 old = json.loads(e["old"]) if e["old"] else None
                 new = json.loads(e["new"]) if e["new"] else None
                 for row in (old, new):
@@ -403,6 +408,12 @@ def undo(conn: sqlite3.Connection, action_id: str) -> dict[str, Any]:
         from app.analysis.index import get_index
 
         get_index().reload_faces(conn, vectors)
+    try:
+        from app.analysis import traits
+
+        traits.after_undo(conn, tables, items)
+    except Exception:  # noqa: BLE001 - the traits follow-up never fails an undo that already happened
+        log.exception("undo: the body traits follow-up of %s failed", action_id)
     log.info("undid action %s (%d changes, %d left as they are now) as %s", action_id, len(entries), skipped, undo_id)
     return {"undo_id": undo_id, "changes": len(entries), "partial": skipped > 0, "items": sorted(items)}
 

@@ -67,6 +67,8 @@ import { forwardReasons, receivedLabel } from '../library/forwards'
 import { burstBestUid, reasonKeys, reasonLabel } from '../library/misclick'
 import OriginIcon from '../people/OriginIcon'
 import PersonPicker, { choiceBody, type PersonChoice } from '../people/PersonPicker'
+import TraitCompare from '../people/TraitCompare'
+import { evidenceLine, guessLabel, guessSure, traitReasons } from '../people/evidence'
 import { boxKey, stillBoxes, videoBoxes, type BoxTarget } from './boxes'
 import GuessChip from './GuessChip'
 import { PersonEditCard, usePersonEdits, type BoxRemoval, type PersonEditMode, type PersonEditTarget } from './PersonEdit'
@@ -891,31 +893,44 @@ export default function InfoPanel({
 
           {guessTargets.length > 0 && (
             <div className="mt-3">
-              <p className="mb-1.5 text-xs text-white/55">Guessed from the same hour, scene and clothes:</p>
-              <ul className="flex flex-col gap-2">
-                {guessTargets.map((t) => (
-                  <li key={boxKey(t)} className="flex items-center gap-2">
-                    <button
-                      type="button"
-                      onClick={(e) => onEditBox(t, e.currentTarget)}
-                      className="size-10 shrink-0 overflow-hidden rounded-full ring-1 ring-white/20"
-                      aria-label={`Edit this ${t.kind === 'face' ? 'face' : 'person'}`}
-                    >
-                      <img src={t.box.url} alt="" className="size-full object-cover" />
-                    </button>
-                    <GuessChip
-                      guess={t.box.guess!}
-                      busy={guesses.pendingKey === boxKey(t)}
-                      onConfirm={() => guesses.confirm(t)}
-                      onReject={() => guesses.reject(t)}
-                      onOther={guesses.other ? (el) => guesses.other?.(t, el) : undefined}
-                      onShow={onShowBox && (!isVideo || !!detail.urls.video) ? () => onShowBox(t) : undefined}
-                      showLabel={`Show the ${t.kind === 'face' ? 'face' : 'person'} guessed as ${personName(t.box.guess!.person)} in the ${isVideo ? 'video' : 'photo'}${
-                        isVideo && t.box.frame_time_s !== null ? `, at ${formatDuration(t.box.frame_time_s)}` : ''
-                      }`}
-                    />
-                  </li>
-                ))}
+              <p className="mb-1.5 text-xs text-white/55">Guesses and why:</p>
+              <ul className="flex flex-col gap-3">
+                {guessTargets.map((t) => {
+                  const g = t.box.guess!
+                  const why = evidenceLine(g)
+                  const lead = traitReasons(g)[0]
+                  return (
+                    <li key={boxKey(t)} className="flex flex-col gap-1.5">
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={(e) => onEditBox(t, e.currentTarget)}
+                          className="size-10 shrink-0 overflow-hidden rounded-full ring-1 ring-white/20"
+                          aria-label={`Edit this ${t.kind === 'face' ? 'face' : 'person'}`}
+                        >
+                          <img src={t.box.url} alt="" className="size-full object-cover" />
+                        </button>
+                        <GuessChip
+                          guess={t.box.guess!}
+                          busy={guesses.pendingKey === boxKey(t)}
+                          onConfirm={() => guesses.confirm(t)}
+                          onReject={() => guesses.reject(t)}
+                          onOther={guesses.other ? (el) => guesses.other?.(t, el) : undefined}
+                          onShow={onShowBox && (!isVideo || !!detail.urls.video) ? () => onShowBox(t) : undefined}
+                          showLabel={`Show the ${t.kind === 'face' ? 'face' : 'person'} guessed as ${personName(t.box.guess!.person)} in the ${isVideo ? 'video' : 'photo'}${
+                            isVideo && t.box.frame_time_s !== null ? `, at ${formatDuration(t.box.frame_time_s)}` : ''
+                          }`}
+                        />
+                      </div>
+                      {why && (
+                        <p className="pl-12 text-xs text-white/55">
+                          {guessLabel(t.kind === 'face' ? 'face' : 'body', g)}, {guessSure(g)}: {why}
+                        </p>
+                      )}
+                      {lead && <TraitCompare className="pl-12" reason={lead} name={personName(g.person)} dark />}
+                    </li>
+                  )
+                })}
               </ul>
             </div>
           )}

@@ -126,6 +126,26 @@ class Settings:
     guess_clothes_sim: float
     guess_gps_m: float
 
+    # body traits (section 34): tattoos, mehndi and nails as evidence for people boxes
+    traits_enabled: bool       # measure traits (the runner in app.analysis.traits)
+    trait_matching: bool       # use them in guesses; off = guesses exactly as before
+    trait_only_guesses: bool   # a guess from a tattoo alone, under the admission rule of section 34
+    trait_only_mehndi: bool    # the same from mehndi alone (off: mehndi only agrees, breaks ties and supports)
+    traits_mehndi: bool        # measure mehndi at all (off by default: SigLIP read plain hands as mehndi)
+    traits_threads: int        # CPU threads per trait model session (pose, hands, dino)
+    trait_min_body_px: int     # smallest box long side, in pixels of the 2048 px preview
+    trait_min_limb_px: int     # shortest limb segment, preview pixels
+    nail_min_hand_px: int      # smallest hand span for nails
+    tattoo_gate_p: float       # SigLIP tattoo cut (measured in step 0; from the unclear cut up to here is "unclear")
+    tattoo_min_inliers: int    # SIFT inliers for a verified tattoo pair
+    mehndi_min_inliers: int    # SIFT inliers for a verified mehndi pair
+    trait_min_p: float         # floor of the learned trait certainty (owner-outcome tightening)
+    trait_margin_llr: float    # lead over the runner-up (log likelihood ratio) for a trait-only guess
+    trait_prior_people: int    # prior odds 1:N for the stored trait-only score
+    nails_max_days: int        # nails are compared within this many days
+    mehndi_max_days: int       # mehndi is compared within this many days
+    trait_propagate_max: int   # items a person's tagging queues for a trait re-guess
+
     # video
     video_sample_interval_s: float
     video_face_interval_s: float   # faces are followed this densely (section 10)
@@ -258,6 +278,24 @@ def _load(**overrides) -> Settings:
         guess_scene_sim=_float("GUESS_SCENE_SIM", 0.80),
         guess_clothes_sim=_float("GUESS_CLOTHES_SIM", 0.85),
         guess_gps_m=_float("GUESS_GPS_M", 250.0),
+        traits_enabled=_bool("TRAITS_ENABLED", True),
+        trait_matching=_bool("TRAIT_MATCHING", True),
+        trait_only_guesses=_bool("TRAIT_ONLY_GUESSES", True),
+        trait_only_mehndi=_bool("TRAIT_ONLY_MEHNDI", False),
+        traits_mehndi=_bool("TRAITS_MEHNDI", False),
+        traits_threads=max(1, _int("TRAITS_THREADS", 2)),
+        trait_min_body_px=_int("TRAIT_MIN_BODY_PX", 200),
+        trait_min_limb_px=_int("TRAIT_MIN_LIMB_PX", 64),
+        nail_min_hand_px=_int("NAIL_MIN_HAND_PX", 96),
+        tattoo_gate_p=_float("TATTOO_GATE_P", 0.80),  # step 0: 706 limb crops pass it with the cloth and jewel cuts
+        tattoo_min_inliers=_int("TATTOO_MIN_INLIERS", 12),  # native crops: 12+ inliers, same 36 of 900, different 2 of 1,500
+        mehndi_min_inliers=_int("MEHNDI_MIN_INLIERS", 30),
+        trait_min_p=_float("TRAIT_MIN_P", 0.90),
+        trait_margin_llr=_float("TRAIT_MARGIN_LLR", 2.0),
+        trait_prior_people=max(1, _int("TRAIT_PRIOR_PEOPLE", 20)),
+        nails_max_days=_int("NAILS_MAX_DAYS", 14),
+        mehndi_max_days=_int("MEHNDI_MAX_DAYS", 21),
+        trait_propagate_max=_int("TRAIT_PROPAGATE_MAX", 400),
         video_sample_interval_s=_float("VIDEO_SAMPLE_INTERVAL_S", 1.0),
         video_face_interval_s=_float("VIDEO_FACE_INTERVAL_S", 0.2),
         video_face_max_frames=_int("VIDEO_FACE_MAX_FRAMES", 1500),

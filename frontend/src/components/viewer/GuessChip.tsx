@@ -5,9 +5,9 @@
 import clsx from 'clsx'
 import { Check, Loader2, UserRoundPen, X } from 'lucide-react'
 import type { GuessOut } from '../../lib/types'
-import { formatPercent, personName } from '../../lib/format'
+import { personName } from '../../lib/format'
 import OriginIcon from '../people/OriginIcon'
-import { evidenceLine } from '../people/evidence'
+import { evidenceLine, guessSure } from '../people/evidence'
 
 export default function GuessChip({
   guess,
@@ -46,7 +46,7 @@ export default function GuessChip({
         compact ? 'h-8 text-xs' : 'h-10 text-sm',
         className,
       )}
-      title={`Maybe ${name}, ${formatPercent(guess.score)} sure${why ? `: ${why}` : ''}`}
+      title={`Maybe ${name}, ${guessSure(guess)}${why ? `: ${why}` : ''}`}
     >
       {onShow ? (
         <button

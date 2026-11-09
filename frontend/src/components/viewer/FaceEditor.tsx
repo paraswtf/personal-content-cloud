@@ -1,16 +1,23 @@
 // Popover for one face or body box: confirm or reject a guess, assign to a person (or a new one),
 // unassign, or delete it as "not a face" / "not a person". A face in an unnamed group names the
 // whole group (or merges it into the picked person) unless "Only change this face" is ticked.
+// Body traits (section 34): the guess panel shows why, with this photo's tattoo, nails or mehndi beside the
+// guessed person's; "Seen on this person" lists the trait regions of the box (or of the person box holding the
+// face), each with "Not a tattoo" (nails, mehndi), "Not this person's", and "Show again" once hidden (this photo
+// only). Those keep the editor open and offer Undo in the app's toast.
 import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from 'react'
-import { useMutation, useQuery } from '@tanstack/react-query'
-import { Ban, Check, Move, UserX, X } from 'lucide-react'
+import { useMutation, useQuery, useQueryClient, type QueryClient } from '@tanstack/react-query'
+import { Ban, Check, Eye, EyeOff, Move, UserX, X } from 'lucide-react'
 import { api } from '../../lib/api'
-import type { AssignOut } from '../../lib/types'
-import { formatCount, formatPercent, personName } from '../../lib/format'
+import type { AssignOut, BodyOut, ItemDetail, TraitOut } from '../../lib/types'
+import { formatCount, personName } from '../../lib/format'
 import { boxOrigin, mergeOrigins } from '../../lib/origin'
 import OriginIcon from '../people/OriginIcon'
 import PersonPicker, { choiceBody, type PersonChoice } from '../people/PersonPicker'
-import { evidenceLine } from '../people/evidence'
+import TraitCompare from '../people/TraitCompare'
+import { clothesLine, guessSure, safeHex, traitReasons } from '../people/evidence'
+import { notTraitLabel, traitActionKey, useTraitActions } from '../people/useTraitActions'
+import { useToast } from '../Toast'
 import { Button } from '../ui'
 import type { PersonBoxTarget } from './boxes'
 import { useInvalidateItem } from './shared'
@@ -44,6 +51,16 @@ export function placement(anchor: HTMLElement | null): CSSProperties {
   return { left: side, top: Math.max(8, (vh - need) / 2), width: WIDTH }
 }
 
+/** The person box a face belongs to, from the item the viewer holds (its traits are on the body). */
+function bodyOfFace(qc: QueryClient, uid: string, faceId: number): BodyOut | null {
+  for (const [, data] of qc.getQueriesData<ItemDetail>({ queryKey: ['item', uid] })) {
+    if (!data || !Array.isArray(data.bodies)) continue
+    const hit = data.bodies.find((b) => b.face_id === faceId)
+    if (hit) return hit
+  }
+  return null
+}
+
 export default function FaceEditor({ uid, target, anchor, onClose, onDone, tracks, onAdjust, pickFirst = false }: Props) {
   const ref = useRef<HTMLDivElement>(null)
   const [style, setStyle] = useState<CSSProperties>(() => placement(anchor))
@@ -73,6 +90,20 @@ export default function FaceEditor({ uid, target, anchor, onClose, onDone, track
       document.removeEventListener('touchstart', onDown)
     }
   }, [anchor, onClose])
+
+  // body traits: read on the person box, so a face shows the ones of the body holding it
+  const qc = useQueryClient()
+  const traitBody = target.kind === 'body' ? target.box : bodyOfFace(qc, uid, target.box.id)
+  const traits: TraitOut[] = traitBody?.traits ?? []
+  const [traitOpen, setTraitOpen] = useState<number | null>(null)
+  const appToast = useToast()
+  const traitActs = useTraitActions({
+    onDone: (msg) => {
+      setTraitOpen(null)
+      appToast.success(msg)
+    },
+    onError: (msg) => appToast.error(msg),
+  })
 
   const group = isFace && box.person && !box.person.name ? box.person : null
   const groupInfo = useQuery({ queryKey: ['person', group?.id], queryFn: () => api.people.get(group!.id), enabled: !!group })
@@ -157,6 +188,7 @@ export default function FaceEditor({ uid, target, anchor, onClose, onDone, track
   const busy = assign.isPending || remove.isPending || nameGroup.isPending || guessAct.isPending || correct.isPending
   const error = assign.error ?? remove.error ?? nameGroup.error ?? guessAct.error ?? correct.error
   const guess = !box.person ? box.guess : null
+  const guessReasons = guess ? traitReasons(guess) : []
   // any open guess among the boxes edited (a whole-video group may hold guessed and plain tracks): a pick corrects
   // those guesses (learned as wrong) instead of overwriting them
   const anyGuess = scopeTargets.some((t) => !t.box.person && !!t.box.guess)
@@ -201,9 +233,15 @@ export default function FaceEditor({ uid, target, anchor, onClose, onDone, track
       {guess && (
         <div className="mt-3 rounded-xl bg-warn/10 p-3">
           <p className="text-sm">
-            Looks like <span className="font-semibold">{personName(guess.person)}</span>, {formatPercent(guess.score)} sure.
+            Looks like <span className="font-semibold">{personName(guess.person)}</span>, {guessSure(guess)}.
           </p>
-          {evidenceLine(guess) && <p className="mt-0.5 text-xs text-ink-soft">{evidenceLine(guess)}</p>}
+          {clothesLine(guess) && <p className="mt-0.5 text-xs text-ink-soft">{clothesLine(guess)}</p>}
+          {guessReasons.map((r, i) => (
+            <p key={i} className="mt-0.5 text-xs text-ink-soft">
+              {r.text}
+            </p>
+          ))}
+          {guessReasons[0] && <TraitCompare className="mt-2" reason={guessReasons[0]} name={personName(guess.person)} />}
           <div className="mt-2 flex flex-wrap gap-2">
             <Button size="md" disabled={busy} loading={guessAct.isPending && guessAct.variables === 'confirm'} onClick={() => guessAct.mutate('confirm')}>
               <Check className="size-4" aria-hidden />
@@ -221,6 +259,81 @@ export default function FaceEditor({ uid, target, anchor, onClose, onDone, track
             </Button>
           </div>
         </div>
+      )}
+
+      {traits.length > 0 && (
+        <section aria-labelledby={`seen-${box.id}`} className="mt-3">
+          <p id={`seen-${box.id}`} className="text-xs text-ink-faint">
+            Seen on this person
+          </p>
+          <ul className="mt-1.5 flex flex-wrap gap-1.5">
+            {traits.map((tr) => {
+              const hex = tr.kind === 'nails' ? safeHex(tr.hex) : undefined
+              return (
+                <li key={tr.id}>
+                  <button
+                    type="button"
+                    aria-expanded={traitOpen === tr.id}
+                    aria-label={`${tr.label}${tr.hidden ? ', hidden' : ''}: options`}
+                    onClick={() => setTraitOpen((cur) => (cur === tr.id ? null : tr.id))}
+                    className={
+                      'flex min-h-10 max-w-full items-center gap-1.5 rounded-full bg-surface-2 py-1 pl-1 pr-3 text-xs hover:bg-line focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent ' +
+                      (traitOpen === tr.id ? 'ring-2 ring-violet-400' : '')
+                    }
+                  >
+                    <img src={tr.crop_url} alt="" className={'size-8 shrink-0 rounded-full object-cover ' + (tr.hidden ? 'opacity-50' : '')} />
+                    {hex && <span aria-hidden className="size-3 shrink-0 rounded-full ring-1 ring-line" style={{ backgroundColor: hex }} />}
+                    <span className={'min-w-0 truncate ' + (tr.hidden ? 'text-ink-faint line-through' : 'text-ink')}>{tr.label}</span>
+                  </button>
+                </li>
+              )
+            })}
+          </ul>
+          {traits
+            .filter((tr) => tr.id === traitOpen)
+            .map((tr) => (
+              <div key={tr.id} role="group" aria-label={`What to do with ${tr.label}`} className="mt-2 flex flex-wrap gap-2 rounded-xl bg-surface-2 p-2">
+                {tr.hidden ? (
+                  <>
+                    <Button
+                      size="md"
+                      variant="secondary"
+                      disabled={traitActs.pending}
+                      loading={traitActs.pendingKey === traitActionKey(tr.id, null)}
+                      onClick={() => traitActs.show(tr)}
+                    >
+                      <Eye className="size-4" aria-hidden />
+                      Show again
+                    </Button>
+                    <p className="w-full text-xs text-ink-soft">Only on this photo. Hidden look-alikes elsewhere stay hidden.</p>
+                  </>
+                ) : (
+                  <>
+                    <Button
+                      size="md"
+                      variant="secondary"
+                      disabled={traitActs.pending}
+                      loading={traitActs.pendingKey === traitActionKey(tr.id, 'not_trait')}
+                      onClick={() => traitActs.hide(tr, 'not_trait')}
+                    >
+                      <EyeOff className="size-4" aria-hidden />
+                      {notTraitLabel(tr.kind)}
+                    </Button>
+                    <Button
+                      size="md"
+                      variant="secondary"
+                      disabled={traitActs.pending}
+                      loading={traitActs.pendingKey === traitActionKey(tr.id, 'not_theirs')}
+                      onClick={() => traitActs.hide(tr, 'not_theirs', box.person ? personName(box.person) : null)}
+                    >
+                      <UserX className="size-4" aria-hidden />
+                      Not this person&apos;s
+                    </Button>
+                  </>
+                )}
+              </div>
+            ))}
+        </section>
       )}
 
       <div className="mt-3">

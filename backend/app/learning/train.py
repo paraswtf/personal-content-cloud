@@ -12,6 +12,7 @@ import threading
 from typing import Any
 
 from app.learning import doc_type, events, forwards, images, misclick, not_faces, people, store, tags
+from app.learning import traits as ltraits
 from app.util import now_iso
 
 log = logging.getLogger(__name__)
@@ -19,7 +20,7 @@ log = logging.getLogger(__name__)
 STATUS = "status"
 _lock = threading.Lock()
 LEARNERS = (("doc_type", doc_type), ("images", images), ("misclick", misclick), ("people", people), ("tags", tags),
-            ("forwards", forwards), ("not_faces", not_faces))
+            ("forwards", forwards), ("not_faces", not_faces), ("traits", ltraits))
 
 
 def signature(conn: sqlite3.Connection) -> list[Any]:
@@ -47,6 +48,11 @@ def signature(conn: sqlite3.Connection) -> list[Any]:
         # the rules themselves: a new learner rule, or the library's ages becoming ready (section 10), retrains
         people.RULES_REV,
         one("SELECT value FROM kv WHERE key = 'face_ages_ready'"),
+        # body traits (section 34): readiness, a new calibration sample (taken only after ready, so the backfill
+        # itself never retrains) and the traits learner's own rules (no learner reads the owner's hides)
+        one("SELECT value FROM kv WHERE key = 'traits_ready'"),
+        one("SELECT value FROM kv WHERE key = 'trait_calib_at'"),
+        ltraits.RULES_REV,
     ]
 
 
@@ -113,11 +119,25 @@ def status(conn: sqlite3.Connection) -> dict[str, Any]:
             "tags": tags.status(),
             "forwards": forwards.status(),
             "not_faces": not_faces.status(),
+            "traits": _traits_status(conn),
         },
         "events": _event_counts(conn),
         "errors": st.get("errors") or {},
         "vault_sensitivity": vault_sensitivity(conn),
     }
+
+
+def _traits_status(conn: sqlite3.Connection) -> dict[str, Any]:
+    """The traits learner plus the scan progress (section 34)."""
+    out = dict(ltraits.status())
+    try:
+        from app.analysis import traits as atraits
+
+        out["scan"] = atraits.progress(conn)
+    except Exception as e:  # noqa: BLE001 - the status page never fails on the scan line
+        log.warning("learning: traits progress unavailable: %s", e)
+        out["scan"] = None
+    return out
 
 
 def vault_sensitivity(conn: sqlite3.Connection) -> str:

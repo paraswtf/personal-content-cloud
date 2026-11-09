@@ -243,12 +243,15 @@ The full DDL is `backend/app/schema.sql`. Summary of tables and the columns code
   frame_time_s, spans, embedding BLOB float32[512], torso_embedding BLOB float32[768] NULL, guess_person_id,
   guess_score, guess_evidence JSON, created_at)`. `assigned_by='user'` is locked; `'guess'` means `person_id`
   is NULL and `guess_person_id` is set until confirmed or rejected.
-- `bodies(id, item_id, face_id FK SET NULL, person_id, assigned_by, x,y,w,h, det_score, torso_embedding BLOB, guess_person_id, guess_score, guess_evidence, frame_time_s, created_at)`.
+- `bodies(id, item_id, face_id FK SET NULL, person_id, assigned_by, x,y,w,h, det_score, torso_embedding BLOB,
+  guess_person_id, guess_score, guess_evidence, frame_time_s, created_at, source CHECK ('detector','user'), by_guess,
+  moved)`. `source 'user'` is a box the owner drew; `by_guess = 1` means the person came from a guess the owner
+  confirmed; `moved = 1` means the owner moved or resized the box, and a re-analysis keeps it (section 10).
 - `persons(id, name, name_key, cover_face_id, created_at, updated_at)`.
 - `item_tags(item_id, person_id, source CHECK ('user','guess'), relation CHECK ('in','related'), created_at,
   PK(item_id, person_id))`; `relation` ('in': they are in the item; 'related': the item is about them without them
   in it, section 10) came through `MIGRATED_COLUMNS`. A tag names a person or a pet (section 22).
-- `guess_rejections(kind CHECK ('face','body'), ref_id, person_id, created_at, PK(kind, ref_id, person_id))`.
+- `guess_rejections(kind CHECK ('face','body','animal'), ref_id, person_id, created_at, PK(kind, ref_id, person_id))`.
 - `merge_dismissals(person_a, person_b)`.
 - `related_dismissals(item_id, person_id, created_at, PK(item_id, person_id))`: "Not related to NAME", a related-tag
   suggestion the owner turned down (section 10); journaled for undo, carried along by merges.
@@ -273,6 +276,23 @@ The full DDL is `backend/app/schema.sql`. Summary of tables and the columns code
 
 Tables and columns added by sections 23 to 28: `albums`, `album_items`, `shares`, `share_items`;
 `items.place*`, `items.gps_checked`, the `items_gps` index; `uploads.session_id`, `uploads.resource`.
+
+Tables added by section 34 (body traits). They are new tables only, with no CHECK constraints (kind, part, status and
+verdict are checked in code) and nothing in `MIGRATED_COLUMNS`, so `test_db_upgrade` is unchanged:
+- `body_traits(id AUTOINCREMENT, body_id FK CASCADE, item_id FK CASCADE, kind, part, x,y,w,h, quality, vec BLOB,
+  detail BLOB, attrs JSON, crop BLOB, created_at)`: one row per trait region. `kind` is tattoo, mehndi or nails;
+  `part` is `forearm_l/r`, `upper_arm_l/r`, `calf_l/r` or `hand_l/r`; the region is normalised. `vec` is
+  float32[768] (the DINOv2 CLS of the crop, then of its mirror), `detail` the crop at native resolution as WebP
+  quality 90 (at most 512 px, tattoo and mehndi only), `crop` a 192 px WebP for the UI. Ids are never reused.
+- `trait_scans(body_id PK FK CASCADE, item_id, rev, box, item_boxes, status, bare JSON, scanned_at)`: one row per
+  measured body, with the rev, the body's box and the item's box fingerprint it was measured with.
+- `trait_hides(id AUTOINCREMENT, item_id FK CASCADE, kind, verdict, x,y,w,h, bx,by,bw,bh, src_trait_id, created_at)`:
+  the owner's "Not a tattoo" (`not_trait`), "Not this person's" (`not_theirs`) and "Show again" (`shown`).
+  Journalled, with no BLOBs.
+- `trait_hide_desc(hide_id PK, vec, detail, created_at)`: the descriptors of a `not_trait` hide, copied from its row.
+  No foreign key, so an undone unhide finds them again.
+- `trait_hide_hits(trait_id FK CASCADE, hide_id FK CASCADE, PK)`: the look-alikes of a `not_trait` hide.
+- `trait_requeue(item_id PK FK CASCADE, queued_at)`: items to guess again on the traits runner thread.
 
 ## 6. Uploads
 
@@ -376,6 +396,18 @@ sweep runs on its own low-priority thread, first an hour after start and then da
 of a document renders on a worker-owned background thread into a scratch directory and swaps the pages in
 one by one, so a running text job never sees a missing page.
 
+Body traits run outside these jobs (section 34). One runner thread (`app.analysis.traits`, `worker.run_in_background`
+key `traits`, nice 19, its own connection) reads tattoos, mehndi and nails from the people boxes of finished photos,
+newest item first, and guesses those photos again. It never runs inside `analyze_item`, so the analysis transaction
+and `Result` are unchanged and face ages, `doc_likeness` and `category` exist by the time it looks at a photo. It is
+kicked by `pipeline._after` (after `guess_item`), by `ingest.recover_on_startup` (`traits.start`, then
+`trait_match.apply_settings_change`), by the routes that move, draw or delete a person box (after their commit), by
+`guess.propagate`, by `undo.undo` (`traits.after_undo`) and by housekeeping (`traits.kick`, then `traits.prune`). The
+item is the unit: each `trait_scans` row keeps the item's box fingerprint (every body box of the photo, written and
+compared with SQLite's own `printf`), so moving, drawing or deleting any box of a photo, or undoing that, makes every
+body of the photo pending again. Photos to guess again wait in `trait_requeue`, which survives a restart; the runner
+drains it between measuring steps and needs no model for that. There is no new `jobs.type`.
+
 ## 8. ML engines and models (`app/ml`)
 
 `ml.runtime.session(path, *, threads)` builds an `InferenceSession` with providers
@@ -393,6 +425,9 @@ pinned and checksummed, skipped when present):
 | `persons` | `yolox/yolox_s.onnx` | Megvii YOLOX release 0.1.1rc0 (35.9 MB) | Apache 2.0 |
 | `ocr` | rapidocr's bundled models (`PP-OCRv6_det_small`, `PP-OCRv6_rec_small`, `ch_ppocr_mobile_v2.0_cls`; installed with the package, nothing downloaded at run time) | RapidAI | Apache 2.0 |
 | `ocr_devanagari` | `ocr/devanagari_PP-OCRv5_rec_mobile.onnx` (7.9 MB, Hindi and Marathi recogniser, character list in the ONNX metadata) and `fonts/NotoSansDevanagari-Regular.ttf` (page renders and test fixtures) | RapidOCR model zoo (modelscope, release v3.10.0); Noto fonts | Apache 2.0; SIL OFL 1.1 |
+| `pose` | `pose/end2end.onnx` (71.8 MB): DWPose-m whole-body pose, 133 COCO-WholeBody points per people box, input 192 x 256 (`app/ml/pose.py`, section 34) | Hugging Face Tau-J/RTMPose at commit cd4d709, the `rtmpose-m_simcc-ucoco_dw-ucoco_270e-256x192` zip (`archive_url`, member `end2end.onnx`, looked up by basename) | code Apache 2.0; the weights are trained on COCO-WholeBody, which is research and non-commercial use only (acceptable for this personal, non-commercial repository) |
+| `hands` | `hands/handpose.onnx` (4.1 MB): MediaPipe hand landmarks, 21 points on a 224 px hand crop (`app/ml/hands.py`) | Hugging Face opencv/handpose_estimation_mediapipe at commit 4b2a0b4 (OpenCV Zoo 2023feb) | Apache 2.0 |
+| `dino` | `dino/dinov2_small.onnx` (88.5 MB, fp32): DINOv2-small CLS descriptors of tattoo and mehndi crops (`app/ml/dino.py`) | Hugging Face onnx-community/dinov2-small at commit 8b1f705 | Apache 2.0 |
 
 Every engine is lazy (loaded on first use), lives once per process, and falls back to CPU when the
 CUDA provider fails to initialise (logged once). Without a model file the dependent stage marks
@@ -402,6 +437,21 @@ GPU memory: onnxruntime's per-session arena grows with every new input shape and
 server in ordinary use was measured at 7.7 GB of the card's 8 GB). `runtime.session` therefore returns CUDA
 sessions wrapped so that every `run()` carries the `memory.enable_memory_arena_shrinkage` option
 (`runtime.wrap_session`, `GPU_ARENA_SHRINK`, default on); `app.ml.ocr` wraps rapidocr's sessions the same way.
+
+The body traits engines (section 34) follow `app/ml/ages.py`: a lazy singleton, one lock, a session from
+`runtime.session(path, threads=TRAITS_THREADS)`, and `available()`, `loaded()`, `provider()`, `reset()`.
+- `pose.estimate(bgr, boxes_px)` returns one (133, 3) array per box (x and y in image pixels, a score). The box grows
+  by 1.25, is widened or heightened to 192:256 and cut with an affine warp (RGB, mean 123.675 / 116.28 / 103.53, std
+  58.395 / 57.12 / 57.375); the SimCC outputs (384 x bins, 512 y bins) decode as argmax / 2, the score as
+  0.5 x (max_x + max_y). Boxes of one photo run in batches of 8. About 20 ms a box on 4 CPU threads.
+- `hands.landmarks(crops_rgb224)` returns, per crop, the 21 landmarks in crop pixels, a confidence and a handedness
+  value read as the probability of a right hand. The graph's four outputs are told apart by shape at load time; the
+  handedness polarity is not checked on labelled hands. One crop at a time, about 3 ms each.
+- `dino.embed(crops_rgb)` returns L2-normalised CLS vectors (n, 384) of crops resized to 224 px (ImageNet mean and
+  std), in batches of 8, about 78 ms a crop on 4 CPU threads.
+- SigLIP is reached through the shared `siglip.get_engine()` (it runs at `SEARCH_THREADS`). Crops go to it as PIL RGB
+  images (`traits.siglip_images`): `_to_pil_rgb` reads a raw numpy array as BGR and would swap red and blue, which
+  matters for the henna and nail gates.
 
 ## 9. Categories, NSFW and mis-clicks (`app/analysis`)
 
@@ -505,18 +555,32 @@ Guessing (`analysis/guess.py`). For an unassigned face or body D in item I:
 - Clothes: `cos(torso(D), torso(F)) >= GUESS_CLOTHES_SIM` (0.85).
 - Face: when D has a face embedding, it must not match any other person at `>= 0.40`; a weak match with the
   candidate (`>= 0.20`) raises the score.
-- Score `= 0.5 * clothes + 0.3 * scene + 0.2 * face_or_0.5`; the best candidate wins when it leads the runner-up
-  by `>= 0.05`; the result is stored as `guess_person_id`, `guess_score`, `guess_evidence` (`{clothes, scene,
-  face, ref_face_id, ref_item_uid, same_day, minutes_apart, gps_m}`) with `assigned_by='guess'`.
+- Score `= 0.5 * clothes + 0.3 * scene + 0.2 * face_or_0.5` until the owner has answered enough guesses; from then
+  on the learned guess probability replaces this mix for every candidate (section 18: `learning.people.guess_probability`
+  over clothes, scene term, face term, same day and GPS, once `MIN_GUESS_EVENTS` answers exist).
+  The best candidate wins when it leads the runner-up by `>= 0.05` on that scale; the result is stored as
+  `guess_person_id`, `guess_score`, `guess_evidence` (`{clothes, scene_term, scene, face, ref_face_id, ref_body_id,
+  ref_item_uid, same_day, minutes_apart, gps_m, score}`; `scene_term` is the scene term the score used, `score` is set
+  on the winner) with `assigned_by='guess'`.
+- Body traits (section 34). When the library's traits are read and a box of the photo has some, `_compute` fuses each
+  box's clothes result with its tattoo, mehndi and nails evidence (`_compute_fused`, the same inputs and the same one
+  person per photo loop); otherwise `_compute_clothes` runs, exactly the clothes path. `guess_evidence.basis` marks
+  the result: `trait` for a guess from traits alone (a tattoo, under the admission rule of section 34),
+  `clothes+trait` for a clothes guess that traits agreed with or broke a tie for, and no `basis` for clothes alone.
+  An open face box gets the traits of the body that holds it (`bodies.face_id`).
 - Confirming sets `person_id`, `assigned_by='user'` and enqueues `guess` for that person; rejecting writes
   `guess_rejections` and clears the guess. A confirmed body without a face adds an `item_tags` row with
   `source='guess'`, removed again when that body is moved or deleted.
-- Propagation (`guess` job) runs the same scoring from the newly tagged face outward over the window.
+- Propagation (`guess` job) runs the same scoring from the newly tagged face outward over the window. It also
+  queues, for the traits runner, the photos at any date whose open boxes carry a tattoo (or, within its window,
+  mehndi) close to the person's by DINOv2 cosine (`trait_match.trait_targets`, at most `TRAIT_PROPAGATE_MAX`, nothing
+  verified there), so the serial queue stays fast (section 34).
 - A guess card for a box in a video shows the frame at the box's time (`/files/frame`, preview size) with the
   box outlined, says "at 0:42", and opens the video there; the poster frame is a different moment.
 - A changed `GUESS_WINDOW_H` takes effect at the next start: `guess.apply_window_change` (from
   `ingest.recover_on_startup`) withdraws every open guess whose reference photo lies outside the window now and
-  queues a `guess` job for its item; `kv guess_window_h` records the value in force.
+  queues a `guess` job for its item; `kv guess_window_h` records the value in force. Guesses with basis `trait` have
+  no window and are kept.
 - A person is guessed for at most one box per photo (the best score wins, the other boxes are scored again
   without that person; videos are exempt), and confirming skips a box whose person is already in the item.
   Rejections follow a face across a reprocess (carried to the new face, see "Carry-over" below). Vault items are never
@@ -1017,7 +1081,7 @@ Library (`/api`): `GET items` (query: `category`, `kind`, `person` repeated, `fr
 `DELETE items/{uid}` (trash); `POST items/{uid}/restore`; `POST items/bulk {uids, action: delete|restore|keep|category|nsfw|favorite|unfavorite|forward|unforward, value?}`;
 `POST items/{uid}/reprocess {stages?: [analyze, text, preview]}`; `GET items/{uid}/pages`; `GET items/{uid}/text`;
 `GET trash` -> `ItemPage`; `POST trash/empty`; `DELETE trash/{uid}` (purge one);
-`GET review/misclicks` -> `ItemPage` (with `misclick_reasons`); `GET review/forwards` -> `ItemPage` (the forwards set apart, section 29); `GET review/guesses?person=` -> `GuessPage` (served by the people router);
+`GET review/misclicks` -> `ItemPage` (with `misclick_reasons`); `GET review/forwards` -> `ItemPage` (the forwards set apart, section 29); `GET review/guesses?person=&basis=all|clothes|trait` -> `GuessPage` (served by the people router; `basis=clothes` keeps guesses with no `basis`, `basis=trait` keeps `trait` and `clothes+trait`, section 34);
 `GET duplicates` -> `DupGroupPage{groups:[{best: ItemCard, copies: [ItemCard]}]}`; `POST duplicates/{uid}/best`;
 `GET stats` -> `Stats{items, by_kind, by_category, people, documents, misclicks, forwards, guesses, trash, queue{queued, running, failed, by_queue}, disk{free_bytes, total_bytes, originals_bytes}, analysis{pending, done, error}, text{pending, done}}`.
 Listing rules: `total` is counted on the first page only (cursor pages carry `total: 0`) for `items`, `trash`,
@@ -1036,8 +1100,12 @@ category_source, category_scores, nsfw_score, quality_scores, labels[], faces[Fa
 people[PersonRef], document: DocumentOut | null, text_status, analysis_status, preview_status, deleted_at,
 urls{thumb, preview, preview_small, original, download, video, pages[]}}`.
 `FaceOut = {id, x, y, w, h, det_score, size_px, quality, frame_time_s, spans, person: PersonRef | null, assigned_by, guess: GuessOut | null, url}`;
-`BodyOut = {id, x, y, w, h, det_score, face_id, person, assigned_by, guess, url}`;
-`GuessOut = {person: PersonRef, score, evidence}`; `PersonRef = {id, name, cover_url, kind, relation}` (`relation`
+`BodyOut = {id, x, y, w, h, det_score, face_id, person, assigned_by, guess, url, traits: TraitOut[] | null}` (the
+body's trait rows, hidden ones too with `hidden: true`; never a BLOB column, section 34);
+`TraitOut = {id, kind, part, x, y, w, h, label, crop_url, hidden, hex, item_uid, taken_at}` (`crop_url` is
+`/files/trait/{id}`; `hex` for nails; `item_uid` and `taken_at` on the person traits rows);
+`GuessOut = {person: PersonRef, score, evidence}` (for trait evidence `evidence.traits[]` entries gain `crop_url` and
+`ref_crop_url`, built from the ids without a query); `PersonRef = {id, name, cover_url, kind, relation}` (`relation`
 `in` | `related` in an item's `people` and `tags`, section 10; a reference from a box is always `in`).
 
 People (`/api`): `GET people?q&filter=all|named|unnamed&sort=items|name|recent&cursor&limit` -> `PersonPage`;
@@ -1068,6 +1136,18 @@ say yes then change it, which taught the guess learner a wrong yes, or no then t
 button that opens the box editor at its name field (an editor already open for that box stays open and moves to
 the field); in the box editor a name picked for boxes holding an open guess (the box, or any track of a whole-video
 group) goes through this route instead of a plain assignment);
+`GET people/{id}/traits` -> `PersonTraitsOut {tattoos: TraitGroupOut[], mehndi: TraitOut[], nails: TraitOut[]}`
+(tattoos grouped by part: `{kind, part, label, photos, first_seen, last_seen, best, item_uids}`; mehndi and nails of the
+last 60 days, at most 12 each; vault rows only while the vault is open); `PUT traits/{id} {hidden, verdict:
+not_trait|not_theirs}` -> `TraitOut` ("Not a tattoo", "Not this person's", "Show again": an owner action, journalled,
+undone through `X-Action-Id`; showing a row again is limited to its photo, and when a look-alike of a hide on another
+photo still hides it a `shown` hide is added here instead; 404 for a missing row or a trashed item, 403
+`vault_locked` for a vault photo while the vault is locked; the photo's guesses are worked out again after the
+commit, outside the action's journal); `GET people/{id}` fills `PersonOut.trait_count`; the routes that move, draw or
+delete a person box kick the traits runner after their commit (section 34); `GET /files/trait/{id}` serves a
+trait's 192 px WebP crop from `body_traits.crop` (its own query, as the crop lives in the database: 404 for a missing
+row or a trashed item, 403 `vault_locked` for a vault photo while locked, `no-store` for the vault and the crop cache
+otherwise, with the usual `nosniff` and CSP headers; no `?v=`, since a rescan writes new ids);
 `GET suggestions`; `POST suggestions/dismiss {a, b}`; `POST items/{uid}/tags {person_id | new_person_name, kind?,
 species?, relation?}` (a person or a pet: `kind 'pet'` with `species` names a new pet, 400 `species_needed`
 without one, section 22; `relation` `in` | `related`, default `in`, the other relation for someone already tagged
@@ -1306,6 +1386,35 @@ undone last, never while typing or while a dialog other than the viewer is open.
 menu, and in the More sheet on phones, opens a dialog listing every change with its time, Undo or Redo, and
 "Clear history" (this browser only).
 
+Body traits (section 34; `people/evidence.ts`, `TraitCompare.tsx`, `TraitsTab.tsx`, `useTraitActions.ts`):
+- Guess labels follow `evidence.basis` (`guessBasis`, `guessLabel`): "Face" and "By clothes" as before, "By" and the
+  kinds that counted for a trait-only guess ("By tattoo", "By tattoo and nails", "By mehndi and nails"), and "By
+  clothes and tattoo" (or mehndi, nails) for `clothes+trait`. Icons: a shirt for clothes, a pen for a tattoo, a hand
+  for mehndi or nails. A trait-only guess shows "strong match" in words, never a percentage
+  (`guessSure`, also in the viewer's guess chip tooltip): its stored score is a posterior that is not calibrated
+  until the owner has answered such guesses. `clothes+trait` keeps the clothes percentage.
+- `traitReasons` writes the reason, for example "Same tattoo on the forearm as NAME's photo from 14 March 2026 and 2
+  other photos" (", probably a mirror photo" when the match needed the mirrored crop), "Same blue nail art, long, 2
+  days earlier" or "Same mehndi on the hand, the same day"; `daysPhrase` says how far apart, and the time-window words
+  of clothes guesses never appear for trait evidence. `againstReasons` reads "No tattoo on the upper arm here, where
+  NAME has one".
+- `TraitCompare` puts the two crops side by side ("This photo" and the person's photo with its date), 56 px on
+  phones and 72 px from sm, the reference crop a button that opens its photo; a crop that no longer loads (a rescan
+  replaced the row, or the vault locked) reads "Photo changed"; nails add a colour swatch (`aria-hidden`, the colour
+  is named in words). Guess cards show one compare row and the rest under "N more signs".
+- In the viewer, the box editor shows "Seen on this person": the box's trait chips (from the body, or the body that
+  holds the face). Each chip's menu has "Not a tattoo" (or nails, mehndi), "Not this person's" and, on a hidden
+  chip, "Show again" (this photo only); hidden chips are struck through. These are owner actions with Undo
+  (`useTraitActions`). The photo stage draws dashed violet rings around the selected box's trait regions; the info
+  panel gives each guess chip its reason line and a small compare.
+- The person page has a "Tattoos and nails" tab when `trait_count > 0`: tattoos by part ("In 14 photos, March 2025 to
+  October 2026", the best crop and the photos), "Mehndi lately" and "Nails lately" (the last 60 days), in a grid of
+  one, two or three columns by width.
+- Review has the chips "All", "Clothes" and "Tattoos and nails" (`basis`); Settings > Learning shows the traits
+  line ("Tattoos and nails: N outcomes, thresholds from N pairs", or the defaults note), the reading progress
+  ("Reading people boxes: N of M"), "Reading tattoos and nails is turned off." when `TRAITS_ENABLED` is off, and
+  "Paused: a model is missing (...)" when a model file is missing.
+
 ## 15. Configuration (env)
 
 | Variable | Default | Meaning |
@@ -1343,6 +1452,16 @@ menu, and in the More sheet on phones, opens a dialog listing every change with 
 | `GEO_ENABLED` | true | download and use the GeoNames gazetteer for place names (section 25) |
 | `FORWARDS_ENABLED`, `FORWARD_MAX_SIDE`, `FORWARD_JPEG_QUALITY_MAX`, `FORWARD_MEME_MIN` | true, 1600, 82, 0.5 | media received through messaging apps (section 29) |
 | `MAP_TILES`, `MAP_TILE_STYLE` | `offline`, OpenFreeMap liberty | default basemap and the online style URL (section 25) |
+| `TRAITS_ENABLED`, `TRAIT_MATCHING` | true, true | read tattoos, mehndi and nails from people boxes; use them in guesses (off: guesses exactly as before) (section 34) |
+| `TRAIT_ONLY_GUESSES`, `TRAIT_ONLY_MEHNDI` | true, false | a guess from a tattoo alone under the admission rule; the same from mehndi alone |
+| `TRAITS_MEHNDI` | false | read mehndi at all (off: SigLIP read plain hands as mehndi on the owner's library; section 34) |
+| `TRAITS_THREADS` | 2 | CPU threads per traits model session (pose, hands, dino) |
+| `TRAIT_MIN_BODY_PX`, `TRAIT_MIN_LIMB_PX`, `NAIL_MIN_HAND_PX` | 200, 64, 96 | smallest box long side and limb segment (pixels of the 2048 px preview), smallest hand span for nails (pixels of the source used) |
+| `TATTOO_GATE_P` | 0.80 | SigLIP tattoo cut (0.60 up to it is "unclear"; measured on the owner's library, section 34) |
+| `TATTOO_MIN_INLIERS`, `MEHNDI_MIN_INLIERS` | 12, 30 | SIFT inliers a verified tattoo or mehndi pair needs |
+| `TRAIT_MARGIN_LLR`, `TRAIT_PRIOR_PEOPLE`, `TRAIT_MIN_P` | 2.0, 20, 0.90 | lead over the runner-up (log likelihood ratio) for a trait-only guess; prior odds 1:N for its stored score; floor of the owner-outcome tightening |
+| `NAILS_MAX_DAYS`, `MEHNDI_MAX_DAYS` | 14, 21 | nails and mehndi are compared within this many days |
+| `TRAIT_PROPAGATE_MAX` | 400 | photos one tagging queues for a trait re-guess |
 
 ## 16. Testing
 
@@ -1354,6 +1473,19 @@ auth, uploads, FTS) run everywhere. Fixtures: the hub's public-domain face photo
 each document type (text drawn with Pillow, valid check digits), a two-page PDF with a text layer and a
 scanned-style PDF, generated blurry and dark images, a tiny ffmpeg-generated video. The frontend
 builds with `tsc` and is checked in a real browser with `ws-check`.
+
+Body traits (section 34) run without models: `tests/helpers.py` adds `make_body`, `make_scan`, `make_trait` (a row
+with a synthetic `detail` crop and its scan row), `set_traits_ready` and `adjusted_params`, and `tattoo_crop(seed,
+angle, scale, mirror, small, variant)` draws a synthetic glyph on skin at 448 px; SIFT runs for real. The fake
+SigLIP engine asserts that it receives PIL RGB images. Files: `test_trait_sift.py` (verification, caches,
+symmetry), `test_traits_extract.py` (the runner, statuses, ownership, the gate, nails, the fingerprint, undo),
+`test_trait_match.py` (tiers, admission, shared designs, absence, mehndi, nails, near-duplicates, hides, budgets),
+`test_trait_guess.py` (fusion with clothes guesses, the window exemption, learning, propagation),
+`test_learning_traits.py`, `test_traits_api.py`, `test_traits_integration.py`; `test_ml_traits.py` needs the real
+models (run alone with `ORT_THREADS=2`). `tests/conftest.py` resets the verification caches for every test
+database, since trait ids restart at 1 in each. `scripts/trait_eval.py` checks the whole path on a snapshot of a
+library (never the live one): stage timings, the gate sheets, the per-query verification table, the watched bodies
+and a leave-one-out run.
 
 ## 17. Build notes
 
@@ -1468,7 +1600,23 @@ Learners (one module each, all pure numpy, all with a `status()` and a `train(co
   total weight, faces of weight 0 are left out, and a rejected face raises the threshold by its weight's share
   of the way to its similarity + 0.02. `guess_probability(features) -> float | None`: a logistic
   regression on [clothes, scene_term, face_term, same_day, has_gps] fitted on `guess` events (needs 30
-  events with both outcomes); `guess.guess_score` returns it instead of the fixed 0.5/0.3/0.2 mix.
+  events with both outcomes); `guess.guess_score` returns it instead of the fixed 0.5/0.3/0.2 mix. Outcomes of
+  guesses made from body traits alone (features `basis: 'trait'`, section 34) are left out of this fit and of its
+  event count, as their terms are not the clothes terms; `clothes+trait` outcomes keep the clothes features and add
+  `basis` and `trait_llr`. `RULES_REV` is 3 (2026-11-09: the trait outcomes left out).
+- `traits.py` (section 34): `params() -> TraitParams` (the tattoo and mehndi tiers, `tattoo_min_inliers`,
+  `tattoo_single_min`, `single_pair_ok`, `nail_color_de`, `admission_p`, `source`), the numbers
+  `analysis/trait_match.py` reads. Tiers are not fitted in this version: the library has one heavily tattooed
+  person, and fitting would need 30 or more positives from 3 or more people. `train(conn)` reads only the
+  calibration sample (kv `trait_calib`, taken on the traits runner thread, never under the training lock) and the
+  owner's answers to trait-only guesses; it verifies nothing. Three adjustments, each only ever stricter: when 3 or
+  more pairs of different named people in different photos verify at the floor, `tattoo_min_inliers` becomes one
+  above the largest such count (at most 30; pairs inside one photo are reported but do not count, as they are mostly
+  one arm inside two boxes); `nail_color_de` becomes `clamp(min(q90 of same-person dE, q10 of hard-negative dE), 6,
+  10)` with 20 or more of each; and with 20 or more answered trait-only guesses, precision under 0.95 raises
+  `tattoo_single_min` to 30 and under 0.85 turns single-pair admission off. When the params change, the photos of the
+  open `trait` and `clothes+trait` guesses are queued for a re-guess. `status()` reports the outcomes, the hard
+  negatives and the adjustments; Settings > Learning adds the reading progress (`traits.progress`).
 - `not_faces.py` (section 10, "Not a face"): the faces the owner removed as not a face (`not_faces`) against
   the faces the owner assigned, clear or not (so the helmets and masks the owner tags keep being found); a
   logistic regression on [detector score, clarity / 30, log1p(sharpness) / 5, log(size) / 6, similarity to
@@ -1481,7 +1629,10 @@ Learners (one module each, all pure numpy, all with a `status()` and a `train(co
 - `train.py`: `train_all(conn) -> dict` (every learner, writes `learned/status.json` with `trained_at`,
   per-learner example counts and what was learned), `maybe_train(conn)` (trains when a choice is newer
   than `trained_at`; called by worker housekeeping every 10 minutes), `pending(conn) -> int` (choices
-  newer than the last training), `reset()`.
+  newer than the last training), `reset()`. `LEARNERS` includes `traits`. `signature` also holds kv
+  `traits_ready`, kv `trait_calib_at` (it changes only when a calibration sample is taken, which happens only once
+  the library is read, so the backfill itself never retrains) and `learning.traits.RULES_REV` (2: hard negatives of
+  two named people only), so a change to the traits learner's rules recomputes its stored adjustments.
 
 API (`/api/system/learning`, session required, CSRF on writes): `GET` ->
 `LearningStatus{enabled, trained_at, pending, learners{doc_type{examples, labels[]}, category{examples,
@@ -2286,6 +2437,11 @@ hard link to it, so a night costs only what changed. `BACKUP_DIR/latest` points 
 snapshot; `snapshots/.partial-<name>` is the one being written and is deleted at the next run if left over.
 After each run the newest `BACKUP_KEEP` (default 14) snapshots are kept. Not in a snapshot: derived files
 (rebuilt from the originals), staging and failed uploads, `tmp/`, `site/`, and `.env` (outside `DATA_DIR`).
+The body traits of section 34 keep their crops in the database, not in files: `body_traits.crop` (192 px WebP),
+`detail` (tattoo and mehndi crops at native resolution, WebP, at most 512 px) and `vec`, and the descriptors of
+the owner's hides in `trait_hide_desc`. So they are in `cloud.db` and in every snapshot, and the orphan file sweep
+never sees them. The estimate before the first measurement was 100 to 130 MB for the owner's library; it is not
+measured yet.
 A run never starts while the originals are still being moved, a missed night (the server was off) is made
 up five minutes after start when the last complete snapshot is older than a day, a first snapshot waits for
 the hour, and a failed run is tried again an hour later. The outcome is kept in kv `backup_last` (started_at,
@@ -2359,6 +2515,17 @@ and the rows a foreign key cleared.
   whole row, ready for a redo). Foreign-key actions (ON DELETE SET NULL, CASCADE) fire them
   too. `kv`, jobs, uploads, sessions and the derived tables are not journaled: a version counter put back
   would leave the face index stale. Measured on the API tests: no owner write happens outside a transaction.
+- Body traits (section 34): `trait_hides` (the owner's "Not a tattoo", "Not this person's" and "Show again") is
+  journaled and holds no BLOBs, so its journal stays small. The derived trait tables (`body_traits`,
+  `trait_scans`, `trait_hide_hits`, `trait_requeue`) are not journaled, as cascades would hex-log their crops;
+  `trait_hide_desc` (a hide's descriptors) is not journaled either and has no foreign key, so an undone unhide
+  finds its descriptors again, and `traits.prune` drops it only when the hide is gone, it is older than
+  `undo.KEEP_DAYS` and the hide's removal is no longer in `undo_log`. After its transaction, `undo.undo()` hands the
+  tables and items it replayed to `traits.after_undo`: the photos of hides put back or taken away are queued for the
+  traits runner (which recomputes their look-alikes and guesses them again, never inside the request), and boxes put
+  back change the photo's box fingerprint, so the runner is kicked. A failure there is logged, never raised. The hide
+  route queues the photo the same way, so its guesses are rewritten outside the action's journal and an older hide
+  can still be undone after a later one rewrote the same guess columns.
 - `POST /api/actions/{id}/undo` -> `UndoOut {undo_id, changes, partial, items}`. Newest change first, in one
   transaction with foreign keys deferred: a row the action inserted is deleted, a row it deleted is inserted
   again, an update puts back only the columns it changed and only where the column still holds what the
@@ -2383,3 +2550,305 @@ and the rows a foreign key cleared.
   the analysis' change kept with `partial`, one action id over two requests, routes that are not actions,
   the vault, expiry and pruning, counters that never block, the triggers of every table and their argument
   count, the size of an update's journal, and BLOBs put back by an undo and a redo).
+
+## 34. Body traits: tattoos, nails and mehndi (`app/analysis/traits.py`, `trait_regions.py`, `trait_nails.py`, `trait_sift.py`, `trait_match.py`)
+
+People boxes whose face does not show (a back, a helmet, a turned head) and unclear faces get guesses from the clothes
+of photos taken within the hour (section 10). Body traits reach further: a tattoo is the same person months later, and
+nail polish or mehndi is the same person a few days later. They are read from the people boxes of photos and used as
+evidence for guesses, never as an assignment: the owner confirms or corrects every guess (2026-11-09).
+
+| Kind | Term | Matched against |
+|---|---|---|
+| `tattoo` | long | references at any date, geometrically verified |
+| `mehndi` | short, off unless `TRAITS_MEHNDI` | references within `MEHNDI_MAX_DAYS` (21), full weight for 3 days |
+| `nails` | short, support only | references within `NAILS_MAX_DAYS` (14), full weight for 2 days: polish colour, finish (plain, french, glitter, art, multi) and length (short, medium, long) |
+
+Parts: `forearm_l/r`, `upper_arm_l/r`, `calf_l/r`, `hand_l/r`. Matching compares part families (the part without its
+side), because a mirror photo swaps the sides. Mehndi is read only with `TRAITS_MEHNDI` (off by default): on the
+owner's library SigLIP's henna group won on plain hands (249 of 255 mehndi rows were hands, and a random 40 showed no
+mehndi), so it waits for a gate measured on real mehndi. With it off, a crop SigLIP calls henna is no evidence at all
+(never a tattoo) and does not stop nails. Not read yet: the neck (necklaces and mangalsutras read as ink), nail
+shape (fingertips of 10 to 25 px), hair colour (lighting dominates, and faces cover it), piercings, jewellery and
+watches (small, removable and common; watches and bangles are negatives in the gate), scars, feet, and boxes in
+videos (scanned with status `video`). An open face gets traits only through the body that holds it.
+
+### Reading a photo (`trait_regions.measure_item`, on the runner thread)
+
+The item is the unit: every body of the photo is measured together, outside any transaction, and written in one short
+transaction that first checks the photo's box fingerprint and bodies did not change meanwhile (else nothing is written
+and the photo stays pending). Statuses set without decoding, first match wins: `video` (not an image, or a box at a
+video time), `vault` (`nsfw = 1`), `doc` (category screenshots or documents, or `doc_likeness >= DOC_LIKENESS_MIN`),
+`small` (the box's long side under `TRAIT_MIN_BODY_PX`, 200, in pixels of the 2048 px preview) and `child` (the ages
+are read and the body's face is in the child band, section 10). The rest are measured: `ok`, `no_pixels` when neither
+the preview nor the original reads, or `error` when our own code failed on that body (it keeps no rows). `doc`,
+`child`, `no_pixels` and `error` are checked again after a day; `vault` as soon as the photo leaves the vault.
+
+1. Pose (`ml/pose.py`, section 8) runs once over the measured bodies of the photo, on the 2048 px preview
+   (`storage.preview_path`; `animals.open_photo` when there is none).
+2. Limb crops along the keypoints: the forearm from the elbow to 80 percent of the way to the wrist (so watches,
+   kadas and bangles stay out), the upper arm and the calf whole. A limb counts with both keypoint scores at 0.5 or
+   more and a segment of at least `TRAIT_MIN_LIMB_PX` (64). Hands: the 21 DWPose hand points with a mean score of
+   0.4 or more and a span of 64 px or more (the gate was measured on hands that size or larger).
+3. Ownership drops a region, never flags it. It must lie at least 80 percent inside its box grown by 10 percent, no
+   other body's pose may hold the same family of limb (scores 0.3 or more) within half its length, and it may lie over
+   another box of the photo by half at most (people standing close overlap a little; before, 15 percent dropped
+   regions no one else claimed); a side whose forearm and upper arm lengths are out of proportion (ratio
+   outside 0.5 to 1.6) is dropped. Boxes at IoU 0.7 or more with the body are its twin and ignored. This is the
+   case of one person's tattooed arm lying inside a relative's box in a group photo.
+4. The gate, on 224 px crops of the preview: a limb as a square of 1.15 x the segment, upright, with the sides outside
+   the limb strip set to grey (the strip is 0.6 of the segment for a forearm, 0.7 for an upper arm, 0.55 for a calf); a
+   hand as 1.4 x its span, wrist down. SigLIP zero-shot (sent as PIL RGB images) over five groups: tattoo, bare skin,
+   cloth (a sleeve, trousers, printed fabric), henna and jewel (a wristwatch, a bracelet or bangle, a phone in the
+   hand). Skin (YCrCb within Cr 133 to 173 and Cb 77 to 127, or the face's own skin plus or minus 10), ink (inside the
+   hull of the skin, not skin, and 20 or more below the skin L* or 25 or more away in chroma) and sharpness (Laplacian
+   variance) are read on the strip.
+5. The verdict, first rule that matches:
+   - henna (forearm or hand): p(henna) 0.50 or more, or the tattoo rule passes and the darkest pixels are brown to
+     orange (median Lab hue 30 to 75 degrees, chroma 15 or more): `mehndi` with `TRAITS_MEHNDI`, else no evidence.
+     Henna is never a tattoo.
+   - `tattoo`: p(tattoo) at least `TATTOO_GATE_P` (0.80), p(cloth) under 0.10, p(jewel) under 0.15 and sharpness 30
+     or more. The skin and ink fractions are not used for tattoos: on the owner's library they kept 345 of the 874
+     crops that passed the SigLIP cuts and dropped mostly real sleeves (dense ink leaves little skin), while the
+     sharpness floor alone keeps 852. They still decide bare limbs.
+   - `unclear`: p(tattoo) from 0.60 up to the gate, or the tattoo rule failing only on p(jewel). No row, and not bare.
+   - `bare`: p(bare) 0.80 or more, skin 0.60 or more, ink under 0.01, sharpness 60 or more, keypoint scores 0.6 or
+     more and a segment of at least 2 x `TRAIT_MIN_LIMB_PX`. Written into the scan's `bare` as `{part: {p, len}}`, the
+     only source of "tattoo absent".
+6. Every tattoo or mehndi crop is cut again from the original at native resolution (the original decoded once per
+   photo, only when needed, with `images.load_oriented` and no size limit): the same rectangle with the keypoints
+   scaled by original side / preview side, `clamp(1.15 x segment x scale, 224, 512)` px square, `INTER_AREA`. When the
+   original does not read, or is under 1.2 times the preview, the preview stands in (`attrs.src` `preview`, else
+   `original`). The row keeps that crop as `detail` (WebP quality 90), a 192 px `crop` for the UI, and `vec`: the
+   DINOv2 CLS of the crop at 224 px and of its mirror. `attrs` hold the five group probabilities `p`, the SIFT
+   keypoint count `kp` (a crop with fewer than 60 is `small` and never counts), the strip `share`, the side `out`,
+   `src`, `skin`, `ink`, `sharp` and the segment `len`. `quality` (for display order) is min(1, short side / 96) x the
+   keypoint score x min(1, sharpness / 150).
+7. Nails, on hands with no tattoo or mehndi and p(jewel) under 0.50, whose span is at least `NAIL_MIN_HAND_PX` (96)
+   in the source used (the original when the photo's long side is 3072 px or more, else the preview):
+   `trait_nails.describe_hand` on a 224 px crop of 1.7 x the span, wrist down, with the MediaPipe landmarks
+   (`ml/hands.py`). No row unless every gate holds: landmark confidence 0.8 or more; the back of the hand faces the
+   camera (the sign of `cross(p5 - p0, p17 - p0)` for the person's right or left hand, from DWPose); at least 2
+   fingers whose nail strip (DIP to TIP, from 0.5 to 1.0 of it) differs from their own skin strip (PIP to DIP) by 12
+   or more (CIELAB distance) and whose colour does not run on past the tip for more than 0.6 of DIP to TIP (a held
+   cup, phone or pole); SigLIP on the fingertips padded by 35 percent says painted nails at 0.5 or more; the polished
+   nails agree within 15 (or form two groups of 2 or more, 20 or more apart: `multi`); the fingertips' sharpness is 80
+   or more. The colour is kept after a von Kries balance in linear RGB that maps the hand's own skin to one target
+   skin colour, so coloured light shifts skin and nail together and cancels; it is named from 14 colour names and
+   kept as `lab` and `hex`. Finish by zero-shot (counted only at 0.7 or more); length from the median run past the
+   tip (under 0.15 short, under 0.35 medium, else long). A row stores no `vec` or `detail`.
+
+An exception inside a model call (pose, hands, DINOv2, SigLIP, including a failed session or the GPU running out of
+memory) stops the whole run with nothing written for that photo, which stays pending; the message is shown in
+Settings > Learning and the next kick tries again. When a model fails on the same photo 3 times in a row
+(`ABORTS_PER_ITEM`), that photo's bodies get `error` instead, so one photo cannot stop the backfill. Any other
+exception while a photo is measured or written marks its bodies `error` (or leaves it pending when the write failed)
+and the run goes on.
+
+### The runner and readiness (`traits.py`)
+
+The runner and its triggers are described in section 7. Each round: the sweep when a new rev became ready
+(`trait_match.sweep_open` queues the photos whose open boxes carry a usable tattoo or mehndi row), the re-guess queue,
+then the pending photos in 30 s steps, newest first, draining the queue between steps, until nothing is pending, a
+model fails, or the process grew by 2 GB since the loop started or passed 7 GB (the review server's limit is 8 GB; the
+next kick resumes). It sleeps 2 s and asks again before it exits, because kicks are dropped while it runs.
+
+`traits.wanted_rev()` is `TRAITS_REV` plus the kinds measured (`2:nails,tattoo`; with `TRAITS_MEHNDI`,
+`2:mehndi,nails,tattoo`), never the models that happened to load. Rev 2 is the reviewed gate and ownership; switching
+mehndi on or off changes the rev, so the library is measured again by itself. kv `traits_ready` is set to it when nothing is pending (an empty library is ready at start), and
+matching uses only rows whose scan has the ready rev, so a missing model never switches matching off: without all four
+engines (pose, hands, dino, SigLIP) or with `TRAITS_ENABLED` off, nothing is measured, written or deleted, and
+`progress()` reports `paused` with the missing keys. A usable row has an `ok` scan of the ready rev measured on the
+body's current box, on a live photo outside the vault that is not a screenshot or document. After a photo is written
+the runner checks the new rows against the owner's "Not a tattoo" hides (look-alikes, below), guesses the photo again
+and queues for a re-guess the photos whose open boxes look like the new rows of named people (at most 50).
+
+### Matching (`trait_match.py`)
+
+`trait_match.context` returns nothing (and guessing takes the clothes path unchanged) unless `TRAITS_ENABLED` and
+`TRAIT_MATCHING` are on, the library is ready, the photo is an image with a capture time, and an open box has a
+usable row or bare limbs. Queries are the rows of an open faceless body, or of the body that holds an open face.
+References are bodies with a person assigned by the owner or automatically: strong when the body or its face was
+assigned by the owner, weak otherwise. People present in the photo and rejected people are left out, and so are people
+an open face contradicts: another named person scores the face at 0.40 or more, or an unnamed group does while the
+face scores the person under 0.20. (A tattooed person's photos split into an unnamed group must not veto that person:
+on the owner's library such a group of 8 faces blocked a box whose tattoo verified with the person at 59 inliers.)
+
+Near-duplicates give no evidence and count for nothing: the same dup group, a Live pair (same `content_id`,
+`companion_of`, `live_video_item_id`), pHash within 6 bits, or a burst (scene cosine 0.97 or more within 120 s).
+Short-term kinds need an EXIF capture time on both photos and no forward (section 29). With the ages read, a body
+holding a child-band face is never a query or reference for nails or mehndi, and never a tattoo reference.
+
+Tattoo, long term:
+- Retrieval: DINOv2 cosine of the query crop against each reference crop and its mirror, 0.45 or more, same family,
+  never the query's own photo or a near-duplicate of it; the top 20, at most 8 per person (the probe's figures came
+  from the top 20 regardless of person).
+- Verification (`trait_sift.verify`): SIFT (1,500 features, contrast threshold 0.02) on the CLAHE (2.0, 8 x 8) grey of
+  the native crops, limited to the limb strip; plain against plain, mirrored against plain and plain against
+  mirrored; ratio test 0.8, at least 6 good matches, `estimateAffinePartial2D` with RANSAC at 6 px per 224 px of the
+  pair's mean side (3,000 iterations), a fitted scale between 0.5 and 2.0. A pair verifies (`passes`) with at least
+  `TATTOO_MIN_INLIERS` (12) inliers and an inlier share of the good matches of 0.25 or more. Results are cached by row
+  id in both directions (8,192 results, 256 feature sets), and one `guess_item` call spends at most 120 verifications.
+  Cosine alone never counts.
+- Each verified pair gives a log likelihood ratio by its inliers: 12 to 19 give 2.5, 20 to 29 give 3.0, 30 or more give
+  3.5, times min(1, query keypoints / 300); a `small` crop on either side gives 0.
+- Same photo: a query row that verifies with another body's row of its own photo counts 0 (whose arm it is cannot be
+  told), and a reference photo where two bodies verify is dropped.
+- Shared design: when several people verify with one query row, the strongest keeps 0.75 of its value if its strength
+  (independent verifying photos, plus 1 with a strong reference) is at least twice every other's and no other has a
+  strong reference; otherwise the row counts 0 for everyone.
+- Per person: the best pair per family, summed over families, plus 0.5 for each further verifying photo on another date
+  and in another dup group (at most 1.0); halved without the reference bar (one strong reference, verifying photos
+  from 2 dates, or 3 separate verifying photos of a named person, not near-duplicates of each other, on any dates:
+  one event seen from several sides); at most 6.0. A pair worth 0 (a `small` crop, a shared design) counts for
+  nothing: no term, no support and no bar.
+
+Tattoo absence: a person's track (their rows of one family linked by verified pairs, at most 60 rows) seen on dates 30 or
+more days apart with a median ink share of 0.15 or more gives -0.7 when the query's scan lists both sides of that
+family as bare (each segment at least 2 x `TRAIT_MIN_LIMB_PX`), the query has no tattoo row there, and the query was
+taken after the track was first seen. Nothing is inferred from photos before a tattoo appeared. All negatives together
+are at least -1.4.
+
+Mehndi, short term: the same retrieval, verification and rules within `MEHNDI_MAX_DAYS` at `MEHNDI_MIN_INLIERS` (30;
+dense repeated patterns verify too easily), 30 to 59 inliers giving 1.0 and 60 or more 1.5, times a decay (1 for 3
+days, then halving every 5 days, 0 past the window); at most 4.0, and no absence.
+
+Nails, support only, within `NAILS_MAX_DAYS`: the colour distance weighs lightness half (`sqrt((dL/2)^2 + da^2 +
+db^2)`). Rarity f is the share of other people's polished hands within the colour distance (default 10) in the same
+window (the library's share with fewer than 20 there, 0.25 with fewer than 50 in the library); the colour term is
+`ln(1/max(f, 0.02)) / ln(50)` x (1 - distance / 10), plus 0.5 for the same art or multi finish, 0.4 glitter, 0.3
+french (both at 0.7 or more), plus 0.2 for the same length; times a decay (1 for 2 days, then halving every 4 days);
+further dates add 0.25 x their decay; at most 1.5. It counts 0 for everyone when another named person, or another body
+in the query's or the reference's photo, matches the colour. Both polished, clearly different (more than 25) and 2
+days or less apart gives -0.5, used only on the trait-only path.
+
+`L(P)` is the sum of the tattoo, mehndi and nails terms and the negatives. The stored score of a trait-only guess is
+`sigmoid(L - ln TRAIT_PRIOR_PEOPLE)` (prior odds 1:20): a sort key, not a calibrated probability, so the UI shows
+"strong match" in words.
+
+### Fusion with guesses (`trait_match.fuse`, `guess._compute_fused`)
+
+The clothes path runs as before and each box's result goes through `fuse` with that box's traits, inside the same
+greedy one-person-per-photo loop. The first rule that applies wins:
+1. Absence veto: the clothes winner's absence term is at the cap (-1.4): no guess.
+2. Conflict: traits admit a different person by the rule below: no guess.
+3. Agreement: the clothes winner has `L > 0` (without the nails negative): the clothes guess stays, with its learned
+   score, as basis `clothes+trait`.
+4. Otherwise a clothes winner stays as it is.
+5. Tie-break: no clothes winner only because of the 0.05 margin, and among the people within the margin exactly one
+   has a tattoo pair with `tattoo_single_min` (20) or more inliers or verified photos on 2 dates (or a mehndi pair at
+   its floor), and the others have `L <= 0`: that person wins with the clothes score, basis `clothes+trait`. Nails never break a tie.
+6. Admission of a trait-only guess, basis `trait`, when there is no clothes candidate, or when the clothes candidates
+   tied and the admitted person is one of them. All of these must hold: `TRAIT_ONLY_GUESSES` is on; the person has a verified tattoo pair with
+   `tattoo_single_min` (20) or more inliers, or verified pairs from 2 or more photos on different dates that are not
+   near-duplicates of each other; no one else verifies with the box's rows after the same-photo and shared-design
+   rules; the reference bar holds; the tattoo term is 2.0 or more and at least the nails term; the lead over the
+   runner-up, both without nails, is at least `TRAIT_MARGIN_LLR` (2.0); and the face
+   veto, child band, vault, documents, rejections, people present and one person per photo allow it. Mehndi admits
+   alone only with `TRAIT_ONLY_MEHNDI` (60 or more inliers, or 2 photos). Nails never lead and never admit.
+
+Evidence. A trait-only guess stores `{basis: "trait", score, trait_llr, ref_item_uid, ref_body_id, days_apart, traits,
+against, terms}`, and never the clothes keys. A `clothes+trait` guess stores the clothes evidence plus `basis`,
+`trait_llr`, `traits` and `score`. `traits` holds at most 3 entries, strongest first: for tattoo and mehndi `{kind,
+part, ref_part, mirrored, trait_id, ref_trait_id, ref_body_id, ref_item_uid, ref_taken_at, days_apart, ref_before, cos,
+inliers, support, strong, llr}`, for nails `{kind, part, trait_id, ref_trait_id, ref_body_id, ref_item_uid,
+ref_taken_at, days_apart, ref_before, color, hex, finish, length, de, decay, llr}`; `against` lists `{kind, part, llr,
+why}` (`bare` for a tattoo seen before, `color` for nails). No URLs are stored; the API adds the crop URLs. Floats are
+rounded and lists sorted, so the same evidence gives the same JSON. `guess.apply_window_change` keeps basis `trait`
+guesses; `record_outcome` records their own terms (`trait_match.outcome_terms`), which the people learner leaves out
+(section 18).
+
+### Corrections
+
+`PUT /api/traits/{id}` (section 13) writes `trait_hides`: `not_trait` ("Not a tattoo", "Not nails", "Not mehndi"),
+`not_theirs` ("Not this person's", with the body's box) and `shown` ("Show again"). A row is hidden when (a) a
+`not_trait` hide of its kind in its photo covers its region at IoU 0.3 or more, (b) a `not_theirs` hide covers its region
+at 0.3 and its body at 0.5, or (c) it is a look-alike of a `not_trait` hide elsewhere and no `shown` hide in its own
+photo covers it. Look-alikes: a `not_trait` hide of a tattoo or mehndi keeps its row's `vec` and `detail` in
+`trait_hide_desc`, and rows of that kind anywhere at DINOv2 cosine 0.45 or more (the retrieval cut; verification
+decides, since even one person's native crops rarely pass 0.7) that verify against it (200 verifications at most) are
+written to `trait_hide_hits`; new rows are checked against every such hide when written. A
+printed shirt repeats and verifies; a real tattoo that only looks similar does not. Showing a row again is limited to
+its photo. Hidden rows are left out of matching, the person page and the counts, and show struck through in the box
+editor. The route saves the hide (the row is hidden at once: rules a and b need no verification) and queues the photo;
+the runner then finds the look-alikes, guesses the photo again, and queues open guesses citing rows that are now
+hidden and up to 10 look-alikes, so a tap never waits on SIFT. Undo of a hide works as for every owner action
+(section 33) and queues the photo the same way.
+
+### Propagation, settings changes and calibration
+
+- Naming someone (`guess.propagate`) queues up to `TRAIT_PROPAGATE_MAX` (400) photos, at any date for tattoos and
+  within its window for mehndi, whose open boxes carry rows close to the person's newest 200 rows by cosine; the
+  runner thread verifies them within its budget. Photos in the clothes window whose open boxes carry trait rows go to
+  the runner too (`trait_match.deferred`): the serial guess job never runs SIFT.
+- `trait_match.apply_settings_change`, at startup, hashes `TRAITS_REV` and the trait settings into kv `trait_rules`
+  (always, ready or not). When the hash changed, open `trait` guesses are withdrawn if matching or trait-only guesses
+  are now off, and the photos of the other `trait` and `clothes+trait` guesses are queued for a re-guess.
+- Calibration (`trait_match.calibration_sample`, on the runner thread once the library is ready, then after 200 new
+  rows and at most every 6 hours; 1,500 verifications at most): the newest 300 usable named rows of each verified kind
+  against other named people (hard negatives, with their inlier counts; pairs inside one photo marked apart), the
+  reference bodies the gates admit per person (strong and weak), and the nail colour distances of the same person
+  within 3 days and of different people in one photo or within a day. Stored in kv `trait_calib`. The traits learner
+  (section 18) turns it into stricter params only; tiers are not fitted. A hard negative raises the tattoo floor only
+  when both people are named, at least one side is confirmed by the owner, and it is in another photo; 3 or more such
+  pairs from 2 or more pairs of people raise the floor to one above the third largest count. (On the owner's library
+  all 17 tattoo hard negatives were one person against an unnamed group that was that person split in two, and the
+  earlier rule had raised the floor from 12 to 30.)
+
+### Measured on the owner's library (2026-11-09, read-only probes)
+
+The gate (step 0): with the five groups above and the shortened forearm, 32,501 crops of every photo people box
+were scored. At p(tattoo) 0.80 or more with cloth under 0.10 and jewel under 0.15, 706 limb crops remained; a random
+48 of those not belonging to the most tattooed person were mostly real tattoos (sleeves, small text, a small mark on
+an upper arm), and the misses were jersey prints and a bare hand; the shared-design rule and the owner's "Not a
+tattoo" hides deal with prints that repeat. Before the jewel group and the shorter forearm, a watch on a sunlit arm gave one person 40 crops at the cut;
+after, 12. The 0.60 to 0.80 band (105 crops) was mostly bare arms, so it stays unclear.
+
+Verification. On 224 px crops from the 2048 px previews SIFT did not separate people (20 or more inliers: 14 of 800
+same-person pairs against 6 of 1,500 different-person pairs). On crops cut from the originals at native resolution
+(median segment 421 px, 90th percentile 763 px), with different-person pairs taken from photos without the most
+tattooed person (so no arm inside another's box):
+
+| Inliers at least | Same person, other day, of 900 | Different people, of 1,500 | ln LR |
+|---|---|---|---|
+| 8 | 45 | 2 | 3.2 |
+| 12 | 36 | 2 | 3.0 |
+| 20 | 21 | 2 | 2.5 |
+| 30 | 8 | 2 | 1.5 (too few negatives to say more) |
+
+Per query, as guessing works (the top 20 references from other days by DINOv2 cosine, then SIFT): 56 of the most
+tattooed person's 90 crops verified only with that person at 12 or more inliers (43 at 20 or more) and none with anyone
+else; none of 66 crops of other people verified with anyone at 8 or more; 12 of 60 crops on unnamed boxes verified with
+that person at 24 to 51 inliers, days apart from the references. The tiers and the admission rule above follow these
+numbers.
+
+End to end with the shipped code (rev 2, `scripts/trait_eval.py` on a snapshot of the owner's library, 2026-11-09):
+the scan read 11,901 people boxes of 5,344 photos in 33 minutes (0.17 s a box with the GPU, peak memory 2.8 GB), and
+the database grew by 21 MB (29.5 MB of crops). It stored 659 tattoo rows and 102 nails rows. Per query, 384 of 601
+tattoo crops on boxes with a person verified only with that person at 12 or more inliers; the 13 that also verified
+with someone else were nearly all one person against an unnamed group that was the same person split in two, which the
+shared-design rule handles. Leave-one-out over 126 boxes (6 confirmed by the owner, 120 whose clear face put them in a
+named person's group), each made faceless for the trial (the box's face deleted inside the rolled-back transaction,
+so no face check can decide for the traits): with no photo in the clothes window, the tattoo path alone named 95 of
+the 126 boxes, all right (Wilson 95 percent: 0.96 to 1.0), 9 of them against photos from other days; with the clothes
+path as well, every guess was right and no clothes winner changed. The 40 crops the gate is surest of are all real
+tattoos.
+
+The limit of these numbers: they cover one heavily tattooed person over about 8 days, and most of the different-person
+crops were the gate's own false positives rather than other people's real tattoos. They say nothing about two people
+with similar real designs, or about a match across months. Nails: of 1,500 sampled boxes, 482 hands were usable, the
+best gate kept 37, and only a third to a half of those were real polish (inked fingers, coloured light and held objects
+were the rest), which is why nails only support.
+
+### Not verified
+
+- The back-of-hand sign in `trait_nails.is_back`: derived from geometry (a right hand from the back, fingers up, image
+  y down, gives a positive `cross(p5 - p0, p17 - p0)`), not measured on labelled photos. The handedness output of
+  `ml/hands.py` is not used.
+- The nail cuts (12 from the skin, spread 15, run past the tip 0.6, the length cuts, sharpness 80) and the white
+  balance on real hands.
+- The skin and ink cuts of bare limbs (the YCrCb ranges, the ink rule, skin 0.60, ink under 0.01, sharpness 60) and the
+  mehndi hue rule, on real photos.
+- Retrieval cosine 0.45, `MEHNDI_MIN_INLIERS` 30, the absence share 0.15, the hide thresholds, pHash 6 and the burst
+  rule, the shared-design factor 0.75 and ratio 2.
+- Faceless child bodies are not child-gated; with `FACE_AGE_MATCHING` off there is no child protection.

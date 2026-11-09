@@ -172,7 +172,94 @@ export interface PersonRef {
 export interface GuessOut {
   person: PersonRef
   score: number
+  /** Read through components/people/evidence.ts. Body traits (section 34) add `basis`, `trait_llr`, `traits` and
+   *  `against` (see TraitEvidence and GuessBasis). */
   evidence: Record<string, unknown>
+}
+// body traits (section 34): tattoos, nails and mehndi read from people boxes
+export type TraitKind = 'tattoo' | 'nails' | 'mehndi'
+/** What a guess rests on: 'trait' (tattoo or mehndi alone), 'clothes+trait' (clothes that traits agree with or
+ *  broke a tie for), or clothes as before (no basis in the evidence). */
+export type GuessBasis = 'clothes' | 'trait' | 'clothes+trait'
+/** One trait region of a person box, normalised to the picture like the box. */
+export interface TraitOut {
+  id: number
+  kind: TraitKind
+  /** forearm_l, forearm_r, upper_arm_l, upper_arm_r, calf_l, calf_r, hand_l, hand_r */
+  part: string
+  x: number
+  y: number
+  w: number
+  h: number
+  /** "Tattoo on the left forearm", "Red nail polish (glitter), long". */
+  label: string
+  crop_url: string
+  /** The owner hid it ("Not a tattoo", "Not this person's"), or it looks like one hidden elsewhere. */
+  hidden?: boolean
+  /** Nails: the polish colour as #rrggbb. */
+  hex?: string | null
+  /** Person traits lists: the photo it is in and when it was taken. Older servers omit them. */
+  item_uid?: string | null
+  taken_at?: string | null
+}
+/** "Not a tattoo" (not_trait) or "Not this person's" (not_theirs); hidden false is "Show again" (this photo only). */
+export interface TraitHideIn {
+  hidden: boolean
+  verdict?: 'not_trait' | 'not_theirs'
+}
+/** One tattoo of a person: the photos it was matched in, its best crop. */
+export interface TraitGroupOut {
+  kind: TraitKind
+  part: string
+  label: string
+  photos: number
+  first_seen: string | null
+  last_seen: string | null
+  best: TraitOut
+  item_uids: string[]
+}
+/** GET /api/people/{id}/traits: tattoos, and mehndi and nails of the last 60 days (at most 12 each). */
+export interface PersonTraits {
+  tattoos: TraitGroupOut[]
+  mehndi: TraitOut[]
+  nails: TraitOut[]
+}
+/** One positive entry of evidence.traits: the query row matched with a reference row of the guessed person. */
+export interface TraitEvidence {
+  kind: TraitKind
+  part: string
+  ref_part?: string
+  mirrored?: boolean
+  trait_id?: number
+  ref_trait_id?: number
+  ref_body_id?: number
+  ref_item_uid?: string
+  ref_taken_at?: string
+  days_apart?: number
+  ref_before?: boolean
+  cos?: number
+  inliers?: number
+  /** Further reference items that verify, on other dates. */
+  support?: number
+  strong?: boolean
+  llr?: number
+  // nails
+  color?: string
+  hex?: string
+  finish?: string
+  length?: string
+  de?: number
+  decay?: number
+  /** Added by the server for display (no stored URLs). */
+  crop_url?: string
+  ref_crop_url?: string
+}
+/** One entry of evidence.against: a trait the guessed person has that this box shows bare. */
+export interface TraitAgainst {
+  kind: TraitKind
+  part: string
+  llr?: number
+  why?: string
 }
 export interface FaceOut {
   id: number
@@ -222,6 +309,8 @@ export interface BodyOut {
   source?: 'detector' | 'user'
   /** The person came from a guess the owner confirmed (section 10). */
   by_guess?: boolean
+  /** Body traits read from this box (section 34), hidden ones flagged. Older servers omit it. */
+  traits?: TraitOut[] | null
 }
 /** An animal box (section 22): a pet found by its look, assigned to a pet identity. */
 export interface AnimalOut {
@@ -262,6 +351,8 @@ export interface PersonOut {
   followed?: number
   /** Items tagged as related to them without them in it (section 10). Older servers omit it. */
   related_count?: number
+  /** GET /api/people/{id} only: tattoo, nails and mehndi regions matched to them (section 34). */
+  trait_count?: number | null
 }
 export interface PersonPage {
   items: PersonOut[]
@@ -948,8 +1039,39 @@ export interface LearningStatus {
     tags?: { tags: number; examples: number; rejections: number }
     /** Section 29: the owner's keep or forward decisions; `learned` once the fitted cut replaces the rule. */
     forwards?: { examples: number; learned: boolean; weights: Record<string, number> | null }
+    /** Section 34: tattoos, nails and mehndi. Optional: older servers lack it. */
+    traits?: TraitLearning
   }
   events: Partial<Record<LearningEventKind, number>>
+}
+/** Reading body traits across the library (section 34). */
+export interface TraitScanProgress {
+  /** False when reading traits is turned off (TRAITS_ENABLED). Older servers omit it. */
+  enabled?: boolean
+  /** People boxes measured with the current version. */
+  scanned: number
+  /** People boxes on analysed items. */
+  eligible: number
+  /** Matching is on: the whole library was measured once. */
+  ready: boolean
+  rev: string | null
+  /** The models that are missing, when reading is paused; null when it runs or traits are off. */
+  paused: string[] | null
+  last_error: string | null
+}
+export interface TraitLearning {
+  /** 'adjusted' once the owner's outcomes or the library's look-alikes tightened a threshold. */
+  source: string
+  tattoo_min_inliers: number
+  nail_color_de: number
+  trained_at: string | null
+  /** Confirmed or rejected guesses made from traits alone. Older servers omit it. */
+  outcomes?: number
+  /** Pairs of different people whose tattoos or mehndi still matched (the library's look-alikes). */
+  hard_negatives?: number
+  /** The pairs the thresholds were set from: look-alikes plus nail colour pairs. */
+  pairs?: number
+  scan?: TraitScanProgress | null
 }
 export interface LearningApplyOut {
   items: number

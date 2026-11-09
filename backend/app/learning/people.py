@@ -15,7 +15,8 @@ learn the same way from their crops (section 22): the owner's crops set the thre
 owner took away from a pet (guess_rejections kind 'animal') raises it above that crop, up to PET_CEIL.
 Guess weights: a logistic regression on the evidence terms of confirmed and rejected guesses
 (learning_events kind 'guess'), used instead of the fixed 0.5/0.3/0.2 mix once MIN_GUESS_EVENTS outcomes
-with both labels exist.
+with both labels exist. Outcomes of guesses made from body traits alone (features basis 'trait', section 34)
+are left out of the fit and the event count: their terms are not the clothes terms (app.learning.traits reads them).
 """
 from __future__ import annotations
 
@@ -29,7 +30,8 @@ from app.learning import events, store
 from app.util import json_loads, now_iso
 
 MODEL = "people"
-RULES_REV = 2  # 2 (2026-11-09): merges under PULL_FLOOR teach nothing; childhood photos left out (train.signature)
+RULES_REV = 3  # 2 (2026-11-09): merges under PULL_FLOOR teach nothing; childhood photos left out (train.signature);
+#               3 (2026-11-09): outcomes of guesses from traits alone (basis 'trait', section 34) are left out
 MIN_GUESS_EVENTS = 30
 MIN_USER_FACES = 3
 FLOOR = 0.30
@@ -238,17 +240,28 @@ def fit_logistic(x: np.ndarray, y: np.ndarray, steps: int = 500, lr: float = 0.5
     return [round(float(v), 5) for v in w], round(float(b), 5)
 
 
-def guess_model(conn: sqlite3.Connection) -> dict[str, Any] | None:
-    rows = events.rows(conn, "guess")
-    xs, ys = [], []
-    for r in rows:
+def _clothes_events(conn: sqlite3.Connection) -> list[tuple[int, dict[str, Any]]]:
+    """(label, features) of the labelled guess outcomes the clothes weights learn from: every one except the
+    guesses made from traits alone (basis 'trait')."""
+    out: list[tuple[int, dict[str, Any]]] = []
+    for r in events.rows(conn, "guess"):
         if r["label"] is None:
             continue
-        f = _features(json_loads(r["features"], {}) or {})
+        f = json_loads(r["features"], {}) or {}
+        if isinstance(f, dict) and f.get("basis") == "trait":
+            continue
+        out.append((int(r["label"]), f if isinstance(f, dict) else {}))
+    return out
+
+
+def guess_model(conn: sqlite3.Connection) -> dict[str, Any] | None:
+    xs, ys = [], []
+    for label, raw in _clothes_events(conn):
+        f = _features(raw)
         if f is None:
             continue
         xs.append(f)
-        ys.append(int(r["label"]))
+        ys.append(label)
     if len(ys) < MIN_GUESS_EVENTS or len(set(ys)) < 2:
         return None
     w, b = fit_logistic(np.asarray(xs, dtype=np.float64), np.asarray(ys, dtype=np.float64))
@@ -258,7 +271,7 @@ def guess_model(conn: sqlite3.Connection) -> dict[str, Any] | None:
 def train(conn: sqlite3.Connection) -> dict[str, Any]:
     thresholds = person_thresholds(conn)
     weights = guess_model(conn)
-    n_events = sum(1 for r in events.rows(conn, "guess") if r["label"] is not None)
+    n_events = len(_clothes_events(conn))
     store.save(MODEL, {
         "thresholds": {str(k): v for k, v in thresholds.items()},
         "weights": weights,

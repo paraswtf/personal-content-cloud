@@ -904,6 +904,12 @@ def _after(conn: sqlite3.Connection, item_id: int, version: int, kind: str, doc_
         guess.guess_item(conn, item_id)
     except Exception as e:
         log.warning("analyze: guessing failed for item %s: %s", item_id, e)
+    try:
+        from app.analysis import traits
+
+        traits.kick(conn)  # section 34: the new bodies are measured on the traits runner thread
+    except Exception as e:
+        log.warning("analyze: could not start the body traits runner after item %s: %s", item_id, e)
     if fts_changed:
         guess.refresh_fts(conn, [item_id])
     if kind == "image" and doc_like is not None and doc_like >= settings.doc_likeness_min:

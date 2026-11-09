@@ -1286,7 +1286,8 @@ def recover_on_startup(conn: sqlite3.Connection) -> None:
     jobs; make sure every queued/processing upload has an ingest job and every item whose analysis,
     text or streaming copy is pending has its job; queue a reparse of the automatic 'other' documents a
     newer detection rule set now types (kv doc_rules_version, section 30); apply a changed guessing window
-    (guess.apply_window_change); when kv probe_version is below probe.PROBE_VERSION, probe again on a
+    (guess.apply_window_change) and changed body trait settings (trait_match.apply_settings_change), and
+    start the body traits runner (traits.start); when kv probe_version is below probe.PROBE_VERSION, probe again on a
     background thread the plain files whose bytes claim a media type (reprobe_plain); bring stored faces
     up to the current face analysis (app.analysis.face_upkeep.start: analysed videos re-tracked once,
     photo faces measured for clarity); wipe data_dir/tmp."""
@@ -1335,6 +1336,18 @@ def recover_on_startup(conn: sqlite3.Connection) -> None:
             log.info("startup: withdrew %d guess(es) outside the guessing window", withdrawn)
     except Exception:
         log.exception("startup: the guess window check failed")
+    try:
+        from app.analysis import trait_match  # section 34: changed trait settings re-check the trait guesses
+
+        trait_match.apply_settings_change(conn)
+    except Exception:
+        log.exception("startup: the body traits settings check failed")
+    try:
+        from app.analysis import traits  # section 34: the runner measures what is pending on its own thread
+
+        traits.start(conn)
+    except Exception:
+        log.exception("startup: could not start the body traits runner")
     try:
         from app.media.probe import PROBE_VERSION
 

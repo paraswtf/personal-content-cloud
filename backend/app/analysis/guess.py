@@ -16,7 +16,13 @@ CONTRACT.
   the people API (lazy imports of app.jobs and app.documents.extract).
 - apply_window_change(conn) -> int: at startup (ingest.recover_on_startup). When settings.guess_window_h
   differs from the value the open guesses were made with (kv guess_window_h), every guess whose reference
-  photo now lies outside the window is withdrawn and its item queued for guessing again.
+  photo now lies outside the window is withdrawn and its item queued for guessing again. Guesses from traits
+  alone (evidence basis 'trait') have no window and are kept.
+- Body traits (section 34, app.analysis.trait_match): when the library's traits are ready and a box of a photo
+  has some, _compute fuses each box's clothes result with its tattoo, mehndi and nails evidence (agreement and
+  tie-breaks as basis 'clothes+trait', a guess from a tattoo alone as basis 'trait'); otherwise _compute_clothes
+  runs, exactly the clothes path below. propagate also queues photos at any date with a similar tattoo for a
+  re-guess on the traits runner thread.
 
 Scoring for an open box D in item I against a reference box F (face or body of a person with
 assigned_by user or auto) in item J:
@@ -351,6 +357,28 @@ def score_box(box: Box, refs: list[Box], scene: dict[int, tuple[float, float | N
 
 def _compute(conn: sqlite3.Connection, item: sqlite3.Row, boxes: list[Box],
              cache: dict[str, Any] | None = None) -> dict[tuple[str, int], Candidate | None]:
+    """The clothes path, or the clothes path fused with body traits (section 34) when the library's traits are
+    ready and a box of this photo has some. Without traits the result is exactly the clothes path's."""
+    tctx = None
+    if boxes and item["kind"] == "image" and item["taken_at"]:
+        try:
+            from app.analysis import trait_match
+
+            tctx = trait_match.context(conn, item, boxes, cache)
+        except Exception:  # noqa: BLE001 - traits never block guessing
+            log.exception("guess: trait matching failed for item %s; clothes only", item["id"])
+            tctx = None
+    if tctx is None:
+        return _compute_clothes(conn, item, boxes, cache)
+    try:
+        return _compute_fused(conn, item, boxes, cache, tctx)
+    except Exception:  # noqa: BLE001 - traits never block guessing
+        log.exception("guess: trait matching failed for item %s; clothes only", item["id"])
+        return _compute_clothes(conn, item, boxes, cache)
+
+
+def _compute_clothes(conn: sqlite3.Connection, item: sqlite3.Row, boxes: list[Box],
+                     cache: dict[str, Any] | None = None) -> dict[tuple[str, int], Candidate | None]:
     results: dict[tuple[str, int], Candidate | None] = {(b.kind, b.id): None for b in boxes}
     if not boxes or not item["taken_at"]:
         return results
@@ -397,6 +425,76 @@ def _compute(conn: sqlite3.Connection, item: sqlite3.Row, boxes: list[Box],
         return results
     # One person per photo: the best-scoring (box, person) wins, the other boxes are scored again
     # without that person (the margin then applies among the people left).
+    pending = list(boxes)
+    taken: set[int] = set()
+    while pending:
+        scored = [(b, score(b, taken)) for b in pending]
+        winners = [(b, c) for b, c in scored if c is not None]
+        if not winners:
+            break
+        b, c = min(winners, key=lambda t: (-t[1].score, t[0].kind, t[0].id))
+        results[(b.kind, b.id)] = c
+        taken.add(c.person_id)
+        pending.remove(b)
+    return results
+
+
+def _clothes_inputs(conn: sqlite3.Connection, item: sqlite3.Row, cache: dict[str, Any] | None):
+    """What score_box needs (refs, scene, uids), or None where _compute_clothes would return early."""
+    window = window_items(conn, item)
+    if not window:
+        return None
+    present = _present_people(conn, int(item["id"]))
+    embs = _scene_embeddings(conn, [int(item["id"]), *[int(r["id"]) for r in window]], cache)
+    e0 = embs.get(int(item["id"]))
+    day0 = local_date(item["taken_at"], settings.local_timezone)
+    t0 = parse_iso(item["taken_at"])
+    scene: dict[int, tuple[float, float | None, float | None, bool, int | None]] = {}
+    for r in window:
+        jid = int(r["id"])
+        cos = float(np.dot(e0, embs[jid])) if e0 is not None and jid in embs and embs[jid].shape == e0.shape else None
+        gps_m = None
+        if None not in (item["gps_lat"], item["gps_lon"], r["gps_lat"], r["gps_lon"]):
+            gps_m = haversine_m(float(item["gps_lat"]), float(item["gps_lon"]), float(r["gps_lat"]), float(r["gps_lon"]))
+        scene_ok = cos is not None and cos >= settings.guess_scene_sim
+        gps_ok = gps_m is not None and gps_m <= settings.guess_gps_m
+        if not (scene_ok or gps_ok):
+            continue
+        term = cos if scene_ok else max(float(cos or 0.0), float(settings.guess_scene_sim))
+        same_day = local_date(r["taken_at"], settings.local_timezone) == day0
+        t = parse_iso(r["taken_at"])
+        minutes = int(round(abs((t - t0).total_seconds()) / 60.0)) if t is not None and t0 is not None else None
+        scene[jid] = (float(term), cos, gps_m, bool(same_day), minutes)
+    if not scene:
+        return None
+    refs = _reference_boxes(conn, list(scene), present, cache)
+    if not refs:
+        return None
+    return refs, scene, {int(r["id"]): r["uid"] for r in window}
+
+
+def _compute_fused(conn: sqlite3.Connection, item: sqlite3.Row, boxes: list[Box], cache: dict[str, Any] | None,
+                   tctx: Any) -> dict[tuple[str, int], Candidate | None]:
+    """The clothes path with body traits (section 34): the same inputs and the same greedy one-person-per-photo
+    loop; each box's clothes result goes through trait_match.fuse with that box's trait result. Photos only."""
+    from app.analysis import trait_match
+
+    results: dict[tuple[str, int], Candidate | None] = {(b.kind, b.id): None for b in boxes}
+    clothes = _clothes_inputs(conn, item, cache)
+    rejected = _rejections(conn, boxes)
+    fscores = _face_scores(conn, boxes)
+    per_box = tctx.score_all(fscores, rejected)
+
+    def score(b: Box, taken: set[int]) -> Candidate | None:
+        rej = rejected.get((b.kind, b.id), set()) | taken
+        if clothes is not None:
+            refs, scene, uids = clothes
+            c_win, c_ranked = score_box(b, refs, scene, fscores.get(b.id) if b.kind == "face" else None, rej, uids)
+        else:
+            c_win, c_ranked = None, []
+        t = per_box.get((b.kind, b.id))
+        return c_win if t is None else trait_match.fuse(c_win, c_ranked, t.without(rej), tctx.params)
+
     pending = list(boxes)
     taken: set[int] = set()
     while pending:
@@ -496,6 +594,7 @@ def propagate(conn: sqlite3.Connection, person_id: int, item_id: int | None) -> 
             break
     total = 0
     cache: dict[str, Any] = {}
+    to_runner: list[int] = []
     for jid in sorted(targets):
         if not conn.execute(
             "SELECT 1 FROM faces WHERE item_id = ? AND person_id IS NULL AND assigned_by IN ('auto', 'guess') "
@@ -504,9 +603,51 @@ def propagate(conn: sqlite3.Connection, person_id: int, item_id: int | None) -> 
             (jid, jid),
         ).fetchone():
             continue
+        if _traits_deferred(conn, jid):
+            to_runner.append(jid)  # trait matching verifies (SIFT): the traits runner does it, not this serial job
+            continue
         total += guess_item(conn, jid, cache)
     log.info("guess propagation for person %s: %d box(es) changed over %d item(s)", person_id, total, len(targets))
+    if to_runner:
+        _requeue_traits(conn, to_runner)
+    _queue_trait_targets(conn, person_id, item_id)
     return total
+
+
+def _traits_deferred(conn: sqlite3.Connection, item_id: int) -> bool:
+    try:
+        from app.analysis import trait_match
+
+        return trait_match.deferred(conn, item_id)
+    except Exception:  # noqa: BLE001 - traits never block guessing
+        log.exception("guess: trait check failed for item %s", item_id)
+        return False
+
+
+def _requeue_traits(conn: sqlite3.Connection, item_ids: list[int]) -> None:
+    try:
+        from app.analysis import traits as atraits
+
+        atraits.requeue(conn, item_ids)
+        atraits.kick(conn)
+    except Exception:  # noqa: BLE001 - the next sweep or runner pass catches up
+        log.exception("guess: could not queue %d photo(s) for the traits runner", len(item_ids))
+
+
+def _queue_trait_targets(conn: sqlite3.Connection, person_id: int, item_id: int | None) -> None:
+    """Photos at any date whose open boxes carry a tattoo (or, within its window, mehndi) close to this person's
+    (cosine only): queued for a re-guess on the traits runner thread, which verifies them within its budget
+    (section 34). Nothing is verified here, so the serial guess queue stays fast."""
+    try:
+        from app.analysis import trait_match
+        from app.analysis import traits as atraits
+
+        targets = trait_match.trait_targets(conn, person_id, item_id, limit=int(settings.trait_propagate_max))
+        if targets:
+            atraits.requeue(conn, targets)
+            atraits.kick(conn)
+    except Exception:  # noqa: BLE001 - traits never block guessing
+        log.exception("guess: could not queue trait targets for person %s", person_id)
 
 
 WINDOW_KEY = "guess_window_h"  # kv: the window the open guesses were made with
@@ -535,6 +676,8 @@ def apply_window_change(conn: sqlite3.Connection) -> int:
                     ev = json_loads(r["guess_evidence"]) or {}
                 except Exception:
                     ev = {}
+                if isinstance(ev, dict) and ev.get("basis") == "trait":
+                    continue  # a guess from traits alone has no time window (section 34)
                 ref_uid = ev.get("ref_item_uid") if isinstance(ev, dict) else None
                 ref = conn.execute("SELECT taken_at FROM items WHERE uid = ?", (ref_uid,)).fetchone() if ref_uid else None
                 t0 = parse_iso(r["taken_at"])
@@ -587,12 +730,23 @@ def record_outcome(conn: sqlite3.Connection, row: sqlite3.Row, person_id: int, l
         from app.learning import events
 
         ev = json_loads(row["guess_evidence"], {}) or {}
+        basis = ev.get("basis") if isinstance(ev, dict) else None
+        if basis == "trait":
+            # A guess from traits alone (section 34): its own terms; the people learner leaves these out.
+            from app.analysis import trait_match
+
+            features = {"basis": "trait", **trait_match.outcome_terms(ev), "score": ev.get("score")}
+            events.record(conn, "guess", label, features, item_id=int(row["item_id"]), person_id=int(person_id))
+            return
         scene_term = ev.get("scene_term")
         if scene_term is None:
             scene_term = ev.get("scene") if ev.get("scene") is not None else float(settings.guess_scene_sim)
         features = guess_features(float(ev.get("clothes") or 0.0), float(scene_term), ev.get("face"),
                                   same_day=bool(ev.get("same_day")), has_gps=ev.get("gps_m") is not None)
         features["score"] = ev.get("score")
+        if basis:
+            features["basis"] = basis
+            features["trait_llr"] = ev.get("trait_llr")
         events.record(conn, "guess", label, features, item_id=int(row["item_id"]), person_id=int(person_id))
     except Exception:  # noqa: BLE001 - learning never blocks a confirmation
         log.exception("learning: could not record a guess outcome")

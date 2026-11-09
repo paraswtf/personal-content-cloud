@@ -3,10 +3,12 @@
 // now fits the models at once instead of waiting for housekeeping; Apply queues a fresh look at
 // items and documents that were decided automatically; Reset deletes the learned models (never the
 // choices themselves). The Vault card also holds the vault sensitivity (low, normal, high).
+// Tattoos and nails (section 34): the thresholds in use and, until every people box was read once, how far the
+// reading got (asked again every 15 s while it runs), or that it is paused for a missing model.
 import { useState, type ReactNode } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import clsx from 'clsx'
-import { EyeOff, FileText, Forward, GraduationCap, ImageOff, RotateCcw, ScanSearch, Shapes, Tags, UsersRound, Wand2 } from 'lucide-react'
+import { EyeOff, FileText, Forward, GraduationCap, ImageOff, PenTool, RotateCcw, ScanSearch, Shapes, Tags, UsersRound, Wand2 } from 'lucide-react'
 import { api } from '../../../lib/api'
 import { formatCount, formatDate, formatRelative } from '../../../lib/format'
 import { useRefreshLibrary } from '../../../lib/hooks'
@@ -275,6 +277,57 @@ function VaultCard({ s, onSensitivity, savingSensitivity }: { s: LearningStatus 
   )
 }
 
+/** Reading tattoos and nails is still going: the status is worth asking again. */
+function traitsScanning(s: LearningStatus | undefined): boolean {
+  const scan = s?.learners.traits?.scan
+  if (!scan || scan.enabled === false || scan.ready || scan.paused?.length) return false
+  return !(scan.eligible > 0 && scan.scanned >= scan.eligible)
+}
+
+function TraitsCard({ traits }: { traits: NonNullable<LearningStatus['learners']['traits']> }) {
+  const scan = traits.scan
+  const off = scan?.enabled === false
+  const reading = !!scan && !off && !scan.ready && !scan.paused?.length
+  const adjusted = traits.source !== 'default'
+  const outcomes = traits.outcomes
+  return (
+    <LearnerCard icon={<PenTool className="size-5" />} title="Tattoos and nails" learned={adjusted}>
+      <p>
+        {adjusted
+          ? outcomes !== undefined && (traits.pairs ?? traits.hard_negatives ?? 0) > 0
+            ? `Tattoos and nails: ${formatCount(outcomes, 'outcome')}, thresholds from ${formatCount(traits.pairs ?? traits.hard_negatives ?? 0, 'pair')}.`
+            : outcomes !== undefined
+              ? `Tattoos and nails: ${formatCount(outcomes, 'outcome')}. Thresholds adjusted to your answers.`
+              : 'Thresholds adjusted to your library and your answers.'
+          : reading
+            ? 'Using the defaults. Guesses from tattoos alone start once every photo is read.'
+            : 'Using the defaults.'}
+        {adjusted && ` A tattoo match needs ${traits.tattoo_min_inliers} matching points.`}
+        {!adjusted && outcomes !== undefined && outcomes > 0 && ` ${formatCount(outcomes, 'guess', 'guesses')} from tattoos alone answered so far.`}
+      </p>
+      {off ? (
+        <p className="mt-1">Reading tattoos and nails is turned off.</p>
+      ) : scan && scan.paused && scan.paused.length > 0 ? (
+        <p className="mt-1" role="status">
+          Paused: a model is missing ({scan.paused.join(', ')}).
+        </p>
+      ) : scan && reading ? (
+        <>
+          <p className="mt-1" role="status">
+            Reading people boxes: {scan.scanned.toLocaleString()} of {scan.eligible.toLocaleString()}. Tattoos and nails count in guesses once all
+            are read.
+          </p>
+          {scan.last_error && (
+            <p className="mt-1 text-danger" role="status">
+              Stopped on an error: {scan.last_error}. It tries again later.
+            </p>
+          )}
+        </>
+      ) : null}
+    </LearnerCard>
+  )
+}
+
 function Learners({ s, ...sensitivity }: { s: LearningStatus } & SensitivityProps) {
   const { doc_type, category, misclick, people, tags, forwards } = s.learners
   const docN = doc_type?.examples ?? 0
@@ -364,6 +417,8 @@ function Learners({ s, ...sensitivity }: { s: LearningStatus } & SensitivityProp
       </LearnerCard>
 
       <ForwardsCard forwards={forwards} />
+
+      {s.learners.traits && <TraitsCard traits={s.learners.traits} />}
     </div>
   )
 }
@@ -372,7 +427,11 @@ export default function LearningTab() {
   const qc = useQueryClient()
   const refreshLibrary = useRefreshLibrary()
   const toast = useToast()
-  const q = useQuery({ queryKey: LEARNING_KEY, queryFn: () => api.system.learning() })
+  const q = useQuery({
+    queryKey: LEARNING_KEY,
+    queryFn: () => api.system.learning(),
+    refetchInterval: (query) => (traitsScanning(query.state.data) ? 15_000 : false),
+  })
   const [switching, setSwitching] = useState(false)
   const [savingSensitivity, setSavingSensitivity] = useState(false)
   const [training, setTraining] = useState(false)

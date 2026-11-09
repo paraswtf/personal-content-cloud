@@ -249,6 +249,7 @@ const RULES: Array<[string, RegExp, string]> = [
   ['DELETE', /^\/api\/tags\/[^/]+$/, 'Deleted a tag'],
   ['PATCH', /^\/api\/documents\/[^/]+$/, 'Edited a document'],
   ['POST', /^\/api\/duplicates\/[^/]+\/best$/, 'Picked the best of duplicates'],
+  ['PUT', /^\/api\/traits\/\d+$/, 'Corrected a tattoo or nails'],
 ]
 
 /** A plain description of a change from its request, when the app showed no message for it. */

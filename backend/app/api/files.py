@@ -19,6 +19,8 @@ GET /files/frame/{uid}?t=&size=full|preview&v=&download=1
 GET /files/page/{uid}/{n}?v=       document page render (rendered on first request when missing);
                                    for images, page 1 is the large preview
 GET /files/face/{id}, /files/body/{id}   crops
+GET /files/trait/{id}              a body trait's crop (section 34), stored in the database (body_traits.crop);
+                                   404 for a missing row or a trashed item
 GET /files/doc-photo/{uid}?v=      photo cropped out of an ID document
 Rules:
 - Items are looked up by uid; paths come from app.storage with the CURRENT version and ext.
@@ -121,13 +123,17 @@ def _cache(row: sqlite3.Row, v: str | None) -> str:
     return IMMUTABLE if v is not None and v.strip() == str(row["version"]) else NO_CACHE
 
 
-def _send(path: Path, media_type: str, cache: str, extra: dict[str, str] | None = None) -> FileResponse:
-    if not path.is_file():
-        raise _not_found()
+def _headers(cache: str, extra: dict[str, str] | None = None) -> dict[str, str]:
     headers = {"cache-control": cache, "x-content-type-options": "nosniff", "content-security-policy": CSP}
     if extra:
         headers.update(extra)
-    return FileResponse(path, media_type=media_type, headers=headers)
+    return headers
+
+
+def _send(path: Path, media_type: str, cache: str, extra: dict[str, str] | None = None) -> FileResponse:
+    if not path.is_file():
+        raise _not_found()
+    return FileResponse(path, media_type=media_type, headers=_headers(cache, extra))
 
 
 def _ascii_fallback(name: str) -> str:
@@ -340,6 +346,23 @@ def body(body_id: int, session: SessionInfo = Depends(require_user),
          conn: sqlite3.Connection = Depends(get_db)) -> FileResponse:
     row = _crop(conn, "bodies", body_id, session)
     return _send(storage.body_crop_path(int(row["id"])), "image/webp", NO_STORE if row["nsfw"] else CROP_CACHE)
+
+
+@router.api_route("/trait/{trait_id}", methods=METHODS)
+def trait(trait_id: int, session: SessionInfo = Depends(require_user),
+          conn: sqlite3.Connection = Depends(get_db)) -> Response:
+    """The UI crop of a body trait (section 34). It lives in the database, so _send (a file path) is not used.
+    A row replaced by a rescan, or a trashed item, is 404 (the UI shows "Photo changed")."""
+    row = conn.execute(
+        "SELECT t.crop, i.nsfw FROM body_traits t JOIN items i ON i.id = t.item_id "
+        "WHERE t.id = ? AND i.deleted_at IS NULL", (trait_id,)
+    ).fetchone()
+    if row is None or not row["crop"]:
+        raise _not_found()
+    if row["nsfw"] and not session.vault_unlocked:
+        raise _vault_locked()
+    return Response(content=bytes(row["crop"]), media_type="image/webp",
+                    headers=_headers(NO_STORE if row["nsfw"] else CROP_CACHE))
 
 
 # -------------------------------------------------------------- video frames

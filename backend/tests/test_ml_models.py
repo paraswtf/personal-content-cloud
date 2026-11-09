@@ -70,7 +70,8 @@ def fake_registry(tmp_path, monkeypatch, models_mod):
 
 
 def test_registry_keys_and_pins(models_mod):
-    assert set(models_mod.REGISTRY) == {"faces", "siglip", "nsfw", "ages", "persons", "ocr", "ocr_devanagari"}
+    assert set(models_mod.REGISTRY) == {"faces", "siglip", "nsfw", "ages", "persons", "ocr", "ocr_devanagari",
+                                          "pose", "hands", "dino"}
     for key, spec in models_mod.REGISTRY.items():
         assert spec.key == key and spec.label and spec.files
         for f in spec.files:
@@ -81,6 +82,24 @@ def test_registry_keys_and_pins(models_mod):
     assert "c3b037a9ef99ed5f116440790f1e098fb388db49" in models_mod.REGISTRY["siglip"].files[0].url
     assert "1ceb3c7fe1e9f3f2507e6df577437f23a9149fd5" in models_mod.REGISTRY["nsfw"].files[0].url
     assert "fd04cddf04982f6acc1ac76fb1a31b44c9285596" in models_mod.REGISTRY["ages"].files[0].url
+
+
+def test_body_trait_models_are_pinned(models_mod):
+    pose = models_mod.REGISTRY["pose"]
+    assert "cd4d7095f5cfc9cfc4f46289bee91ea4a1e1d9fd" in pose.archive_url and pose.archive_url.endswith(".zip")
+    (f,) = pose.files
+    assert (f.rel, f.member, f.url) == ("end2end.onnx", "end2end.onnx", None)
+    assert (f.size, f.sha256) == (71_792_372, "94ca58fa2d6c4530b6957ac9548084ebc2fa27ed71e4e01f0b73844306ed01a6")
+    assert "non-commercial" in pose.license
+    assert models_mod.model_dir("pose").name == "pose"
+    (h,) = models_mod.REGISTRY["hands"].files
+    assert "4b2a0b446e5cf2f11fb6b2c7251091c035d2c1f7" in h.url
+    assert (h.size, h.sha256) == (4_099_621, "db0898ae717b76b075d9bf563af315b29562e11f8df5027a1ef07b02bef6d81c")
+    (d,) = models_mod.REGISTRY["dino"].files
+    assert "8b1f705a3a7f6f062f6bdd21986c1583d3ef105d" in d.url and d.url.endswith("/onnx/model.onnx")
+    assert (d.size, d.sha256) == (88_532_934, "f22797eabf810a75e41de68d378541ebea372122b25c4ce3ef25ff618250c20a")
+    for key in ("pose", "hands", "dino"):
+        assert models_mod._ENGINES[key] == f"app.ml.{key}"
 
 
 def test_models_module_does_not_import_onnxruntime():
@@ -103,7 +122,7 @@ def test_statuses_shape(models_mod):
     assert set(st) == {"running", "progress", "error"}
 
 
-@pytest.mark.parametrize("key", ["faces", "siglip", "nsfw", "persons", "ocr", "ocr_devanagari"])
+@pytest.mark.parametrize("key", ["faces", "siglip", "nsfw", "persons", "ocr", "ocr_devanagari", "pose", "hands", "dino"])
 def test_present_for_every_key(models_mod, key):
     skip_without_models(key)
     assert models_mod.present(key)

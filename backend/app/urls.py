@@ -66,6 +66,11 @@ def animal_url(animal_id: int) -> str:
     return f"/files/animal/{animal_id}" + _written(storage.animal_crop_path(animal_id))
 
 
+def trait_url(trait_id: int) -> str:
+    """A body trait's 192 px crop (section 34). No ?v=: a rescan writes new rows, and ids are never reused."""
+    return f"/files/trait/{int(trait_id)}"
+
+
 def doc_photo_url(uid: str, version: int) -> str:
     return f"/files/doc-photo/{uid}?v={version}"
 

@@ -56,14 +56,27 @@ def _never_the_owners_folders(tmp_path_factory):
     reload_settings()
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _keep_test_priority():
+    """traits._loop() lowers its thread's priority (worker._lower_priority, nice 19); tests run it on the pytest
+    thread itself, which would renice the rest of the session."""
+    from app import worker
+
+    mp = pytest.MonkeyPatch()
+    mp.setattr(worker, "_lower_priority", lambda: None)
+    yield
+    mp.undo()
+
+
 @pytest.fixture()
 def data_dir(tmp_path):
     from app.config import reload_settings
 
     d = tmp_path / "data"
     # frontend_dist points into tmp: the app writes .gz siblings there at startup, never into frontend/
+    # traits_mehndi: the trait tests cover mehndi too (off by default in the app; test_traits_defaults checks that)
     reload_settings(data_dir=d, frontend_dist=tmp_path / "dist", workers_enabled=False, min_free_disk_bytes=0,
-                    chunk_size=256 * 1024, session_days=30)
+                    chunk_size=256 * 1024, session_days=30, traits_mehndi=True)
     from app import db, storage
 
     storage.ensure_dirs()
@@ -84,6 +97,16 @@ def data_dir(tmp_path):
         from app.search import service
 
         service.reset_matrix()
+    except Exception:
+        pass
+    try:
+        # body_traits and trait_hides ids restart at 1 in every database: the SIFT caches keyed by id must not
+        # carry results between tests, nor the runner's last error and calibration try
+        from app.analysis import trait_sift, traits
+
+        trait_sift.reset()
+        with traits._state_lock:
+            traits._state.update(last_error=None, calib_tried=None, abort_item=None)
     except Exception:
         pass
     yield d

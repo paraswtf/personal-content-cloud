@@ -6,6 +6,8 @@
 // picks who it is in PersonBoxCard, and the box is added with them.
 // Each name carries its origin (section 10): a person icon when the owner tagged or drew it, a bot when the
 // system did. Adjust mode (section 10): one box shows BoxAdjuster to move or resize it, the others step back.
+// Body traits (section 34): while a box's editor is open, its tattoo, nails and mehndi regions show as dashed violet
+// rings (the person box's, for a face), drawn only, never in the way of a tap.
 import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
 import { useMutation } from '@tanstack/react-query'
 import clsx from 'clsx'
@@ -236,6 +238,15 @@ export default function PhotoStage({
     }
   }, [adjustKey])
 
+  // The trait regions of the box being edited (a face shows its person box's), not while a box is moved.
+  const traitRings = (() => {
+    if (!editingKey || adjustKey || drawing) return []
+    const [kind, raw] = editingKey.split(':')
+    const id = Number(raw)
+    const body = kind === 'body' ? detail.bodies.find((b) => b.id === id) : kind === 'face' ? detail.bodies.find((b) => b.face_id === id) : undefined
+    return (body?.traits ?? []).filter((t) => !t.hidden)
+  })()
+
   return (
     <div
       ref={rootRef}
@@ -370,6 +381,18 @@ export default function PhotoStage({
             </div>
           )
         })}
+
+      {showFaces &&
+        loaded &&
+        !liveSrc &&
+        traitRings.map((tr) => (
+          <span
+            key={`trait:${tr.id}`}
+            aria-hidden
+            className="pointer-events-none absolute rounded-md border-2 border-dashed border-violet-400 shadow-[0_0_0_1px_rgba(0,0,0,0.45)]"
+            style={{ left: `${tr.x * 100}%`, top: `${tr.y * 100}%`, width: `${tr.w * 100}%`, height: `${tr.h * 100}%` }}
+          />
+        ))}
 
       {adjusting && showFaces && loaded && !liveSrc && (
         <BoxAdjuster

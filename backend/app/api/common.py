@@ -11,6 +11,7 @@ import numpy as np
 from collections.abc import Iterable
 from typing import Any
 
+from app.analysis import traits as atraits
 from app.config import settings
 from app.schemas import (
     AnimalOut,
@@ -24,6 +25,7 @@ from app.schemas import (
     LiveVideoOut,
     PersonOut,
     PersonRef,
+    TraitOut,
     UploadOut,
 )
 from app.urls import (
@@ -38,6 +40,7 @@ from app.urls import (
     preview_small_url,
     preview_url,
     thumb_url,
+    trait_url,
 )
 from app.util import json_loads
 
@@ -363,7 +366,38 @@ def guess_out(conn: sqlite3.Connection, row: sqlite3.Row, refs: dict[int, Person
     ref = _ref(conn, row["guess_person_id"], refs)
     if ref is None:
         return None
-    return GuessOut(person=ref, score=float(row["guess_score"] or 0), evidence=json_loads(row["guess_evidence"], {}) or {})
+    evidence = json_loads(row["guess_evidence"], {}) or {}
+    return GuessOut(person=ref, score=float(row["guess_score"] or 0), evidence=_with_trait_urls(evidence))
+
+
+def _with_trait_urls(evidence: Any) -> Any:
+    """The evidence with crop_url / ref_crop_url on each entry of evidence.traits (section 34), as a copy. No
+    database query: a row a rescan replaced answers 404 at the crop route, and the UI shows "Photo changed"."""
+    if not isinstance(evidence, dict) or not isinstance(evidence.get("traits"), list):
+        return evidence
+    out = []
+    for entry in evidence["traits"]:
+        if not isinstance(entry, dict):
+            out.append(entry)
+            continue
+        entry = dict(entry)
+        for key, url_key in (("trait_id", "crop_url"), ("ref_trait_id", "ref_crop_url")):
+            tid = entry.get(key)
+            if isinstance(tid, int) and not isinstance(tid, bool):
+                entry[url_key] = trait_url(tid)
+        out.append(entry)
+    return {**evidence, "traits": out}
+
+
+def trait_out(row: sqlite3.Row, hidden: bool = False) -> TraitOut:
+    """row from body_traits with traits.ROW_COLUMNS (never the BLOBs)."""
+    attrs = atraits.attrs_of(row)
+    hex_ = attrs.get("hex") if row["kind"] == "nails" and isinstance(attrs.get("hex"), str) else None
+    return TraitOut(
+        id=int(row["id"]), kind=row["kind"], part=row["part"], x=row["x"], y=row["y"], w=row["w"], h=row["h"],
+        label=atraits.label(row["kind"], row["part"], attrs), crop_url=trait_url(int(row["id"])), hidden=hidden,
+        hex=hex_,
+    )
 
 
 VIDEO_GROUP_SIM = 0.5  # section 10: two tracks of a video this alike are one person for whole-video editing
@@ -429,13 +463,14 @@ def face_out(conn: sqlite3.Connection, row: sqlite3.Row, refs: dict[int, PersonR
     )
 
 
-def body_out(conn: sqlite3.Connection, row: sqlite3.Row, refs: dict[int, PersonRef] | None = None) -> BodyOut:
-    """row from bodies. refs: as for guess_out."""
+def body_out(conn: sqlite3.Connection, row: sqlite3.Row, refs: dict[int, PersonRef] | None = None,
+             traits: list[TraitOut] | None = None) -> BodyOut:
+    """row from bodies. refs: as for guess_out. traits: the body's traits (item detail only, section 34)."""
     return BodyOut(
         id=row["id"], x=row["x"], y=row["y"], w=row["w"], h=row["h"], det_score=row["det_score"],
         face_id=row["face_id"], person=_ref(conn, row["person_id"], refs), assigned_by=row["assigned_by"],
         guess=guess_out(conn, row, refs), frame_time_s=row["frame_time_s"], url=body_url(int(row["id"])),
-        source=_box_source(row), by_guess=_by_guess(row),
+        source=_box_source(row), by_guess=_by_guess(row), traits=traits,
     )
 
 

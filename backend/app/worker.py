@@ -30,7 +30,8 @@ CONTRACT (docs/ARCHITECTURE.md section 7).
   (ingest.cleanup_stale_uploads), failed uploads kept longer than settings.trash_days
   (ingest.expire_failed), the trash (ingest.expire_trash), expired sessions
   (app.auth.sessions.purge_expired), job_runs older than throughput.KEEP_DAYS and, once per
-  ingest.TIDY_VERSION, the derived files the app no longer keeps (ingest.tidy_derivatives). housekeeping()
+  ingest.TIDY_VERSION, the derived files the app no longer keeps (ingest.tidy_derivatives); the body traits
+  upkeep (app.analysis.traits: prune the old look-alike descriptors, kick the runner). housekeeping()
   holds housekeeping_lock, so the manual endpoint and the worker loop never run it at once.
 - Every job that ran to a verdict (complete, or a failure that used an attempt) is recorded by
   app.throughput for the processing speed charts (section 32); deferrals are not runs.
@@ -38,7 +39,7 @@ CONTRACT (docs/ARCHITECTURE.md section 7).
   low-priority thread: first SWEEP_FIRST_DELAY_S after start, then every SWEEP_INTERVAL_S.
 - run_in_background(key, fn, *args): one-off work that should not hold a request thread (page
   renders of a document reprocess) runs on a short-lived thread owned by this module; one per key
-  at a time. drain() waits for these threads first.
+  at a time (background_running(key) tells whether one is alive). drain() waits for these threads first.
 - After the main queue drains, one unique 'recluster' job is queued when faces were added since
   the last run and some automatic faces are still unassigned.
 - start()/stop() are called from the FastAPI lifespan; nothing starts when
@@ -359,6 +360,13 @@ def _housekeeping(conn: sqlite3.Connection) -> dict[str, int]:
         out["tidied"] = ingest.tidy_derivatives(conn)
     except Exception:  # noqa: BLE001 - tidying never blocks housekeeping
         log.exception("housekeeping: tidying derived files failed")
+    try:
+        from app.analysis import traits
+
+        out["trait_descriptors"] = traits.prune(conn)
+        traits.kick(conn)
+    except Exception:  # noqa: BLE001 - body traits never block housekeeping
+        log.exception("housekeeping: the body traits upkeep failed")
 
     return out
 
@@ -384,6 +392,13 @@ def run_in_background(key: str, fn: Callable[..., Any], *args: Any) -> threading
         _background[key] = t
         t.start()
     return t
+
+
+def background_running(key: str) -> bool:
+    """True while a run_in_background thread for this key is alive."""
+    with _background_lock:
+        t = _background.get(key)
+    return t is not None and t.is_alive()
 
 
 def wait_background(timeout: float | None = None) -> None:

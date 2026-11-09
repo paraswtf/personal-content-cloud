@@ -1,7 +1,8 @@
 """Model registry and downloader (docs/ARCHITECTURE.md section 8).
 
 Contract:
-  REGISTRY: dict[str, ModelSpec]      keys 'faces', 'siglip', 'nsfw', 'persons', 'ocr', 'ocr_devanagari'
+  REGISTRY: dict[str, ModelSpec]      keys 'faces', 'siglip', 'nsfw', 'ages', 'persons', 'ocr', 'ocr_devanagari',
+                                      'pose', 'hands', 'dino' (the body traits models)
   present(key) -> bool                every file of the model is on disk with its pinned size (no hashing)
   path(key, relpath) -> Path          a file of the model (relative to the model's folder)
   model_dir(key) -> Path              the model's folder
@@ -82,6 +83,9 @@ class ModelSpec:
 
 _HF_SIGLIP = "https://huggingface.co/immich-app/ViT-B-16-SigLIP__webli/resolve/c3b037a9ef99ed5f116440790f1e098fb388db49/"
 _HF_NSFW = "https://huggingface.co/onnx-community/nsfw_image_detection-ONNX/resolve/1ceb3c7fe1e9f3f2507e6df577437f23a9149fd5/"
+_HF_RTMPOSE = "https://huggingface.co/Tau-J/RTMPose/resolve/cd4d7095f5cfc9cfc4f46289bee91ea4a1e1d9fd/"
+_HF_HANDS = "https://huggingface.co/opencv/handpose_estimation_mediapipe/resolve/4b2a0b446e5cf2f11fb6b2c7251091c035d2c1f7/"
+_HF_DINO = "https://huggingface.co/onnx-community/dinov2-small/resolve/8b1f705a3a7f6f062f6bdd21986c1583d3ef105d/"
 _HF_AGES = "https://huggingface.co/onnx-community/fairface_age_image_detection-ONNX/resolve/fd04cddf04982f6acc1ac76fb1a31b44c9285596/"
 
 REGISTRY: dict[str, ModelSpec] = {
@@ -206,6 +210,45 @@ REGISTRY: dict[str, ModelSpec] = {
                "Noto fonts (notofonts.github.io, Noto Sans Devanagari Regular)",
         license="Recogniser: Apache 2.0; font: SIL Open Font License 1.1",
     ),
+    "pose": ModelSpec(
+        key="pose",
+        label="Body pose (DWPose-m, RTMPose whole body 133 points)",
+        subdir="pose",
+        files=(
+            ModelFile("end2end.onnx", 71_792_372,
+                      "94ca58fa2d6c4530b6957ac9548084ebc2fa27ed71e4e01f0b73844306ed01a6", member="end2end.onnx"),
+        ),
+        source="Hugging Face Tau-J/RTMPose at commit cd4d709 (rtmposev1 onnx_sdk, rtmpose-m_simcc-ucoco_dw-ucoco_"
+               "270e-256x192 zip, member end2end.onnx)",
+        license="Code: Apache 2.0. Weights are trained on COCO-WholeBody: research and non-commercial use only "
+                "(acceptable for this personal, non-commercial repository)",
+        archive_url=_HF_RTMPOSE + "rtmposev1/onnx_sdk/rtmpose-m_simcc-ucoco_dw-ucoco_270e-256x192-c8b76419_20230728.zip",
+        archive_size_estimate=67 * 1024 * 1024,
+    ),
+    "hands": ModelSpec(
+        key="hands",
+        label="Hand landmarks (MediaPipe handpose, OpenCV Zoo 2023feb)",
+        subdir="hands",
+        files=(
+            ModelFile("handpose.onnx", 4_099_621,
+                      "db0898ae717b76b075d9bf563af315b29562e11f8df5027a1ef07b02bef6d81c",
+                      url=_HF_HANDS + "handpose_estimation_mediapipe_2023feb.onnx"),
+        ),
+        source="Hugging Face opencv/handpose_estimation_mediapipe at commit 4b2a0b4",
+        license="Apache 2.0",
+    ),
+    "dino": ModelSpec(
+        key="dino",
+        label="Image descriptors (DINOv2 small, fp32)",
+        subdir="dino",
+        files=(
+            ModelFile("dinov2_small.onnx", 88_532_934,
+                      "f22797eabf810a75e41de68d378541ebea372122b25c4ce3ef25ff618250c20a",
+                      url=_HF_DINO + "onnx/model.onnx"),
+        ),
+        source="Hugging Face onnx-community/dinov2-small at commit 8b1f705 (onnx/model.onnx, fp32)",
+        license="Apache 2.0",
+    ),
 }
 
 DEVANAGARI_FONT_REL = "fonts/NotoSansDevanagari-Regular.ttf"
@@ -219,6 +262,9 @@ _ENGINES = {
     "persons": "app.ml.persons",
     "ocr": "app.ml.ocr",
     "ocr_devanagari": "app.ml.ocr_devanagari",
+    "pose": "app.ml.pose",
+    "hands": "app.ml.hands",
+    "dino": "app.ml.dino",
 }
 
 

@@ -526,3 +526,69 @@ CREATE INDEX IF NOT EXISTS share_items_item ON share_items(item_id);
 
 -- Map (section 25): items with coordinates. gps_lat has existed since the first schema, so the index is safe here.
 CREATE INDEX IF NOT EXISTS items_gps ON items(gps_lat, gps_lon) WHERE gps_lat IS NOT NULL AND deleted_at IS NULL;
+
+-- Body traits (section 34): tattoos, mehndi and nails read from people boxes (app.analysis.traits). New tables only:
+-- kind, part, status and verdict are checked in code. body_traits, trait_scans, trait_hide_desc, trait_hide_hits and
+-- trait_requeue are derived and not journalled; trait_hides is an owner correction, journalled without BLOBs.
+CREATE TABLE IF NOT EXISTS body_traits (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,      -- never reused (verification cache keys)
+  body_id    INTEGER NOT NULL REFERENCES bodies(id) ON DELETE CASCADE,
+  item_id    INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+  kind       TEXT NOT NULL,                          -- tattoo | mehndi | nails
+  part       TEXT NOT NULL,                          -- forearm_l/r, upper_arm_l/r, calf_l/r, hand_l/r
+  x REAL NOT NULL, y REAL NOT NULL, w REAL NOT NULL, h REAL NOT NULL,  -- normalised region, display orientation
+  quality    REAL NOT NULL,                          -- display order only
+  vec        BLOB,                                   -- float32[768]: DINOv2 CLS of the crop, then of its mirror
+  detail     BLOB,                                   -- tattoo/mehndi: the native-resolution crop, WebP q90, <= 512 px
+  attrs      TEXT NOT NULL DEFAULT '{}',             -- JSON: kp, small, share, out, src, p; nails: lab, color, finish, ...
+  crop       BLOB NOT NULL,                          -- WebP <= 192 px, for the UI
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS body_traits_body ON body_traits(body_id);
+CREATE INDEX IF NOT EXISTS body_traits_kind ON body_traits(kind, item_id);
+CREATE INDEX IF NOT EXISTS body_traits_item ON body_traits(item_id);       -- cascades on item delete
+-- One row per measured body: which rev, box and item fingerprint it was measured with.
+CREATE TABLE IF NOT EXISTS trait_scans (
+  body_id    INTEGER PRIMARY KEY REFERENCES bodies(id) ON DELETE CASCADE,
+  item_id    INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+  rev        TEXT NOT NULL,                          -- app.analysis.traits.wanted_rev() at measurement
+  box        TEXT NOT NULL,                          -- printf('%.4f,%.4f,%.4f,%.4f', x, y, w, h) of the body
+  item_boxes TEXT NOT NULL,                          -- every body box of the item: 'id:x,y,w,h' joined by ';' in id order
+  status     TEXT NOT NULL,                          -- ok small child doc vault video no_pixels error
+  bare       TEXT NOT NULL DEFAULT '{}',             -- JSON {part: {"p", "len"}}: limbs seen bare
+  scanned_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS trait_scans_item ON trait_scans(item_id);
+CREATE INDEX IF NOT EXISTS trait_scans_status ON trait_scans(status, scanned_at);
+-- The owner's "Not a tattoo", "Not this person's" and "Show again" (journalled, undoable; no BLOBs).
+CREATE TABLE IF NOT EXISTS trait_hides (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,    -- never reused (trait_hide_desc and cache keys)
+  item_id      INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+  kind         TEXT NOT NULL,
+  verdict      TEXT NOT NULL,                        -- not_trait | not_theirs | shown
+  x REAL NOT NULL, y REAL NOT NULL, w REAL NOT NULL, h REAL NOT NULL,  -- the region the owner acted on
+  bx REAL, by REAL, bw REAL, bh REAL,                -- not_theirs: the body box
+  src_trait_id INTEGER,                              -- the row acted on (no FK: rows are replaced on a rescan)
+  created_at   TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS trait_hides_item ON trait_hides(item_id);
+-- The descriptors of a not_trait hide, copied from its row. No FK, so an undone unhide finds them again;
+-- app.analysis.traits.prune drops orphans older than app.undo.KEEP_DAYS.
+CREATE TABLE IF NOT EXISTS trait_hide_desc (
+  hide_id    INTEGER PRIMARY KEY,                    -- trait_hides.id
+  vec        BLOB NOT NULL,
+  detail     BLOB NOT NULL,
+  created_at TEXT NOT NULL
+);
+-- Look-alikes of a not_trait hide (rule c): rows that verify against its descriptors.
+CREATE TABLE IF NOT EXISTS trait_hide_hits (
+  trait_id INTEGER NOT NULL REFERENCES body_traits(id) ON DELETE CASCADE,
+  hide_id  INTEGER NOT NULL REFERENCES trait_hides(id) ON DELETE CASCADE,
+  PRIMARY KEY (trait_id, hide_id)
+);
+CREATE INDEX IF NOT EXISTS trait_hide_hits_hide ON trait_hide_hits(hide_id);
+-- Items to guess again on the traits runner thread (survives a restart).
+CREATE TABLE IF NOT EXISTS trait_requeue (
+  item_id   INTEGER PRIMARY KEY REFERENCES items(id) ON DELETE CASCADE,
+  queued_at TEXT NOT NULL
+);

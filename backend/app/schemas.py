@@ -191,6 +191,28 @@ class FaceOut(BaseModel):
     by_guess: bool = False  # section 10: the person came from a guess the owner confirmed
 
 
+TraitKind = Literal["tattoo", "nails", "mehndi"]
+
+
+class TraitOut(BaseModel):
+    """A body trait (section 34): a tattoo, mehndi or painted nails seen on a person box. The region is
+    normalised to the photo; hidden when the owner said it is not a trait or not this person's (or a
+    look-alike of one they hid); hex is the nail colour (nails only)."""
+    id: int
+    kind: TraitKind
+    part: str
+    x: float
+    y: float
+    w: float
+    h: float
+    label: str
+    crop_url: str
+    hidden: bool = False
+    hex: str | None = None
+    item_uid: str | None = None  # the person page only: the row's photo, to open it
+    taken_at: str | None = None
+
+
 class BodyOut(BaseModel):
     id: int
     x: float
@@ -207,6 +229,7 @@ class BodyOut(BaseModel):
     group: int | None = None    # videos: the tracks of one person or look-alike share a number (section 10)
     by_guess: bool = False  # section 10: the person came from a guess the owner confirmed
     source: Literal["detector", "user"] = "detector"  # section 10: 'user' when the owner drew the person box
+    traits: list[TraitOut] | None = None  # section 34: photos' item detail only (None elsewhere)
 
 
 class AnimalOut(BaseModel):
@@ -469,6 +492,32 @@ class PersonOut(BaseModel):
     confirmed_faces: int = 0      # faces (or crops) the owner assigned: the anchors of the reference
     followed: int = 0             # merge responses (section 10): unnamed look-alikes merged along with the owner's merge
     related_count: int = 0        # live items tagged 'related' to them (section 10); item_count keeps meaning 'in'
+    trait_count: int | None = None  # section 34: tattoos, mehndi and nails seen on them (GET /people/{id} only)
+
+
+class TraitGroupOut(BaseModel):
+    """One tattoo of a person (section 34): the photos it was seen in, first and last, and the best crop."""
+    kind: TraitKind
+    part: str
+    label: str
+    photos: int
+    first_seen: str | None = None
+    last_seen: str | None = None
+    best: TraitOut
+    item_uids: list[str] = []
+
+
+class PersonTraitsOut(BaseModel):
+    """GET /people/{id}/traits: tattoos grouped by design; mehndi and nails of the last 60 days (12 at most)."""
+    tattoos: list[TraitGroupOut] = []
+    mehndi: list[TraitOut] = []
+    nails: list[TraitOut] = []
+
+
+class TraitHideIn(BaseModel):
+    """PUT /traits/{id}: hide a trait ("Not a tattoo", "Not this person's") or show it again on this photo."""
+    hidden: bool
+    verdict: Literal["not_trait", "not_theirs"] = "not_trait"
 
 
 class PersonPage(BaseModel):
