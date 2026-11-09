@@ -11,11 +11,13 @@ import { ChevronDown, ChevronLeft, ChevronRight, Info, Loader2, Pencil, PawPrint
 import { api, ApiError } from '../lib/api'
 import type { ItemDetail } from '../lib/types'
 import { formatDuration, personName } from '../lib/format'
+import { boxOrigin, mergeOrigins, originPhrase, type Origin } from '../lib/origin'
 import { useAuth } from '../lib/auth'
 import { claimForToast } from '../lib/undo'
 import { useConfig } from '../lib/hooks'
 import { vaultify, withVault } from '../lib/preview'
 import ErrorBoundary, { ErrorPanel } from './ErrorBoundary'
+import OriginIcon from './people/OriginIcon'
 import { useToast } from './Toast'
 import { ConfirmModal, lockScroll } from './ui'
 import { errorMessage } from './admin/adminHooks'
@@ -75,7 +77,8 @@ function VideoChips({
   onEdit: (t: BoxTarget, anchor: HTMLElement, group?: boolean) => void
 }) {
   // One chip per person or look-alike (section 10): editing it applies to every track of the group;
-  // "Show tracks" opens the group so one track can be handled alone.
+  // "Show tracks" opens the group so one track can be handled alone. Each name carries its origin: a person
+  // icon when the owner tagged or drew any of the tracks, a bot when the system did.
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set())
   if (!targets.length) return null
   const groups = groupVideoBoxes(targets)
@@ -86,12 +89,13 @@ function VideoChips({
       else next.add(key)
       return next
     })
-  const chip = (t: BoxTarget, count: number, groupKey: string | null, inner = false) => {
+  const chip = (t: BoxTarget, count: number, groupKey: string | null, origin: Origin | null, inner = false) => {
     const key = boxKey(t)
     const b = t.box
     const isAnimal = t.kind === 'animal'
     const name = isAnimal ? animalLabel(t.box) : b.person ? personName(b.person) : b.guess ? `${personName(b.guess.person)}?` : 'Not tagged'
     const whole = count > 1 && groupKey !== null
+    const how = origin ? `, ${originPhrase(origin)}` : ''
     return (
       <li
         key={(whole ? 'group:' : '') + key}
@@ -108,11 +112,14 @@ function VideoChips({
           onClick={() => onSeek(t)}
           aria-pressed={activeKey === key}
           className="flex h-10 items-center gap-2 rounded-full pl-1 pr-3 text-sm text-white hover:bg-white/10"
-          aria-label={whole ? `Show the first of ${count} tracks of ${name}` : `Show the frame at ${formatDuration(b.frame_time_s)}, ${name}`}
+          aria-label={(whole ? `Show the first of ${count} tracks of ${name}` : `Show the frame at ${formatDuration(b.frame_time_s)}, ${name}`) + how}
         >
           <img src={b.url} alt="" className="size-8 rounded-full object-cover" />
           {isAnimal && <PawPrint className="-mr-1 size-3.5 shrink-0 text-white/70" aria-hidden />}
           <span className={clsx('max-w-[9rem] truncate', b.guess && !b.person && 'text-amber-200')}>{name}</span>
+          {origin && (
+            <OriginIcon origin={origin} decorative className={clsx('-ml-1', origin === 'guess' ? 'text-amber-200' : 'text-white/70')} />
+          )}
           <span className="text-xs tabular-nums text-white/55">{whole ? `${count} tracks` : formatDuration(b.frame_time_s)}</span>
         </button>
         <button
@@ -150,8 +157,9 @@ function VideoChips({
       <ul className="flex gap-2 overflow-x-auto overscroll-x-contain px-1 pb-1" aria-label="People and pets in this video" data-no-swipe>
         {groups.flatMap((g) => {
           const whole = g.targets.length > 1
-          const items = [chip(g.first, g.targets.length, whole ? g.key : null)]
-          if (whole && expanded.has(g.key)) items.push(...g.targets.map((t) => chip(t, 1, null, true)))
+          const origin = whole ? mergeOrigins(g.targets.map((t) => boxOrigin(t.box))) : boxOrigin(g.first.box)
+          const items = [chip(g.first, g.targets.length, whole ? g.key : null, origin)]
+          if (whole && expanded.has(g.key)) items.push(...g.targets.map((t) => chip(t, 1, null, boxOrigin(t.box), true)))
           return items
         })}
       </ul>

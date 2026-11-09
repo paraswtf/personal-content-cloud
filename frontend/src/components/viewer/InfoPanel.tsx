@@ -3,6 +3,8 @@
 // Tags (section 10): "Tag someone" lists people and pets (a new pet asks for its species) and can mark the item as
 // related to someone who is not in it; related tags show under "Related to". Every person's chip has a menu (section 14):
 // Change to..., Rename, Not NAME (or Remove from this item for a tag alone) and, for the owner's tags, the relation switch.
+// Each chip carries who put the person there (section 10): a person icon for the owner (a tag, a box they tagged or
+// drew), a bot for the system; one answer per person, so their chips in every section agree.
 import AlbumsSection from '../albums/AlbumsSection'
 import LocationRow from '../map/LocationRow'
 import { useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from 'react'
@@ -36,6 +38,7 @@ import {
   X,
 } from 'lucide-react'
 import { ApiError, api } from '../../lib/api'
+import { itemOrigins, originPhrase, type ItemOrigin } from '../../lib/origin'
 import {
   CATEGORIES,
   CATEGORY_LABELS,
@@ -62,6 +65,7 @@ import { errorMessage } from '../admin/adminHooks'
 import VirtualDocument from '../documents/VirtualDocument'
 import { forwardReasons, receivedLabel } from '../library/forwards'
 import { burstBestUid, reasonKeys, reasonLabel } from '../library/misclick'
+import OriginIcon from '../people/OriginIcon'
 import PersonPicker, { choiceBody, type PersonChoice } from '../people/PersonPicker'
 import { boxKey, stillBoxes, videoBoxes, type BoxTarget } from './boxes'
 import GuessChip from './GuessChip'
@@ -153,6 +157,7 @@ function PersonChip({
   onShow,
   active = false,
   where,
+  origin,
 }: {
   person: PersonRef
   thumb: string | null | undefined
@@ -161,6 +166,8 @@ function PersonChip({
   onShow?: () => void
   active?: boolean
   where: 'video' | 'photo'
+  /** Who put them on the item: the owner or the system (section 10). */
+  origin?: ItemOrigin
 }) {
   const name = personName(person)
   const pet = person.kind === 'pet'
@@ -233,6 +240,7 @@ function PersonChip({
       {thumb && related && <Link2 className="-mr-0.5 size-3.5 shrink-0 text-white/70" aria-label="Related" />}
       {thumb && !related && pet && <PawPrint className="-mr-0.5 size-3.5 shrink-0 text-white/70" aria-label="Pet" />}
       <span className={person.name ? 'truncate' : 'truncate text-white/70'}>{name}</span>
+      {origin && <OriginIcon origin={origin} decorative={!!onShow} className="-ml-1 text-white/60" />}
     </>
   )
   const iconButton =
@@ -251,7 +259,7 @@ function PersonChip({
           type="button"
           onClick={onShow}
           aria-current={active ? 'true' : undefined}
-          aria-label={`Show ${name} in the ${where}`}
+          aria-label={`Show ${name} in the ${where}${origin ? `, ${originPhrase(origin)}` : ''}`}
           title={`Show ${name} in the ${where}`}
           className="flex h-10 min-w-0 items-center gap-2 rounded-full pl-1 pr-2 text-left text-sm font-medium text-white hover:bg-white/10"
         >
@@ -480,6 +488,7 @@ export default function InfoPanel({
   for (const b of detail.bodies) if (b.person && !thumbs.has(b.person.id)) thumbs.set(b.person.id, b.url)
   for (const a of detail.animals) if (a.person && !thumbs.has(a.person.id)) thumbs.set(a.person.id, a.url)
   const unnamedAnimals = detail.animals.filter((a) => !a.person).length
+  const origins = itemOrigins(detail)
   const tagIds = new Set(detail.tags.map((t) => t.id))
   const inPeople = detail.people.filter((p) => p.relation !== 'related')
   // The people with a box here (a face, a person box or a pet box): their badge can show them (section 14), on a
@@ -792,6 +801,7 @@ export default function InfoPanel({
                   where="video"
                   active={activePersonId === p.id}
                   onShow={canShow ? () => onShowPerson?.(p.id, true) : undefined}
+                  origin={origins.get(p.id)}
                 />
               ))}
             </ul>
@@ -814,6 +824,7 @@ export default function InfoPanel({
                   where={isVideo ? 'video' : 'photo'}
                   active={activePersonId === p.id}
                   onShow={canShow && shown.has(p.id) ? () => onShowPerson?.(p.id) : undefined}
+                  origin={origins.get(p.id)}
                 />
               ))}
             </ul>
@@ -837,7 +848,14 @@ export default function InfoPanel({
               </p>
               <ul className="flex flex-wrap gap-2" aria-label="Related to">
                 {relatedPeople.map((p) => (
-                  <PersonChip key={p.id} person={p} thumb={p.cover_url} menu={personMenu(p)} where={isVideo ? 'video' : 'photo'} />
+                  <PersonChip
+                    key={p.id}
+                    person={p}
+                    thumb={p.cover_url}
+                    menu={personMenu(p)}
+                    where={isVideo ? 'video' : 'photo'}
+                    origin={origins.get(p.id)}
+                  />
                 ))}
               </ul>
             </div>

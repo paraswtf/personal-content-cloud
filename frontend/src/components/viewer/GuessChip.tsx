@@ -1,8 +1,10 @@
-// "Alice?" with confirm and reject buttons: a person guess waiting for an answer.
+// "Alice?" with confirm and reject buttons: a person guess waiting for an answer, with the bot of a
+// suggestion made by the system (section 10).
 import clsx from 'clsx'
 import { Check, Loader2, X } from 'lucide-react'
 import type { GuessOut } from '../../lib/types'
 import { formatPercent, personName } from '../../lib/format'
+import OriginIcon from '../people/OriginIcon'
 import { evidenceLine } from '../people/evidence'
 
 export default function GuessChip({
@@ -36,6 +38,7 @@ export default function GuessChip({
       )}
       title={`Maybe ${name}, ${formatPercent(guess.score)} sure${why ? `: ${why}` : ''}`}
     >
+      <OriginIcon origin="guess" size={compact ? 'xs' : 'sm'} className="mr-0.5" />
       <span className="min-w-0 truncate font-semibold">{name}?</span>
       {busy ? (
         <span className={btn}>

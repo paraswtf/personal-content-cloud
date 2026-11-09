@@ -17,6 +17,7 @@ import { Avatar, Button, Spinner } from '../ui'
 import { useToast } from '../Toast'
 import { AdminModal } from '../admin/AdminModal'
 import { errorMessage } from '../admin/adminHooks'
+import OriginIcon from './OriginIcon'
 import PersonPicker, { choiceBody, type PersonChoice } from './PersonPicker'
 
 /** The person or pet the selection was made on (their page). */
@@ -208,6 +209,10 @@ export default function PeopleBulkAction({ uids, busy = false, onDone, from }: P
     const who: Who = { id: p.id, name: p.name, kind: p.kind, species: p.species }
     const name = displayName(p)
     const detail = [`in ${p.items.toLocaleString()} of ${total.toLocaleString()}`]
+    // section 10: on how many the owner put them (a tag, a box they tagged or drew); older servers do not say
+    const mine = p.by_you === undefined ? null : Math.min(p.by_you, p.items)
+    const auto = mine === null ? 0 : p.items - mine
+    if (mine && auto) detail.push(`${mine.toLocaleString()} by you`)
     if (p.related) detail.push(`related on ${p.related.toLocaleString()}`)
     if (p.kind === 'pet' && p.species) detail.push(speciesLabel(p.species).toLowerCase())
     return (
@@ -215,7 +220,11 @@ export default function PeopleBulkAction({ uids, busy = false, onDone, from }: P
         <div className="flex min-w-0 items-center gap-3">
           <Avatar src={p.cover_url} name={p.name ?? '?'} size={36} />
           <div className="min-w-0 flex-1">
-            <p className={clsx('truncate text-sm font-semibold', !p.name && 'text-ink-soft')}>{name}</p>
+            <p className="flex min-w-0 items-center gap-1.5 text-sm font-semibold">
+              <span className={clsx('truncate', !p.name && 'text-ink-soft')}>{name}</span>
+              {!!mine && <OriginIcon origin="you" label={`Tagged or drawn by you on ${formatCount(mine, 'item')}`} className="text-ink-soft" />}
+              {auto > 0 && <OriginIcon origin="auto" label={`Tagged automatically on ${formatCount(auto, 'item')}`} className="text-ink-soft" />}
+            </p>
             <p className="text-xs text-ink-soft">{detail.join(', ')}</p>
           </div>
         </div>

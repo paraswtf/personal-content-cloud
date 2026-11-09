@@ -7,6 +7,8 @@ import { Ban, Check, UserX, X } from 'lucide-react'
 import { api } from '../../lib/api'
 import type { AssignOut } from '../../lib/types'
 import { formatCount, formatPercent, personName } from '../../lib/format'
+import { boxOrigin, mergeOrigins } from '../../lib/origin'
+import OriginIcon from '../people/OriginIcon'
 import PersonPicker, { choiceBody, type PersonChoice } from '../people/PersonPicker'
 import { evidenceLine } from '../people/evidence'
 import { Button } from '../ui'
@@ -141,6 +143,8 @@ export default function FaceEditor({ uid, target, anchor, onClose, onDone, track
   const busy = assign.isPending || remove.isPending || nameGroup.isPending || guessAct.isPending
   const error = assign.error ?? remove.error ?? nameGroup.error ?? guessAct.error
   const guess = !box.person ? box.guess : null
+  // who put them there (section 10): for the whole group of tracks, the owner when any track is theirs
+  const origin = scopeTargets.length > 1 ? mergeOrigins(scopeTargets.map((t) => boxOrigin(t.box))) : boxOrigin(box)
 
   return (
     <div
@@ -159,9 +163,12 @@ export default function FaceEditor({ uid, target, anchor, onClose, onDone, track
           <p className="text-xs text-ink-faint">
             {group ? 'Not named yet' : box.person ? 'Currently tagged as' : guess ? 'Our guess' : 'Not tagged yet'}
           </p>
-          <p className="truncate text-sm font-semibold">
-            {box.person ? personName(box.person) : guess ? `${personName(guess.person)}?` : 'Who is this?'}
-            {group && groupFaces > 0 && <span className="font-normal text-ink-soft">, {formatCount(groupFaces, 'face')}</span>}
+          <p className="flex min-w-0 items-center gap-1 text-sm font-semibold">
+            <span className="truncate">
+              {box.person ? personName(box.person) : guess ? `${personName(guess.person)}?` : 'Who is this?'}
+              {group && groupFaces > 0 && <span className="font-normal text-ink-soft">, {formatCount(groupFaces, 'face')}</span>}
+            </span>
+            {origin && <OriginIcon origin={origin} className="text-ink-soft" />}
           </p>
         </div>
         <button

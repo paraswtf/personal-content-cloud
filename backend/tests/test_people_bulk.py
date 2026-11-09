@@ -103,6 +103,35 @@ def test_the_list_counts_faces_bodies_pet_boxes_and_both_relations(client, conn)
     assert client.get(f"/api/items/{a['uid']}").status_code == 200   # the item route is not shadowed
 
 
+def test_the_list_counts_the_items_where_the_owner_put_someone(client, conn):
+    """`by_you`: items with a box the owner tagged or drew, or a tag; recognition alone does not count."""
+    a, b, c, d, e = _items(conn, 5)
+    asha, ben, carl = make_person(conn, "Asha"), make_person(conn, "Ben"), make_person(conn, "Carl")
+    chikki = _pet(conn, "Chikki", "cat")
+    make_face(conn, a["id"], asha, write_crop=False)                       # recognised
+    make_face(conn, b["id"], asha, assigned_by="user", write_crop=False)   # the owner tagged it
+    make_face(conn, b["id"], asha, box=(0.6, 0.2, 0.2, 0.3), write_crop=False)   # recognised beside it
+    second = _body(conn, b["id"], asha)                                    # a second box of the owner's on b
+    drawn = _body(conn, c["id"], asha)
+    _body(conn, d["id"], asha)                                             # found and grouped by the system
+    _tag(conn, e["id"], ben, "related")
+    make_face(conn, a["id"], carl, box=(0.6, 0.2, 0.2, 0.3), write_crop=False)
+    _animal(conn, a["id"], chikki)
+    pet_box = _animal(conn, b["id"], chikki)
+    with tx(conn):
+        conn.execute("UPDATE bodies SET source = 'user' WHERE id = ?", (drawn,))     # drawn, even if not locked
+        conn.execute("UPDATE bodies SET assigned_by = 'user' WHERE id = ?", (second,))   # b still counts once
+        conn.execute("UPDATE animals SET source = 'user' WHERE id = ?", (pet_box,))
+
+    r = client.post("/api/items/people", json={"uids": [x["uid"] for x in (a, b, c, d, e)]})
+    assert r.status_code == 200, r.text
+    by = {p["id"]: p for p in r.json()["people"]}
+    assert (by[asha]["items"], by[asha]["by_you"]) == (4, 2)
+    assert (by[ben]["items"], by[ben]["by_you"]) == (1, 1)
+    assert (by[chikki]["items"], by[chikki]["by_you"]) == (2, 1)
+    assert (by[carl]["items"], by[carl]["by_you"]) == (1, 0)
+
+
 def test_a_move_to_someone_else_takes_lookalikes_and_tags_along(client, conn):
     asha, a_faces, b_faces, items = _mixed_person(conn)
     bela = make_person(conn, "Bela")

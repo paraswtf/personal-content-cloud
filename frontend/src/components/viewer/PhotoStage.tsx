@@ -4,6 +4,8 @@
 // Draw mode: the owner drags a box (or takes the whole photo) over a pet the detector missed (section 22),
 // picks the species, and the new box's popover opens so the pet can be named; or over a person (section 10),
 // picks who it is in PersonBoxCard, and the box is added with them.
+// Each name carries its origin (section 10): a person icon when the owner tagged or drew it, a bot when the
+// system did.
 import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
 import { useMutation } from '@tanstack/react-query'
 import clsx from 'clsx'
@@ -12,7 +14,9 @@ import { api } from '../../lib/api'
 import { SPECIES, type AnimalOut, type ItemDetail, type Species } from '../../lib/types'
 import { personName, speciesLabel } from '../../lib/format'
 import { previewSrcSet } from '../../lib/preview'
+import { ORIGIN_LABEL, boxOrigin } from '../../lib/origin'
 import { errorMessage } from '../admin/adminHooks'
+import OriginIcon from '../people/OriginIcon'
 import { animalLabel, boxKey, stillBoxes, type BoxTarget, type DrawKind } from './boxes'
 import GuessChip from './GuessChip'
 import PersonBoxCard from './PersonBoxCard'
@@ -255,6 +259,10 @@ export default function PhotoStage({
           const isAnimal = t.kind === 'animal'
           const noun = isAnimal ? 'pet' : isBody ? 'person' : 'face'
           const label = isAnimal ? animalLabel(t.box) : b.person ? personName(b.person) : isBody ? 'Person, not tagged' : 'Not tagged'
+          // a guess shows its own chip; an untagged box the detector found has no origin
+          const origin = boxOrigin(b)
+          const shownOrigin = origin === 'guess' ? null : origin
+          const how = origin === 'auto' ? ' automatically' : origin === 'you' ? ' by you' : origin === 'drawn' ? ', drawn by you' : ''
           const below = b.y + b.h < 0.86
           const pos = { left: `${b.x * 100}%`, top: `${b.y * 100}%`, width: `${b.w * 100}%`, height: `${b.h * 100}%` }
           return (
@@ -285,7 +293,8 @@ export default function PhotoStage({
                       ? 'border-accent ring-4 ring-accent/70 motion-safe:animate-pulse'
                       : 'hover:border-accent focus-visible:border-accent',
                 )}
-                aria-label={b.person ? `Edit ${noun} tagged as ${label}` : `Tag this ${noun}`}
+                aria-label={b.person ? `Edit ${noun} tagged as ${label}${how}` : `Tag this ${noun}${origin === 'drawn' ? ', drawn by you' : ''}`}
+                title={shownOrigin ? `${label}: ${ORIGIN_LABEL[shownOrigin].toLowerCase()}` : undefined}
                 onClick={(e) => onEditBox(t, e.currentTarget)}
               />
               <span
@@ -306,13 +315,14 @@ export default function PhotoStage({
                 ) : (
                   <span
                     className={clsx(
-                      'truncate rounded-full px-2 py-0.5 text-[11px] font-semibold',
+                      'flex min-w-0 items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-semibold',
                       b.person || isAnimal ? 'bg-black/70 text-white' : 'bg-amber-300 text-black',
                       isAnimal || (b.person && b.person.name) ? '' : 'opacity-0 group-hover:opacity-100 group-focus-within:opacity-100',
                     )}
                   >
-                    {isAnimal && <PawPrint className="mr-1 inline size-3 align-[-1px]" aria-hidden />}
-                    {label}
+                    {isAnimal && <PawPrint className="size-3 shrink-0" aria-hidden />}
+                    <span className="truncate">{label}</span>
+                    {shownOrigin && <OriginIcon origin={shownOrigin} size="xs" decorative className="opacity-80" />}
                   </span>
                 )}
               </span>

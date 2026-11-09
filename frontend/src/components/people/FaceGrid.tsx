@@ -1,10 +1,13 @@
-// Grid of face crops with an optional select mode (a person's faces, unassigned faces).
+// Grid of face crops with an optional select mode (a person's faces, unassigned faces). Each tile shows who put
+// the face there (section 10): a person icon when the owner tagged it, a bot when the system grouped or guessed it.
 import clsx from 'clsx'
-import { Check, Film, Lock, Sparkles } from 'lucide-react'
+import { Check, Film, Lock } from 'lucide-react'
 import type { FaceListItem } from '../../lib/types'
 import { formatDuration, personName } from '../../lib/format'
 import { useInfiniteSentinel } from '../../lib/hooks'
+import { boxOrigin, originPhrase } from '../../lib/origin'
 import { LoadMore } from '../admin/fields'
+import OriginIcon from './OriginIcon'
 
 export default function FaceGrid({
   faces,
@@ -34,8 +37,15 @@ export default function FaceGrid({
       <ul className="grid grid-cols-3 gap-2 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-8">
         {faces.map((f) => {
           const isSel = selected.has(f.id)
+          const origin = boxOrigin({ person: f.person_id !== null ? { id: f.person_id } : null, assigned_by: f.assigned_by, guess: f.guess })
           const label = `Face ${f.id}, ${f.size_px} pixels${f.item_kind === 'video' ? ', from a video' : ''}${
-            f.guess ? `, maybe ${personName(f.guess.person)}` : ''
+            f.guess
+              ? `, maybe ${personName(f.guess.person)}`
+              : origin
+                ? `, ${originPhrase(origin)}`
+                : f.assigned_by === 'user'
+                  ? ', kept unassigned by you'
+                  : ''
           }`
           return (
             <li key={f.id}>
@@ -68,17 +78,18 @@ export default function FaceGrid({
                   <span className="inline-flex min-w-0 items-center gap-1">
                     {f.item_kind === 'video' && <Film className="size-3 shrink-0" aria-hidden />}
                     {f.guess ? (
-                      <span className="truncate">
-                        <Sparkles className="mr-0.5 inline size-3" aria-hidden />
-                        {personName(f.guess.person)}?
-                      </span>
+                      <span className="truncate">{personName(f.guess.person)}?</span>
                     ) : f.item_kind === 'video' && f.frame_time_s !== null ? (
                       formatDuration(f.frame_time_s)
                     ) : (
                       `${f.size_px} px`
                     )}
                   </span>
-                  {f.assigned_by === 'user' && <Lock className="size-3 shrink-0" aria-label="Set by you" />}
+                  {origin ? (
+                    <OriginIcon origin={origin} size="xs" decorative />
+                  ) : (
+                    f.assigned_by === 'user' && <Lock className="size-3 shrink-0" aria-hidden />
+                  )}
                 </span>
               </button>
             </li>

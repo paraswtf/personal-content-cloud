@@ -98,6 +98,9 @@ def test_drawn_box_takes_the_zero_shot_species_and_joins_a_lookalike_pet(client,
     assert row["person_id"] == chikki and row["assigned_by"] == "auto"
     assert json.loads(row["species_scores"])["cat"] == pytest.approx(0.9)
     assert np.allclose(np.frombuffer(row["embedding"], dtype=np.float32), vec)
+    # the pet's page tells the drawn box from the found one, even though the pet was matched for it
+    crops = {c["id"]: c["source"] for c in client.get(f"/api/people/{chikki}/animals").json()["items"]}
+    assert crops[out["id"]] == "user" and sorted(crops.values()) == ["detector", "user"]
 
 
 def test_drawn_box_outside_the_photo_or_too_small_is_refused(client, conn):

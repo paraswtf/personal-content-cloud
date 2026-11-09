@@ -22,7 +22,9 @@ import { api } from '../../lib/api'
 import { SPECIES, type ItemDetail, type Species } from '../../lib/types'
 import { personName, speciesLabel } from '../../lib/format'
 import { posterTime } from '../../lib/preview'
+import { boxOrigin } from '../../lib/origin'
 import { errorMessage } from '../admin/adminHooks'
+import OriginIcon from '../people/OriginIcon'
 import { animalLabel, type BoxTarget, type DrawKind } from './boxes'
 import PersonBoxCard from './PersonBoxCard'
 import { darkButton, useInvalidateItem } from './shared'
@@ -247,6 +249,7 @@ export default function VideoStage({ detail, src, videoRef, face, onDismissFace,
 
   const p = face?.box.person
   const name = face?.kind === 'animal' ? animalLabel(face.box) : p ? personName(p) : face?.box.guess ? `${personName(face.box.guess.person)}?` : 'Not tagged'
+  const origin = face ? boxOrigin(face.box) : null
   return (
     <div className="relative">
       <video
@@ -269,11 +272,12 @@ export default function VideoStage({ detail, src, videoRef, face, onDismissFace,
         >
           <span
             className={
-              'absolute left-[-2px] max-w-[12rem] truncate rounded-sm bg-accent px-1.5 py-0.5 text-xs font-semibold text-white ' +
+              'absolute left-[-2px] flex max-w-[12rem] items-center gap-1 whitespace-nowrap rounded-sm bg-accent px-1.5 py-0.5 text-xs font-semibold text-white ' +
               (rect.top >= 22 ? 'bottom-full mb-0.5' : 'top-full mt-0.5')
             }
           >
-            {name}
+            <span className="truncate">{name}</span>
+            {origin && <OriginIcon origin={origin} size="xs" decorative />}
           </span>
         </div>
       )}

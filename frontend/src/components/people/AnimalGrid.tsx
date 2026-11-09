@@ -1,10 +1,13 @@
-// Grid of animal crops with an optional select mode (a pet's crops).
+// Grid of animal crops with an optional select mode (a pet's crops). Each tile shows who put the crop there
+// (section 10): a person icon when the owner tagged it or drew the box, a bot when the system matched it.
 import clsx from 'clsx'
-import { Check, Film, Lock } from 'lucide-react'
+import { Check, Film } from 'lucide-react'
 import type { AnimalListItem } from '../../lib/types'
 import { formatDuration, speciesLabel } from '../../lib/format'
 import { useInfiniteSentinel } from '../../lib/hooks'
+import { boxOrigin, originPhrase } from '../../lib/origin'
 import { LoadMore } from '../admin/fields'
+import OriginIcon from './OriginIcon'
 
 export default function AnimalGrid({
   animals,
@@ -31,7 +34,8 @@ export default function AnimalGrid({
       <ul className="grid grid-cols-3 gap-2 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-8">
         {animals.map((a) => {
           const isSel = selected.has(a.id)
-          const label = `${speciesLabel(a.species)} ${a.id}${a.item_kind === 'video' ? ', from a video' : ''}`
+          const origin = boxOrigin({ person: a.person_id !== null ? { id: a.person_id } : null, assigned_by: a.assigned_by, source: a.source })
+          const label = `${speciesLabel(a.species)} ${a.id}${a.item_kind === 'video' ? ', from a video' : ''}${origin ? `, ${originPhrase(origin)}` : ''}`
           return (
             <li key={a.id}>
               <button
@@ -61,7 +65,7 @@ export default function AnimalGrid({
                     {a.item_kind === 'video' && <Film className="size-3 shrink-0" aria-hidden />}
                     {a.item_kind === 'video' && a.frame_time_s !== null ? formatDuration(a.frame_time_s) : speciesLabel(a.species)}
                   </span>
-                  {a.assigned_by === 'user' && <Lock className="size-3 shrink-0" aria-label="Set by you" />}
+                  {origin && <OriginIcon origin={origin} size="xs" decorative />}
                 </span>
               </button>
             </li>

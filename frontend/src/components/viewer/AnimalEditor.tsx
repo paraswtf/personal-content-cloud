@@ -7,7 +7,9 @@ import { useMutation } from '@tanstack/react-query'
 import { Ban, PawPrint, Shuffle, UserX, X } from 'lucide-react'
 import { api } from '../../lib/api'
 import { formatCount, personName, speciesLabel } from '../../lib/format'
+import { boxOrigin, mergeOrigins } from '../../lib/origin'
 import { SPECIES, type PersonOut, type Species } from '../../lib/types'
+import OriginIcon from '../people/OriginIcon'
 import PersonPicker, { choiceBody, type PersonChoice } from '../people/PersonPicker'
 import { Button } from '../ui'
 import type { AnimalBox } from './boxes'
@@ -42,6 +44,8 @@ export default function AnimalEditor({ uid, box, anchor, onClose, onDone, tracks
   const [onlyTrack, setOnlyTrack] = useState(false)
   const ids = trackList && !onlyTrack ? trackList.map((b) => b.id) : [box.id]
   const trackTail = ids.length > 1 ? ` (${ids.length} tracks)` : ''
+  // who put the pet there (section 10): for the whole group of tracks, the owner when any track is theirs
+  const origin = trackList && !onlyTrack ? mergeOrigins(trackList.map((b) => boxOrigin(b))) : boxOrigin(box)
 
   useLayoutEffect(() => setStyle(placement(anchor)), [anchor, box.id])
   useEffect(() => {
@@ -126,7 +130,10 @@ export default function AnimalEditor({ uid, box, anchor, onClose, onDone, tracks
             {box.person ? `${species}, currently tagged as` : `${species}, not named yet`}
             {box.species_source === 'user' && ' (your choice)'}
           </p>
-          <p className="truncate text-sm font-semibold">{box.person ? personName({ ...box.person, species: box.species }) : 'Which pet is this?'}</p>
+          <p className="flex min-w-0 items-center gap-1 text-sm font-semibold">
+            <span className="truncate">{box.person ? personName({ ...box.person, species: box.species }) : 'Which pet is this?'}</span>
+            {origin && <OriginIcon origin={origin} className="text-ink-soft" />}
+          </p>
         </div>
         <button
           type="button"

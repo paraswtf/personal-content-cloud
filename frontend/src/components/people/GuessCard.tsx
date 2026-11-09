@@ -7,6 +7,7 @@ import type { GuessItem } from '../../lib/types'
 import { frameUrl } from '../../lib/api'
 import { formatDuration, formatPercent, personName } from '../../lib/format'
 import { Avatar, Button } from '../ui'
+import OriginIcon from './OriginIcon'
 import { evidenceLine } from './evidence'
 
 export default function GuessCard({
@@ -58,6 +59,7 @@ export default function GuessCard({
           <Link to={`/people/${g.guess.person.id}`} className="mt-1 flex min-w-0 items-center gap-2 hover:underline">
             <Avatar src={g.guess.person.cover_url} name={g.guess.person.name} size={28} />
             <span className="truncate text-sm font-semibold">{name}?</span>
+            <OriginIcon origin="guess" className="-ml-1 text-ink-soft" />
           </Link>
         </div>
       </div>

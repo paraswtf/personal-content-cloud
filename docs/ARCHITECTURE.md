@@ -634,9 +634,12 @@ found or in the trash are skipped; a selection holding a vault item while the va
 `vault_locked`):
 - `POST /api/items/people` `{uids}` -> `ItemsPeopleOut{items, unnamed_faces, people: [ItemPersonOut]}`: the
   people and pets on those items, from faces, bodies, pet boxes and tags. `ItemPersonOut{id, name, kind,
-  species, cover_url, items, faces, bodies, animals, tags, related}`: `items` counts the selected items they
-  are on (any way), `tags` and `related` their tags by relation. Sorted by `items` (most first), then named
-  before unnamed, then by name. `unnamed_faces` counts the faces in the selection that nobody is named for.
+  species, cover_url, items, faces, bodies, animals, tags, related, by_you}`: `items` counts the selected items
+  they are on (any way), `tags` and `related` their tags by relation, `by_you` (2026-11-09) the items where the
+  owner put them there: a face, person box or pet box with `assigned_by = 'user'`, a box the owner drew (`source =
+  'user'`), or a tag (every tag is the owner's: added by hand, or a confirmed guess on a faceless body). Sorted by
+  `items` (most first), then named before unnamed, then by name. `unnamed_faces` counts the faces in the selection
+  that nobody is named for.
 - `POST /api/items/people/move` `{uids, from_person_id, person_id | new_person_name}` ->
   `PeopleBulkOut{updated, person, followed}`. In those items every face, body and pet box of `from` goes to
   the target, locked as the owner's (`assigned_by = 'user'`, as `/faces/assign`), and every tag of `from`
@@ -982,6 +985,25 @@ is read again either way. After a change that can take the chip away, the focus 
 left to the first pencil in the list, else to "Tag someone". The chips under
 "In the frame" (videos) have no pencil. Escape closes the card (not the viewer) and puts the focus back on the
 chip's pencil.
+
+Who tagged it (2026-11-09, `lib/origin.ts`, `people/OriginIcon.tsx`): every person or pet name on a box or a badge
+carries a small icon, a person (lucide `UserRound`) when the owner put them there and a bot (`Bot`) when the system
+did, with the words as a tooltip ("Tagged by you", "Drawn by you", "Tagged automatically", "Suggested
+automatically") and in the label of the control around it ("Show Asha in the photo, tagged by you", "Edit face
+tagged as Ravi automatically"); `data-origin` is `you` or `auto`. A box (`boxOrigin`) is the owner's when
+`assigned_by` is 'user' with a person on it, "Drawn by you" when the owner drew it (`source` 'user') and the
+system matched it (a pet box), the system's when recognition or grouping put the person there, and a guess
+waiting for an answer shows the bot of a suggestion; a box the detector found with nobody on it has no icon (the
+person page keeps a lock on a face the owner took off someone, "Kept unassigned by you"). Naming an unnamed group
+or merging people does not make the faces the owner's: the system grouped them, so they keep the bot until the
+owner tags one. A badge that stands for several boxes takes one answer: a person on an item (`itemOrigins`, used
+by every section of the info panel so their chips agree) is the owner's when a tag or any box of theirs there is,
+and a video's group chip is the owner's when any of its tracks is (the opened tracks show their own). Shown on the
+photo's box labels and the label of the picked video track, the chips under a video, the info panel's chips ("In
+the frame", the people, "Related to") and guesses, the face and pet editors' headers, the person page's face and
+pet crop tiles (pet crops carry `source`), the review's guess cards and the selection's people list, which shows
+the person icon for the items `by_you` counts and the bot for the rest ("Tagged or drawn by you on 2 items", and
+"2 by you" in the line under the name when both apply). An older server without `by_you` gets no icon there.
 
 Person boxes (2026-11-08, `viewer/PersonBoxCard.tsx`, section 10 for the server side): the People section of the
 info panel has "Add a person box" next to the pet buttons, on photos and videos, for someone in a helmet, seen from
@@ -1364,7 +1386,8 @@ unassigns its boxes; pruning removes unnamed pets without boxes.
 
 Routes: `GET /api/people?kind=person|pet|all` (default `all`); `PersonOut.kind`, `species`, `animal_count`
 (for a pet `face_count` is 0, `cover_face_id` null and `cover_url` its best crop, user-assigned first);
-`PersonRef.kind`; `GET /api/people/{id}/animals` (`AnimalPage` of `AnimalListItem`, best detection first);
+`PersonRef.kind`; `GET /api/people/{id}/animals` (`AnimalPage` of `AnimalListItem`, best detection first, with
+`source`: 'user' for a box the owner drew);
 `GET /api/people/{id}/items` and the `person` filter of the library and search include animal boxes;
 `ItemDetail.animals: [AnimalOut{id, x, y, w, h, det_score, species, frame_time_s, person, assigned_by, url}]`
 and `ItemDetail.people` lists pets with kind `pet`; `POST /api/animals/assign {animal_ids, person_id |

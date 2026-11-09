@@ -165,6 +165,8 @@ export interface AnimalOut {
   assigned_by: 'auto' | 'user'
   /** Who set the species: the detector (with the zero-shot check) or the owner (section 22). */
   species_source?: 'auto' | 'user'
+  /** 'user' when the owner drew the box (section 22), else found by the detector. Older servers omit it. */
+  source?: 'detector' | 'user'
   url: string
   /** Videos: tracks of one person, or of one look-alike, share a number (section 10). */
   group?: number | null
@@ -232,6 +234,8 @@ export interface AnimalListItem {
   frame_time_s: number | null
   person_id: number | null
   assigned_by: 'auto' | 'user'
+  /** 'user' when the owner drew the box. Older servers omit it. */
+  source?: 'detector' | 'user'
   created_at: string
 }
 export interface AnimalPage {
@@ -310,6 +314,9 @@ export interface ItemPersonOut {
   /** Their tags on the selected items, by relation. */
   tags: number
   related: number
+  /** Selected items where the owner put them (a tag, a box they tagged or drew); the rest came from recognition
+   *  alone. Older servers omit it: then no origin is shown. */
+  by_you?: number
 }
 export interface ItemsPeopleOut {
   /** Selected items found (trashed ones are skipped). */

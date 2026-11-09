@@ -791,8 +791,9 @@ def assign_bodies(body: AssignBodiesIn, conn: sqlite3.Connection = Depends(get_d
 
 
 ANIMAL_SELECT = (
-    "SELECT a.id, a.person_id, a.assigned_by, a.det_score, a.species, a.species_source, a.frame_time_s, a.created_at, "
-    "i.uid AS item_uid, i.kind AS item_kind, i.version AS item_version FROM animals a JOIN items i ON i.id = a.item_id"
+    "SELECT a.id, a.person_id, a.assigned_by, a.source, a.det_score, a.species, a.species_source, a.frame_time_s, "
+    "a.created_at, i.uid AS item_uid, i.kind AS item_kind, i.version AS item_version "
+    "FROM animals a JOIN items i ON i.id = a.item_id"
 )
 _BOX_NAMES = {"faces": ("Face not found", "face_count"), "bodies": ("Body not found", "body_count"),
               "animals": ("Animal box not found", "animal_count")}
@@ -804,7 +805,7 @@ def _animal_item(row: sqlite3.Row) -> AnimalListItem:
         id=row["id"], item_uid=row["item_uid"], item_kind=row["item_kind"],
         thumb_url=thumb_url(row["item_uid"], int(row["item_version"])), url=animal_url(int(row["id"])),
         det_score=row["det_score"], species=row["species"], frame_time_s=row["frame_time_s"],
-        person_id=row["person_id"], assigned_by=row["assigned_by"], created_at=row["created_at"],
+        person_id=row["person_id"], assigned_by=row["assigned_by"], source=row["source"], created_at=row["created_at"],
     )
 
 
@@ -1412,27 +1413,37 @@ def _pet_target(conn: sqlite3.Connection, session: SessionInfo, person_id: int |
 def people_on_items(body: ItemsPeopleIn, conn: sqlite3.Connection = Depends(get_db),
                     session: SessionInfo = Depends(require_user)) -> ItemsPeopleOut:
     """The people and pets on the selected items (section 10): who is on them through faces, bodies, pet
-    boxes and tags, most items first, named before unnamed; and the faces nobody is named for."""
+    boxes and tags, most items first, named before unnamed; and the faces nobody is named for. `by_you`
+    counts the items where the owner put them there (a box they tagged or drew, or a tag), the rest came
+    from recognition alone."""
     item_ids = _selection(conn, session, body.uids)
     stats: dict[int, dict[str, Any]] = {}
 
     def entry(pid: int) -> dict[str, Any]:
-        return stats.setdefault(pid, {"items": set(), "faces": 0, "bodies": 0, "animals": 0, "tags": 0, "related": 0})
+        return stats.setdefault(pid, {"items": set(), "mine": set(), "faces": 0, "bodies": 0, "animals": 0,
+                                      "tags": 0, "related": 0})
 
     unnamed = 0
     for chunk in _chunks(item_ids):
         ph = _ids_sql(chunk)
         for table, key in (("faces", "faces"), ("bodies", "bodies"), ("animals", "animals")):
+            # Faces are never drawn; bodies and pet boxes are when source is 'user'.
+            mine = "assigned_by = 'user'" if table == "faces" else "(assigned_by = 'user' OR source = 'user')"
             for r in conn.execute(
-                f"SELECT person_id, item_id FROM {table} WHERE person_id IS NOT NULL AND item_id IN ({ph})", chunk
+                f"SELECT person_id, item_id, {mine} AS mine FROM {table} "
+                f"WHERE person_id IS NOT NULL AND item_id IN ({ph})", chunk
             ):
                 e = entry(int(r["person_id"]))
                 e[key] += 1
                 e["items"].add(int(r["item_id"]))
+                if r["mine"]:
+                    e["mine"].add(int(r["item_id"]))
+        # Every tag is the owner's: added by hand, or a guess on a faceless body they confirmed.
         for r in conn.execute(f"SELECT person_id, item_id, relation FROM item_tags WHERE item_id IN ({ph})", chunk):
             e = entry(int(r["person_id"]))
             e["related" if r["relation"] == "related" else "tags"] += 1
             e["items"].add(int(r["item_id"]))
+            e["mine"].add(int(r["item_id"]))
         unnamed += int(conn.execute(
             f"SELECT COUNT(*) FROM faces WHERE person_id IS NULL AND item_id IN ({ph})", chunk).fetchone()[0])
     rows: list[sqlite3.Row] = []
@@ -1447,7 +1458,7 @@ def people_on_items(body: ItemsPeopleIn, conn: sqlite3.Connection = Depends(get_
         people.append(ItemPersonOut(
             id=pid, name=r["name"], kind=r["kind"] or "person", species=r["species"] if pet else None,
             cover_url=covers.get(pid), items=len(e["items"]), faces=e["faces"], bodies=e["bodies"],
-            animals=e["animals"], tags=e["tags"], related=e["related"],
+            animals=e["animals"], tags=e["tags"], related=e["related"], by_you=len(e["mine"]),
         ))
     people.sort(key=lambda p: (-p.items, p.name is None, (p.name or "").casefold(), p.id))
     return ItemsPeopleOut(items=len(item_ids), unnamed_faces=unnamed, people=people)

@@ -503,6 +503,7 @@ class AnimalListItem(BaseModel):
     frame_time_s: float | None = None
     person_id: int | None = None
     assigned_by: Literal["auto", "user"] = "auto"
+    source: Literal["detector", "user"] = "detector"  # section 22: 'user' when the owner drew the box
     created_at: str
 
 
@@ -651,7 +652,8 @@ class ItemsPeopleIn(BaseModel):
 
 class ItemPersonOut(BaseModel):
     """A person or pet on the selected items: `items` counts the items they are on in any way (a face, a
-    body, a pet box or a tag of either relation); `tags` and `related` count their tags by relation."""
+    body, a pet box or a tag of either relation); `tags` and `related` count their tags by relation;
+    `by_you` counts the items where the owner put them (a box they tagged or drew, or a tag)."""
     id: int
     name: str | None = None
     kind: PersonKind = "person"
@@ -663,6 +665,7 @@ class ItemPersonOut(BaseModel):
     animals: int = 0
     tags: int = 0
     related: int = 0
+    by_you: int = 0
 
 
 class ItemsPeopleOut(BaseModel):
