@@ -59,7 +59,8 @@ class Settings:
     # auth
     rp_id: str | None          # WebAuthn relying party id (host); derived from the request when None
     rp_name: str
-    origin: str | None         # expected WebAuthn origin (scheme://host[:port]); derived when None
+    origin: str | None         # expected WebAuthn origin(s), comma-separated (scheme://host[:port]); the first is the
+                               # server's own address (app.auth.passkeys.home_origin); derived from the request when None
     session_days: int
     vault_unlock_min: int
     trash_days: int

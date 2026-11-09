@@ -11,7 +11,13 @@ Contract:
   listing the stored credentials.
 - verify_assertion(conn, request, challenge_id, credential) -> bool.
 - rp_id(request), expected_origins(request): from settings when set, else derived from the request
-  (Host without port; scheme from X-Forwarded-Proto, then the URL scheme).
+  (Host without port; scheme from X-Forwarded-Proto, then the URL scheme). ORIGIN may list several origins,
+  comma-separated (the dev server's {origins}: its own URL, then its custom domains): a ceremony from any of them
+  verifies, as WebAuthn related origins allow (the RP ID stays the server's own host, so stored passkeys keep
+  working; the platform publishes /.well-known/webauthn on it listing the custom domains).
+- configured_origins() -> list[str] (ORIGIN split, empty when unset); home_origin(request) -> str: the first
+  expected origin, the server's own address, where one canonical URL is needed (the frontend links there when the
+  browser cannot use related origins).
 
 Challenges live in the `challenges` table under a random id with a 5-minute expiry. A challenge is
 claimed (used=1) before the credential is even parsed, so every challenge serves one attempt only,
@@ -99,10 +105,22 @@ def rp_id(request: Request) -> str:
     return _strip_port(_host_header(request)).lower()
 
 
+def configured_origins() -> list[str]:
+    """ORIGIN as a list: comma-separated, trimmed, lowercased (browsers send origins lowercase), without a trailing
+    slash, duplicates dropped (order kept)."""
+    if not settings.origin:
+        return []
+    return list(dict.fromkeys(o.strip().rstrip("/").lower() for o in settings.origin.split(",") if o.strip()))
+
+
 def expected_origins(request: Request) -> list[str]:
-    if settings.origin:
-        return [o.strip().rstrip("/") for o in settings.origin.split(",") if o.strip()]
-    return [f"{_scheme(request)}://{_host_header(request).lower()}"]
+    """Every origin a ceremony may come from: ORIGIN's list, else the request's own origin."""
+    return configured_origins() or [f"{_scheme(request)}://{_host_header(request).lower()}"]
+
+
+def home_origin(request: Request) -> str:
+    """The server's own address (the first expected origin), where one canonical URL is needed."""
+    return expected_origins(request)[0]
 
 
 # ----------------------------------------------------------------- challenges

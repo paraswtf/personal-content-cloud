@@ -11,6 +11,7 @@ import type {
   AssignFacesIn,
   AssignOut,
   AuthState,
+  RelyingParty,
   BulkIn,
   BulkOut,
   Category,
@@ -366,6 +367,7 @@ export const api = {
 
   auth: {
     state: () => get<AuthState>('/api/auth/state'),
+    rp: () => get<RelyingParty>('/api/auth/rp'),
     setup: (username: string, password: string) => post<AuthState>('/api/auth/setup', { username, password }),
     login: (username: string, password: string) => post<AuthState>('/api/auth/login', { username, password }),
     logout: () => post<AuthState>('/api/auth/logout'),

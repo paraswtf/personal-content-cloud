@@ -4,6 +4,9 @@ Contract: `router` is a plain APIRouter without a prefix; main.py mounts it with
 `app.include_router(auth.router, prefix="/api/auth")`.
 
 - GET state needs no login (optional_user); setup_required until the account exists.
+- GET rp needs no login: {rp_id, home_url}, where the passkeys belong (the RP ID and the server's own address, the
+  first of ORIGIN's origins); the site shows a link there when it runs on a custom domain in a browser without
+  WebAuthn related origins.
 - POST setup, login, passkeys/login/options, passkeys/login/verify need no session but do need
   the CSRF header. Every other route needs require_user (which also checks CSRF on writes).
 - Wrong credentials answer 401 `invalid_credentials`; too many failures 429 `too_many_attempts`;
@@ -29,6 +32,7 @@ from app.build_id import API_BUILD
 from app.config import settings
 from app.schemas import (
     AuthState,
+    RelyingPartyOut,
     ChallengeOut,
     DeviceCreated,
     DeviceIn,
@@ -96,6 +100,12 @@ def _passkey_out(row: sqlite3.Row) -> PasskeyOut:
 @router.get("/state", response_model=AuthState)
 def state(session: SessionInfo | None = Depends(optional_user), conn: sqlite3.Connection = Depends(get_db)):
     return _state(conn, session)
+
+
+@router.get("/rp", response_model=RelyingPartyOut)
+def relying_party(request: Request) -> RelyingPartyOut:
+    """Where the passkeys belong (section 4). Public: the same facts the platform's /.well-known/webauthn shows."""
+    return RelyingPartyOut(rp_id=passkeys.rp_id(request), home_url=passkeys.home_origin(request))
 
 
 @router.post("/setup", response_model=AuthState, dependencies=[Depends(check_csrf)])

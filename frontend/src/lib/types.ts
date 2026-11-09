@@ -51,6 +51,11 @@ export interface AuthState {
   /** The server's API build id; the shell compares it with __API_BUILD__ (older servers omit it). */
   api_build?: string
 }
+/** GET /api/auth/rp: where passkeys belong. `home_url` is the server's own address (the first of ORIGIN's origins). */
+export interface RelyingParty {
+  rp_id: string
+  home_url: string
+}
 export interface SessionOut {
   id: number
   created_at: string

@@ -4,6 +4,9 @@
 // vault is unlocked from `vault_until`, re-evaluated every 30 s so the UI locks itself when the window
 // ends. The passkey helpers run the WebAuthn ceremonies with @simplewebauthn/browser against the
 // options the server sends, passing the server's `challenge_id` back with the credential.
+// usePasskeyPlace() says whether passkeys can work on this address: they belong to the server's own
+// host (the RP ID), and on a custom domain the browser can use them only through WebAuthn related
+// origins, which Firefox does not support. Where they cannot, the screens link to the server's own address.
 import { useCallback, useEffect, useState } from 'react'
 import { useQuery, useQueryClient, type QueryClient } from '@tanstack/react-query'
 import {
@@ -20,6 +23,8 @@ import type { AuthState, PasskeyOut } from './types'
 export const AUTH_KEY = ['auth', 'state'] as const
 export const PASSKEYS_KEY = ['auth', 'passkeys'] as const
 export const SESSIONS_KEY = ['auth', 'sessions'] as const
+/** Public: where passkeys work (usePasskeyPlace). Kept across logouts like the auth state. */
+export const PASSKEY_PLACE_KEY = ['auth', 'passkey-place'] as const
 
 const VAULT_TICK_MS = 30_000
 
@@ -42,9 +47,13 @@ export function isVaultOpen(state: AuthState | null | undefined, now = Date.now(
   return Number.isFinite(t) && t > now
 }
 
-/** Drop every cached query except the auth state (after logout or when the session ends). */
+const PUBLIC_KEYS: readonly (readonly string[])[] = [AUTH_KEY, PASSKEY_PLACE_KEY]
+
+/** Drop every cached query except the public auth ones (after logout or when the session ends). */
 export function clearPrivateCache(qc: QueryClient): void {
-  qc.removeQueries({ predicate: (q) => !(q.queryKey[0] === AUTH_KEY[0] && q.queryKey[1] === AUTH_KEY[1]) })
+  qc.removeQueries({
+    predicate: (q) => !PUBLIC_KEYS.some((k) => q.queryKey[0] === k[0] && q.queryKey[1] === k[1]),
+  })
 }
 
 export interface UseAuth {
@@ -114,6 +123,92 @@ export function passkeysSupported(): boolean {
   } catch {
     return false
   }
+}
+
+/** The server's own address, where passkeys always work. */
+export interface HomeAddress {
+  /** scheme://host[:port] */
+  origin: string
+  /** host[:port], for display */
+  host: string
+}
+
+export type PasskeyPlace =
+  /** No WebAuthn here at all (an old browser, or plain http). */
+  | { kind: 'unsupported' }
+  /** Still asking the server and the browser; keep the passkey button disabled meanwhile. */
+  | { kind: 'checking' }
+  | { kind: 'here' }
+  /** This address cannot use the passkeys (a custom domain in a browser without related origins). */
+  | { kind: 'elsewhere'; home: HomeAddress }
+
+/** True when a page on `hostname` may use passkeys made for `rpId` directly: the RP ID itself or a subdomain of it. */
+export function onRelyingParty(hostname: string, rpId: string): boolean {
+  const h = hostname.toLowerCase().replace(/\.$/, '')
+  const r = rpId.toLowerCase().replace(/\.$/, '')
+  return h === r || h.endsWith(`.${r}`)
+}
+
+type ClientCapabilities = Record<string, boolean | undefined>
+const CAPABILITIES_WAIT_MS = 3000
+
+/**
+ * Whether the browser reports WebAuthn related origins in PublicKeyCredential.getClientCapabilities(). A browser
+ * without the method, one that throws, or one that does not answer within a few seconds does not.
+ */
+export async function relatedOriginsSupported(): Promise<boolean> {
+  try {
+    const pkc = window.PublicKeyCredential as unknown as
+      | { getClientCapabilities?: () => Promise<ClientCapabilities> }
+      | undefined
+    if (typeof pkc?.getClientCapabilities !== 'function') return false
+    const caps = await Promise.race([
+      pkc.getClientCapabilities(),
+      new Promise<null>((resolve) => window.setTimeout(() => resolve(null), CAPABILITIES_WAIT_MS)),
+    ])
+    return caps?.relatedOrigins === true
+  } catch {
+    return false
+  }
+}
+
+function homeAddress(url: string): HomeAddress | null {
+  try {
+    const u = new URL(url)
+    return { origin: u.origin, host: u.host }
+  } catch {
+    return null
+  }
+}
+
+/** The server's own address when passkeys cannot work on this one, else null. */
+async function findPasskeyHome(): Promise<HomeAddress | null> {
+  const rp = await api.auth.rp()
+  const here = window.location
+  if (onRelyingParty(here.hostname, rp.rp_id)) return null
+  const home = homeAddress(rp.home_url)
+  // nowhere better to send the visitor: leave the passkey button as it was
+  if (!home || home.host === here.host) return null
+  return (await relatedOriginsSupported()) ? null : home
+}
+
+/**
+ * Where passkeys work, for the screens that offer one (sign in, setup, vault unlock, adding a passkey). When the
+ * server cannot be asked (an older server), the answer is 'here' and the screens behave as before.
+ */
+export function usePasskeyPlace(): PasskeyPlace {
+  const supported = passkeysSupported()
+  const q = useQuery({
+    queryKey: PASSKEY_PLACE_KEY,
+    queryFn: findPasskeyHome,
+    enabled: supported,
+    staleTime: Infinity,
+    gcTime: Infinity,
+    retry: 1,
+  })
+  if (!supported) return { kind: 'unsupported' }
+  if (q.isPending) return { kind: 'checking' }
+  return q.data ? { kind: 'elsewhere', home: q.data } : { kind: 'here' }
 }
 
 /**

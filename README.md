@@ -123,7 +123,7 @@ Environment variables (all optional):
 | `MODELS_DIR` | `./models` | Downloaded models. |
 | `PORT`, `HOST` | `41010`, `127.0.0.1` | Where the server listens. |
 | `SITE_TITLE` | `Personal Content Cloud` | |
-| `RP_ID`, `ORIGIN` | derived from the request | WebAuthn relying party (set them when behind a proxy). |
+| `RP_ID`, `ORIGIN` | derived from the request | WebAuthn relying party (set them when behind a proxy). `ORIGIN` may list several origins, comma-separated, so passkeys work on custom domains too; the first is the server's own address. |
 | `SESSION_DAYS` | `30` | Sliding session length. |
 | `VAULT_UNLOCK_MIN` | `15` | How long the vault stays open. |
 | `TRASH_DAYS` | `30` | Deleted items wait this long before they are purged. |

@@ -1,12 +1,14 @@
 // Vault unlock form: the password, or a passkey when the account has one. The vault page shows it full
 // size while locked; Settings shows it compact inside a dialog when a passkey change needs the vault
-// open. `onUnlocked` gets the AuthState the unlock endpoint returned.
+// open. `onUnlocked` gets the AuthState the unlock endpoint returned. On a custom domain where this browser
+// cannot use the passkeys, a note links to the server's own address instead of the passkey button.
 import { useId, useState, type FormEvent } from 'react'
 import { useMutation } from '@tanstack/react-query'
 import { Fingerprint, Lock, LockKeyhole } from 'lucide-react'
 import { api, ApiError } from '../../lib/api'
 import type { AuthState } from '../../lib/types'
-import { startPasskeyAssertion } from '../../lib/auth'
+import { startPasskeyAssertion, usePasskeyPlace } from '../../lib/auth'
+import PasskeyElsewhere from '../shell/PasskeyElsewhere'
 import { errorMessage } from '../admin/adminHooks'
 import { Button } from '../ui'
 
@@ -23,6 +25,7 @@ export default function UnlockForm({
   description?: string
 }) {
   const passwordId = useId()
+  const place = usePasskeyPlace()
   const [password, setPassword] = useState('')
   const [error, setError] = useState<string | null>(null)
   const withPassword = useMutation({
@@ -79,13 +82,16 @@ export default function UnlockForm({
         <Lock className="size-4" aria-hidden />
         Unlock
       </Button>
-      {hasPasskeys && (
+      {hasPasskeys && place.kind === 'elsewhere' && (
+        <PasskeyElsewhere home={place.home} lead="Use your password, or a passkey at" />
+      )}
+      {hasPasskeys && place.kind !== 'elsewhere' && (
         <Button
           type="button"
           size="lg"
           variant="secondary"
           loading={withPasskey.isPending}
-          disabled={busy}
+          disabled={busy || place.kind === 'checking'}
           onClick={() => {
             setError(null)
             withPasskey.mutate()

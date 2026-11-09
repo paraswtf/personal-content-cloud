@@ -165,7 +165,17 @@ stored (companion pictures, small previews that repeat the large one) once per `
   login with a discoverable credential (`POST /api/auth/passkeys/login/options` returns options and a
   `challenge_id`; the challenge is stored in `challenges` with a 5-minute expiry; `verify` creates the
   session). `RP_ID` and `ORIGIN` come from env; when unset they are derived from the request
-  (`Host` without port; scheme from `X-Forwarded-Proto`). The dev server manifest sets them from `{host}`.
+  (`Host` without port; scheme from `X-Forwarded-Proto`). `ORIGIN` may list several origins, comma-separated:
+  a ceremony from any of them verifies (`passkeys.expected_origins`), and the first is the server's own
+  address (`passkeys.home_origin`). The dev server manifest sets `RP_ID` from `{host}` and `ORIGIN` from
+  `{origins}` (its own URL, then its custom domains). The RP ID stays the review host, so existing passkeys
+  keep working, and on a custom domain the browser uses them through WebAuthn related origins: the platform
+  publishes `https://{host}/.well-known/webauthn` listing those domains, and the browser checks it before the
+  ceremony. `GET /api/auth/rp` (no login) returns `{rp_id, home_url}`. On an address that is neither the RP ID
+  nor under it, the sign-in, setup, vault unlock and add-passkey screens ask
+  `PublicKeyCredential.getClientCapabilities()`; when the browser does not report `relatedOrigins`, they show
+  a note linking to the same page at `home_url` instead of a passkey button that would fail
+  (`usePasskeyPlace`, `PasskeyElsewhere`).
   Registering and removing a passkey need an unlocked vault (403 `vault_locked`): the session must have
   re-entered the password or used a passkey within `VAULT_UNLOCK_MIN`, so a stolen or left-open session cannot
   enrol its own authenticator. `passkeys/login/options` has its own limit of 30 calls per minute per IP (429
@@ -1291,7 +1301,7 @@ menu, and in the More sheet on phones, opens a dialog listing every change with 
 | `MODELS_DIR` | `<repo>/models` | all models |
 | `PORT`, `HOST` | `41000`, `127.0.0.1` | listen address |
 | `SITE_TITLE` | `Personal Content Cloud` | |
-| `RP_ID`, `ORIGIN`, `RP_NAME` | derived from the request / site title | WebAuthn relying party |
+| `RP_ID`, `ORIGIN`, `RP_NAME` | derived from the request / site title | WebAuthn relying party; `ORIGIN` may be a comma-separated list, the first being the server's own address (section 4) |
 | `SESSION_DAYS` | 30 | sliding session length |
 | `VAULT_UNLOCK_MIN` | 15 | NSFW unlock window |
 | `TRASH_DAYS` | 30 | purge after |

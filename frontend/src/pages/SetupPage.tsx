@@ -1,12 +1,15 @@
 // /setup: first run. Creates the single account (username 1..64, password 10..200 characters) and
 // goes to the library. Once an account exists the page sends the visitor to /login (or / when signed in).
+// On a custom domain where this browser cannot use passkeys, the passkey line becomes a link to the
+// server's own address.
 import { useId, useState, type FormEvent } from 'react'
 import { Navigate, useNavigate } from 'react-router'
 import { ApiError, api } from '../lib/api'
-import { authErrorMessage, useAuth } from '../lib/auth'
+import { authErrorMessage, usePasskeyPlace, useAuth } from '../lib/auth'
 import { Button, PageSpinner } from '../components/ui'
 import { inputClass } from '../components/admin/fields'
 import { AuthCard, Field, FormError, PasswordInput, StrengthMeter } from '../components/shell/AuthCard'
+import PasskeyElsewhere from '../components/shell/PasskeyElsewhere'
 import { usePageTitle } from '../components/shell/title'
 
 export const USERNAME_MAX = 64
@@ -24,6 +27,7 @@ export default function SetupPage() {
   const [error, setError] = useState<string | null>(null)
   const [touched, setTouched] = useState(false)
   const ids = { user: useId(), pw: useId(), pw2: useId() }
+  const place = usePasskeyPlace()
 
   if (loading) return <PageSpinner />
   if (state && !state.setup_required) return <Navigate to={state.authenticated ? '/' : '/login'} replace />
@@ -108,9 +112,13 @@ export default function SetupPage() {
         <Button type="submit" size="lg" loading={busy} className="w-full">
           Create account
         </Button>
-        <p className="text-xs text-ink-soft">
-          After this you can add a passkey in Settings, so this device signs in with a fingerprint, face or screen lock.
-        </p>
+        {place.kind === 'elsewhere' ? (
+          <PasskeyElsewhere home={place.home} lead="To add one after setup, sign in at" />
+        ) : (
+          <p className="text-xs text-ink-soft">
+            After this you can add a passkey in Settings, so this device signs in with a fingerprint, face or screen lock.
+          </p>
+        )}
       </form>
     </AuthCard>
   )

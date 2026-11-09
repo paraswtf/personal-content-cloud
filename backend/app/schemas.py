@@ -25,6 +25,14 @@ class AuthState(BaseModel):
     api_build: str = ""
 
 
+class RelyingPartyOut(BaseModel):
+    """Where the passkeys belong (section 4): the RP ID (the server's own host) and the server's own address. The site
+    compares its location with them: on a custom domain a browser without WebAuthn related origins cannot use them."""
+
+    rp_id: str
+    home_url: str
+
+
 class SetupIn(BaseModel):
     username: str = Field(min_length=1, max_length=64)
     password: str = Field(min_length=10, max_length=200)

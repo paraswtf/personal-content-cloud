@@ -10,7 +10,7 @@
         "PORT": "{port}",
         "HOST": "127.0.0.1",
         "RP_ID": "{host}",
-        "ORIGIN": "{url}"
+        "ORIGIN": "{origins}"
       },
       "description": "Personal Content Cloud: site, API and background workers (analysis, OCR, previews)"
     }

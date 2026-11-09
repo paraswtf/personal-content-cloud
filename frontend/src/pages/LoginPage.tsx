@@ -1,15 +1,17 @@
 // /login: passkey first (when the browser can use one), password below. `next` brings the user back
 // to the page that sent them here. 401 shows a plain "wrong details" message, 429 the rate limit.
+// On a custom domain where this browser cannot use the passkeys, a note links to the server's own address.
 import { useEffect, useId, useState, type FormEvent } from 'react'
 import { Navigate, useNavigate, useSearchParams } from 'react-router'
 import { useQueryClient } from '@tanstack/react-query'
 import { Fingerprint, LogIn } from 'lucide-react'
 import { ApiError, api } from '../lib/api'
-import { authErrorMessage, clearPrivateCache, loginWithPasskey, passkeysSupported, useAuth } from '../lib/auth'
+import { authErrorMessage, clearPrivateCache, loginWithPasskey, usePasskeyPlace, useAuth } from '../lib/auth'
 import type { AuthState } from '../lib/types'
 import { Button, PageSpinner } from '../components/ui'
 import { inputClass } from '../components/admin/fields'
 import { AuthCard, Field, FormError, PasswordInput } from '../components/shell/AuthCard'
+import PasskeyElsewhere from '../components/shell/PasskeyElsewhere'
 import { safeNext } from '../components/shell/AppShell'
 import { usePageTitle } from '../components/shell/title'
 
@@ -33,7 +35,10 @@ export default function LoginPage() {
   const [busy, setBusy] = useState<'password' | 'passkey' | null>(null)
   const [error, setError] = useState<string | null>(null)
   const ids = { user: useId(), pw: useId() }
-  const canPasskey = passkeysSupported()
+  const place = usePasskeyPlace()
+  const canPasskey = place.kind !== 'unsupported'
+  // a passkey button that can work (or may, while the check runs)
+  const passkeyHere = place.kind === 'here' || place.kind === 'checking'
 
   // data cached by an earlier session must not leak into the next one
   useEffect(() => {
@@ -92,14 +97,17 @@ export default function LoginPage() {
   return (
     <AuthCard title="Sign in" subtitle={state?.site_title || 'Personal Content Cloud'}>
       <div className="flex flex-col gap-5">
-        {canPasskey && (
+        {place.kind === 'elsewhere' && (
+          <PasskeyElsewhere home={place.home} lead="Sign in with a passkey at" />
+        )}
+        {passkeyHere && (
           <div className="flex flex-col gap-2">
             <Button
               type="button"
               size="lg"
               variant={hasPasskeys ? 'primary' : 'secondary'}
               loading={busy === 'passkey'}
-              disabled={busy === 'password'}
+              disabled={busy === 'password' || place.kind === 'checking'}
               onClick={() => void passkey()}
               className="w-full"
             >
@@ -148,7 +156,7 @@ export default function LoginPage() {
           <Button
             type="submit"
             size="lg"
-            variant={canPasskey && hasPasskeys ? 'secondary' : 'primary'}
+            variant={passkeyHere && hasPasskeys ? 'secondary' : 'primary'}
             loading={busy === 'password'}
             disabled={!username.trim() || !password || busy === 'passkey'}
             className="w-full"

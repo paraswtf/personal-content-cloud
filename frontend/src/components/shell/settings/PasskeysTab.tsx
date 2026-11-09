@@ -2,17 +2,29 @@
 // fingerprint, face or screen lock; the password keeps working as a fallback. Adding or removing a
 // passkey needs the vault open (the server answers 403 vault_locked otherwise): the tab then asks for
 // the password or a passkey in a dialog and runs the same action again once.
+// On a custom domain where this browser cannot use passkeys, a note links to the server's own address
+// instead of the add form.
 import { useId, useState, type FormEvent } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Fingerprint, KeyRound, Pencil, Plus, Trash2 } from 'lucide-react'
 import { api } from '../../../lib/api'
-import { AUTH_KEY, PASSKEYS_KEY, authErrorMessage, isVaultLocked, passkeysSupported, registerPasskey, useAuth } from '../../../lib/auth'
+import {
+  AUTH_KEY,
+  PASSKEYS_KEY,
+  authErrorMessage,
+  isVaultLocked,
+  passkeysSupported,
+  registerPasskey,
+  useAuth,
+  usePasskeyPlace,
+} from '../../../lib/auth'
 import { formatDate } from '../../../lib/format'
 import type { AuthState, PasskeyOut } from '../../../lib/types'
 import { Badge, Button, ConfirmModal, ErrorState, Modal, Spinner } from '../../ui'
 import { inputClass } from '../../admin/fields'
 import { useToast } from '../../Toast'
 import { FormError } from '../AuthCard'
+import PasskeyElsewhere from '../PasskeyElsewhere'
 import UnlockForm from '../../vault/UnlockForm'
 import { Section, describeAgent, errorText } from './common'
 
@@ -30,6 +42,7 @@ export default function PasskeysTab() {
   const toast = useToast()
   const { setState } = useAuth()
   const supported = passkeysSupported()
+  const place = usePasskeyPlace()
   const q = useQuery({ queryKey: PASSKEYS_KEY, queryFn: api.auth.passkeys })
   const nameId = useId()
   const [name, setName] = useState(defaultName)
@@ -131,7 +144,11 @@ export default function PasskeysTab() {
         title="Add a passkey"
         description="A passkey lets this device sign you in with its fingerprint, face or screen lock, without typing the password. It also unlocks the vault. Adding or removing a passkey asks for the password or a passkey again."
       >
-        {supported ? (
+        {place.kind === 'elsewhere' ? (
+          <div className="max-w-lg">
+            <PasskeyElsewhere home={place.home} lead="To add one, sign in at" />
+          </div>
+        ) : supported ? (
           <form onSubmit={add} className="flex max-w-lg flex-col gap-3">
             <label htmlFor={nameId} className="text-sm font-medium">
               Name
@@ -145,7 +162,7 @@ export default function PasskeysTab() {
                 placeholder="For example, My phone"
                 className={inputClass}
               />
-              <Button type="submit" loading={adding} disabled={!name.trim()} className="shrink-0">
+              <Button type="submit" loading={adding} disabled={!name.trim() || place.kind === 'checking'} className="shrink-0">
                 {!adding && <Plus className="size-4" aria-hidden />}
                 Add passkey
               </Button>
