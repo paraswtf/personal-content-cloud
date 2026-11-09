@@ -38,6 +38,8 @@ interface Props {
   guessPendingKey: string | null
   onConfirmGuess: (target: BoxTarget) => void
   onRejectGuess: (target: BoxTarget) => void
+  /** "Someone else" on a guess: the box's editor at its name field. */
+  onOtherGuess?: (target: BoxTarget, anchor: HTMLElement) => void
   /** Use this image instead of the preview (a document page). */
   src?: string
   /** Live Photo clip to play over the still, muted and looping; null or undefined shows the still. */
@@ -120,6 +122,7 @@ export default function PhotoStage({
   guessPendingKey,
   onConfirmGuess,
   onRejectGuess,
+  onOtherGuess,
   src,
   liveSrc,
   onLiveStop,
@@ -348,6 +351,7 @@ export default function PhotoStage({
                     busy={guessPendingKey === key}
                     onConfirm={() => onConfirmGuess(t)}
                     onReject={() => onRejectGuess(t)}
+                    onOther={onOtherGuess ? (el) => onOtherGuess(t, el) : undefined}
                   />
                 ) : (
                   <span

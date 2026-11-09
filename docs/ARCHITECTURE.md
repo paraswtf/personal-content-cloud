@@ -1035,6 +1035,16 @@ the items about them, section 10);
 marked `by_guess` so it still shows as the system's find, section 14; any later hand assignment clears the mark; a
 re-analysis carries it; confirmations from before the mark existed are marked once at start from the guess
 learner's log, kv `guess_marks_v1`); `POST guesses/reject {faces, bodies}`;
+`POST guesses/correct {faces, bodies, person_id | new_person_name}` -> `AssignOut` ("Someone else", 2026-11-09: in one
+action, so one undo, the guess is learned as wrong exactly as `guesses/reject` does (a `guess` learning event with
+label 0 for the guessed person, and a `guess_rejections` row so that guess is not made again) and the box goes to the
+person named as `faces/assign` and `bodies/assign` do, the owner's own choice with `by_guess` 0; a box guessed as that
+very person is a yes, as `guesses/confirm`; a box with no open guess is simply assigned. Before this the owner had to
+say yes then change it, which taught the guess learner a wrong yes, or no then tag it, two steps. The guess cards
+(person Guesses tab, review page) have "Someone else" with a name field; the viewer's guess chips have a third
+button that opens the box editor at its name field (an editor already open for that box stays open and moves to
+the field); in the box editor a name picked for boxes holding an open guess (the box, or any track of a whole-video
+group) goes through this route instead of a plain assignment);
 `GET suggestions`; `POST suggestions/dismiss {a, b}`; `POST items/{uid}/tags {person_id | new_person_name, kind?,
 species?, relation?}` (a person or a pet: `kind 'pet'` with `species` names a new pet, 400 `species_needed`
 without one, section 22; `relation` `in` | `related`, default `in`, the other relation for someone already tagged

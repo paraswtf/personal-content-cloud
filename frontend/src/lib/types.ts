@@ -671,6 +671,11 @@ export interface GuessIdsIn {
   faces?: number[]
   bodies?: number[]
 }
+/** "Someone else" on a guess (section 10): the guess learned as wrong, the boxes given to this person. */
+export interface GuessCorrectIn extends GuessIdsIn {
+  person_id?: number | null
+  new_person_name?: string | null
+}
 export interface DiskStats {
   free_bytes: number
   total_bytes: number

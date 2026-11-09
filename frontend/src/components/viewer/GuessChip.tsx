@@ -1,7 +1,9 @@
 // "Alice?" with confirm and reject buttons: a person guess waiting for an answer, with the bot of a
 // suggestion made by the system (section 10). In the details the name is a button that shows the box (section 14).
+// "Someone else" (onOther) opens the box's editor at its name field: the guess is learned as wrong and the box goes
+// to the person picked, in one step.
 import clsx from 'clsx'
-import { Check, Loader2, X } from 'lucide-react'
+import { Check, Loader2, UserRoundPen, X } from 'lucide-react'
 import type { GuessOut } from '../../lib/types'
 import { formatPercent, personName } from '../../lib/format'
 import OriginIcon from '../people/OriginIcon'
@@ -16,11 +18,14 @@ export default function GuessChip({
   compact = false,
   onShow,
   showLabel,
+  onOther,
 }: {
   guess: GuessOut
   busy: boolean
   onConfirm: () => void
   onReject: () => void
+  /** "Someone else": the box's editor, at its name field (anchored to the button). */
+  onOther?: (anchor: HTMLElement) => void
   className?: string
   /** Inside a picture: smaller, buttons keep a 40 px hit area through an invisible margin. */
   compact?: boolean
@@ -71,6 +76,18 @@ export default function GuessChip({
           <button type="button" onClick={onReject} className={clsx(btn, 'hover:bg-black/10')} aria-label={`No, this is not ${name}`}>
             <X className="size-4" aria-hidden />
           </button>
+          {onOther && (
+            <button
+              type="button"
+              onClick={(e) => onOther(e.currentTarget)}
+              className={clsx(btn, 'hover:bg-black/10')}
+              aria-label={`Someone else, not ${name}`}
+              title="Someone else"
+              data-editor-opener=""
+            >
+              <UserRoundPen className="size-4" aria-hidden />
+            </button>
+          )}
         </>
       )}
     </span>

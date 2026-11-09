@@ -411,6 +411,13 @@ class GuessIdsIn(BaseModel):
     bodies: list[int] = []
 
 
+class GuessCorrectIn(GuessIdsIn):
+    """"Someone else" on a guess (section 10): the boxes and who they really are, an existing person or a new name."""
+
+    person_id: int | None = None
+    new_person_name: str | None = Field(default=None, max_length=120)
+
+
 class DiskStats(BaseModel):
     free_bytes: int
     total_bytes: int

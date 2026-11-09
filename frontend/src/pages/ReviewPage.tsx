@@ -375,6 +375,7 @@ function GuessesTab() {
                 busy={review.busyFor(g)}
                 onConfirm={() => review.confirm([g])}
                 onReject={() => review.reject([g])}
+                onCorrect={(choice) => review.correct([g], choice)}
                 onOpenItem={(uid, t) => viewer.open(uid, t)}
               />
             </li>

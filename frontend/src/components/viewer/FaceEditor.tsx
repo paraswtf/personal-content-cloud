@@ -25,6 +25,8 @@ interface Props {
   onDone: (message: string) => void
   /** Move or resize the box on the picture (section 10). */
   onAdjust?: () => void
+  /** Opened by "Someone else" on a guess: the name field takes the focus. */
+  pickFirst?: boolean
 }
 
 export const WIDTH = 320
@@ -42,7 +44,7 @@ export function placement(anchor: HTMLElement | null): CSSProperties {
   return { left: side, top: Math.max(8, (vh - need) / 2), width: WIDTH }
 }
 
-export default function FaceEditor({ uid, target, anchor, onClose, onDone, tracks, onAdjust }: Props) {
+export default function FaceEditor({ uid, target, anchor, onClose, onDone, tracks, onAdjust, pickFirst = false }: Props) {
   const ref = useRef<HTMLDivElement>(null)
   const [style, setStyle] = useState<CSSProperties>(() => placement(anchor))
   const invalidate = useInvalidateItem(uid)
@@ -59,6 +61,8 @@ export default function FaceEditor({ uid, target, anchor, onClose, onDone, track
     const onDown = (e: MouseEvent | TouchEvent) => {
       const t = e.target as Node
       if (ref.current?.contains(t) || anchor?.contains(t)) return
+      // a control that opens this editor itself ("Someone else" on a guess): it re-anchors the editor, not close it
+      if (t instanceof Element && t.closest('[data-editor-opener]')) return
       onClose()
     }
     document.addEventListener('mousedown', onDown)
@@ -116,6 +120,14 @@ export default function FaceEditor({ uid, target, anchor, onClose, onDone, track
       onDone(merged ? `Merged into ${personName(person)}` : `Named ${personName(person)}${groupFaces > 1 ? ` (${formatCount(groupFaces, 'face')})` : ''}`)
     },
   })
+  // "Someone else" on a guess (section 10): learned as wrong and given to the person picked, in one step
+  const correct = useMutation({
+    mutationFn: (choice: PersonChoice) => api.people.correctGuesses({ faces: faceIds, bodies: bodyIds, ...choiceBody(choice) }),
+    onSuccess: (res) => {
+      invalidate()
+      onDone((res.person ? `Tagged as ${personName(res.person)}` : 'Saved') + trackTail)
+    },
+  })
   const guessAct = useMutation({
     mutationFn: (action: 'confirm' | 'reject') => {
       const body = { faces: faceIds, bodies: bodyIds }
@@ -142,9 +154,12 @@ export default function FaceEditor({ uid, target, anchor, onClose, onDone, track
       onDone(`Removed. It will not be shown as a ${noun} again.${more}${trackTail}`)
     },
   })
-  const busy = assign.isPending || remove.isPending || nameGroup.isPending || guessAct.isPending
-  const error = assign.error ?? remove.error ?? nameGroup.error ?? guessAct.error
+  const busy = assign.isPending || remove.isPending || nameGroup.isPending || guessAct.isPending || correct.isPending
+  const error = assign.error ?? remove.error ?? nameGroup.error ?? guessAct.error ?? correct.error
   const guess = !box.person ? box.guess : null
+  // any open guess among the boxes edited (a whole-video group may hold guessed and plain tracks): a pick corrects
+  // those guesses (learned as wrong) instead of overwriting them
+  const anyGuess = scopeTargets.some((t) => !t.box.person && !!t.box.guess)
   // who put them there (section 10): for the whole group of tracks, the owner when any track is theirs
   const origin = scopeTargets.length > 1 ? mergeOrigins(scopeTargets.map((t) => boxOrigin(t.box))) : boxOrigin(box)
 
@@ -210,12 +225,22 @@ export default function FaceEditor({ uid, target, anchor, onClose, onDone, track
 
       <div className="mt-3">
         <PersonPicker
-          autoFocus={!sheet && !guess}
-          placeholder={groupScope ? 'Type their name, or pick someone' : box.person ? 'Move to someone else' : 'Search or type a new name'}
-          excludeIds={box.person ? [box.person.id] : undefined}
+          key={pickFirst ? 'pick' : 'plain'}
+          autoFocus={pickFirst || (!sheet && !guess)}
+          placeholder={
+            groupScope
+              ? 'Type their name, or pick someone'
+              : box.person
+                ? 'Move to someone else'
+                : guess
+                  ? `Not ${personName(guess.person)}? Type who it is`
+                  : 'Search or type a new name'
+          }
+          excludeIds={box.person ? [box.person.id] : guess ? [guess.person.id] : undefined}
           onPick={(choice) => {
             if (busy) return
             if (groupScope) nameGroup.mutate(choice)
+            else if (anyGuess) correct.mutate(choice) // the guesses are learned as wrong, not silently overwritten
             else assign.mutate(choice)
           }}
         />

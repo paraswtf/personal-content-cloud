@@ -24,6 +24,7 @@ import type {
   DocumentUpdate,
   DupGroupPage,
   FacePage,
+  GuessCorrectIn,
   GuessIdsIn,
   GuessPage,
   LearningApplyOut,
@@ -485,6 +486,8 @@ export const api = {
     moveBody: (id: number, box: BoxIn) => put<BodyOut>(`/api/bodies/${id}/box`, box),
     confirmGuesses: (body: GuessIdsIn) => post<BulkOut>('/api/guesses/confirm', body),
     rejectGuesses: (body: GuessIdsIn) => post<BulkOut>('/api/guesses/reject', body),
+    /** "Someone else": the guess learned as wrong and the boxes given to the right person, one action. */
+    correctGuesses: (body: GuessCorrectIn) => post<AssignOut>('/api/guesses/correct', body),
     suggestions: (limit = 30) => get<SuggestionList>(`/api/suggestions${qs({ limit })}`),
     childhood: (id: number) => get<ChildhoodOut>(`/api/people/${id}/childhood`),
     /** Items that may be related to the person too (section 10), best first. */

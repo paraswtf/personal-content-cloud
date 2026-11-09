@@ -209,7 +209,7 @@ export default function PersonPicker({
                 <Avatar src={opt.person.cover_url} name={opt.person.name ?? '?'} size={32} />
                 <span className="min-w-0 flex-1">
                   <span className={clsx('block truncate font-medium', !opt.person.name && 'text-ink-soft')}>{personName(opt.person)}</span>
-                  <span className="block text-xs text-ink-faint">
+                  <span className="block text-xs text-ink-soft">
                     {petRow
                       ? `${speciesLabel(opt.person.species)}, ${formatCount(opt.person.item_count, 'item')}`
                       : `${formatCount(opt.person.face_count, 'face')}, ${formatCount(opt.person.item_count, 'item')}`}

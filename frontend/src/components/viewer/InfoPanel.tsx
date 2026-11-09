@@ -90,6 +90,8 @@ interface Props {
   guesses: {
     confirm: (t: BoxTarget) => void
     reject: (t: BoxTarget) => void
+    /** "Someone else": the box's editor at its name field. */
+    other?: (t: BoxTarget, anchor: HTMLElement) => void
     pendingKey: string | null
   }
   onEditBox: (target: BoxTarget, anchor: HTMLElement) => void
@@ -906,6 +908,7 @@ export default function InfoPanel({
                       busy={guesses.pendingKey === boxKey(t)}
                       onConfirm={() => guesses.confirm(t)}
                       onReject={() => guesses.reject(t)}
+                      onOther={guesses.other ? (el) => guesses.other?.(t, el) : undefined}
                       onShow={onShowBox && (!isVideo || !!detail.urls.video) ? () => onShowBox(t) : undefined}
                       showLabel={`Show the ${t.kind === 'face' ? 'face' : 'person'} guessed as ${personName(t.box.guess!.person)} in the ${isVideo ? 'video' : 'photo'}${
                         isVideo && t.box.frame_time_s !== null ? `, at ${formatDuration(t.box.frame_time_s)}` : ''

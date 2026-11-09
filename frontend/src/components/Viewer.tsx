@@ -209,7 +209,7 @@ function ViewerInner({ uid, onClose, onPrev, onNext, position, startAt = null, v
   const [showInfo, setShowInfo] = useState<boolean>(
     () => mode === 'document' || (rememberInfo ?? (typeof window !== 'undefined' && window.matchMedia('(min-width: 1024px)').matches)),
   )
-  const [editing, setEditing] = useState<{ kind: BoxKind; id: number; anchor: HTMLElement; group?: boolean } | null>(null)
+  const [editing, setEditing] = useState<{ kind: BoxKind; id: number; anchor: HTMLElement; group?: boolean; pick?: boolean } | null>(null)
   const [tagging, setTagging] = useState(false)
   const [drawing, setDrawing] = useState<DrawKind | null>(null) // a pet box (section 22) or a person box (section 10) the owner draws
   // section 10: the box the owner is moving or resizing (BoxAdjuster on the photo)
@@ -290,14 +290,24 @@ function ViewerInner({ uid, onClose, onPrev, onNext, position, startAt = null, v
     return () => clearTimeout(t)
   }, [toast])
 
+  const editBox = useCallback(
+    (t: BoxTarget, anchor: HTMLElement, group = false, pick = false) =>
+      setEditing((cur) =>
+        // a second tap on the same box closes its editor; "Someone else" (pick) always opens it at the name field
+        !pick && cur && cur.kind === t.kind && cur.id === t.box.id ? null : { kind: t.kind, id: t.box.id, anchor, group, pick },
+      ),
+    [],
+  )
   const guessActions = useGuessActions(uid, showToast)
   const guesses = useMemo(
     () => ({
       confirm: (t: BoxTarget) => t.kind !== 'animal' && t.box.guess && guessActions.confirm(t.kind, t.box.id, t.box.guess),
       reject: (t: BoxTarget) => t.kind !== 'animal' && t.box.guess && guessActions.reject(t.kind, t.box.id, t.box.guess),
+      // "Someone else": the box's editor at its name field; the pick there corrects the guess in one step
+      other: (t: BoxTarget, anchor: HTMLElement) => editBox(t, anchor, false, true),
       pendingKey: guessActions.pendingKey,
     }),
-    [guessActions],
+    [guessActions, editBox],
   )
 
   const fps = detail?.fps ?? null
@@ -513,11 +523,6 @@ function ViewerInner({ uid, onClose, onPrev, onNext, position, startAt = null, v
       return null
     })
   }, [])
-  const editBox = useCallback(
-    (t: BoxTarget, anchor: HTMLElement, group = false) =>
-      setEditing((cur) => (cur && cur.kind === t.kind && cur.id === t.box.id ? null : { kind: t.kind, id: t.box.id, anchor, group })),
-    [],
-  )
 
   useEffect(() => {
     const prevFocus = document.activeElement as HTMLElement | null
@@ -741,6 +746,7 @@ function ViewerInner({ uid, onClose, onPrev, onNext, position, startAt = null, v
           guessPendingKey={guesses.pendingKey}
           onConfirmGuess={guesses.confirm}
           onRejectGuess={guesses.reject}
+          onOtherGuess={guesses.other}
           liveSrc={livePlaying ? liveUrl : null}
           onLiveStop={stopLive}
           onLiveError={onLiveError}
@@ -970,6 +976,7 @@ function ViewerInner({ uid, onClose, onPrev, onNext, position, startAt = null, v
             target={editingTarget}
             tracks={editingTracks?.filter((t): t is PersonBoxTarget => t.kind !== 'animal')}
             anchor={editing.anchor}
+            pickFirst={!!editing.pick}
             onClose={closeEditor}
             onDone={(msg) => {
               showToast(msg)

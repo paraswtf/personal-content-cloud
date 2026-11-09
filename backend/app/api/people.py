@@ -16,6 +16,8 @@ Routes (all under /api, all require a logged-in session; writes need the CSRF he
          owner moves or resizes a box (section 10, app.analysis.box_edit); 422 for a bad box or no_face (a face
          box moved where no face is), 409 when the photo or frame cannot be opened
   POST   /guesses/confirm {faces, bodies} -> BulkOut;  POST /guesses/reject -> BulkOut
+  POST   /guesses/correct {faces, bodies, person_id | new_person_name} -> AssignOut ("Someone else": the guess learned
+         as wrong and the box given to the right person, one action)
   GET    /review/guesses?cursor&limit -> GuessPage
   GET    /suggestions?limit -> SuggestionList;  POST /suggestions/dismiss {a, b} -> Ok
   POST   /items/{uid}/tags {person_id | new_person_name, kind?, species?, relation?} -> [PersonRef] (a person or a
@@ -83,6 +85,7 @@ from app.schemas import (
     ChildhoodCandidate,
     ChildhoodOut,
     DismissIn,
+    GuessCorrectIn,
     ItemRelatedSuggestion,
     ItemRelatedSuggestions,
     RelatedDismissIn,
@@ -1214,6 +1217,58 @@ def reject_guesses(body: GuessIdsIn, conn: sqlite3.Connection = Depends(get_db),
     _check_boxes_vault(conn, session, "faces", body.faces)
     _check_boxes_vault(conn, session, "bodies", body.bodies)
     return BulkOut(updated=guess.reject(conn, body.faces, body.bodies))
+
+
+@router.post("/guesses/correct", response_model=AssignOut)
+def correct_guesses(body: GuessCorrectIn, conn: sqlite3.Connection = Depends(get_db),
+                    session: SessionInfo = Depends(require_user)) -> AssignOut:
+    """"Someone else" on a guess (sections 10 and 18), in one action and so one undo: the guess is learned as wrong, as
+    /guesses/reject does (its evidence goes to the guess learner as a no, and the box is remembered as not the guessed
+    person, so that guess is not made again), and the box goes to the person the owner names, as /faces/assign and
+    /bodies/assign do (the owner's own choice, not the system's find). A box guessed as that very person is a yes
+    (/guesses/confirm); a box with no open guess is simply assigned."""
+    name_given = body.new_person_name is not None
+    if (body.person_id is None) == (not name_given):
+        raise HTTPException(status_code=400, detail="Choose an existing person or a new name")
+    faces = sorted({int(f) for f in body.faces})
+    bodies = sorted({int(b) for b in body.bodies})
+    if not faces and not bodies:
+        raise HTTPException(status_code=400, detail="Choose a face or a person box")
+    _check_boxes_vault(conn, session, "faces", faces)
+    _check_boxes_vault(conn, session, "bodies", bodies)
+    followed: list[int] = []
+    with tx(conn):
+        target = int(_target_person(conn, body.person_id, body.new_person_name, name_given, session))  # type: ignore[arg-type]
+
+        def guessed_as_target(table: str, ids: list[int]) -> list[int]:
+            if not ids:
+                return []
+            return [int(r[0]) for r in conn.execute(
+                f"SELECT id FROM {table} WHERE id IN ({_ids_sql(ids)}) AND person_id IS NULL AND guess_person_id = ?",
+                [*ids, target])]
+
+        same_f, same_b = guessed_as_target("faces", faces), guessed_as_target("bodies", bodies)
+        items: set[int] = set()
+        for table, ids in (("faces", same_f), ("bodies", same_b)):
+            if ids:
+                items |= {int(r[0]) for r in conn.execute(
+                    f"SELECT item_id FROM {table} WHERE id IN ({_ids_sql(ids)})", ids)}
+        confirmed = guess.confirm(conn, same_f, same_b) if same_f or same_b else 0
+        rest_f = [f for f in faces if f not in set(same_f)]
+        rest_b = [b for b in bodies if b not in set(same_b)]
+        guess.reject(conn, rest_f, rest_b)  # only the boxes with an open guess (of someone else) are touched
+        leaving = _leaving(conn, "faces", rest_f, target) if rest_f else {}
+        updated = 0
+        for table, ids in (("faces", rest_f), ("bodies", rest_b)):
+            if ids:
+                n, its = _move_boxes(conn, table, ids, target)
+                updated += n
+                items |= its
+        if leaving:
+            followed, more = _follow_lookalikes(conn, leaving, target)
+            items |= more
+    _after_people_change(conn, items, {(target, i) for i in items})
+    return AssignOut(updated=updated + confirmed, person=_person_out(conn, target), followed=len(followed))
 
 
 @router.get("/review/guesses", response_model=GuessPage)
