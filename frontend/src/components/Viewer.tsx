@@ -29,7 +29,7 @@ import LiveButton from './viewer/LiveButton'
 import PhotoStage from './viewer/PhotoStage'
 import VideoPreparing from './viewer/VideoPreparing'
 import VideoStage, { currentFrameTime, posterTime } from './viewer/VideoStage'
-import { animalLabel, boxKey, findBox, groupVideoBoxes, videoBoxes, type AnimalBox, type BoxKind, type BoxTarget, type DrawKind, type PersonBoxTarget } from './viewer/boxes'
+import { animalLabel, boxKey, findBox, groupVideoBoxes, stillBoxes, videoBoxes, type AnimalBox, type BoxKind, type BoxTarget, type DrawKind, type PersonBoxTarget } from './viewer/boxes'
 import { useGuessActions } from './viewer/useGuessActions'
 import { useOnScreenFaces } from './viewer/useOnScreenFaces'
 import { seekToFrame } from './viewer/videoSeek'
@@ -52,6 +52,8 @@ export interface ViewerProps {
 
 // Remembered for the rest of the visit so prev/next and reopening keep the choice.
 let rememberFaces = true
+/** How long a photo's boxes stay lit after a tap on the person's badge in the details. */
+const SPOTLIGHT_MS = 4000
 let rememberInfo: boolean | null = null
 
 function isTyping(el: EventTarget | null): boolean {
@@ -203,6 +205,10 @@ function ViewerInner({ uid, onClose, onPrev, onNext, position, startAt = null, v
   const appToast = useToast()
   const [seekFace, setSeekFace] = useState<{ key: string; shown: boolean } | null>(null)
   const [page, setPage] = useState(0)
+  // A person whose boxes the photo highlights for a moment, after a tap on their badge in the details (section 14);
+  // `at` tells two taps on the same badge apart, so a second tap lights them for the full time again.
+  const [spotlight, setSpotlight] = useState<{ person: number; at: number } | null>(null)
+  const infoToggleRef = useRef<HTMLButtonElement>(null)
   const [livePlaying, setLivePlaying] = useState(false)
 
   const placeholder = useMemo(() => findCachedItem(qc, uid), [qc, uid])
@@ -300,6 +306,12 @@ function ViewerInner({ uid, onClose, onPrev, onNext, position, startAt = null, v
   const videoUrl = detail?.kind === 'video' ? detail.urls.video : null
   const onScreen = useOnScreenFaces(videoRef, detail?.kind === 'video' ? detail.faces : null, videoUrl ? `${uid}:${detailVersion}:${videoUrl}` : null)
   useEffect(() => {
+    if (spotlight === null) return
+    const timer = window.setTimeout(() => setSpotlight(null), SPOTLIGHT_MS)
+    return () => window.clearTimeout(timer)
+  }, [spotlight])
+  useEffect(() => setSpotlight(null), [uid])
+  useEffect(() => {
     const video = videoRef.current
     if (startAt === null || !videoUrl || !video) return
     const ctl = new AbortController()
@@ -352,6 +364,41 @@ function ViewerInner({ uid, onClose, onPrev, onNext, position, startAt = null, v
   }, [])
   const addPetBox = useCallback(() => startDrawing('pet'), [startDrawing])
   const addPersonBox = useCallback(() => startDrawing('person'), [startDrawing])
+  /** A tap on a person's badge in the details (section 14): on a video, the same as their chip under the video
+   *  (the first of their tracks, or with `now` the one on screen); on a photo, their boxes light up for a moment.
+   *  The boxes show, and on a phone the details sheet goes down so the moment is in view. */
+  const showPerson = useCallback(
+    (personId: number, now = false) => {
+      if (!detail) return
+      setEditing(null)
+      setShowFaces(true)
+      if (detail.kind === 'video') {
+        const mine = videoBoxes(detail).filter((t) => t.box.person?.id === personId)
+        const pick = (now && onScreen ? mine.find((t) => t.kind === 'face' && onScreen.has(t.box.id)) : undefined) ?? mine[0]
+        if (pick) seekTo(pick)
+      } else {
+        setLivePlaying(false) // boxes are not drawn over a playing Live Photo clip
+        setSpotlight({ person: personId, at: Date.now() })
+      }
+      if (typeof window !== 'undefined' && !window.matchMedia('(min-width: 1024px)').matches) {
+        setShowInfo(false)
+        // The badge goes away with the sheet: the focus waits on the details button, which brings it back.
+        requestAnimationFrame(() => infoToggleRef.current?.focus({ preventScroll: true }))
+      }
+    },
+    [detail, onScreen, seekTo],
+  )
+  // The person the stage shows now: the video's picked track, the photo's highlighted boxes.
+  const activePersonId = useMemo(() => {
+    if (!detail) return null
+    if (detail.kind !== 'video') return spotlight?.person ?? null
+    if (!seekFace) return null
+    return videoBoxes(detail).find((t) => boxKey(t) === seekFace.key)?.box.person?.id ?? null
+  }, [detail, seekFace, spotlight])
+  const spotlightKeys = useMemo(
+    () => new Set(detail && spotlight !== null ? stillBoxes(detail).filter((t) => t.box.person?.id === spotlight.person).map(boxKey) : []),
+    [detail, spotlight],
+  )
 
   const closeEditor = useCallback(() => {
     setEditing((cur) => {
@@ -575,6 +622,7 @@ function ViewerInner({ uid, onClose, onPrev, onNext, position, startAt = null, v
           detail={detail}
           showFaces={showFaces}
           editingKey={editing ? `${editing.kind}:${editing.id}` : null}
+          spotlightKeys={spotlightKeys}
           onEditBox={editBox}
           guessPendingKey={guesses.pendingKey}
           onConfirmGuess={guesses.confirm}
@@ -691,7 +739,7 @@ function ViewerInner({ uid, onClose, onPrev, onNext, position, startAt = null, v
               <ScanFace className="size-5" aria-hidden />
             </button>
           )}
-          <button type="button" onClick={toggleInfo} aria-pressed={showInfo} className={iconButton} aria-label="Show details" title="Details (I)">
+          <button ref={infoToggleRef} type="button" onClick={toggleInfo} aria-pressed={showInfo} className={iconButton} aria-label="Show details" title="Details (I)">
             <Info className="size-5" aria-hidden />
           </button>
           {detail && !detail.nsfw && !vault && <ShareButton uid={detail.uid} onOpenChange={setSharing} />}
@@ -772,6 +820,8 @@ function ViewerInner({ uid, onClose, onPrev, onNext, position, startAt = null, v
                 onEditBox={editBox}
                 onAddPetBox={addPetBox}
                 onAddPersonBox={addPersonBox}
+                onShowPerson={showPerson}
+                activePersonId={activePersonId}
                 documentFirst={mode === 'document'}
               />
             </aside>

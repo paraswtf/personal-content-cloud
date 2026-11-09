@@ -27,6 +27,8 @@ interface Props {
   detail: ItemDetail
   showFaces: boolean
   editingKey: string | null
+  /** Boxes lit for a moment: the person whose badge was tapped in the details (section 14). */
+  spotlightKeys?: ReadonlySet<string>
   onEditBox: (target: BoxTarget, anchor: HTMLElement) => void
   guessPendingKey: string | null
   onConfirmGuess: (target: BoxTarget) => void
@@ -102,6 +104,7 @@ export default function PhotoStage({
   detail,
   showFaces,
   editingKey,
+  spotlightKeys,
   onEditBox,
   guessPendingKey,
   onConfirmGuess,
@@ -276,7 +279,11 @@ export default function PhotoStage({
                       : b.guess
                         ? 'border-amber-300'
                         : 'border-dashed border-amber-300/90',
-                  editingKey === key ? 'border-accent ring-2 ring-accent' : 'hover:border-accent focus-visible:border-accent',
+                  editingKey === key
+                    ? 'border-accent ring-2 ring-accent'
+                    : spotlightKeys?.has(key)
+                      ? 'border-accent ring-4 ring-accent/70 motion-safe:animate-pulse'
+                      : 'hover:border-accent focus-visible:border-accent',
                 )}
                 aria-label={b.person ? `Edit ${noun} tagged as ${label}` : `Tag this ${noun}`}
                 onClick={(e) => onEditBox(t, e.currentTarget)}

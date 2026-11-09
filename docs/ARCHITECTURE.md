@@ -953,10 +953,16 @@ for videos: draw mode pauses the player and keeps it paused, the box is drawn ov
 screen ("Whole frame" takes it all) and is posted with `t`, the viewer's `currentFrameTime`; the new box shows as a
 track chip under the video.
 
-People in the info panel (2026-11-08, `viewer/InfoPanel.tsx`, `viewer/PersonEdit.tsx`): every chip under "People" (or
-"People and pets", "In this video") and "Related to" has a menu ("Options for {name}", menu "Edit {name}", arrow keys
-and Escape) with the changes the face boxes make, for everything of theirs on the item at once, without clicking a
-box. "Change to..." and "Rename" (or "Name" for an unnamed person) open a light card under the chips, which scrolls
+People in the info panel (2026-11-08, `viewer/InfoPanel.tsx`, `viewer/PersonEdit.tsx`): a person's badge does three
+things (2026-11-09). A tap on the face and name shows them on the stage (`onShowPerson`, the viewer's `showPerson`): on
+a video it jumps to them exactly as their chip under the video does (the first of their tracks, the box drawn on the
+paused frame), and under "In the frame" to the appearance on screen now, once the video can play; on a photo their
+boxes light up for four seconds (a playing Live Photo clip stops, and a second tap lights them again). The boxes are
+turned on for it, the editors close, and on a phone the details sheet goes down so the moment is in view, the focus
+waiting on the details button; the badge of the person the stage shows is marked (`aria-current`, a ring). Someone
+with no box here (a tag alone, "Related to") has a plain name. The arrow beside it ("Open {name}'s page") goes to the person's
+page, and the pencil ("Edit {name}") opens the menu (arrow keys and Escape) with the changes the face boxes make, for
+everything of theirs on the item at once, without clicking a box. "Change to..." and "Rename" (or "Name" for an unnamed person) open a light card under the chips, which scrolls
 itself into view in the phone sheet: "Change {name} to..." holds a `PersonPicker` (people for a person, pets of the
 same species for a pet, a typed name creates one) and posts `/api/items/people/move` with this item alone (their
 faces, bodies, pet boxes and tags here go to the one picked, remembered as not them, learned like a move from a face
@@ -964,8 +970,8 @@ box); "Rename" sends `PATCH /api/people/{id}` (everywhere; a name someone else h
 `/api/items/people/remove` with this item: their boxes here stay, unnamed and remembered as not them
 (guess_rejections), and their tags here go. Someone here through a tag alone gets "Remove from this item" (the tag's
 DELETE) instead, and a tag the owner made also offers "Make this 'in'" or "Make this 'related'". The chips under
-"In the frame" (videos) stay links only. Escape closes the card (not the viewer) and puts the focus back on the
-chip's menu button.
+"In the frame" (videos) have no pencil. Escape closes the card (not the viewer) and puts the focus back on the
+chip's pencil.
 
 Person boxes (2026-11-08, `viewer/PersonBoxCard.tsx`, section 10 for the server side): the People section of the
 info panel has "Add a person box" next to the pet buttons, on photos and videos, for someone in a helmet, seen from

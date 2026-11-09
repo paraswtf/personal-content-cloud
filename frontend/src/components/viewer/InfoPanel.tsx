@@ -11,7 +11,7 @@ import { useMutation } from '@tanstack/react-query'
 import clsx from 'clsx'
 import {
   AlertCircle,
-  ChevronDown,
+  ArrowUpRight,
   Download,
   EyeOff,
   Forward,
@@ -62,7 +62,7 @@ import VirtualDocument from '../documents/VirtualDocument'
 import { forwardReasons, receivedLabel } from '../library/forwards'
 import { burstBestUid, reasonKeys, reasonLabel } from '../library/misclick'
 import PersonPicker, { choiceBody, type PersonChoice } from '../people/PersonPicker'
-import { boxKey, type BoxTarget } from './boxes'
+import { boxKey, stillBoxes, videoBoxes, type BoxTarget } from './boxes'
 import GuessChip from './GuessChip'
 import { PersonEditCard, usePersonEdits, type PersonEditMode, type PersonEditTarget } from './PersonEdit'
 import TagsPanel from './TagsPanel'
@@ -93,6 +93,11 @@ interface Props {
   onAddPersonBox?: () => void
   /** Opened from the documents page: the document card comes first. */
   documentFirst?: boolean
+  /** A tap on a person's badge (section 14): on a video, jump to them as their chip under the video does (onScreen:
+   *  to the appearance in the frame now); on a photo, show their box. Badges of people with no box here only link. */
+  onShowPerson?: (personId: number, onScreen?: boolean) => void
+  /** The person the stage is showing now (the video's picked track, the photo's highlighted box). */
+  activePersonId?: number | null
 }
 
 function Section({ title, children, id }: { title: string; children: ReactNode; id?: string }) {
@@ -131,7 +136,22 @@ interface ChipMenu {
   tagOnly: boolean
 }
 
-function PersonChip({ person, thumb, menu }: { person: PersonRef; thumb: string | null | undefined; menu?: ChipMenu }) {
+function PersonChip({
+  person,
+  thumb,
+  menu,
+  onShow,
+  active = false,
+  where,
+}: {
+  person: PersonRef
+  thumb: string | null | undefined
+  menu?: ChipMenu
+  /** Show them on the stage (section 14); without it the name is only a label. */
+  onShow?: () => void
+  active?: boolean
+  where: 'video' | 'photo'
+}) {
   const name = personName(person)
   const pet = person.kind === 'pet'
   const related = person.relation === 'related'
@@ -193,17 +213,50 @@ function PersonChip({ person, thumb, menu }: { person: PersonRef; thumb: string 
   ) : (
     <Tag className="size-3.5 text-white/70" aria-hidden />
   )
+  const face = (
+    <>
+      {thumb ? (
+        <img src={thumb} alt="" className="size-8 shrink-0 rounded-full object-cover" />
+      ) : (
+        <span className="flex size-8 shrink-0 items-center justify-center rounded-full bg-white/10">{mark}</span>
+      )}
+      {thumb && related && <Link2 className="-mr-0.5 size-3.5 shrink-0 text-white/70" aria-label="Related" />}
+      {thumb && !related && pet && <PawPrint className="-mr-0.5 size-3.5 shrink-0 text-white/70" aria-label="Pet" />}
+      <span className={person.name ? 'truncate' : 'truncate text-white/70'}>{name}</span>
+    </>
+  )
+  const iconButton =
+    'flex size-10 shrink-0 items-center justify-center rounded-full text-white/60 hover:bg-white/10 hover:text-white focus-visible:text-white disabled:opacity-50'
   return (
-    <li ref={root} className="relative flex max-w-full items-center rounded-full bg-white/10 transition-colors hover:bg-white/15" onKeyDown={onKeyDown}>
-      <Link to={`/people/${person.id}`} className="flex h-10 min-w-0 items-center gap-2 rounded-full pl-1 pr-3 text-sm font-medium text-white">
-        {thumb ? (
-          <img src={thumb} alt="" className="size-8 shrink-0 rounded-full object-cover" />
-        ) : (
-          <span className="flex size-8 shrink-0 items-center justify-center rounded-full bg-white/10">{mark}</span>
-        )}
-        {thumb && related && <Link2 className="-mr-0.5 size-3.5 shrink-0 text-white/70" aria-label="Related" />}
-        {thumb && !related && pet && <PawPrint className="-mr-0.5 size-3.5 shrink-0 text-white/70" aria-label="Pet" />}
-        <span className={person.name ? 'truncate' : 'truncate text-white/70'}>{name}</span>
+    <li
+      ref={root}
+      className={clsx(
+        'relative flex max-w-full items-center rounded-full transition-colors',
+        active ? 'bg-white/25 ring-2 ring-white/80' : 'bg-white/10 hover:bg-white/15',
+      )}
+      onKeyDown={onKeyDown}
+    >
+      {onShow ? (
+        <button
+          type="button"
+          onClick={onShow}
+          aria-current={active ? 'true' : undefined}
+          aria-label={`Show ${name} in the ${where}`}
+          title={`Show ${name} in the ${where}`}
+          className="flex h-10 min-w-0 items-center gap-2 rounded-full pl-1 pr-2 text-left text-sm font-medium text-white hover:bg-white/10"
+        >
+          {face}
+        </button>
+      ) : (
+        <span className="flex h-10 min-w-0 items-center gap-2 pl-1 pr-2 text-sm font-medium text-white">{face}</span>
+      )}
+      <Link
+        to={`/people/${person.id}`}
+        aria-label={`Open ${name}'s page`}
+        title={`Open ${name}'s page`}
+        className={clsx(iconButton, '-ml-1')}
+      >
+        <ArrowUpRight className="size-4" aria-hidden />
       </Link>
       {menu && (
         <button
@@ -211,13 +264,14 @@ function PersonChip({ person, thumb, menu }: { person: PersonRef; thumb: string 
           type="button"
           onClick={toggle}
           disabled={menu.busy}
-          aria-label={`Options for ${name}`}
+          aria-label={`Edit ${name}`}
+          title={`Edit ${name}`}
           aria-haspopup="menu"
           aria-expanded={open}
           data-person-menu={person.id}
-          className="-ml-2 flex size-10 shrink-0 items-center justify-center rounded-full text-white/60 hover:bg-white/10 hover:text-white disabled:opacity-50"
+          className={clsx(iconButton, '-ml-1')}
         >
-          {menu.busy ? <Loader2 className="size-4 animate-spin" aria-hidden /> : <ChevronDown className="size-4" aria-hidden />}
+          {menu.busy ? <Loader2 className="size-4 animate-spin" aria-hidden /> : <Pencil className="size-4" aria-hidden />}
         </button>
       )}
       {menu && open && (
@@ -331,6 +385,8 @@ export default function InfoPanel({
   onAddPetBox,
   onAddPersonBox,
   documentFirst = false,
+  onShowPerson,
+  activePersonId = null,
 }: Props) {
   const invalidate = useInvalidateItem(detail.uid)
   const [busyId, setBusyId] = useState<number | null>(null)
@@ -374,6 +430,14 @@ export default function InfoPanel({
   const unnamedAnimals = detail.animals.filter((a) => !a.person).length
   const tagIds = new Set(detail.tags.map((t) => t.id))
   const inPeople = detail.people.filter((p) => p.relation !== 'related')
+  // The people with a box here (a face, a person box or a pet box): their badge can show them (section 14), on a
+  // video once it can play.
+  const canShow = !!onShowPerson && (!isVideo || !!detail.urls.video)
+  const shown = new Set<number>(
+    (isVideo ? videoBoxes(detail) : boxable ? stillBoxes(detail) : [])
+      .map((t) => t.box.person?.id)
+      .filter((id): id is number => typeof id === 'number'),
+  )
   const relatedPeople = detail.people.filter((p) => p.relation === 'related')
   const unmatched = detail.faces.filter((f) => !f.person && !f.guess).length
   const guessTargets: BoxTarget[] = [
@@ -637,7 +701,14 @@ export default function InfoPanel({
           {inFrame.length > 0 ? (
             <ul className="flex flex-wrap gap-2" aria-label="People in the frame">
               {inFrame.map((p) => (
-                <PersonChip key={p.id} person={p} thumb={thumbs.get(p.id)} />
+                <PersonChip
+                  key={p.id}
+                  person={p}
+                  thumb={thumbs.get(p.id)}
+                  where="video"
+                  active={activePersonId === p.id}
+                  onShow={canShow ? () => onShowPerson?.(p.id, true) : undefined}
+                />
               ))}
             </ul>
           ) : (
@@ -651,7 +722,15 @@ export default function InfoPanel({
           {inPeople.length > 0 ? (
             <ul className="flex flex-wrap gap-2" aria-label="People in this item">
               {inPeople.map((p) => (
-                <PersonChip key={p.id} person={p} thumb={thumbs.get(p.id) ?? p.cover_url} menu={personMenu(p)} />
+                <PersonChip
+                  key={p.id}
+                  person={p}
+                  thumb={thumbs.get(p.id) ?? p.cover_url}
+                  menu={personMenu(p)}
+                  where={isVideo ? 'video' : 'photo'}
+                  active={activePersonId === p.id}
+                  onShow={canShow && shown.has(p.id) ? () => onShowPerson?.(p.id) : undefined}
+                />
               ))}
             </ul>
           ) : (
@@ -674,7 +753,7 @@ export default function InfoPanel({
               </p>
               <ul className="flex flex-wrap gap-2" aria-label="Related to">
                 {relatedPeople.map((p) => (
-                  <PersonChip key={p.id} person={p} thumb={p.cover_url} menu={personMenu(p)} />
+                  <PersonChip key={p.id} person={p} thumb={p.cover_url} menu={personMenu(p)} where={isVideo ? 'video' : 'photo'} />
                 ))}
               </ul>
             </div>
