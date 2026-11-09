@@ -405,7 +405,7 @@ def test_people_list_total_and_covers_on_every_page(conn, locked):
     first = locked.get("/api/people", params={"sort": "name", "limit": 2}).json()
     rest = locked.get("/api/people", params={"sort": "name", "limit": 2, "cursor": first["next_cursor"]}).json()
     assert first["total"] == rest["total"] == 3
-    covers = {p["id"]: p["cover_url"] for p in first["items"] + rest["items"]}
+    covers = {p["id"]: p["cover_url"].split("?")[0] for p in first["items"] + rest["items"]}
     assert covers == {pid: f"/files/face/{fid}" for pid, fid in zip(ids, faces)}
 
 

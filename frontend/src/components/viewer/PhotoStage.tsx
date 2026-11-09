@@ -5,7 +5,7 @@
 // picks the species, and the new box's popover opens so the pet can be named; or over a person (section 10),
 // picks who it is in PersonBoxCard, and the box is added with them.
 // Each name carries its origin (section 10): a person icon when the owner tagged or drew it, a bot when the
-// system did.
+// system did. Adjust mode (section 10): one box shows BoxAdjuster to move or resize it, the others step back.
 import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
 import { useMutation } from '@tanstack/react-query'
 import clsx from 'clsx'
@@ -17,7 +17,8 @@ import { previewSrcSet } from '../../lib/preview'
 import { ORIGIN_LABEL, boxOrigin } from '../../lib/origin'
 import { errorMessage } from '../admin/adminHooks'
 import OriginIcon from '../people/OriginIcon'
-import { animalLabel, boxKey, stillBoxes, type BoxTarget, type DrawKind } from './boxes'
+import BoxAdjuster from './BoxAdjuster'
+import { adjustLabel, animalLabel, boxKey, stillBoxes, type BoxTarget, type DrawKind } from './boxes'
 import GuessChip from './GuessChip'
 import PersonBoxCard from './PersonBoxCard'
 import { darkButton, useInvalidateItem } from './shared'
@@ -50,6 +51,12 @@ interface Props {
   /** Draw mode ended (cancelled, or the box was added). */
   onDrawEnd?: () => void
   onToast?: (message: string) => void
+  /** Adjust mode (section 10): the box being moved or resized, with the save in progress and its error. */
+  adjusting?: BoxTarget | null
+  adjustSaving?: boolean
+  adjustError?: string | null
+  onAdjustSave?: (box: NormBox) => void
+  onAdjustCancel?: () => void
 }
 
 interface Drag {
@@ -120,6 +127,11 @@ export default function PhotoStage({
   drawing = null,
   onDrawEnd,
   onToast,
+  adjusting = null,
+  adjustSaving = false,
+  adjustError = null,
+  onAdjustSave,
+  onAdjustCancel,
 }: Props) {
   const [loaded, setLoaded] = useState(false)
   const [failed, setFailed] = useState(false)
@@ -206,6 +218,18 @@ export default function PhotoStage({
     ? { left: Math.min(drag.x0, drag.x1), top: Math.min(drag.y0, drag.y1), width: Math.abs(drag.x1 - drag.x0), height: Math.abs(drag.y1 - drag.y0) }
     : null
 
+  // After adjusting, the focus goes back to the box's own button.
+  const adjustKey = adjusting ? boxKey(adjusting) : null
+  const lastAdjust = useRef<string | null>(null)
+  useEffect(() => {
+    if (adjustKey) lastAdjust.current = adjustKey
+    else if (lastAdjust.current) {
+      const key = lastAdjust.current
+      lastAdjust.current = null
+      requestAnimationFrame(() => boxRefs.current.get(key)?.focus({ preventScroll: true }))
+    }
+  }, [adjustKey])
+
   return (
     <div
       ref={rootRef}
@@ -255,6 +279,7 @@ export default function PhotoStage({
         boxes.map((t) => {
           const b = t.box
           const key = boxKey(t)
+          if (key === adjustKey) return null
           const isBody = t.kind === 'body'
           const isAnimal = t.kind === 'animal'
           const noun = isAnimal ? 'pet' : isBody ? 'person' : 'face'
@@ -266,7 +291,7 @@ export default function PhotoStage({
           const below = b.y + b.h < 0.86
           const pos = { left: `${b.x * 100}%`, top: `${b.y * 100}%`, width: `${b.w * 100}%`, height: `${b.h * 100}%` }
           return (
-            <div key={key} className="group absolute" style={pos}>
+            <div key={key} className={clsx('group absolute', adjustKey && 'pointer-events-none opacity-40')} style={pos}>
               <button
                 type="button"
                 ref={(el) => {
@@ -329,6 +354,18 @@ export default function PhotoStage({
             </div>
           )
         })}
+
+      {adjusting && showFaces && loaded && !liveSrc && (
+        <BoxAdjuster
+          key={adjustKey}
+          start={{ x: adjusting.box.x, y: adjusting.box.y, w: adjusting.box.w, h: adjusting.box.h }}
+          label={adjustLabel(adjusting)}
+          saving={adjustSaving}
+          error={adjustError}
+          onSave={(box) => onAdjustSave?.(box)}
+          onCancel={() => onAdjustCancel?.()}
+        />
+      )}
 
       {drawing && loaded && !pending && (
         <div

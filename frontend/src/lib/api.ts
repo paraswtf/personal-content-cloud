@@ -63,6 +63,9 @@ import type {
   AddPersonBoxIn,
   PersonBoxOut,
   AnimalOut,
+  BodyOut,
+  BoxIn,
+  FaceOut,
   ThroughputOut,
   ThroughputRange,
   ItemsPeopleOut,
@@ -162,6 +165,7 @@ async function request<T>(method: string, url: string, body?: unknown, signal?: 
 export const get = <T>(url: string, signal?: AbortSignal) => request<T>('GET', url, undefined, signal)
 export const post = <T>(url: string, body?: unknown) => request<T>('POST', url, body ?? {})
 export const patch = <T>(url: string, body: unknown) => request<T>('PATCH', url, body)
+export const put = <T>(url: string, body: unknown) => request<T>('PUT', url, body)
 export const del = <T>(url: string) => request<T>('DELETE', url)
 
 /** A DELETE that answers 404 found the thing gone already (an earlier step took it): that is done. */
@@ -467,6 +471,10 @@ export const api = {
     assignBodies: (body: AssignBodiesIn) => post<AssignOut>('/api/bodies/assign', body),
     /** "Not a person". A box already gone counts as done, like deleteFace. */
     deleteBody: (id: number) => del<OkOut>(`/api/bodies/${id}`).catch(goneIsDone),
+    /** Section 10: the owner moves or resizes a face box (422 `no_face` when it went where no face is). */
+    moveFace: (id: number, box: BoxIn) => put<FaceOut>(`/api/faces/${id}/box`, box),
+    /** Section 10: the owner moves or resizes a person box. */
+    moveBody: (id: number, box: BoxIn) => put<BodyOut>(`/api/bodies/${id}/box`, box),
     confirmGuesses: (body: GuessIdsIn) => post<BulkOut>('/api/guesses/confirm', body),
     rejectGuesses: (body: GuessIdsIn) => post<BulkOut>('/api/guesses/reject', body),
     suggestions: (limit = 30) => get<SuggestionList>(`/api/suggestions${qs({ limit })}`),
@@ -488,6 +496,8 @@ export const api = {
     setSpecies: (body: AnimalSpeciesIn) => post<AssignOut>('/api/animals/species', body),
     /** "Not a pet". A box already gone counts as done, like deleteFace. */
     remove: (id: number) => del<OkOut>(`/api/animals/${id}`).catch(goneIsDone),
+    /** Section 10: the owner moves or resizes a pet box. */
+    move: (id: number, box: BoxIn) => put<AnimalOut>(`/api/animals/${id}/box`, box),
   },
 
   documents: {

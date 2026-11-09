@@ -1,5 +1,5 @@
 // Face, body and animal boxes of an item as one list of targets for the stage, the chips and the editor.
-import { speciesLabel } from '../../lib/format'
+import { personName, speciesLabel } from '../../lib/format'
 import type { AnimalOut, BodyOut, FaceOut, ItemDetail } from '../../lib/types'
 
 export type BoxKind = 'face' | 'body' | 'animal'
@@ -21,6 +21,15 @@ export function boxKey(t: { kind: BoxKind; box: { id: number } }): string {
 /** Label of an animal box: the pet's name when it has one, else the species. */
 export function animalLabel(box: AnimalOut): string {
   return box.person?.name?.trim() ? box.person.name : speciesLabel(box.species)
+}
+
+/** Whose box it is, for the box adjuster's label (section 10): "the face box of Asha", "this pet box". */
+export function adjustLabel(t: BoxTarget): string {
+  const b = t.box
+  const noun = t.kind === 'animal' ? 'pet box' : t.kind === 'body' ? 'person box' : 'face box'
+  if (t.kind === 'animal') return t.box.person ? `the ${noun} of ${animalLabel(t.box)}` : `this ${noun}`
+  if (b.person) return `the ${noun} of ${personName(b.person)}`
+  return b.guess ? `this ${noun}, maybe ${personName(b.guess.person)}` : `this ${noun}`
 }
 
 /** Boxes drawn on a still picture: faces, plus bodies whose face was not found (a back, a far shot), plus animals. */

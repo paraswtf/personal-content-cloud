@@ -27,13 +27,15 @@ interface OriginBox {
   guess?: unknown
 }
 
-/** Who put the person (or the guess) on one box; null for a box the detector found with nobody on it. A box
- *  the owner drew and the system matched (a pet box) is 'drawn'; drawn and named by the owner is 'you'. */
+/** Who put the person (or the guess) on one box; null for a box the detector found with nobody on it. A box the
+ *  owner drew, moved or resized with someone the system matched on it is 'drawn'; named by the owner, 'you'. A
+ *  guess stays the system's suggestion even on a box the owner placed. */
 export function boxOrigin(b: OriginBox): Origin | null {
   if (b.person && b.assigned_by === 'user') return 'you'
-  if (b.source === 'user') return 'drawn'
+  if (b.person && b.source === 'user') return 'drawn'
   if (b.person) return 'auto'
   if (b.guess) return 'guess'
+  if (b.source === 'user') return 'drawn'
   return null
 }
 

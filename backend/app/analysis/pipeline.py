@@ -591,10 +591,14 @@ def analyze_item(conn: sqlite3.Connection, item_id: int, version: int) -> None:
                 conn.execute("INSERT OR REPLACE INTO item_labels(item_id, label, score) VALUES (?, ?, ?)",
                              (item_id, label, float(score)))
 
-            # Faces. The owner's drawn person boxes and the faces they point at stay (section 10).
+            # Faces. The owner's drawn person boxes and the faces they point at stay (section 10), and on a photo
+            # the face boxes the owner moved or resized; a video's faces are tracked again (names carried over).
             drawn_bodies = conn.execute("SELECT * FROM bodies WHERE item_id = ? AND source = 'user' ORDER BY id",
                                         (item_id,)).fetchall()
             drawn_faces = person_boxes.protected_face_ids(drawn_bodies)
+            if kind == "image":
+                drawn_faces |= {int(r[0]) for r in conn.execute(
+                    "SELECT id FROM faces WHERE item_id = ? AND source = 'user'", (item_id,))}
             old_faces = [f for f in conn.execute("SELECT * FROM faces WHERE item_id = ? ORDER BY id", (item_id,)).fetchall()
                          if int(f["id"]) not in drawn_faces]
             if keep_faces:
@@ -659,16 +663,21 @@ def analyze_item(conn: sqlite3.Connection, item_id: int, version: int) -> None:
                 path = storage.body_crop_path(bid)
                 written.append(path)
                 storage.write_bytes_atomic(path, crop)
-            if kind == "image" and drawn_bodies:
-                # Detections over a drawn person box or its face are that person again: the drawn ones stay.
+            if kind == "image" and (drawn_bodies or drawn_faces):
+                # Detections over a drawn person box or a kept face are that person again: the owner's ones stay.
                 for gone in person_boxes.drop_over_drawn(conn, "bodies", new_body_ids,
                                                          [(b["x"], b["y"], b["w"], b["h"]) for b in drawn_bodies]):
                     new_body_ids.remove(gone)
                     trash.append(storage.body_crop_path(gone))
                 if drawn_faces:
                     marks = ",".join("?" * len(drawn_faces))
-                    boxes = [(f["x"], f["y"], f["w"], f["h"]) for f in conn.execute(
-                        f"SELECT x, y, w, h FROM faces WHERE id IN ({marks})", sorted(drawn_faces))]
+                    kept_faces = conn.execute(f"SELECT id, x, y, w, h FROM faces WHERE id IN ({marks})",
+                                              sorted(drawn_faces)).fetchall()
+                    boxes = [(f["x"], f["y"], f["w"], f["h"]) for f in kept_faces]
+                    # A new body around a twin takes the kept face, so no faceless box is left around it.
+                    for gone in person_boxes.relink_twin_bodies(conn, new_face_ids, kept_faces, new_body_ids):
+                        new_body_ids.remove(gone)
+                        trash.append(storage.body_crop_path(gone))
                     for gone in person_boxes.drop_over_drawn(conn, "faces", new_face_ids, boxes):
                         new_face_ids.remove(gone)
                         trash.append(storage.face_crop_path(gone))

@@ -457,7 +457,7 @@ def test_crops_and_image_page(client):
     assert client.get(f"/files/page/{row['uid']}/1").status_code == 200  # an image's page 1 is its preview
     assert client.get(f"/files/page/{row['uid']}/2").status_code == 404
     detail = client.get(f"/api/items/{row['uid']}").json()
-    assert len(detail["faces"]) == 1 and detail["faces"][0]["url"] == f"/files/face/{face}"
+    assert len(detail["faces"]) == 1 and detail["faces"][0]["url"].split("?")[0] == f"/files/face/{face}"
 
 
 # ------------------------------------------------------------------ stats, config, system, reprocess

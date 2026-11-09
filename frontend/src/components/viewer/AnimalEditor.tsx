@@ -4,7 +4,7 @@
 // animal. Same shape as the face editor.
 import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from 'react'
 import { useMutation } from '@tanstack/react-query'
-import { Ban, PawPrint, Shuffle, UserX, X } from 'lucide-react'
+import { Ban, Move, PawPrint, Shuffle, UserX, X } from 'lucide-react'
 import { api } from '../../lib/api'
 import { formatCount, personName, speciesLabel } from '../../lib/format'
 import { boxOrigin, mergeOrigins } from '../../lib/origin'
@@ -24,6 +24,8 @@ interface Props {
   anchor: HTMLElement | null
   onClose: () => void
   onDone: (message: string) => void
+  /** Move or resize the box on the picture (section 10). */
+  onAdjust?: () => void
 }
 
 /** " 2 look-alike crops followed." after a species change, or nothing. */
@@ -31,7 +33,7 @@ export function followedCrops(followed: number | undefined): string {
   return followed ? ` ${formatCount(followed, 'look-alike crop')} followed.` : ''
 }
 
-export default function AnimalEditor({ uid, box, anchor, onClose, onDone, tracks }: Props) {
+export default function AnimalEditor({ uid, box, anchor, onClose, onDone, tracks, onAdjust }: Props) {
   const ref = useRef<HTMLDivElement>(null)
   const [style, setStyle] = useState<CSSProperties>(() => placement(anchor))
   const [picking, setPicking] = useState(false)
@@ -229,6 +231,12 @@ export default function AnimalEditor({ uid, box, anchor, onClose, onDone, tracks
           >
             <UserX className="size-4" aria-hidden />
             Not this pet
+          </Button>
+        )}
+        {onAdjust && (
+          <Button variant="secondary" disabled={busy} onClick={onAdjust}>
+            <Move className="size-4" aria-hidden />
+            Move or resize
           </Button>
         )}
         <Button variant="danger" disabled={busy} loading={remove.isPending} onClick={() => remove.mutate()}>

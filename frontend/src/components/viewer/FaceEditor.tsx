@@ -3,7 +3,7 @@
 // whole group (or merges it into the picked person) unless "Only change this face" is ticked.
 import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from 'react'
 import { useMutation, useQuery } from '@tanstack/react-query'
-import { Ban, Check, UserX, X } from 'lucide-react'
+import { Ban, Check, Move, UserX, X } from 'lucide-react'
 import { api } from '../../lib/api'
 import type { AssignOut } from '../../lib/types'
 import { formatCount, formatPercent, personName } from '../../lib/format'
@@ -23,6 +23,8 @@ interface Props {
   anchor: HTMLElement | null
   onClose: () => void
   onDone: (message: string) => void
+  /** Move or resize the box on the picture (section 10). */
+  onAdjust?: () => void
 }
 
 export const WIDTH = 320
@@ -40,7 +42,7 @@ export function placement(anchor: HTMLElement | null): CSSProperties {
   return { left: side, top: Math.max(8, (vh - need) / 2), width: WIDTH }
 }
 
-export default function FaceEditor({ uid, target, anchor, onClose, onDone, tracks }: Props) {
+export default function FaceEditor({ uid, target, anchor, onClose, onDone, tracks, onAdjust }: Props) {
   const ref = useRef<HTMLDivElement>(null)
   const [style, setStyle] = useState<CSSProperties>(() => placement(anchor))
   const invalidate = useInvalidateItem(uid)
@@ -252,6 +254,12 @@ export default function FaceEditor({ uid, target, anchor, onClose, onDone, track
           <Button variant="secondary" disabled={busy} loading={assign.isPending && assign.variables === null} onClick={() => assign.mutate(null)}>
             <UserX className="size-4" aria-hidden />
             Not this person
+          </Button>
+        )}
+        {onAdjust && (
+          <Button variant="secondary" disabled={busy} onClick={onAdjust}>
+            <Move className="size-4" aria-hidden />
+            Move or resize
           </Button>
         )}
         <Button variant="danger" disabled={busy} loading={remove.isPending} onClick={() => remove.mutate()}>

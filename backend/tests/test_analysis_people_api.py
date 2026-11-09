@@ -107,7 +107,7 @@ def test_create_rename_merge_delete(api, conn):
     assert conn.execute("SELECT COUNT(*) FROM jobs WHERE type = 'guess'").fetchone()[0] >= 1
 
     r = api.patch(f"/api/people/{asha}", json={"cover_face_id": f3})
-    assert r.status_code == 200 and r.json()["cover_url"] == f"/files/face/{f3}"
+    assert r.status_code == 200 and r.json()["cover_url"].split("?")[0] == f"/files/face/{f3}"
     stranger_face = make_face(conn, _item(conn)["id"], None, embedding=_vec(4))
     assert api.patch(f"/api/people/{asha}", json={"cover_face_id": stranger_face}).status_code == 400
     assert api.patch(f"/api/people/{asha}", json={"name": "Asha K"}).json()["name"] == "Asha K"
@@ -137,7 +137,7 @@ def test_person_faces_and_items(api, conn):
                      (tagged["id"], p, now_iso()))
     faces = api.get(f"/api/people/{p}/faces").json()
     assert [f["id"] for f in faces["items"]] == [fv] and faces["total"] == 1
-    assert faces["items"][0]["url"] == f"/files/face/{fv}" and faces["items"][0]["item_uid"] == visible["uid"]
+    assert faces["items"][0]["url"].split("?")[0] == f"/files/face/{fv}" and faces["items"][0]["item_uid"] == visible["uid"]
     items = api.get(f"/api/people/{p}/items").json()
     assert [i["uid"] for i in items["items"]] == [visible["uid"], tagged["uid"]] and items["total"] == 2
     page = api.get(f"/api/people/{p}/items?limit=1").json()

@@ -229,7 +229,8 @@ CREATE TABLE IF NOT EXISTS faces (
   guess_evidence  TEXT,                         -- JSON {clothes, scene, face, ref_face_id, ref_item_uid, same_day, gps_m}
   created_at      TEXT NOT NULL,
   clarity         REAL,                         -- face-model feature norm; NULL = not measured (section 10)
-  sharpness       REAL                          -- Laplacian variance of the aligned face; NULL = not measured
+  sharpness       REAL,                         -- Laplacian variance of the aligned face; NULL = not measured
+  source          TEXT NOT NULL DEFAULT 'detector' CHECK (source IN ('detector','user'))  -- 'user': the owner moved or resized the box (section 10)
 );
 CREATE INDEX IF NOT EXISTS faces_item   ON faces(item_id);
 CREATE INDEX IF NOT EXISTS faces_person ON faces(person_id, quality);
@@ -250,7 +251,7 @@ CREATE TABLE IF NOT EXISTS bodies (
   guess_evidence  TEXT,
   frame_time_s    REAL,
   created_at      TEXT NOT NULL,
-  source          TEXT NOT NULL DEFAULT 'detector' CHECK (source IN ('detector','user'))  -- 'user': drawn (section 10)
+  source          TEXT NOT NULL DEFAULT 'detector' CHECK (source IN ('detector','user'))  -- 'user': drawn, moved or resized by the owner (section 10)
 );
 CREATE INDEX IF NOT EXISTS bodies_item   ON bodies(item_id);
 CREATE INDEX IF NOT EXISTS bodies_person ON bodies(person_id);
@@ -267,7 +268,7 @@ CREATE TABLE IF NOT EXISTS animals (
   species         TEXT NOT NULL,                -- bird, cat, dog, horse, sheep, cow, elephant, bear, zebra, giraffe
   species_source  TEXT NOT NULL DEFAULT 'auto' CHECK (species_source IN ('auto','user')),  -- 'user': the owner said so
   species_scores  TEXT,                         -- JSON {species: probability} from the zero-shot check (section 22)
-  source          TEXT NOT NULL DEFAULT 'detector' CHECK (source IN ('detector','user')),  -- 'user': the owner drew it
+  source          TEXT NOT NULL DEFAULT 'detector' CHECK (source IN ('detector','user')),  -- 'user': the owner drew, moved or resized it
   frame_time_s    REAL,                         -- videos: the sampled frame
   embedding       BLOB,                         -- float32[768], L2-normalised (SigLIP of the padded crop)
   created_at      TEXT NOT NULL

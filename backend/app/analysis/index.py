@@ -254,6 +254,31 @@ class FaceIndex:
             self._tentative_conn = None
             self._tentative_ids = set()
 
+    def reload_faces(self, conn: sqlite3.Connection, face_ids: list[int]) -> None:
+        """After a commit that changed these faces' vectors or weights (a moved box, or the undo of one): take
+        them again from the database. A plain sync would not, as it only loads the vectors of faces it has not
+        seen. Faces the index does not hold yet come with the next sync."""
+        ids = sorted({int(f) for f in face_ids})
+        if not ids:
+            return
+        with self.lock:
+            changed = False
+            for start in range(0, len(ids), _IN_CHUNK):
+                chunk = ids[start:start + _IN_CHUNK]
+                marks = ",".join("?" * len(chunk))
+                for r in conn.execute(
+                    "SELECT id, person_id, assigned_by, item_id, det_score, size_px, clarity, sharpness, embedding "
+                    f"FROM faces WHERE id IN ({marks})", chunk,
+                ):
+                    pos = self._pos.get(int(r[0]))
+                    if pos is None:
+                        continue
+                    self._emb[pos] = _decode(r[8])
+                    self._weight[pos] = _weight_of([r])[0]
+                    changed = True
+            if changed:
+                self._changed()
+
     def set_person(self, face_id: int, person_id: int | None) -> None:
         """Reflect an assignment made in the current transaction without a full refresh."""
         with self.lock:

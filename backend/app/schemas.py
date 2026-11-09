@@ -175,6 +175,7 @@ class FaceOut(BaseModel):
     guess: GuessOut | None = None
     url: str
     group: int | None = None    # videos: the tracks of one person or look-alike share a number (section 10)
+    source: Literal["detector", "user"] = "detector"  # section 10: 'user' when the owner moved or resized the box
 
 
 class BodyOut(BaseModel):
@@ -482,6 +483,7 @@ class FaceListItem(BaseModel):
     frame_time_s: float | None = None
     person_id: int | None = None
     assigned_by: AssignedBy
+    source: Literal["detector", "user"] = "detector"  # section 10: 'user' when the owner moved or resized the box
     guess: GuessOut | None = None
     created_at: str
 
@@ -511,6 +513,14 @@ class AnimalPage(BaseModel):
     items: list[AnimalListItem]
     next_cursor: str | None = None
     total: int
+
+
+class BoxIn(BaseModel):
+    """A box's new place (section 10): x, y, w, h normalised to the picture (display orientation)."""
+    x: float = Field(ge=0.0, le=1.0)
+    y: float = Field(ge=0.0, le=1.0)
+    w: float = Field(gt=0.0, le=1.0)
+    h: float = Field(gt=0.0, le=1.0)
 
 
 class AssignFacesIn(BaseModel):

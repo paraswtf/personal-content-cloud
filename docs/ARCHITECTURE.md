@@ -609,6 +609,39 @@ Person boxes the owner draws (2026-11-08), like the pet boxes of section 22. `PO
 - Tests: `tests/test_video_tracking.py`, `tests/test_face_weights.py`, `tests/test_not_faces.py`,
   `tests/test_person_boxes.py`, `tests/test_face_upkeep.py`.
 
+Moving or resizing a box (2026-11-09, `app/analysis/box_edit.py`): `PUT /api/faces/{id}/box`,
+`/api/bodies/{id}/box` and `/api/animals/{id}/box` with `BoxIn {x, y, w, h}` answer the box (`FaceOut`, `BodyOut`,
+`AnimalOut`), for any face, person or pet box, a guess's too.
+- The slow part runs before the write (`box_edit.prepare`): the photo, or a video box's frame at its
+  `frame_time_s`, as the analysis sees it; the box checked (inside the picture, at least 12 pixels a side in that
+  frame unless it is no smaller than the old box, so a small detector box can still be nudged); the new crop. A face
+  box also gets the face detector inside it (padded like a drawn person box): a face whose centre lies inside the
+  box gives the new face vector, detector score, size, quality, clarity and sharpness (of several, the one most
+  inside the box, then the one it overlaps most: `person_boxes.pick_face`, so a box enlarged around Asha that takes
+  in part of Ravi's face still means hers); none found keeps the old vector while the box is still around the old
+  face (overlapping it by IoU `>= 0.3`, covering half of it, or holding its centre: `box_edit.near_old`) or when the
+  detector is not loaded, and otherwise answers 422 `no_face` (a box where no face is belongs to a person box).
+  With SigLIP a face's head-and-torso
+  vector, a person box's clothes vector and a pet box's look vector are taken again.
+- The write stores the owner's box (not the detector's) with `source 'user'` (a migrated column on faces too,
+  `FaceOut.source`, `FaceListItem.source`), the new vectors, and then the crop: the old one is copied to the
+  action's undo folder (`undo.keep_copy`) and the new one written; the face index takes the face again
+  (`FaceIndex.reload_faces`, as a plain sync only loads vectors of faces it has not seen). Names and guesses stay
+  (no new guess job: the owner may be fixing the box before answering), and a pet box nobody is on is matched to
+  pets again.
+- Crop URLs carry the crop file's time (`/files/face/{id}?v=...`, `app/urls.py`), so a moved box's new crop shows at
+  once wherever its crop is (and an undo, which brings back the old file with its old time, brings back the old
+  URL).
+- Re-analysis keeps the moved boxes like drawn ones: person and pet boxes by `source`, and on a photo the faces
+  with `source 'user'`, dropping new detector faces over them; a new detector body around such a twin takes the
+  kept face instead (`person_boxes.relink_twin_bodies`; dropping the twin would clear its `face_id` and leave a
+  faceless person box around the kept face), or goes when a body already holds it. A video's faces are tracked
+  again (their names carry over to the new tracks), as a re-track cannot keep a box from an older run.
+- 400 `frame_time_needed`, 403 `vault_locked`, 404, 409 when the photo or frame cannot be opened, 422 for a bad box
+  or `no_face`. Undo puts the box, its vectors and its crop back (section 33). Origins (section 14): a moved box with
+  a person the system matched shows "Drawn by you"; a guess stays the system's suggestion.
+- Tests: `tests/test_box_move.py`.
+
 Related items (2026-11-08). A tag can also say that an item is about someone without them in it (a pet's
 toy, a person's handwriting), so it shows under the person and in a search for the name:
 - `item_tags.relation TEXT NOT NULL DEFAULT 'in' CHECK (relation IN ('in','related'))` (a migrated column).
@@ -999,9 +1032,10 @@ carries a small icon, a person (lucide `UserRound`) when the owner put them ther
 did, with the words as a tooltip ("Tagged by you", "Drawn by you", "Tagged automatically", "Suggested
 automatically") and in the label of the control around it ("Show Asha in the photo, tagged by you", "Edit face
 tagged as Ravi automatically"); `data-origin` is `you` or `auto`. A box (`boxOrigin`) is the owner's when
-`assigned_by` is 'user' with a person on it, "Drawn by you" when the owner drew it (`source` 'user') and the
-system matched it (a pet box), the system's when recognition or grouping put the person there, and a guess
-waiting for an answer shows the bot of a suggestion; a box the detector found with nobody on it has no icon (the
+`assigned_by` is 'user' with a person on it, "Drawn by you" when the owner drew, moved or resized it (`source`
+'user') and the system matched the person on it (a pet box, a moved box), the system's when recognition or grouping
+put the person there, and a guess waiting for an answer shows the bot of a suggestion, also on a box the owner
+placed; a box the detector found with nobody on it has no icon (the
 person page keeps a lock on a face the owner took off someone, "Kept unassigned by you"). Naming an unnamed group
 or merging people does not make the faces the owner's: the system grouped them, so they keep the bot until the
 owner tags one. A badge that stands for several boxes takes one answer: a person on an item (`itemOrigins`, used
@@ -1023,6 +1057,21 @@ than the stage, holding a `PersonPicker` (a typed name creates the person) with 
 someone posts `items/{uid}/people-boxes` (`person_id` or `new_person_name`); the toast says when a face inside the
 box was tagged too. The new box shows with the name like any person box (a video's as a chip under it), and its
 editor's "Not a person" removes it.
+
+Moving or resizing a box (2026-11-09, `viewer/BoxAdjuster.tsx`, section 10 for the server side): on photos and videos
+the face and pet editors offer "Move or resize", for every face, person and pet box, guesses included (a video's box
+on its own frame: the player goes there and stays paused, the handles sit over the picture and cover the player's
+controls, and the chips under the video step aside until it is saved or cancelled). The editor closes
+(on a phone the details go down too) and the box gets corner handles over a dimmed photo, the other boxes stepping
+back: drag the box to move it, a corner to resize it (touch too: the layer is `data-no-swipe` and `touch-none`, so
+a drag never turns into a swipe to the next item). The box itself takes the focus: the arrows move it (Shift for
+small steps), + and - resize it around its middle, Enter saves and Escape cancels; the viewer's own keys and the
+previous and next arrows stay out of the way meanwhile. Save and Cancel sit under the box, else over it, else
+inside its bottom edge, centred on it but always inside the picture (measured, so a box at a phone's edge keeps
+them on screen). Adjust mode ends when its box can no longer show: the boxes hidden, a Live Photo playing, drawing
+started, or a badge in the details jumping elsewhere. Save sends `PUT .../box` and shows "Face box moved" (person box, pet box) with Undo; nothing moved closes
+without a request; `no_face` keeps the handles with "No face there. For someone whose face does not show, use
+Add a person box instead." The focus then goes back to the box's own button (on a video, its chip).
 
 Header (2026-11-08, `components/shell/Header.tsx`, `Nav.tsx`, `HeaderMenu.tsx`): on md and up the bar
 holds the site name (from lg), Library and People as links, a Documents menu (All documents and the six
@@ -2105,7 +2154,10 @@ and the rows a foreign key cleared.
   rewritten.
 - Files: a crop the action removes (`undo.discard`, used by the box deletes) moves to `DATA_DIR/undo/<action>/`
   instead of being deleted; an undo that puts the row back puts the crop back, and the crops of rows an undo
-  removes go to the undo's own folder, ready for a redo.
+  removes go to the undo's own folder, ready for a redo. A crop an action replaces (a moved box,
+  `undo.keep_copy`) is copied there first; an undo that puts the box's x, y, w or h back swaps the crops (the one
+  on disk goes to the undo's folder, the action's copy comes back), so a redo swaps them again. Faces whose vector
+  or weight columns come back are taken again by the face index (`FaceIndex.reload_faces`).
 - Housekeeping drops actions older than 30 days with their journal and files (`undo.prune`).
 - Tests: `tests/test_undo.py` (a face named then undone and redone, "Not a face" with a look-alike and their
   crops, a merge and a person delete, a drawn person box, category, trash and album, a later change blocking,

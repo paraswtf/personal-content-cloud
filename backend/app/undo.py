@@ -24,6 +24,10 @@ CONTRACT.
   the caller refreshes the items' full-text rows (`items` in the answer).
 - item_ids(conn, action_id): the items an action touched (the vault check of the route).
 - discard(path): during an action a removed crop moves to DATA_DIR/undo/<action>/ instead of being deleted.
+- keep_copy(path): during an action a crop about to be replaced (a moved box, section 10) is copied there
+  first. An undo that puts a box's x, y, w or h back swaps the crops: the one on disk goes to the undo's
+  stash and the action's copy comes back (so a redo swaps them again), and faces whose vectors came back
+  are taken again by the face index (FaceIndex.reload_faces).
 - not_undoable(): a with-block whose writes stay out of the journal (the bulk purge).
 - prune(conn): drops actions older than KEEP_DAYS with their stash (worker housekeeping).
 """
@@ -66,6 +70,8 @@ CROPS: dict[str, Callable[[int], Path]] = {
 STASH_DIR = "undo"
 # Bookkeeping columns: they never block an undo and are not put back; the counts are counted again.
 NOISE = frozenset({"updated_at", "face_count", "body_count", "animal_count"})
+BOX_COLUMNS = frozenset({"x", "y", "w", "h"})  # a box's place: its crop follows it (keep_copy)
+FACE_VECTOR_COLUMNS = frozenset({"embedding", "det_score", "size_px", "clarity", "sharpness"})
 COUNTS = {"face_count": "faces", "body_count": "bodies", "animal_count": "animals"}
 
 
@@ -187,6 +193,25 @@ def discard(path: Path | None) -> None:
     os.replace(p, dest)
 
 
+def keep_copy(path: Path | None) -> None:
+    """Copy a file the current action is about to replace into its stash (an undo puts it back). Outside an
+    action, or when the action already kept one, nothing happens."""
+    act = current_action.get()
+    if path is None or act is None:
+        return
+    p = Path(path)
+    if not p.exists():
+        return
+    try:
+        dest = _stash_path(act.id, p)
+    except ValueError:  # outside the data folder
+        return
+    if dest.exists():
+        return  # the action's first copy is the one to put back
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(p, dest)
+
+
 def _move(src: Path, dest: Path) -> None:
     if src.exists():
         dest.parent.mkdir(parents=True, exist_ok=True)
@@ -289,6 +314,8 @@ def undo(conn: sqlite3.Connection, action_id: str) -> dict[str, Any]:
     token = current_action.set(ActionContext(undo_id, "UNDO", f"/api/actions/{action_id}/undo", undo_of=action_id))
     restored: list[tuple[str, int]] = []  # rows put back: their crops come back from this action's stash
     removed: list[tuple[str, int]] = []  # rows taken away again: their crops go to the undo's stash
+    swapped: list[tuple[str, int]] = []  # boxes put back where they were: their crops swap with the stash
+    vectors: list[int] = []  # faces whose vectors or weights came back: the face index takes them again
     skipped = 0
     items: set[int] = set()
     try:
@@ -340,6 +367,10 @@ def undo(conn: sqlite3.Connection, action_id: str) -> dict[str, Any]:
                     conn.execute(
                         f"UPDATE {table} SET {', '.join(chr(34) + c + chr(34) + ' = ?' for c in back)} WHERE {where}",
                         [_sql_value(old[c], c in blobs) for c in back] + [_sql_value(new.get(k), k in blobs) for k in pk])
+                    if table in CROPS and BOX_COLUMNS & set(back) and isinstance(new.get("id"), int):
+                        swapped.append((table, int(new["id"])))
+                    if table == "faces" and FACE_VECTOR_COLUMNS & set(back) and isinstance(new.get("id"), int):
+                        vectors.append(int(new["id"]))
             if items:
                 ids = sorted(items)
                 for start in range(0, len(ids), 500):
@@ -361,6 +392,17 @@ def undo(conn: sqlite3.Connection, action_id: str) -> dict[str, Any]:
         path = CROPS[table](row_id)
         if path.exists():
             _move(path, _stash_path(undo_id, path))
+    for table, row_id in swapped:
+        path = CROPS[table](row_id)
+        before = _stash_path(action_id, path)
+        if before.exists():
+            if path.exists():
+                _move(path, _stash_path(undo_id, path))
+            _move(before, path)
+    if vectors:
+        from app.analysis.index import get_index
+
+        get_index().reload_faces(conn, vectors)
     log.info("undid action %s (%d changes, %d left as they are now) as %s", action_id, len(entries), skipped, undo_id)
     return {"undo_id": undo_id, "changes": len(entries), "partial": skipped > 0, "items": sorted(items)}
 

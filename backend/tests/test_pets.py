@@ -175,12 +175,12 @@ def test_people_routes_know_pets(client, zoo):
     assert [(p["name"], p["kind"], p["species"], p["animal_count"], p["face_count"], p["item_count"]) for p in pets_page["items"]] == \
         [("Bruno", "pet", "dog", 1, 0, 1)]
     bruno = pets_page["items"][0]
-    assert bruno["cover_url"] == f"/files/animal/{zoo['d1']}" and bruno["cover_face_id"] is None
+    assert bruno["cover_url"].split("?")[0] == f"/files/animal/{zoo['d1']}" and bruno["cover_face_id"] is None
     assert [p["name"] for p in client.get("/api/people", params={"kind": "person"}).json()["items"]] == ["Meera"]
     assert {p["name"] for p in client.get("/api/people").json()["items"]} == {"Bruno", "Meera"}
     assert client.get(f"/api/people/{zoo['bruno']}").json()["kind"] == "pet"
     crops = client.get(f"/api/people/{zoo['bruno']}/animals").json()
-    assert crops["total"] == 1 and crops["items"][0]["species"] == "dog" and crops["items"][0]["url"] == f"/files/animal/{zoo['d1']}"
+    assert crops["total"] == 1 and crops["items"][0]["species"] == "dog" and crops["items"][0]["url"].split("?")[0] == f"/files/animal/{zoo['d1']}"
     assert client.get(f"/api/people/{zoo['meera']}/animals").json()["total"] == 0
     assert [i["filename"] for i in client.get(f"/api/people/{zoo['bruno']}/items").json()["items"]] == ["dogs.jpg"]
     assert [i["filename"] for i in client.get("/api/items", params={"person": zoo["bruno"]}).json()["items"]] == ["dogs.jpg"]

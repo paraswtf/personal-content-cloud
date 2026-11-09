@@ -9,6 +9,9 @@ Routes (all under /api, all require a logged-in session; writes need the CSRF he
   GET    /people/{id}/faces?cursor&limit -> FacePage;  GET /people/{id}/items?cursor&limit&vault -> ItemPage
   GET    /faces/unassigned -> FacePage;  POST /faces/assign -> AssignOut;  DELETE /faces/{id} -> Ok
   POST   /bodies/assign -> AssignOut;  DELETE /bodies/{id} -> Ok
+  PUT    /faces/{id}/box, /bodies/{id}/box, /animals/{id}/box {x, y, w, h} -> FaceOut | BodyOut | AnimalOut: the
+         owner moves or resizes a box (section 10, app.analysis.box_edit); 422 for a bad box or no_face (a face
+         box moved where no face is), 409 when the photo or frame cannot be opened
   POST   /guesses/confirm {faces, bodies} -> BulkOut;  POST /guesses/reject -> BulkOut
   GET    /review/guesses?cursor&limit -> GuessPage
   GET    /suggestions?limit -> SuggestionList;  POST /suggestions/dismiss {a, b} -> Ok
@@ -40,7 +43,8 @@ from app import storage
 from app import undo as undo_mod
 from app.analysis import cluster, guess
 from app.analysis import animals as animals_mod
-from app.analysis import person_boxes
+from app.analysis import box_edit, person_boxes
+from app.analysis.index import get_index
 from app.analysis import pets as pets_mod
 from app.learning import not_faces as not_faces_mod
 from app.api.common import (
@@ -99,6 +103,9 @@ from app.schemas import (
     TagIn,
     AnimalBoxIn,
     AnimalOut,
+    BodyOut,
+    BoxIn,
+    FaceOut,
     RedetectIn,
 )
 from app.urls import animal_url, face_url, thumb_url
@@ -396,7 +403,7 @@ def _tags_of(conn: sqlite3.Connection, item_id: int) -> list[PersonRef]:
 
 
 FACE_SELECT = (
-    "SELECT f.id, f.person_id, f.assigned_by, f.det_score, f.size_px, f.quality, f.frame_time_s, f.created_at, "
+    "SELECT f.id, f.person_id, f.assigned_by, f.source, f.det_score, f.size_px, f.quality, f.frame_time_s, f.created_at, "
     "f.guess_person_id, f.guess_score, f.guess_evidence, i.uid AS item_uid, i.kind AS item_kind, "
     "i.version AS item_version FROM faces f JOIN items i ON i.id = f.item_id"
 )
@@ -414,7 +421,8 @@ def _face_item(conn: sqlite3.Connection, row: sqlite3.Row, refs: dict[int, Perso
         thumb_url=thumb_url(row["item_uid"], int(row["item_version"])), url=face_url(int(row["id"])),
         det_score=row["det_score"], size_px=row["size_px"], quality=row["quality"],
         frame_time_s=row["frame_time_s"], person_id=row["person_id"], assigned_by=row["assigned_by"],
-        guess=guess_out(conn, row, refs), created_at=row["created_at"],
+        source="user" if row["source"] == "user" else "detector", guess=guess_out(conn, row, refs),
+        created_at=row["created_at"],
     )
 
 
@@ -1084,6 +1092,53 @@ def delete_face(face_id: int, conn: sqlite3.Connection = Depends(get_db),
 def delete_body(body_id: int, conn: sqlite3.Connection = Depends(get_db),
                 session: SessionInfo = Depends(require_user)) -> Ok:
     return _delete_box(conn, "bodies", body_id, session)
+
+
+# ------------------------------------------------------------------ moving a box (section 10)
+def _move_box(conn: sqlite3.Connection, table: str, box_id: int, body: BoxIn, session: SessionInfo) -> sqlite3.Row:
+    """The box at its new place (box_edit): the slow part before the transaction, the crop after it."""
+    not_found, _count = _BOX_NAMES[table]
+    row = conn.execute(f"SELECT item_id FROM {table} WHERE id = ?", (box_id,)).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail=not_found)
+    _check_items_vault(conn, session, [int(row["item_id"])])
+    try:
+        prep = box_edit.prepare(conn, table, box_id, (body.x, body.y, body.w, body.h))
+    except LookupError:
+        raise HTTPException(status_code=404, detail=not_found) from None
+    except box_edit.NoFace:
+        raise HTTPException(status_code=422, detail="no_face") from None
+    except animals_mod.FrameTimeNeeded:
+        raise HTTPException(status_code=400, detail="frame_time_needed") from None
+    except animals_mod.NoImage:
+        raise HTTPException(status_code=409, detail="The photo or frame could not be opened") from None
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
+    with tx(conn):
+        if not box_edit.store(conn, prep):
+            raise HTTPException(status_code=404, detail=not_found)
+    box_edit.write_crop(prep)
+    if table == "faces":
+        get_index().reload_faces(conn, [box_id])
+    return conn.execute(f"SELECT * FROM {table} WHERE id = ?", (box_id,)).fetchone()
+
+
+@router.put("/faces/{face_id}/box", response_model=FaceOut)
+def move_face(face_id: int, body: BoxIn, conn: sqlite3.Connection = Depends(get_db),
+              session: SessionInfo = Depends(require_user)) -> FaceOut:
+    return face_out(conn, _move_box(conn, "faces", face_id, body, session))
+
+
+@router.put("/bodies/{body_id}/box", response_model=BodyOut)
+def move_body(body_id: int, body: BoxIn, conn: sqlite3.Connection = Depends(get_db),
+              session: SessionInfo = Depends(require_user)) -> BodyOut:
+    return body_out(conn, _move_box(conn, "bodies", body_id, body, session))
+
+
+@router.put("/animals/{animal_id}/box", response_model=AnimalOut)
+def move_animal(animal_id: int, body: BoxIn, conn: sqlite3.Connection = Depends(get_db),
+                session: SessionInfo = Depends(require_user)) -> AnimalOut:
+    return animal_out(conn, _move_box(conn, "animals", animal_id, body, session))
 
 
 # ------------------------------------------------------------------ guesses

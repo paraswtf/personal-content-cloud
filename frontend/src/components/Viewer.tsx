@@ -9,7 +9,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import clsx from 'clsx'
 import { ChevronDown, ChevronLeft, ChevronRight, Info, Loader2, Pencil, PawPrint, ScanFace, Star, X } from 'lucide-react'
 import { api, ApiError } from '../lib/api'
-import type { ItemDetail } from '../lib/types'
+import type { BoxIn, ItemDetail } from '../lib/types'
 import { formatDuration, personName } from '../lib/format'
 import { boxOrigin, mergeOrigins, originPhrase, type Origin } from '../lib/origin'
 import { useAuth } from '../lib/auth'
@@ -116,6 +116,7 @@ function VideoChips({
         <button
           type="button"
           onClick={() => onSeek(t)}
+          data-box-key={key}
           aria-pressed={activeKey === key}
           className="flex h-10 items-center gap-2 rounded-full pl-1 pr-3 text-sm text-white hover:bg-white/10"
           aria-label={(whole ? `${name}, ${count} tracks, show the first` : `${name}, ${formatDuration(b.frame_time_s)}, show this frame`) + how}
@@ -211,6 +212,8 @@ function ViewerInner({ uid, onClose, onPrev, onNext, position, startAt = null, v
   const [editing, setEditing] = useState<{ kind: BoxKind; id: number; anchor: HTMLElement; group?: boolean } | null>(null)
   const [tagging, setTagging] = useState(false)
   const [drawing, setDrawing] = useState<DrawKind | null>(null) // a pet box (section 22) or a person box (section 10) the owner draws
+  // section 10: the box the owner is moving or resizing (BoxAdjuster on the photo)
+  const [adjusting, setAdjusting] = useState<{ kind: BoxKind; id: number } | null>(null)
   const [confirmDelete, setConfirmDelete] = useState(false)
   const [sharing, setSharing] = useState(false) // the Share dialog (section 26): the keyboard steps aside like for the delete confirm
   const [exitAfter, setExitAfter] = useState<'next' | 'close' | null>(null)
@@ -259,6 +262,7 @@ function ViewerInner({ uid, onClose, onPrev, onNext, position, startAt = null, v
     setEditing(null)
     setTagging(false)
     setDrawing(null)
+    setAdjusting(null)
     setPage(0)
   }, [uid])
 
@@ -352,6 +356,14 @@ function ViewerInner({ uid, onClose, onPrev, onNext, position, startAt = null, v
   useEffect(() => {
     if (editing && detail && !editingTarget) setEditing(null)
   }, [editing, detail, editingTarget])
+  const adjustTarget = adjusting && detail ? findBox(detail, adjusting.kind, adjusting.id) : null
+  useEffect(() => {
+    if (adjusting && detail && !adjustTarget) setAdjusting(null)
+  }, [adjusting, detail, adjustTarget])
+  // Adjust mode ends when its box cannot show any more: boxes hidden, a Live Photo playing, drawing started.
+  useEffect(() => {
+    if (adjusting && (!showFaces || livePlaying || drawing)) setAdjusting(null)
+  }, [adjusting, showFaces, livePlaying, drawing])
 
   const poster = posterTime(detail?.duration_s)
   const frameTime = useCallback(() => currentFrameTime(videoRef.current, frameTimeRef.current, poster), [poster])
@@ -372,11 +384,67 @@ function ViewerInner({ uid, onClose, onPrev, onNext, position, startAt = null, v
    *  tagging form close, and on a phone the details sheet goes down so the photo is in reach. */
   const startDrawing = useCallback((kind: DrawKind) => {
     setEditing(null)
+    setAdjusting(null)
     setTagging(false)
     setShowFaces(true)
     setDrawing(kind)
     if (typeof window !== 'undefined' && !window.matchMedia('(min-width: 1024px)').matches) setShowInfo(false)
   }, [])
+  /** Adjust mode (section 10): the editor closes and the box gets handles; on a phone the details go down. */
+  const moveBox = useMutation({
+    mutationFn: async ({ t, box }: { t: BoxTarget; box: BoxIn }): Promise<unknown> =>
+      t.kind === 'face' ? api.people.moveFace(t.box.id, box) : t.kind === 'body' ? api.people.moveBody(t.box.id, box) : api.animals.move(t.box.id, box),
+    onSuccess: (_r, v) => {
+      invalidate()
+      setAdjusting(null)
+      showToast(v.t.kind === 'face' ? 'Face box moved' : v.t.kind === 'body' ? 'Person box moved' : 'Pet box moved')
+    },
+  })
+  const startAdjust = useCallback(
+    (t: BoxTarget) => {
+      moveBox.reset()
+      setEditing(null)
+      setTagging(false)
+      setDrawing(null)
+      setSpotlight(null)
+      setLivePlaying(false)
+      setShowFaces(true)
+      setAdjusting({ kind: t.kind, id: t.box.id })
+      // a video's box belongs to its frame: the player goes there and stays paused (VideoStage)
+      if (detail?.kind === 'video') {
+        videoRef.current?.pause()
+        seekTo(t)
+      }
+      if (typeof window !== 'undefined' && !window.matchMedia('(min-width: 1024px)').matches) setShowInfo(false)
+    },
+    [moveBox, detail?.kind, seekTo],
+  )
+  // After adjusting a video's box, the focus goes back to its chip under the video (a photo's stage does its own).
+  const adjustedKey = useRef<string | null>(null)
+  useEffect(() => {
+    if (adjusting) adjustedKey.current = `${adjusting.kind}:${adjusting.id}`
+    else if (adjustedKey.current) {
+      const key = adjustedKey.current
+      adjustedKey.current = null
+      if (detail?.kind === 'video') {
+        requestAnimationFrame(() => rootRef.current?.querySelector<HTMLElement>(`[data-box-key="${key}"]`)?.focus({ preventScroll: true }))
+      }
+    }
+  }, [adjusting, detail?.kind])
+  const saveAdjust = (box: BoxIn) => {
+    if (!adjustTarget || moveBox.isPending) return
+    const b = adjustTarget.box
+    if (Math.abs(box.x - b.x) + Math.abs(box.y - b.y) + Math.abs(box.w - b.w) + Math.abs(box.h - b.h) < 1e-4) {
+      setAdjusting(null) // nothing moved
+      return
+    }
+    moveBox.mutate({ t: adjustTarget, box })
+  }
+  const adjustError = moveBox.error
+    ? moveBox.error instanceof ApiError && moveBox.error.code === 'no_face'
+      ? 'No face there. For someone whose face does not show, use Add a person box instead.'
+      : errorMessage(moveBox.error, 'Could not move the box')
+    : null
   const addPetBox = useCallback(() => startDrawing('pet'), [startDrawing])
   const addPersonBox = useCallback(() => startDrawing('person'), [startDrawing])
   /** A tap on a person's badge in the details (section 14): on a video, the same as their chip under the video
@@ -394,6 +462,7 @@ function ViewerInner({ uid, onClose, onPrev, onNext, position, startAt = null, v
     (personId: number, now = false) => {
       if (!detail) return
       setEditing(null)
+      setAdjusting(null)
       setShowFaces(true)
       if (detail.kind === 'video') {
         const mine = videoBoxes(detail).filter((t) => t.box.person?.id === personId)
@@ -413,6 +482,7 @@ function ViewerInner({ uid, onClose, onPrev, onNext, position, startAt = null, v
     (t: BoxTarget) => {
       if (!detail) return
       setEditing(null)
+      setAdjusting(null)
       setShowFaces(true)
       if (detail.kind === 'video') seekTo(t)
       else {
@@ -540,6 +610,8 @@ function ViewerInner({ uid, onClose, onPrev, onNext, position, startAt = null, v
         }
         return
       }
+      // The box adjuster takes its own keys (arrows, Enter, Escape); nothing else while it is open.
+      if (adjusting) return
       if (e.key === 'Escape') {
         if (e.defaultPrevented) return
         e.preventDefault()
@@ -572,7 +644,7 @@ function ViewerInner({ uid, onClose, onPrev, onNext, position, startAt = null, v
     }
     document.addEventListener('keydown', onKey)
     return () => document.removeEventListener('keydown', onKey)
-  }, [confirmDelete, sharing, editing, drawing, tagging, livePlaying, onClose, onPrev, onNext, closeEditor, toggleInfo, toggleFaces, detail, favorite, isDocKind, pageCount])
+  }, [confirmDelete, sharing, editing, drawing, adjusting, tagging, livePlaying, onClose, onPrev, onNext, closeEditor, toggleInfo, toggleFaces, detail, favorite, isDocKind, pageCount])
 
   const onTouchStart = (e: TouchEvent) => {
     const t = e.touches[0]
@@ -631,7 +703,7 @@ function ViewerInner({ uid, onClose, onPrev, onNext, position, startAt = null, v
       if (detail.kind === 'video') {
         if (!detail.urls.video) return <VideoPreparing detail={detail} />
         const shown =
-          seekFace?.shown && showFaces ? (videoBoxes(detail).find((t) => boxKey(t) === seekFace.key) ?? null) : null
+          seekFace?.shown && showFaces && !adjusting ? (videoBoxes(detail).find((t) => boxKey(t) === seekFace.key) ?? null) : null
         return (
           <VideoStage
             key={detail.uid + ':' + detail.version}
@@ -645,6 +717,11 @@ function ViewerInner({ uid, onClose, onPrev, onNext, position, startAt = null, v
             onDrawEnd={() => setDrawing(null)}
             frameTime={frameTime}
             onToast={showToast}
+            adjusting={adjustTarget}
+            adjustSaving={moveBox.isPending}
+            adjustError={adjustError}
+            onAdjustSave={saveAdjust}
+            onAdjustCancel={() => setAdjusting(null)}
           />
         )
       }
@@ -666,6 +743,11 @@ function ViewerInner({ uid, onClose, onPrev, onNext, position, startAt = null, v
           liveSrc={livePlaying ? liveUrl : null}
           onLiveStop={stopLive}
           onLiveError={onLiveError}
+          adjusting={adjustTarget}
+          adjustSaving={moveBox.isPending}
+          adjustError={adjustError}
+          onAdjustSave={saveAdjust}
+          onAdjustCancel={() => setAdjusting(null)}
           drawing={drawing}
           onDrawEnd={() => setDrawing(null)}
           onToast={showToast}
@@ -802,17 +884,17 @@ function ViewerInner({ uid, onClose, onPrev, onNext, position, startAt = null, v
             {stage}
             {liveUrl && <LiveButton playing={livePlaying} onChange={setLivePlaying} className="absolute left-3 top-3 z-10 sm:left-5 sm:top-5" />}
           </div>
-          {onPrev && (
+          {onPrev && !adjusting && (
             <button type="button" onClick={onPrev} className={clsx(navButton, 'left-2 sm:left-4')} aria-label="Previous" title="Previous">
               <ChevronLeft className="size-6" aria-hidden />
             </button>
           )}
-          {onNext && (
+          {onNext && !adjusting && (
             <button type="button" onClick={onNext} className={clsx(navButton, 'right-2 sm:right-4')} aria-label="Next" title="Next">
               <ChevronRight className="size-6" aria-hidden />
             </button>
           )}
-          {detail?.kind === 'video' && showFaces && (
+          {detail?.kind === 'video' && showFaces && !adjusting && (
             <VideoChips
               targets={videoBoxes(detail)}
               editingKey={editing ? `${editing.kind}:${editing.id}` : null}
@@ -878,6 +960,7 @@ function ViewerInner({ uid, onClose, onPrev, onNext, position, startAt = null, v
               showToast(msg)
               closeEditor()
             }}
+            onAdjust={detail?.kind === 'image' || detail?.kind === 'video' ? () => startAdjust(editingTarget) : undefined}
           />
         ) : (
           <FaceEditor
@@ -890,6 +973,7 @@ function ViewerInner({ uid, onClose, onPrev, onNext, position, startAt = null, v
               showToast(msg)
               closeEditor()
             }}
+            onAdjust={detail?.kind === 'image' || detail?.kind === 'video' ? () => startAdjust(editingTarget) : undefined}
           />
         )
       )}

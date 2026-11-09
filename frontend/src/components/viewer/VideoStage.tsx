@@ -25,7 +25,8 @@ import { posterTime } from '../../lib/preview'
 import { boxOrigin } from '../../lib/origin'
 import { errorMessage } from '../admin/adminHooks'
 import OriginIcon from '../people/OriginIcon'
-import { animalLabel, type BoxTarget, type DrawKind } from './boxes'
+import BoxAdjuster from './BoxAdjuster'
+import { adjustLabel, animalLabel, boxKey, type BoxTarget, type DrawKind } from './boxes'
 import PersonBoxCard from './PersonBoxCard'
 import { darkButton, useInvalidateItem } from './shared'
 import { boxInVideo, type Rect } from './videoSeek'
@@ -48,6 +49,12 @@ interface Props {
   /** The time of the frame on screen (the viewer's currentFrameTime), sent as `t` with the box. */
   frameTime?: () => number
   onToast?: (message: string) => void
+  /** Adjust mode (section 10), on the paused frame of the box: the box being moved or resized. */
+  adjusting?: BoxTarget | null
+  adjustSaving?: boolean
+  adjustError?: string | null
+  onAdjustSave?: (box: NormBox) => void
+  onAdjustCancel?: () => void
 }
 
 export { posterTime }
@@ -117,7 +124,23 @@ function useFrameClock(videoRef: RefObject<HTMLVideoElement | null>, ref: Mutabl
   }, [videoRef, ref, src])
 }
 
-export default function VideoStage({ detail, src, videoRef, face, onDismissFace, frameTimeRef, drawing = null, onDrawEnd, frameTime, onToast }: Props) {
+export default function VideoStage({
+  detail,
+  src,
+  videoRef,
+  face,
+  onDismissFace,
+  frameTimeRef,
+  drawing = null,
+  onDrawEnd,
+  frameTime,
+  onToast,
+  adjusting = null,
+  adjustSaving = false,
+  adjustError = null,
+  onAdjustSave,
+  onAdjustCancel,
+}: Props) {
   const [rect, setRect] = useState<Rect | null>(null)
   useFrameClock(videoRef, frameTimeRef, src)
 
@@ -137,8 +160,10 @@ export default function VideoStage({ detail, src, videoRef, face, onDismissFace,
     setPending(null)
   }, [drawing])
 
+  // Drawing or adjusting a box: the picture's place is tracked and the player stays paused.
+  const framed = !!drawing || !!adjusting
   useEffect(() => {
-    if (!drawing) {
+    if (!framed) {
       setDrag(null)
       setPending(null)
       setPicture(null)
@@ -161,7 +186,7 @@ export default function VideoStage({ detail, src, videoRef, face, onDismissFace,
       for (const e of events) video.removeEventListener(e, update)
       video.removeEventListener('play', pause)
     }
-  }, [drawing, videoRef])
+  }, [framed, videoRef])
 
   const add = useMutation({
     mutationFn: (v: { box: NormBox; t: number; species: Species }) => api.items.addAnimal(detail.uid, { ...v.box, species: v.species, t: v.t }),
@@ -279,6 +304,20 @@ export default function VideoStage({ detail, src, videoRef, face, onDismissFace,
             <span className="truncate">{name}</span>
             {origin && <OriginIcon origin={origin} size="xs" decorative />}
           </span>
+        </div>
+      )}
+
+      {adjusting && picture && (
+        <div className="absolute z-20" style={{ left: picture.left, top: picture.top, width: picture.width, height: picture.height }}>
+          <BoxAdjuster
+            key={boxKey(adjusting)}
+            start={{ x: adjusting.box.x, y: adjusting.box.y, w: adjusting.box.w, h: adjusting.box.h }}
+            label={adjustLabel(adjusting)}
+            saving={adjustSaving}
+            error={adjustError}
+            onSave={(box) => onAdjustSave?.(box)}
+            onCancel={() => onAdjustCancel?.()}
+          />
         </div>
       )}
 

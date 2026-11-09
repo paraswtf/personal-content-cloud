@@ -424,7 +424,7 @@ def face_out(conn: sqlite3.Connection, row: sqlite3.Row, refs: dict[int, PersonR
         id=row["id"], x=row["x"], y=row["y"], w=row["w"], h=row["h"], det_score=row["det_score"],
         size_px=row["size_px"], quality=row["quality"], frame_time_s=row["frame_time_s"],
         spans=json_loads(row["spans"]), person=_ref(conn, row["person_id"], refs), assigned_by=row["assigned_by"],
-        guess=guess_out(conn, row, refs), url=face_url(int(row["id"])),
+        guess=guess_out(conn, row, refs), url=face_url(int(row["id"])), source=_box_source(row),
     )
 
 
