@@ -164,6 +164,12 @@ export const post = <T>(url: string, body?: unknown) => request<T>('POST', url, 
 export const patch = <T>(url: string, body: unknown) => request<T>('PATCH', url, body)
 export const del = <T>(url: string) => request<T>('DELETE', url)
 
+/** A DELETE that answers 404 found the thing gone already (an earlier step took it): that is done. */
+function goneIsDone(e: unknown): OkOut {
+  if (e instanceof ApiError && e.status === 404) return { ok: true }
+  throw e
+}
+
 const enc = encodeURIComponent
 
 /** Seconds of a video frame as sent to the server: floored to the millisecond. */
@@ -441,7 +447,9 @@ export const api = {
     remove: (id: number) => del<OkOut>(`/api/people/${id}`),
     merge: (body: MergeIn) => post<PersonOut>('/api/people/merge', body),
     /** Every crop of a pet takes this species, and so does the pet (section 22). */
-    setSpecies: (id: number, species: Species) => post<PersonOut>(`/api/people/${id}/species`, { species }),
+    /** A pet's species everywhere (section 22); the reply names the pet the change ends on (a pet of the same name
+     *  and species takes the crops) and how many look-alike crops followed. */
+    setSpecies: (id: number, species: Species) => post<AssignOut>(`/api/people/${id}/species`, { species }),
     faces: (id: number, cursor?: string | null, limit = 200) => get<FacePage>(`/api/people/${id}/faces${qs({ cursor, limit })}`),
     animals: (id: number, cursor?: string | null, limit = 120) => get<AnimalPage>(`/api/people/${id}/animals${qs({ cursor, limit })}`),
     /** `relation`: in (the default), related (items about them without them in it, section 10) or all. */
@@ -457,7 +465,8 @@ export const api = {
         throw e
       }),
     assignBodies: (body: AssignBodiesIn) => post<AssignOut>('/api/bodies/assign', body),
-    deleteBody: (id: number) => del<OkOut>(`/api/bodies/${id}`),
+    /** "Not a person". A box already gone counts as done, like deleteFace. */
+    deleteBody: (id: number) => del<OkOut>(`/api/bodies/${id}`).catch(goneIsDone),
     confirmGuesses: (body: GuessIdsIn) => post<BulkOut>('/api/guesses/confirm', body),
     rejectGuesses: (body: GuessIdsIn) => post<BulkOut>('/api/guesses/reject', body),
     suggestions: (limit = 30) => get<SuggestionList>(`/api/suggestions${qs({ limit })}`),
@@ -477,7 +486,8 @@ export const api = {
     assign: (body: AssignAnimalsIn) => post<AssignOut>('/api/animals/assign', body),
     /** The owner's species for these boxes; look-alike crops follow (section 22). */
     setSpecies: (body: AnimalSpeciesIn) => post<AssignOut>('/api/animals/species', body),
-    remove: (id: number) => del<OkOut>(`/api/animals/${id}`),
+    /** "Not a pet". A box already gone counts as done, like deleteFace. */
+    remove: (id: number) => del<OkOut>(`/api/animals/${id}`).catch(goneIsDone),
   },
 
   documents: {

@@ -969,7 +969,17 @@ faces, bodies, pet boxes and tags here go to the one picked, remembered as not t
 box); "Rename" sends `PATCH /api/people/{id}` (everywhere; a name someone else has merges them). "Not {name}" posts
 `/api/items/people/remove` with this item: their boxes here stay, unnamed and remembered as not them
 (guess_rejections), and their tags here go. Someone here through a tag alone gets "Remove from this item" (the tag's
-DELETE) instead, and a tag the owner made also offers "Make this 'in'" or "Make this 'related'". The chips under
+DELETE) instead, and a tag the owner made also offers "Make this 'in'" or "Make this 'related'". Like the box editors,
+the menu also takes their boxes here away (2026-11-09), each item shown only when they have such boxes and each one
+undoable action: "Not a face" (`DELETE /api/faces/{id}` for each of their faces here, kept for the not-a-face learner,
+look-alikes going with them), "Not a person" (their person boxes without a face, `DELETE /api/bodies/{id}`) and, for a
+pet, "Not a pet" (`DELETE /api/animals/{id}`) and "Species..." (a card with the species buttons of the pet box editor;
+like a rename it changes the pet everywhere, `POST /api/people/{id}/species`, its boxes following, so the pet stays
+on the item, or joins a pet of the same name and species when there is one, which the message names; the box editor
+still changes one box). A face taken away from inside a person box of theirs leaves them on the item through that
+box, and the message says so. A box already gone counts as removed (a retry after a failure half way), and the item
+is read again either way. After a change that can take the chip away, the focus goes to their pencil, or when they
+left to the first pencil in the list, else to "Tag someone". The chips under
 "In the frame" (videos) have no pencil. Escape closes the card (not the viewer) and puts the focus back on the
 chip's pencil.
 

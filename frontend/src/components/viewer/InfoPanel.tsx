@@ -12,6 +12,7 @@ import clsx from 'clsx'
 import {
   AlertCircle,
   ArrowUpRight,
+  Ban,
   Download,
   EyeOff,
   Forward,
@@ -64,7 +65,7 @@ import { burstBestUid, reasonKeys, reasonLabel } from '../library/misclick'
 import PersonPicker, { choiceBody, type PersonChoice } from '../people/PersonPicker'
 import { boxKey, stillBoxes, videoBoxes, type BoxTarget } from './boxes'
 import GuessChip from './GuessChip'
-import { PersonEditCard, usePersonEdits, type PersonEditMode, type PersonEditTarget } from './PersonEdit'
+import { PersonEditCard, usePersonEdits, type BoxRemoval, type PersonEditMode, type PersonEditTarget } from './PersonEdit'
 import TagsPanel from './TagsPanel'
 import TextPanel from './TextPanel'
 import { darkButton, useInvalidateItem } from './shared'
@@ -121,6 +122,8 @@ export function Row({ label, value }: { label: string; value: ReactNode }) {
 
 const menuItemClass =
   'flex min-h-11 w-full items-center gap-2.5 rounded-lg px-3 py-2 text-left text-sm text-white/90 hover:bg-white/10 focus-visible:bg-white/10 disabled:opacity-50'
+/** The items that take boxes away ("Not a face", "Not a person", "Not a pet"), in the box editors' danger colour. */
+const dangerItemClass = menuItemClass.replace('text-white/90', 'text-red-300')
 
 /** What the owner can do with someone on this item (section 14): change them to someone else, rename them, take them
  * off the item, and for a tag of the owner's, switch its relation (the same POST with the other one). */
@@ -134,6 +137,13 @@ interface ChipMenu {
   /** "Not NAME" when boxes of theirs are here (they stay, remembered as not them), "Remove from this item" for a tag alone. */
   onRemove: () => void
   tagOnly: boolean
+  /** Their boxes here, which "Not a face", "Not a person" and "Not a pet" take away as the box editors do (0: no item). */
+  faces: number
+  bodies: number
+  pets: number
+  onRemoveBoxes: (kind: BoxRemoval) => void
+  /** A pet's boxes here are another species (a card with the species). */
+  onSpecies?: () => void
 }
 
 function PersonChip({
@@ -298,6 +308,15 @@ function PersonChip({
               <span className="block text-xs text-white/50">Everywhere, not only here</span>
             </span>
           </button>
+          {menu.onSpecies && (
+            <button type="button" role="menuitem" className={menuItemClass} onClick={act(menu.onSpecies)}>
+              <PawPrint className="size-4 shrink-0" aria-hidden />
+              <span className="min-w-0">
+                Species...
+                <span className="block text-xs text-white/50">What kind of animal it is, everywhere</span>
+              </span>
+            </button>
+          )}
           {menu.relation === 'related' ? (
             <button type="button" role="menuitem" className={menuItemClass} onClick={act(() => menu.onRelation('in'))}>
               <ScanFace className="size-4 shrink-0" aria-hidden />
@@ -330,6 +349,39 @@ function PersonChip({
                 Not {name}
                 <span className="block text-xs text-white/50">
                   {pet ? 'Its boxes here stay, unnamed and remembered as not it' : 'Their faces here stay, unnamed and remembered as not them'}
+                </span>
+              </span>
+            </button>
+          )}
+          {menu.faces > 0 && (
+            <button type="button" role="menuitem" className={dangerItemClass} onClick={act(() => menu.onRemoveBoxes('face'))}>
+              <Ban className="size-4 shrink-0" aria-hidden />
+              <span className="min-w-0">
+                Not a face
+                <span className="block text-xs text-white/50">
+                  {menu.faces === 1 ? 'Removes this face box' : `Removes their ${menu.faces} face boxes here`}, and detection learns from it
+                </span>
+              </span>
+            </button>
+          )}
+          {menu.bodies > 0 && (
+            <button type="button" role="menuitem" className={dangerItemClass} onClick={act(() => menu.onRemoveBoxes('body'))}>
+              <Ban className="size-4 shrink-0" aria-hidden />
+              <span className="min-w-0">
+                Not a person
+                <span className="block text-xs text-white/50">
+                  {menu.bodies === 1 ? 'Removes their person box here' : `Removes their ${menu.bodies} person boxes here`}
+                </span>
+              </span>
+            </button>
+          )}
+          {menu.pets > 0 && (
+            <button type="button" role="menuitem" className={dangerItemClass} onClick={act(() => menu.onRemoveBoxes('animal'))}>
+              <Ban className="size-4 shrink-0" aria-hidden />
+              <span className="min-w-0">
+                Not a pet
+                <span className="block text-xs text-white/50">
+                  {menu.pets === 1 ? 'Removes its box here' : `Removes its ${menu.pets} boxes here`}
                 </span>
               </span>
             </button>
@@ -503,6 +555,23 @@ export default function InfoPanel({
     setTagging(false)
     setPersonEdit({ mode, who: p, species: detail.animals.find((a) => a.person?.id === p.id)?.species ?? null })
   }
+  // A change that can take the chip away moves the focus, once the item is read again, back to the person's pencil,
+  // or when they left to the first pencil in the list, else to "Tag someone" (section 14).
+  const tagButton = useRef<HTMLButtonElement>(null)
+  const [refocus, setRefocus] = useState<{ id: number; before: ItemDetail } | null>(null)
+  const refocusAfter = (id: number) => setRefocus({ id, before: detail })
+  useEffect(() => {
+    if (!refocus || refocus.before === detail) return
+    const id = refocus.id
+    setRefocus(null)
+    requestAnimationFrame(() => {
+      const el =
+        document.querySelector<HTMLElement>(`[data-person-menu="${id}"]`) ??
+        document.querySelector<HTMLElement>('[data-person-menu]') ??
+        tagButton.current
+      el?.focus({ preventScroll: true })
+    })
+  }, [detail, refocus])
   const closeEdit = () => {
     const id = personEdit?.who.id
     setPersonEdit(null)
@@ -510,6 +579,10 @@ export default function InfoPanel({
       requestAnimationFrame(() => document.querySelector<HTMLElement>(`[data-person-menu="${id}"]`)?.focus())
   }
   const personMenu = (p: PersonRef): ChipMenu => {
+    const faceIds = detail.faces.filter((f) => f.person?.id === p.id).map((f) => f.id)
+    // Person boxes without a face of their own (drawn ones, a back or a far shot); a face's body goes with the face.
+    const bodyIds = detail.bodies.filter((b) => b.person?.id === p.id && b.face_id === null).map((b) => b.id)
+    const petIds = detail.animals.filter((a) => a.person?.id === p.id).map((a) => a.id)
     const tagged = tagIds.has(p.id) || p.relation === 'related'
     const tagOnly = tagged && !boxed.has(p.id)
     return {
@@ -520,10 +593,21 @@ export default function InfoPanel({
       onRename: () => startEdit('rename', p),
       onRemove: () => {
         setPersonEdit(null)
-        if (tagOnly) removeTag.mutate(p.id)
-        else edits.notThem.mutate(p)
+        if (tagOnly) removeTag.mutate(p.id, { onSettled: () => refocusAfter(p.id) })
+        else edits.notThem.mutate(p, { onSettled: () => refocusAfter(p.id) })
       },
       tagOnly,
+      faces: faceIds.length,
+      bodies: bodyIds.length,
+      pets: petIds.length,
+      onRemoveBoxes: (kind) => {
+        setPersonEdit(null)
+        const ids = kind === 'face' ? faceIds : kind === 'body' ? bodyIds : petIds
+        // A face inside a person box of theirs leaves them on the item through that box (the toast says so).
+        const stays = kind === 'face' && detail.bodies.some((b) => b.person?.id === p.id && b.face_id !== null && faceIds.includes(b.face_id))
+        if (ids.length) edits.removeBoxes.mutate({ who: p, kind, ids, stays }, { onSettled: () => refocusAfter(p.id) })
+      },
+      onSpecies: p.kind === 'pet' && petIds.length ? () => startEdit('species', p) : undefined,
     }
   }
   const update = useMutation({
@@ -765,8 +849,12 @@ export default function InfoPanel({
               edit={personEdit}
               busy={edits.busy}
               video={isVideo}
-              onPick={(choice) => edits.change.mutate({ who: personEdit.who, choice })}
+              onPick={(choice) => {
+                const id = personEdit.who.id
+                edits.change.mutate({ who: personEdit.who, choice }, { onSettled: () => refocusAfter(id) })
+              }}
               onRename={(name) => edits.rename.mutate({ who: personEdit.who, name })}
+              onSpecies={(next) => edits.species.mutate({ who: personEdit.who, species: next })}
               onCancel={closeEdit}
             />
           )}
@@ -876,7 +964,7 @@ export default function InfoPanel({
               )}
             </div>
           ) : (
-            <button type="button" onClick={() => setTagging(true)} className={darkButton('default', 'mt-3')}>
+            <button ref={tagButton} type="button" onClick={() => setTagging(true)} className={darkButton('default', 'mt-3')}>
               <UserPlus className="size-4" aria-hidden />
               Tag someone
             </button>
