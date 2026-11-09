@@ -4,13 +4,33 @@ import SwiftData
 struct SyncView: View {
     @ObservedObject private var engine = SyncEngine.shared
     @ObservedObject private var uploader = BackgroundUploader.shared
-    @Query(sort: \SyncEvent.at, order: .reverse) private var events: [SyncEvent]
-    @Query(filter: #Predicate<SyncRecord> { $0.status == "synced" }) private var synced: [SyncRecord]
-    @Query(filter: #Predicate<SyncRecord> { $0.status == "failed" }) private var failed: [SyncRecord]
-    @Query(filter: #Predicate<SyncRecord> { $0.status == "uploaded" }) private var waiting: [SyncRecord]
+    @Environment(\.modelContext) private var ctx
+    // Only what the screen shows is loaded. Loading every record (or every log line) made each save
+    // during a large sync reload thousands of objects on the main thread, and a log line trimmed
+    // by SyncStore.log while still listed here crashed the app.
+    @Query(SyncView.recentEvents) private var events: [SyncEvent]
+    @Query(SyncView.recentFailed) private var failed: [SyncRecord]
+
+    static var recentEvents: FetchDescriptor<SyncEvent> {
+        var d = FetchDescriptor<SyncEvent>(sortBy: [SortDescriptor(\.at, order: .reverse)])
+        d.fetchLimit = 100
+        return d
+    }
+
+    static var recentFailed: FetchDescriptor<SyncRecord> {
+        var d = FetchDescriptor<SyncRecord>(predicate: #Predicate<SyncRecord> { $0.status == "failed" },
+                                            sortBy: [SortDescriptor(\.updatedAt, order: .reverse)])
+        d.fetchLimit = 20
+        return d
+    }
+
+    private func count(_ status: String) -> Int {
+        (try? ctx.fetchCount(FetchDescriptor<SyncRecord>(predicate: #Predicate<SyncRecord> { $0.status == status }))) ?? 0
+    }
 
     var body: some View {
-        NavigationStack {
+        let syncedCount = count("synced"), failedCount = count("failed"), waitingCount = count("uploaded")
+        return NavigationStack {
             List {
                 Section {
                     HStack {
@@ -41,15 +61,15 @@ struct SyncView: View {
                         }
                         .buttonStyle(.borderedProminent)
                         Spacer()
-                        Text("\(synced.count) synced, \(failed.count) failed").font(.footnote).foregroundStyle(.secondary)
+                        Text("\(syncedCount) synced, \(failedCount) failed").font(.footnote).foregroundStyle(.secondary)
                     }
-                    if !waiting.isEmpty {
-                        Text("\(waiting.count) sent, waiting for the server to store them").font(.footnote).foregroundStyle(.secondary)
+                    if waitingCount > 0 {
+                        Text("\(waitingCount) sent, waiting for the server to store them").font(.footnote).foregroundStyle(.secondary)
                     }
                 }
                 if !failed.isEmpty {
                     Section("Failed") {
-                        ForEach(failed.prefix(20)) { r in
+                        ForEach(failed) { r in
                             VStack(alignment: .leading) {
                                 Text(r.filename.isEmpty ? r.assetId : r.filename)
                                 Text(r.error ?? "").font(.footnote).foregroundStyle(.red)
@@ -58,7 +78,7 @@ struct SyncView: View {
                     }
                 }
                 Section("Log") {
-                    ForEach(events.prefix(100)) { e in
+                    ForEach(events) { e in
                         HStack(alignment: .top) {
                             Text(e.at, style: .time).font(.footnote).foregroundStyle(.secondary).frame(width: 64, alignment: .leading)
                             Text(e.text).font(.footnote).foregroundStyle(e.level == "error" ? .red : .primary)

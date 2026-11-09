@@ -133,6 +133,7 @@ final class SyncEvent {
 final class SyncStore {
     static let shared = SyncStore()
     let container: ModelContainer
+    private var linesSinceTrim = 0
 
     private init() {
         let schema = Schema([SyncRecord.self, SyncEvent.self])
@@ -155,9 +156,14 @@ final class SyncStore {
     func log(_ text: String, level: String = "info") {
         let ctx = container.mainContext
         ctx.insert(SyncEvent(text, level: level))
-        // keep the log short
-        if let old = try? ctx.fetch(FetchDescriptor<SyncEvent>(sortBy: [SortDescriptor(\.at, order: .reverse)])), old.count > 500 {
-            for e in old.dropFirst(500) { ctx.delete(e) }
+        // Keep the log short: every 50 lines, drop all but the newest 500. The Sync screen lists only
+        // the newest 100, so it never shows a line being removed.
+        linesSinceTrim += 1
+        if linesSinceTrim >= 50 {
+            linesSinceTrim = 0
+            var old = FetchDescriptor<SyncEvent>(sortBy: [SortDescriptor(\.at, order: .reverse)])
+            old.fetchOffset = 500
+            for e in (try? ctx.fetch(old)) ?? [] { ctx.delete(e) }
         }
         try? ctx.save()
     }
