@@ -598,7 +598,8 @@ def record_outcome(conn: sqlite3.Connection, row: sqlite3.Row, person_id: int, l
 
 
 def confirm(conn: sqlite3.Connection, face_ids: list[int], body_ids: list[int]) -> int:
-    """Accept open guesses: person_id = guess_person_id, assigned_by 'user'. A body without a face
+    """Accept open guesses: person_id = guess_person_id, assigned_by 'user' (locked, as the owner said so) and
+    by_guess 1 (the system found them: shown with its icon, section 10). A body without a face
     also gets an item_tags row (source 'guess', removed again when that body is reassigned or deleted).
     A box whose person is already in the item (also through a box confirmed earlier in this call)
     is not confirmed: its guess is cleared. Queues a 'guess' job per (person, item). Returns boxes
@@ -639,14 +640,15 @@ def confirm(conn: sqlite3.Connection, face_ids: list[int], body_ids: list[int]) 
                 if already("faces", r, pid):
                     continue
                 record_outcome(conn, r, pid, 1)
+                # by_guess: the owner said yes, but the system found them (shown as the system's, section 10)
                 conn.execute(
-                    "UPDATE faces SET person_id = ?, assigned_by = 'user', guess_person_id = NULL, guess_score = NULL, "
-                    "guess_evidence = NULL WHERE id = ?",
+                    "UPDATE faces SET person_id = ?, assigned_by = 'user', by_guess = 1, guess_person_id = NULL, "
+                    "guess_score = NULL, guess_evidence = NULL WHERE id = ?",
                     (pid, r["id"]),
                 )
                 conn.execute(
-                    "UPDATE bodies SET person_id = ?, assigned_by = 'user', guess_person_id = NULL, guess_score = NULL, "
-                    "guess_evidence = NULL WHERE face_id = ?",
+                    "UPDATE bodies SET person_id = ?, assigned_by = 'user', by_guess = 1, guess_person_id = NULL, "
+                    "guess_score = NULL, guess_evidence = NULL WHERE face_id = ?",
                     (pid, r["id"]),
                 )
                 pairs.add((pid, int(r["item_id"])))
@@ -664,8 +666,8 @@ def confirm(conn: sqlite3.Connection, face_ids: list[int], body_ids: list[int]) 
                     continue
                 record_outcome(conn, r, pid, 1)
                 conn.execute(
-                    "UPDATE bodies SET person_id = ?, assigned_by = 'user', guess_person_id = NULL, guess_score = NULL, "
-                    "guess_evidence = NULL WHERE id = ?",
+                    "UPDATE bodies SET person_id = ?, assigned_by = 'user', by_guess = 1, guess_person_id = NULL, "
+                    "guess_score = NULL, guess_evidence = NULL WHERE id = ?",
                     (pid, r["id"]),
                 )
                 if r["face_id"] is None:

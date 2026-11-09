@@ -55,15 +55,14 @@ def test_a_face_box_moves_with_a_new_crop_and_keeps_its_name_and_vector_without_
     assert r.status_code == 200, r.text
     out = r.json()
     assert (out["x"], out["y"], out["w"], out["h"]) == pytest.approx((0.32, 0.22, 0.18, 0.28))
-    assert out["source"] == "user" and out["person"]["id"] == asha and out["assigned_by"] == "user"
+    assert out["source"] == "detector" and out["person"]["id"] == asha and out["assigned_by"] == "user"
     row = _row(conn, "faces", fid)
-    assert row["source"] == "user" and np.allclose(_vec(row), _unit(3))   # no detector: the vector stays
+    assert row["moved"] == 1 and row["source"] == "detector"   # moved, not drawn: who found the face stays
+    assert np.allclose(_vec(row), _unit(3))   # no detector: the vector stays
     assert storage.face_crop_path(fid).read_bytes() != before
     assert out["url"].split("?")[0] == url_before.split("?")[0] and out["url"] != url_before   # a new crop, a new URL
     detail = client.get(f"/api/items/{item['uid']}").json()
-    assert detail["faces"][0]["source"] == "user" and detail["faces"][0]["url"] == out["url"]
-    faces = client.get(f"/api/people/{asha}/faces").json()["items"]
-    assert faces[0]["source"] == "user"
+    assert detail["faces"][0]["url"] == out["url"]
 
 
 def test_a_face_found_in_the_new_box_gives_the_new_vector(client, conn, monkeypatch):
@@ -110,7 +109,7 @@ def test_undo_puts_the_box_its_crop_its_url_and_the_index_vector_back_and_redo_a
     u = client.post(f"/api/actions/{r.headers['x-action-id']}/undo")
     assert u.status_code == 200, u.text
     row = _row(conn, "faces", fid)
-    assert (row["x"], row["y"], row["w"], row["h"]) == pytest.approx(FACE) and row["source"] == "detector"
+    assert (row["x"], row["y"], row["w"], row["h"]) == pytest.approx(FACE) and row["moved"] == 0
     assert np.allclose(_vec(row), _unit(3)) and np.allclose(_index_vec(conn, fid), _unit(3))
     assert storage.face_crop_path(fid).read_bytes() == crop_before
     assert client.get(f"/api/items/{item['uid']}").json()["faces"][0]["url"] == url_before
@@ -138,7 +137,7 @@ def test_a_guess_box_keeps_its_guess_and_shows_no_owner(client, conn):
     assert conn.execute("SELECT COUNT(*) FROM jobs WHERE type = 'guess'").fetchone()[0] == 0
 
 
-def test_a_person_box_and_a_pet_box_move_and_become_the_owners(client, conn):
+def test_a_person_box_and_a_pet_box_move_and_keep_who_found_them(client, conn):
     item = _photo(conn)
     kabir = make_person(conn, "Kabir")
     with tx(conn):
@@ -152,11 +151,12 @@ def test_a_person_box_and_a_pet_box_move_and_become_the_owners(client, conn):
         storage.write_bytes_atomic(path, b"old crop")
     r = client.put(f"/api/bodies/{bid}/box", json={"x": 0.12, "y": 0.1, "w": 0.32, "h": 0.85})
     assert r.status_code == 200, r.text
-    assert r.json()["source"] == "user" and r.json()["person"]["id"] == kabir and r.json()["assigned_by"] == "auto"
+    assert r.json()["source"] == "detector" and r.json()["person"]["id"] == kabir and r.json()["assigned_by"] == "auto"
+    assert _row(conn, "bodies", bid)["moved"] == 1
     assert storage.body_crop_path(bid).read_bytes() != b"old crop"
     r = client.put(f"/api/animals/{aid}/box", json={"x": 0.55, "y": 0.5, "w": 0.35, "h": 0.45})
     assert r.status_code == 200, r.text
-    assert r.json()["source"] == "user" and r.json()["x"] == pytest.approx(0.55)
+    assert r.json()["source"] == "detector" and r.json()["x"] == pytest.approx(0.55) and _row(conn, "animals", aid)["moved"] == 1
     assert storage.animal_crop_path(aid).read_bytes() != b"old crop"
 
 
@@ -255,9 +255,9 @@ def test_undo_swaps_a_person_box_and_a_pet_box_crop_back(client, conn):
         assert moved != b"old crop"
         u = client.post(f"/api/actions/{r.headers['x-action-id']}/undo")
         assert u.status_code == 200 and path.read_bytes() == b"old crop"
-        assert _row(conn, kind, box_id)["source"] == "detector"
+        assert _row(conn, kind, box_id)["moved"] == 0
         assert client.post(f"/api/actions/{u.json()['undo_id']}/undo").status_code == 200
-        assert path.read_bytes() == moved and _row(conn, kind, box_id)["source"] == "user"
+        assert path.read_bytes() == moved and _row(conn, kind, box_id)["moved"] == 1
 
 
 def test_reanalysis_gives_a_body_around_the_twin_the_moved_face(conn, client, monkeypatch):

@@ -230,7 +230,9 @@ CREATE TABLE IF NOT EXISTS faces (
   created_at      TEXT NOT NULL,
   clarity         REAL,                         -- face-model feature norm; NULL = not measured (section 10)
   sharpness       REAL,                         -- Laplacian variance of the aligned face; NULL = not measured
-  source          TEXT NOT NULL DEFAULT 'detector' CHECK (source IN ('detector','user'))  -- 'user': the owner moved or resized the box (section 10)
+  source          TEXT NOT NULL DEFAULT 'detector' CHECK (source IN ('detector','user')),  -- 'user': the owner drew the face box (section 10)
+  by_guess        INTEGER NOT NULL DEFAULT 0,   -- 1: the person came from a guess the owner confirmed (shown as the system's)
+  moved           INTEGER NOT NULL DEFAULT 0    -- 1: the owner moved or resized the box (a re-analysis keeps it)
 );
 CREATE INDEX IF NOT EXISTS faces_item   ON faces(item_id);
 CREATE INDEX IF NOT EXISTS faces_person ON faces(person_id, quality);
@@ -251,7 +253,9 @@ CREATE TABLE IF NOT EXISTS bodies (
   guess_evidence  TEXT,
   frame_time_s    REAL,
   created_at      TEXT NOT NULL,
-  source          TEXT NOT NULL DEFAULT 'detector' CHECK (source IN ('detector','user'))  -- 'user': drawn, moved or resized by the owner (section 10)
+  source          TEXT NOT NULL DEFAULT 'detector' CHECK (source IN ('detector','user')),  -- 'user': drawn by the owner (section 10)
+  by_guess        INTEGER NOT NULL DEFAULT 0,   -- 1: the person came from a guess the owner confirmed
+  moved           INTEGER NOT NULL DEFAULT 0    -- 1: the owner moved or resized the box (a re-analysis keeps it)
 );
 CREATE INDEX IF NOT EXISTS bodies_item   ON bodies(item_id);
 CREATE INDEX IF NOT EXISTS bodies_person ON bodies(person_id);
@@ -268,7 +272,8 @@ CREATE TABLE IF NOT EXISTS animals (
   species         TEXT NOT NULL,                -- bird, cat, dog, horse, sheep, cow, elephant, bear, zebra, giraffe
   species_source  TEXT NOT NULL DEFAULT 'auto' CHECK (species_source IN ('auto','user')),  -- 'user': the owner said so
   species_scores  TEXT,                         -- JSON {species: probability} from the zero-shot check (section 22)
-  source          TEXT NOT NULL DEFAULT 'detector' CHECK (source IN ('detector','user')),  -- 'user': the owner drew, moved or resized it
+  source          TEXT NOT NULL DEFAULT 'detector' CHECK (source IN ('detector','user')),  -- 'user': the owner drew it
+  moved           INTEGER NOT NULL DEFAULT 0,   -- 1: the owner moved or resized the box (a re-analysis keeps it)
   frame_time_s    REAL,                         -- videos: the sampled frame
   embedding       BLOB,                         -- float32[768], L2-normalised (SigLIP of the padded crop)
   created_at      TEXT NOT NULL

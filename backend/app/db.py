@@ -61,6 +61,11 @@ MIGRATED_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("faces", "sharpness", "REAL"),
     ("bodies", "source", "TEXT NOT NULL DEFAULT 'detector' CHECK (source IN ('detector','user'))"),
     ("faces", "source", "TEXT NOT NULL DEFAULT 'detector' CHECK (source IN ('detector','user'))"),
+    ("faces", "by_guess", "INTEGER NOT NULL DEFAULT 0"),
+    ("bodies", "by_guess", "INTEGER NOT NULL DEFAULT 0"),
+    ("faces", "moved", "INTEGER NOT NULL DEFAULT 0"),
+    ("bodies", "moved", "INTEGER NOT NULL DEFAULT 0"),
+    ("animals", "moved", "INTEGER NOT NULL DEFAULT 0"),
 )
 _SCHEMA_FILE = Path(__file__).with_name("schema.sql")
 # Full-text tokenizer of items_fts. unicode61 treats combining marks (Unicode Mn, Mc) as separators,
@@ -118,6 +123,7 @@ def init_db() -> None:
         with tx(conn):
             _upgrade_fts(conn, schema)
             _upgrade_checks(conn, schema)
+            _mark_confirmed_guesses(conn)
             conn.execute("INSERT OR IGNORE INTO kv(key, value) VALUES ('schema_version', ?)", (str(SCHEMA_VERSION),))
             conn.execute(
                 "UPDATE kv SET value = ? WHERE key = 'schema_version' AND CAST(value AS INTEGER) < ?",
@@ -274,6 +280,22 @@ def tx(conn: sqlite3.Connection) -> Iterator[sqlite3.Connection]:
         if conn.in_transaction:
             conn.execute("ROLLBACK")
         raise
+
+
+def _mark_confirmed_guesses(conn: sqlite3.Connection) -> None:
+    """Once (kv 'guess_marks_v1'): boxes whose person came from a guess the owner confirmed before faces.by_guess
+    and bodies.by_guess existed. The guess learner's log keeps each confirmation's item and person; the owner's
+    boxes of that person there (not drawn by the owner) are it. Call inside a tx."""
+    if kv_get(conn, "guess_marks_v1") == "1":
+        return
+    pairs = conn.execute(
+        "SELECT DISTINCT item_id, person_id FROM learning_events WHERE kind = 'guess' AND label = 1 "
+        "AND item_id IS NOT NULL AND person_id IS NOT NULL").fetchall()
+    for item_id, person_id in pairs:
+        for table in ("faces", "bodies"):
+            conn.execute(f"UPDATE {table} SET by_guess = 1 WHERE item_id = ? AND person_id = ? AND assigned_by = 'user' "
+                         "AND source = 'detector' AND by_guess = 0", (item_id, person_id))
+    kv_set(conn, "guess_marks_v1", "1")
 
 
 def kv_get(conn: sqlite3.Connection, key: str, default: str | None = None) -> str | None:

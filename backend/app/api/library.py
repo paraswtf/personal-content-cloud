@@ -190,6 +190,13 @@ def _related(ref: PersonRef, relation: str) -> PersonRef:
     return ref if relation == "in" else ref.model_copy(update={"relation": relation})
 
 
+def _tag_ref(ref: PersonRef, relation: str, source: str) -> PersonRef:
+    """A tag's person: its relation, and by_guess for a tag a confirmed guess on a faceless body made (the
+    system's find, section 10)."""
+    out = _related(ref, relation)
+    return out.model_copy(update={"by_guess": True}) if source == "guess" else out
+
+
 def _grouped(out, groups: dict[tuple[str, int], int], kind: str):
     """Sets the video group of a box (section 10); photos have none."""
     out.group = groups.get((kind, int(out.id)))
@@ -211,7 +218,7 @@ def item_detail(conn: sqlite3.Connection, row: sqlite3.Row) -> ItemDetail:
     ).fetchall()
     groups = video_groups(faces, bodies, animals) if row["kind"] == "video" else {}
     tags = conn.execute(
-        "SELECT p.id, t.relation FROM item_tags t JOIN persons p ON p.id = t.person_id "
+        "SELECT p.id, t.relation, t.source FROM item_tags t JOIN persons p ON p.id = t.person_id "
         "WHERE t.item_id = ? ORDER BY p.name IS NULL, p.name_key, p.id",
         (item_id,),
     ).fetchall()
@@ -237,7 +244,7 @@ def item_detail(conn: sqlite3.Connection, row: sqlite3.Row) -> ItemDetail:
         faces=[_grouped(face_out(conn, f, refs), groups, "face") for f in faces],
         bodies=[_grouped(body_out(conn, b, refs), groups, "body") for b in bodies],
         animals=[_grouped(animal_out(conn, a, refs), groups, "animal") for a in animals],
-        tags=[_related(refs[int(t["id"])], t["relation"]) for t in tags if int(t["id"]) in refs],
+        tags=[_tag_ref(refs[int(t["id"])], t["relation"], t["source"]) for t in tags if int(t["id"]) in refs],
         people=[_related(refs[p], rel) for p, rel in people if p in refs],
         document=document_out(doc, row, wallet_configured=_wallet_configured()) if doc is not None else None,
         text_status=row["text_status"], analysis_status=row["analysis_status"], preview_status=row["preview_status"],

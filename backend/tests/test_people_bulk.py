@@ -132,6 +132,21 @@ def test_the_list_counts_the_items_where_the_owner_put_someone(client, conn):
     assert (by[carl]["items"], by[carl]["by_you"]) == (1, 0)
 
 
+def test_change_to_takes_an_unnamed_group_off_its_only_item(client, conn):
+    """Regression (2026-11-09): the move emptied the unnamed group, which was pruned before its look-alikes were
+    followed, and the "not them" memory for the gone group failed a foreign key (500 on Change to...)."""
+    clip = make_item(conn, filename="kart.mov", write_files=False)
+    group, other_group = make_person(conn, None), make_person(conn, None)
+    aadhya = make_person(conn, "Aadhya")
+    f1 = make_face(conn, clip["id"], group, write_crop=False)
+    f2 = make_face(conn, clip["id"], other_group, box=(0.6, 0.2, 0.2, 0.3), write_crop=False)
+    for g in (group, other_group):
+        r = client.post("/api/items/people/move", json={"uids": [clip["uid"]], "from_person_id": g, "person_id": aadhya})
+        assert r.status_code == 200, r.text
+    assert {_face_owner(conn, f)[0] for f in (f1, f2)} == {aadhya}
+    assert conn.execute("SELECT COUNT(*) FROM persons WHERE id IN (?, ?)", (group, other_group)).fetchone()[0] == 0
+
+
 def test_a_move_to_someone_else_takes_lookalikes_and_tags_along(client, conn):
     asha, a_faces, b_faces, items = _mixed_person(conn)
     bela = make_person(conn, "Bela")

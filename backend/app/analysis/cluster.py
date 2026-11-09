@@ -615,8 +615,8 @@ def carry_over(conn: sqlite3.Connection, old_faces: list[sqlite3.Row], new_face_
                                                     olds[i]["person_id"] is not None and int(olds[i]["person_id"]) in named,
                                                     float(old_e[i] @ new_e[j])))]
             conn.execute(
-                "UPDATE faces SET person_id = ?, assigned_by = ? WHERE id = ?",
-                (o["person_id"], o["assigned_by"], news[j]["id"]),
+                "UPDATE faces SET person_id = ?, assigned_by = ?, by_guess = ? WHERE id = ?",
+                (o["person_id"], o["assigned_by"], int(o["by_guess"]) if "by_guess" in o.keys() else 0, news[j]["id"]),
             )
             carried += 1
         for i, j in [*pairs, *follows]:

@@ -360,7 +360,8 @@ def _move_boxes(conn: sqlite3.Connection, table: str, ids: list[int], target: in
     if table == "bodies":
         _drop_body_tags(conn, [r for r in rows if r["person_id"] is not None and r["person_id"] != target])
     items = {int(r["item_id"]) for r in rows}
-    clear = "" if table == "animals" else ", guess_person_id = NULL, guess_score = NULL, guess_evidence = NULL"
+    # the owner's own say: no longer a guess they confirmed (by_guess, section 10)
+    clear = "" if table == "animals" else ", by_guess = 0, guess_person_id = NULL, guess_score = NULL, guess_evidence = NULL"
     conn.execute(f"UPDATE {table} SET person_id = ?, assigned_by = 'user'{clear} WHERE id IN ({ph})", [target, *ids])
     if target is not None:
         # The owner says these boxes are the target: an older "not the target" for them is outdated.
@@ -407,7 +408,8 @@ def _tags_of(conn: sqlite3.Connection, item_id: int) -> list[PersonRef]:
 
 
 FACE_SELECT = (
-    "SELECT f.id, f.person_id, f.assigned_by, f.source, f.det_score, f.size_px, f.quality, f.frame_time_s, f.created_at, "
+    "SELECT f.id, f.person_id, f.assigned_by, f.source, f.by_guess, f.det_score, f.size_px, f.quality, f.frame_time_s, "
+    "f.created_at, "
     "f.guess_person_id, f.guess_score, f.guess_evidence, i.uid AS item_uid, i.kind AS item_kind, "
     "i.version AS item_version FROM faces f JOIN items i ON i.id = f.item_id"
 )
@@ -425,8 +427,8 @@ def _face_item(conn: sqlite3.Connection, row: sqlite3.Row, refs: dict[int, Perso
         thumb_url=thumb_url(row["item_uid"], int(row["item_version"])), url=face_url(int(row["id"])),
         det_score=row["det_score"], size_px=row["size_px"], quality=row["quality"],
         frame_time_s=row["frame_time_s"], person_id=row["person_id"], assigned_by=row["assigned_by"],
-        source="user" if row["source"] == "user" else "detector", guess=guess_out(conn, row, refs),
-        created_at=row["created_at"],
+        source="user" if row["source"] == "user" else "detector", by_guess=bool(row["by_guess"]),
+        guess=guess_out(conn, row, refs), created_at=row["created_at"],
     )
 
 
@@ -620,8 +622,8 @@ def delete_person(person_id: int, conn: sqlite3.Connection = Depends(get_db),
         _visible_person_row(conn, session, person_id)
         items = _items_of_person(conn, person_id)
         cluster.clear_guesses_for(conn, [person_id])
-        conn.execute("UPDATE faces SET person_id = NULL, assigned_by = 'user' WHERE person_id = ?", (person_id,))
-        conn.execute("UPDATE bodies SET person_id = NULL, assigned_by = 'user' WHERE person_id = ?", (person_id,))
+        conn.execute("UPDATE faces SET person_id = NULL, assigned_by = 'user', by_guess = 0 WHERE person_id = ?", (person_id,))
+        conn.execute("UPDATE bodies SET person_id = NULL, assigned_by = 'user', by_guess = 0 WHERE person_id = ?", (person_id,))
         conn.execute("UPDATE animals SET person_id = NULL, assigned_by = 'user' WHERE person_id = ?", (person_id,))
         conn.execute("DELETE FROM persons WHERE id = ?", (person_id,))
         bump_faces_version(conn)
@@ -1526,8 +1528,9 @@ def people_on_items(body: ItemsPeopleIn, conn: sqlite3.Connection = Depends(get_
     for chunk in _chunks(item_ids):
         ph = _ids_sql(chunk)
         for table, key in (("faces", "faces"), ("bodies", "bodies"), ("animals", "animals")):
-            # Faces are never drawn; bodies and pet boxes are when source is 'user'.
-            mine = "assigned_by = 'user'" if table == "faces" else "(assigned_by = 'user' OR source = 'user')"
+            # The owner's: tagged by hand (not a guess they confirmed: by_guess), or a box they drew, moved or resized.
+            mine = ("(assigned_by = 'user' OR source = 'user')" if table == "animals"
+                    else "((assigned_by = 'user' AND by_guess = 0) OR source = 'user')")
             for r in conn.execute(
                 f"SELECT person_id, item_id, {mine} AS mine FROM {table} "
                 f"WHERE person_id IS NOT NULL AND item_id IN ({ph})", chunk
@@ -1537,12 +1540,13 @@ def people_on_items(body: ItemsPeopleIn, conn: sqlite3.Connection = Depends(get_
                 e["items"].add(int(r["item_id"]))
                 if r["mine"]:
                     e["mine"].add(int(r["item_id"]))
-        # Every tag is the owner's: added by hand, or a guess on a faceless body they confirmed.
-        for r in conn.execute(f"SELECT person_id, item_id, relation FROM item_tags WHERE item_id IN ({ph})", chunk):
+        # A tag added by hand is the owner's; one from a guess on a faceless body they confirmed is the system's find.
+        for r in conn.execute(f"SELECT person_id, item_id, relation, source FROM item_tags WHERE item_id IN ({ph})", chunk):
             e = entry(int(r["person_id"]))
             e["related" if r["relation"] == "related" else "tags"] += 1
             e["items"].add(int(r["item_id"]))
-            e["mine"].add(int(r["item_id"]))
+            if r["source"] != "guess":
+                e["mine"].add(int(r["item_id"]))
         unnamed += int(conn.execute(
             f"SELECT COUNT(*) FROM faces WHERE person_id IS NULL AND item_id IN ({ph})", chunk).fetchone()[0])
     rows: list[sqlite3.Row] = []

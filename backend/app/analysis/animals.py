@@ -585,14 +585,12 @@ def embed_look(engine: Any | None, look: np.ndarray | None) -> np.ndarray | None
 
 
 def drawn_ids(rows: list[sqlite3.Row]) -> list[int]:
-    """The owner-drawn boxes (source 'user') among animal rows: a re-analysis keeps them untouched."""
+    """The owner's boxes among animal rows, drawn (source 'user') or moved or resized (moved 1): a re-analysis keeps
+    them untouched."""
     out: list[int] = []
     for r in rows:
-        try:
-            src = r["source"]
-        except (IndexError, KeyError):
-            src = "detector"
-        if src == "user":
+        keys = r.keys()
+        if ("source" in keys and r["source"] == "user") or ("moved" in keys and r["moved"]):
             out.append(int(r["id"]))
     return out
 
@@ -742,7 +740,8 @@ def drop_over_drawn(conn: sqlite3.Connection, item_id: int, new_ids: list[int]) 
     (their crop files are the caller's to remove)."""
     if not new_ids:
         return []
-    drawn = conn.execute("SELECT x, y, w, h FROM animals WHERE item_id = ? AND source = 'user'", (item_id,)).fetchall()
+    drawn = conn.execute("SELECT x, y, w, h FROM animals WHERE item_id = ? AND (source = 'user' OR moved = 1)",
+                         (item_id,)).fetchall()
     if not drawn:
         return []
     marks = ",".join("?" * len(new_ids))

@@ -617,7 +617,8 @@ Face boxes the owner draws (2026-11-09), around a face the detector missed: `POS
   for the detector, so a small or soft face it missed in the whole picture is often found; of several, the one most
   inside the box (`pick_face`). It must find one: 422 `no_face` otherwise (a helmet, a back or someone far away is a
   person box), 409 `models_unavailable` without the face model.
-- The row keeps the owner's box with `source 'user'`, `assigned_by 'user'` for the person (a new name makes them),
+- The row keeps the owner's box with `source 'user'` (drawn, `FaceOut.source`), `assigned_by 'user'` for the person
+  (a new name makes them),
   the found face's vector, score, size, quality, clarity and sharpness, the head-and-torso vector with SigLIP, and
   its crop; on a video `frame_time_s = t` and spans `t +- 0.5 s`. On a photo a stored face under it (IoU `>= 0.4`
   with the found face) is assigned instead, as a hand assignment is. A new face inside a person box the detector
@@ -641,8 +642,9 @@ Moving or resizing a box (2026-11-09, `app/analysis/box_edit.py`): `PUT /api/fac
   detector is not loaded, and otherwise answers 422 `no_face` (a box where no face is belongs to a person box).
   With SigLIP a face's head-and-torso
   vector, a person box's clothes vector and a pet box's look vector are taken again.
-- The write stores the owner's box (not the detector's) with `source 'user'` (a migrated column on faces too,
-  `FaceOut.source`, `FaceListItem.source`), the new vectors, and then the crop: the old one is copied to the
+- The write stores the owner's box (not the detector's) with `moved = 1` (a migrated column on faces, bodies and
+  animals; who put the person there does not change by fixing the box, so `source` stays and the origin icon with
+  it), the new vectors, and then the crop: the old one is copied to the
   action's undo folder (`undo.keep_copy`) and the new one written; the face index takes the face again
   (`FaceIndex.reload_faces`, as a plain sync only loads vectors of faces it has not seen). Names and guesses stay
   (no new guess job: the owner may be fixing the box before answering), and a pet box nobody is on is matched to
@@ -650,14 +652,14 @@ Moving or resizing a box (2026-11-09, `app/analysis/box_edit.py`): `PUT /api/fac
 - Crop URLs carry the crop file's time (`/files/face/{id}?v=...`, `app/urls.py`), so a moved box's new crop shows at
   once wherever its crop is (and an undo, which brings back the old file with its old time, brings back the old
   URL).
-- Re-analysis keeps the moved boxes like drawn ones: person and pet boxes by `source`, and on a photo the faces
-  with `source 'user'`, dropping new detector faces over them; a new detector body around such a twin takes the
+- Re-analysis keeps the moved boxes like drawn ones (`source 'user'` or `moved = 1`): person and pet boxes, and on
+  a photo the faces, dropping new detector faces over them; a new detector body around such a twin takes the
   kept face instead (`person_boxes.relink_twin_bodies`; dropping the twin would clear its `face_id` and leave a
   faceless person box around the kept face), or goes when a body already holds it. A video's faces are tracked
   again (their names carry over to the new tracks), as a re-track cannot keep a box from an older run.
 - 400 `frame_time_needed`, 403 `vault_locked`, 404, 409 when the photo or frame cannot be opened, 422 for a bad box
-  or `no_face`. Undo puts the box, its vectors and its crop back (section 33). Origins (section 14): a moved box with
-  a person the system matched shows "Drawn by you"; a guess stays the system's suggestion.
+  or `no_face`. Undo puts the box, its vectors and its crop back (section 33). Origins (section 14) do not change: a
+  moved box shows who put the person there, as before.
 - Tests: `tests/test_box_move.py`.
 
 Related items (2026-11-08). A tag can also say that an item is about someone without them in it (a pet's
@@ -687,8 +689,9 @@ found or in the trash are skipped; a selection holding a vault item while the va
   people and pets on those items, from faces, bodies, pet boxes and tags. `ItemPersonOut{id, name, kind,
   species, cover_url, items, faces, bodies, animals, tags, related, by_you}`: `items` counts the selected items
   they are on (any way), `tags` and `related` their tags by relation, `by_you` (2026-11-09) the items where the
-  owner put them there: a face, person box or pet box with `assigned_by = 'user'`, a box the owner drew (`source =
-  'user'`), or a tag (every tag is the owner's: added by hand, or a confirmed guess on a faceless body). Sorted by
+  owner put them there: a face, person box or pet box with `assigned_by = 'user'` that is not a confirmed guess
+  (`by_guess`), a box the owner drew (`source = 'user'`), or a tag added by hand (a tag a confirmed
+  guess on a faceless body made, `source 'guess'`, is the system's find). Sorted by
   `items` (most first), then named before unnamed, then by name. `unnamed_faces` counts the faces in the selection
   that nobody is named for.
 - `POST /api/items/people/move` `{uids, from_person_id, person_id | new_person_name}` ->
@@ -893,7 +896,10 @@ video over the poster and up to 12 sampled frames; 409 `models_unavailable`), se
 the items about them, section 10);
 `GET faces/unassigned`; `POST faces/assign {face_ids, person_id | new_person_name | null}`; `DELETE faces/{id}`;
 `POST bodies/assign {body_ids, person_id | new_person_name | null}`; `DELETE bodies/{id}`;
-`POST guesses/confirm {faces: [id], bodies: [id]}`; `POST guesses/reject {faces, bodies}`;
+`POST guesses/confirm {faces: [id], bodies: [id]}` (the box is locked as the owner's, `assigned_by 'user'`, and
+marked `by_guess` so it still shows as the system's find, section 14; any later hand assignment clears the mark; a
+re-analysis carries it; confirmations from before the mark existed are marked once at start from the guess
+learner's log, kv `guess_marks_v1`); `POST guesses/reject {faces, bodies}`;
 `GET suggestions`; `POST suggestions/dismiss {a, b}`; `POST items/{uid}/tags {person_id | new_person_name, kind?,
 species?, relation?}` (a person or a pet: `kind 'pet'` with `species` names a new pet, 400 `species_needed`
 without one, section 22; `relation` `in` | `related`, default `in`, the other relation for someone already tagged
@@ -1050,20 +1056,25 @@ carries a small icon, a person (lucide `UserRound`) when the owner put them ther
 did, with the words as a tooltip ("Tagged by you", "Drawn by you", "Tagged automatically", "Suggested
 automatically") and in the label of the control around it ("Show Asha in the photo, tagged by you", "Edit face
 tagged as Ravi automatically"); `data-origin` is `you` or `auto`. A box (`boxOrigin`) is the owner's when
-`assigned_by` is 'user' with a person on it, "Drawn by you" when the owner drew, moved or resized it (`source`
-'user') and the system matched the person on it (a pet box, a moved box), the system's when recognition or grouping
+`assigned_by` is 'user' with a person on it, "Drawn by you" when the owner drew it (`source` 'user') and the system
+matched the person on it (a pet box), the system's when recognition or grouping
 put the person there, and a guess waiting for an answer shows the bot of a suggestion, also on a box the owner
-placed; a box the detector found with nobody on it has no icon (the
+placed. A guess the owner confirmed stays the system's find (2026-11-09): the box is locked as the owner's for
+learning (`assigned_by 'user'`) but marked `by_guess` (`FaceOut`, `BodyOut`, `FaceListItem`; a tag a confirmed
+faceless guess made carries `by_guess` in `ItemDetail.tags`), and shows the bot with "Guessed automatically,
+confirmed by you" (origin 'confirmed'); tagging that box by hand afterwards makes it the owner's. A box the detector
+found with nobody on it has no icon (the
 person page keeps a lock on a face the owner took off someone, "Kept unassigned by you"). Naming an unnamed group
 or merging people does not make the faces the owner's: the system grouped them, so they keep the bot until the
 owner tags one. A badge that stands for several boxes takes one answer: a person on an item (`itemOrigins`, used
-by every section of the info panel so their chips agree) is the owner's when a tag or any box of theirs there is,
+by every section of the info panel so their chips agree) is the owner's when a tag or any box of theirs there is
+(then drawn by them, then a confirmed guess, then the system's),
 and a video's group chip is the owner's when any of its tracks is (the opened tracks show their own). Shown on the
 photo's box labels and the label of the picked video track, the chips under a video, the info panel's chips ("In
 the frame", the people, "Related to") and guesses, the face and pet editors' headers, the person page's face and
 pet crop tiles (pet crops carry `source`), the review's guess cards and the selection's people list, which shows
-the person icon for the items `by_you` counts and the bot for the rest ("Tagged or drawn by you on 2 items", and
-"2 by you" in the line under the name when both apply). An older server without `by_you` gets no icon there.
+the person icon for the items `by_you` counts and the bot for the rest ("Tagged or drawn by you on 2 items", "Found
+automatically on 1 item", and "2 by you" in the line under the name when both apply). An older server without `by_you` gets no icon there.
 
 Person boxes (2026-11-08, `viewer/PersonBoxCard.tsx`, section 10 for the server side): the People section of the
 info panel has "Add a person box" next to the pet buttons, on photos and videos, for someone in a helmet, seen from

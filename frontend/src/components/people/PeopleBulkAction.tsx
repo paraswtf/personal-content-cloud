@@ -223,7 +223,7 @@ export default function PeopleBulkAction({ uids, busy = false, onDone, from }: P
             <p className="flex min-w-0 items-center gap-1.5 text-sm font-semibold">
               <span className={clsx('truncate', !p.name && 'text-ink-soft')}>{name}</span>
               {!!mine && <OriginIcon origin="you" label={`Tagged or drawn by you on ${formatCount(mine, 'item')}`} className="text-ink-soft" />}
-              {auto > 0 && <OriginIcon origin="auto" label={`Tagged automatically on ${formatCount(auto, 'item')}`} className="text-ink-soft" />}
+              {auto > 0 && <OriginIcon origin="auto" label={`Found automatically on ${formatCount(auto, 'item')}`} className="text-ink-soft" />}
             </p>
             <p className="text-xs text-ink-soft">{detail.join(', ')}</p>
           </div>

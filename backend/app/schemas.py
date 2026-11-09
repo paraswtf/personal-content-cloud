@@ -151,6 +151,8 @@ class PersonRef(BaseModel):
     # In an item's people and tags lists (section 10): 'related' when the item is about them without them
     # in it. A reference from a box is always 'in'.
     relation: TagRelation = "in"
+    # In an item's tags: true for a tag made by a guess the owner confirmed (the system's find, section 10).
+    by_guess: bool | None = None
 
 
 class GuessOut(BaseModel):
@@ -175,7 +177,8 @@ class FaceOut(BaseModel):
     guess: GuessOut | None = None
     url: str
     group: int | None = None    # videos: the tracks of one person or look-alike share a number (section 10)
-    source: Literal["detector", "user"] = "detector"  # section 10: 'user' when the owner moved or resized the box
+    source: Literal["detector", "user"] = "detector"  # section 10: 'user' when the owner drew the face box
+    by_guess: bool = False  # section 10: the person came from a guess the owner confirmed
 
 
 class BodyOut(BaseModel):
@@ -192,6 +195,7 @@ class BodyOut(BaseModel):
     frame_time_s: float | None = None
     url: str
     group: int | None = None    # videos: the tracks of one person or look-alike share a number (section 10)
+    by_guess: bool = False  # section 10: the person came from a guess the owner confirmed
     source: Literal["detector", "user"] = "detector"  # section 10: 'user' when the owner drew the person box
 
 
@@ -483,7 +487,8 @@ class FaceListItem(BaseModel):
     frame_time_s: float | None = None
     person_id: int | None = None
     assigned_by: AssignedBy
-    source: Literal["detector", "user"] = "detector"  # section 10: 'user' when the owner moved or resized the box
+    source: Literal["detector", "user"] = "detector"  # section 10: 'user' when the owner drew the face box
+    by_guess: bool = False  # section 10: the person came from a guess the owner confirmed
     guess: GuessOut | None = None
     created_at: str
 

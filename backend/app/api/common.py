@@ -425,6 +425,7 @@ def face_out(conn: sqlite3.Connection, row: sqlite3.Row, refs: dict[int, PersonR
         size_px=row["size_px"], quality=row["quality"], frame_time_s=row["frame_time_s"],
         spans=json_loads(row["spans"]), person=_ref(conn, row["person_id"], refs), assigned_by=row["assigned_by"],
         guess=guess_out(conn, row, refs), url=face_url(int(row["id"])), source=_box_source(row),
+        by_guess=_by_guess(row),
     )
 
 
@@ -434,7 +435,7 @@ def body_out(conn: sqlite3.Connection, row: sqlite3.Row, refs: dict[int, PersonR
         id=row["id"], x=row["x"], y=row["y"], w=row["w"], h=row["h"], det_score=row["det_score"],
         face_id=row["face_id"], person=_ref(conn, row["person_id"], refs), assigned_by=row["assigned_by"],
         guess=guess_out(conn, row, refs), frame_time_s=row["frame_time_s"], url=body_url(int(row["id"])),
-        source=_box_source(row),
+        source=_box_source(row), by_guess=_by_guess(row),
     )
 
 
@@ -446,6 +447,14 @@ def animal_out(conn: sqlite3.Connection, row: sqlite3.Row, refs: dict[int, Perso
         assigned_by=row["assigned_by"], species_source=_species_source(row), source=_box_source(row),
         url=animal_url(int(row["id"])),
     )
+
+
+def _by_guess(row: sqlite3.Row) -> bool:
+    """The box's person came from a guess the owner confirmed (rows from hand-written selects may lack it)."""
+    try:
+        return bool(row["by_guess"]) and row["person_id"] is not None
+    except (IndexError, KeyError):
+        return False
 
 
 def _box_source(row: sqlite3.Row) -> str:

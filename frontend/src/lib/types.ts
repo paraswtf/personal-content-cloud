@@ -109,6 +109,8 @@ export interface PersonRef {
   kind: PersonKind
   /** ItemDetail.people and tags: 'related' when the item is about them without them in it. Older servers omit it ('in'). */
   relation?: TagRelation
+  /** ItemDetail.tags: a tag a confirmed guess made (section 10), the system's find. */
+  by_guess?: boolean | null
 }
 export interface GuessOut {
   person: PersonRef
@@ -132,8 +134,10 @@ export interface FaceOut {
   url: string
   /** Videos: tracks of one person, or of one look-alike, share a number (section 10). */
   group?: number | null
-  /** 'user' when the owner moved or resized the box (section 10). Older servers omit it. */
+  /** 'user' when the owner drew the face box (section 10). Older servers omit it. */
   source?: 'detector' | 'user'
+  /** The person came from a guess the owner confirmed: the system's find, shown with its icon (section 10). */
+  by_guess?: boolean
 }
 /** A box's new place (section 10): normalised to the picture, display orientation. */
 export interface BoxIn {
@@ -157,8 +161,10 @@ export interface BodyOut {
   url: string
   /** Videos: tracks of one person, or of one look-alike, share a number (section 10). */
   group?: number | null
-  /** 'user' when the owner drew, moved or resized the box (section 10), else found by the detector. */
+  /** 'user' when the owner drew the box (section 10), else found by the detector. */
   source?: 'detector' | 'user'
+  /** The person came from a guess the owner confirmed (section 10). */
+  by_guess?: boolean
 }
 /** An animal box (section 22): a pet found by its look, assigned to a pet identity. */
 export interface AnimalOut {
@@ -229,8 +235,10 @@ export interface FaceListItem {
   frame_time_s: number | null
   person_id: number | null
   assigned_by: AssignedBy
-  /** 'user' when the owner moved or resized the box. Older servers omit it. */
+  /** 'user' when the owner drew the face box. Older servers omit it. */
   source?: 'detector' | 'user'
+  /** The person came from a guess the owner confirmed (section 10). */
+  by_guess?: boolean
   guess: GuessOut | null
   created_at: string
 }

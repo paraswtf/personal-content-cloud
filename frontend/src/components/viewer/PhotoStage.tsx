@@ -290,7 +290,16 @@ export default function PhotoStage({
           // a guess shows its own chip; an untagged box the detector found has no origin
           const origin = boxOrigin(b)
           const shownOrigin = origin === 'guess' ? null : origin
-          const how = origin === 'auto' ? ' automatically' : origin === 'you' ? ' by you' : origin === 'drawn' ? ', drawn by you' : ''
+          const how =
+            origin === 'auto'
+              ? ' automatically'
+              : origin === 'you'
+                ? ' by you'
+                : origin === 'drawn'
+                  ? ', drawn by you'
+                  : origin === 'confirmed'
+                    ? ', guessed automatically and confirmed by you'
+                    : ''
           const below = b.y + b.h < 0.86
           const pos = { left: `${b.x * 100}%`, top: `${b.y * 100}%`, width: `${b.w * 100}%`, height: `${b.h * 100}%` }
           return (

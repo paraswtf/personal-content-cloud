@@ -18,8 +18,8 @@ CONTRACT.
   Vectors stay as they were when SigLIP is not loaded.
   Raises LookupError (no such box), ValueError (a bad box), NoFace, animals.FrameTimeNeeded, animals.NoImage.
 - store(conn, prepared) -> bool, inside the caller's transaction: writes the owner's box (not the detector's)
-  with source 'user' (a re-analysis keeps it; a video's faces are tracked again, section 10) and the new
-  vectors. Names and guesses stay: the owner may be fixing the box before answering a guess. A pet box nobody
+  with moved 1 (a re-analysis keeps it like a drawn box; a video's faces are tracked again, section 10; who put
+  the person there does not change: source stays) and the new vectors. Names and guesses stay: the owner may be fixing the box before answering a guess. A pet box nobody
   is on is matched to pets again. False when the box is gone.
 - write_crop(prepared) after the commit: the old crop is copied to the action's undo stash (undo.keep_copy),
   and the new one written in its place (a new file time, so its URL changes, app.urls).
@@ -126,7 +126,7 @@ def prepare(conn: sqlite3.Connection, table: str, box_id: int, box: tuple[float,
     old = (float(row["x"]), float(row["y"]), float(row["w"]), float(row["h"]))
     x, y, w, h = check_box(box, old, W, H)
     px = (x * W, y * H, min(float(W), (x + w) * W), min(float(H), (y + h) * H))
-    updates: dict[str, Any] = {"source": "user"}
+    updates: dict[str, Any] = {"moved": 1}
     if table == "faces":
         # the face the box means: centre inside, most inside it (not a neighbour's it takes in part of)
         found = person_boxes.pick_face(person_boxes._faces_in(bgr, px), px)

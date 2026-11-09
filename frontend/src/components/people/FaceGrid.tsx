@@ -37,7 +37,13 @@ export default function FaceGrid({
       <ul className="grid grid-cols-3 gap-2 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-8">
         {faces.map((f) => {
           const isSel = selected.has(f.id)
-          const origin = boxOrigin({ person: f.person_id !== null ? { id: f.person_id } : null, assigned_by: f.assigned_by, source: f.source, guess: f.guess })
+          const origin = boxOrigin({
+            person: f.person_id !== null ? { id: f.person_id } : null,
+            assigned_by: f.assigned_by,
+            source: f.source,
+            by_guess: f.by_guess,
+            guess: f.guess,
+          })
           const label = `Face ${f.id}, ${f.size_px} pixels${f.item_kind === 'video' ? ', from a video' : ''}${
             f.guess
               ? `, maybe ${personName(f.guess.person)}`

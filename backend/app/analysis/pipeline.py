@@ -474,8 +474,8 @@ def _carry_bodies(conn: sqlite3.Connection, old_bodies: list[sqlite3.Row], new_i
         if best is not None:
             used.add(best[1])
             if o["assigned_by"] == "user":
-                conn.execute("UPDATE bodies SET person_id = ?, assigned_by = 'user' WHERE id = ?",
-                             (o["person_id"], best[1]))
+                conn.execute("UPDATE bodies SET person_id = ?, assigned_by = 'user', by_guess = ? WHERE id = ?",
+                             (o["person_id"], int(o["by_guess"]) if "by_guess" in o.keys() else 0, best[1]))
             if int(o["id"]) in rejected:
                 cluster.move_rejections(conn, "body", int(o["id"]), best[1])
 
@@ -591,14 +591,14 @@ def analyze_item(conn: sqlite3.Connection, item_id: int, version: int) -> None:
                 conn.execute("INSERT OR REPLACE INTO item_labels(item_id, label, score) VALUES (?, ?, ?)",
                              (item_id, label, float(score)))
 
-            # Faces. The owner's drawn person boxes and the faces they point at stay (section 10), and on a photo
-            # the face boxes the owner moved or resized; a video's faces are tracked again (names carried over).
-            drawn_bodies = conn.execute("SELECT * FROM bodies WHERE item_id = ? AND source = 'user' ORDER BY id",
-                                        (item_id,)).fetchall()
+            # Faces. The owner's drawn or moved person boxes and the faces they point at stay (section 10), and on a
+            # photo the face boxes the owner drew, moved or resized; a video's faces are tracked again (names carried).
+            drawn_bodies = conn.execute(
+                "SELECT * FROM bodies WHERE item_id = ? AND (source = 'user' OR moved = 1) ORDER BY id", (item_id,)).fetchall()
             drawn_faces = person_boxes.protected_face_ids(drawn_bodies)
             if kind == "image":
                 drawn_faces |= {int(r[0]) for r in conn.execute(
-                    "SELECT id FROM faces WHERE item_id = ? AND source = 'user'", (item_id,))}
+                    "SELECT id FROM faces WHERE item_id = ? AND (source = 'user' OR moved = 1)", (item_id,))}
             old_faces = [f for f in conn.execute("SELECT * FROM faces WHERE item_id = ? ORDER BY id", (item_id,)).fetchall()
                          if int(f["id"]) not in drawn_faces]
             if keep_faces:
@@ -642,8 +642,8 @@ def analyze_item(conn: sqlite3.Connection, item_id: int, version: int) -> None:
                     old_ids = [i for i in old_ids if i not in stay]
 
             # Bodies (after the faces, so face_id can point at the new rows); drawn ones stay.
-            old_bodies = conn.execute("SELECT * FROM bodies WHERE item_id = ? AND source != 'user' ORDER BY id",
-                                      (item_id,)).fetchall()
+            old_bodies = conn.execute(
+                "SELECT * FROM bodies WHERE item_id = ? AND source != 'user' AND moved = 0 ORDER BY id", (item_id,)).fetchall()
             if keep_bodies:
                 # Faceless bodies stay; bodies around a face go only when that face is re-detected.
                 kept = [b for b in old_bodies if keep_faces or b["face_id"] is None]
