@@ -1,14 +1,16 @@
 // "People" for selection bars (docs/ARCHITECTURE.md section 10, people on a selection). It opens a sheet
 // "People in N items": on a person's or pet's page (`from`) a first block "Not NAME?" moves their
-// appearances on the selected items to someone else or removes them there; then everyone the items show
-// (POST /api/items/people), each with Change to..., Rename and Remove; and Tag someone in these. One sheet
-// with steps (no modal over a modal), so it fits a phone. A move, a removal or a tag closes the sheet and
-// clears the selection; a rename keeps it open and reloads the list.
+// appearances on the selected items to someone else, or says they are not NAME there ("Not NAME": their
+// boxes stay, unassigned and remembered as not them, as "Not this person" and "Not this pet" do in the box
+// editors); then everyone the items show (POST /api/items/people), each with Change to..., Rename and Not
+// this person (Not this pet); and Tag someone in these. One sheet with steps (no modal over a modal), so it
+// fits a phone. A move, a "Not NAME" or a tag closes the sheet and clears the selection; a rename keeps it
+// open and reloads the list.
 import { useMemo, useState, type FormEvent, type ReactNode } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from 'react-router'
 import clsx from 'clsx'
-import { ArrowLeft, Link2, Pencil, UserMinus, UserPlus, Users, UserRoundPen } from 'lucide-react'
+import { ArrowLeft, Link2, Pencil, UserPlus, Users, UserRoundPen, UserX } from 'lucide-react'
 import { api } from '../../lib/api'
 import { SPECIES, type ItemPersonOut, type PeopleBulkOut, type PersonKind, type Species, type TagRelation } from '../../lib/types'
 import { formatCount, personName, speciesLabel } from '../../lib/format'
@@ -45,7 +47,7 @@ type Step =
   | { kind: 'list' }
   | { kind: 'move'; who: Who }
   | { kind: 'rename'; who: Who }
-  | { kind: 'remove'; who: Who }
+  | { kind: 'not'; who: Who }
   | { kind: 'tag' }
   | { kind: 'tag-species'; name: string }
 
@@ -55,6 +57,18 @@ const ITEMS_PEOPLE_KEY = 'items-people'
 export function displayName(p: { name: string | null; kind: PersonKind }): string {
   if (p.name?.trim()) return p.name
   return p.kind === 'pet' ? 'Unnamed pet' : 'Unnamed person'
+}
+
+/** The "Not ..." choice: "Not Asha", or "Not this person" / "Not this pet" for someone without a name. */
+export function notLabel(p: { name: string | null; kind: PersonKind }): string {
+  if (p.name?.trim()) return `Not ${p.name}`
+  return p.kind === 'pet' ? 'Not this pet' : 'Not this person'
+}
+
+/** Who a "Not ..." is about, inside a sentence: "Asha", or "this person" / "this pet". */
+function notWho(p: { name: string | null; kind: PersonKind }): string {
+  if (p.name?.trim()) return p.name
+  return p.kind === 'pet' ? 'this pet' : 'this person'
 }
 
 function itemsTail(n: number): string {
@@ -122,16 +136,18 @@ export default function PeopleBulkAction({ uids, busy = false, onDone, from }: P
       ),
     onError: (e) => toast.error(errorMessage(e, 'Could not move them.')),
   })
-  const remove = useMutation({
+  // "Not NAME" on these items (POST /api/items/people/remove): their boxes stay, unassigned and remembered as
+  // not them, look-alikes go along, and their tags here go.
+  const notThem = useMutation({
     mutationFn: (who: Who) => api.people.removeFromItems({ uids, person_id: who.id }),
     onSuccess: (r, who) =>
       finished(
         r.updated
-          ? `${displayName(who)} removed from ${formatCount(r.updated, 'item')}.${followedTail(r, who.kind)}`
-          : `${displayName(who)} is not on ${itemsTail(count)}: nothing removed.`,
+          ? `${formatCount(r.updated, 'item')} marked as not ${notWho(who)}.${followedTail(r, who.kind)}`
+          : `${displayName(who)} is not on ${itemsTail(count)}: nothing changed.`,
         r.updated > 0,
       ),
-    onError: (e) => toast.error(errorMessage(e, 'Could not remove them.')),
+    onError: (e) => toast.error(errorMessage(e, 'Could not save that.')),
   })
   const tag = useMutation({
     mutationFn: (v: { choice?: PersonChoice; newPet?: { name: string; species: Species }; relation: TagRelation }) =>
@@ -168,7 +184,7 @@ export default function PeopleBulkAction({ uids, busy = false, onDone, from }: P
     },
     onError: (e) => toast.error(errorMessage(e, 'Could not save the name.')),
   })
-  const working = move.isPending || remove.isPending || tag.isPending || rename.isPending
+  const working = move.isPending || notThem.isPending || tag.isPending || rename.isPending
 
   const startRename = (who: Who) => {
     setNameText(who.name ?? '')
@@ -237,9 +253,9 @@ export default function PeopleBulkAction({ uids, busy = false, onDone, from }: P
             <Pencil className="size-4" aria-hidden />
             {p.name ? 'Rename' : 'Name'}
           </Button>
-          <Button size="sm" variant="danger" disabled={working} onClick={() => setStep({ kind: 'remove', who })}>
-            <UserMinus className="size-4" aria-hidden />
-            Remove
+          <Button size="sm" variant="secondary" disabled={working} onClick={() => setStep({ kind: 'not', who })}>
+            <UserX className="size-4" aria-hidden />
+            {p.kind === 'pet' ? 'Not this pet' : 'Not this person'}
           </Button>
         </div>
       </li>
@@ -300,26 +316,27 @@ export default function PeopleBulkAction({ uids, busy = false, onDone, from }: P
         </div>
       </form>
     )
-  } else if (step.kind === 'remove') {
+  } else if (step.kind === 'not') {
     const who = step.who
+    const pet = who.kind === 'pet'
     body = (
       <div>
         {back}
         <p className="text-sm font-semibold text-ink">
-          Remove {displayName(who)} from {itemsTail(total)}?
+          Not {notWho(who)} on {itemsTail(total)}?
         </p>
         <p className="mt-1 text-sm text-ink-soft">
-          {who.kind === 'pet'
-            ? 'Its boxes on these items stay, unassigned, and its tags here are removed.'
-            : 'Their faces and bodies on these items stay, unassigned and remembered as not them, and their tags here are removed.'}
+          {pet
+            ? `Its boxes here stay, unassigned and remembered as not ${notWho(who)}, so they are not matched to it again. Look-alike crops go along, and its tags here are removed.`
+            : `Their faces and bodies here stay, unassigned and remembered as not ${notWho(who)}, so they are not matched to them again. Look-alike faces go along, and their tags here are removed.`}
         </p>
         <div className="mt-4 flex flex-wrap justify-end gap-2">
-          <Button variant="ghost" disabled={remove.isPending} onClick={() => setStep({ kind: 'list' })}>
+          <Button variant="ghost" disabled={notThem.isPending} onClick={() => setStep({ kind: 'list' })}>
             Cancel
           </Button>
-          <Button variant="danger" loading={remove.isPending} onClick={() => remove.mutate(who)}>
-            <UserMinus className="size-4" aria-hidden />
-            Remove
+          <Button loading={notThem.isPending} onClick={() => notThem.mutate(who)}>
+            <UserX className="size-4" aria-hidden />
+            {notLabel(who)}
           </Button>
         </div>
       </div>
@@ -399,9 +416,9 @@ export default function PeopleBulkAction({ uids, busy = false, onDone, from }: P
                 <UserRoundPen className="size-4" aria-hidden />
                 Move these to...
               </Button>
-              <Button size="sm" variant="danger" disabled={working} onClick={() => setStep({ kind: 'remove', who: from })}>
-                <UserMinus className="size-4" aria-hidden />
-                Remove {displayName(from)} from these
+              <Button size="sm" variant="secondary" disabled={working} onClick={() => setStep({ kind: 'not', who: from })}>
+                <UserX className="size-4" aria-hidden />
+                {notLabel(from)}
               </Button>
             </div>
           </section>

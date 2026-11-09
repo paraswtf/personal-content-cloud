@@ -763,12 +763,15 @@ Learning from these choices (the owner's "learn from not this person choices and
 Frontend: `components/people/PeopleBulkAction.tsx`, a "People" button for selection bars with props `{uids,
 vault, busy?, onDone, from?: {id, name, kind, species}}`. It opens a sheet "People in N items": with `from`
 (a person's or pet's page) a first block "Not NAME?" with "Move these to..." (`PersonChoiceModal` of the same
-kind; a pet keeps its species) and "Remove NAME from these" (with a confirm); then the list from
+kind; a pet keeps its species) and "Not NAME" (`/items/people/remove` behind a confirm that says what happens:
+the boxes stay, unassigned and remembered as not them, look-alikes go along, their tags here go; the same as
+"Not this person" and "Not this pet" in the box editors, so it is not styled as a deletion); then the list from
 `POST /api/items/people`, each row with the avatar, the name ("Unnamed person" or "Unnamed pet") and "in X of
-N", and the actions "Change to...", "Rename" (an inline name field; "Name" for unnamed ones) and "Remove";
-the unnamed faces count as a note; and "Tag someone in these" (the picker of both kinds with the related
-switch, a new pet asking its species). A move, a removal or a tag closes the sheet, clears the selection,
-toasts the outcome ("12 items moved to Meera", "+3 look-alike faces followed") and refreshes the library, the
+N", and the actions "Change to...", "Rename" (an inline name field; "Name" for unnamed ones) and "Not this
+person" or "Not this pet" (the same confirm); the unnamed faces count as a note; and "Tag someone in these"
+(the picker of both kinds with the related switch, a new pet asking its species). A move, a "Not NAME" or a
+tag closes the sheet, clears the selection, toasts the outcome ("12 items moved to Meera", "13 items marked as
+not Chikki", "+3 look-alike faces followed") and refreshes the library, the
 person pages, the people list and open item details; a rename keeps the sheet open and reloads its list.
 `BulkBar` (library, search, albums, vault) gets the button; the person and pet pages' Items and Related tabs
 get a Select button, selectable tiles and a selection bar with the button (`from` = that person or pet).
