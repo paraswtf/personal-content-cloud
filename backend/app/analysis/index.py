@@ -323,6 +323,36 @@ class FaceIndex:
                            for b in range(sims.shape[1]))
             return out
 
+    def least_best_match(self, target_id: int, person_ids: list[int] | set[int]) -> dict[int, float]:
+        """{person: the least, over every face of theirs, of that face's best similarity to a face of target_id
+        that counts (face weight > 0)}; a person without faces here is left out, and -1.0 for each when the target
+        has none. A face's score for a person is a weighted mean of its top similarities to the person's faces,
+        so it never exceeds that best similarity: a person under a cut here has a face that cannot match the
+        target at that cut (follow_merge's quick pass, one matrix product instead of a scoring per person).
+        Call after sync."""
+        ids = np.fromiter((int(p) for p in person_ids), dtype=np.int64)
+        with self.lock:
+            out: dict[int, float] = {}
+            if self._ids.shape[0] == 0 or ids.size == 0:
+                return out
+            target = (self._person == int(target_id)) & (self._weight > 0)
+            rows = np.nonzero(np.isin(self._person, ids))[0]
+            if rows.size == 0:
+                return out
+            pids = self._person[rows]
+            if not target.any():
+                return {int(p): -1.0 for p in np.unique(pids)}
+            ref = self._emb[target]
+            best = np.empty(rows.size, dtype=np.float32)
+            for start in range(0, rows.size, 4096):  # bounded memory for a target with many faces
+                part = rows[start:start + 4096]
+                best[start:start + part.size] = (self._emb[part] @ ref.T).max(axis=1)
+            order = np.argsort(pids, kind="stable")
+            pids, best = pids[order], best[order]
+            starts = np.r_[0, np.nonzero(np.diff(pids))[0] + 1]
+            least = np.minimum.reduceat(best, starts)
+            return {int(p): float(v) for p, v in zip(pids[starts].tolist(), least.tolist())}
+
     def centroids(self, person_ids: list[int] | None = None) -> tuple[np.ndarray, np.ndarray]:
         """(person_ids array, L2-normalised mean embeddings (P, 512)) for people with faces of weight
         > 0, each face counted by its face weight."""

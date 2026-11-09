@@ -13,8 +13,15 @@ CONTRACT.
   Item by item from kv face_measure_cursor, one short transaction each; faces_version moves every
   BUMP_EVERY items and at the end, so the face index weighs them anew. Nothing while the face models are
   off.
-- start(conn): on startup (app.ingest.recover_on_startup): retrack_videos, and measure_photo_faces on a
-  background thread when photos are left to measure.
+- drop_nested_twins(conn) -> int: once (kv nested_faces_v1): on a photo, two face boxes from the same analysis
+  (same created_at, both found by the detector and not moved) with at least app.ml.faces.CONTAIN_THRESH of the
+  smaller inside the other are one face seen twice (the detector's merge drops such twins since 2026-11-09).
+  One goes: a face the owner tagged stays over one they did not, then the better detector score; two faces the
+  owner tagged as different people both stay. A body around the one that goes takes the one that stays, or
+  goes too when that one has a body; an unnamed group left empty goes. Not an owner action (no undo). Returns
+  the faces removed.
+- start(conn): on startup (app.ingest.recover_on_startup): drop_nested_twins, retrack_videos, and
+  measure_photo_faces on a background thread when photos are left to measure.
 """
 from __future__ import annotations
 
@@ -141,6 +148,76 @@ def measure_photo_faces(conn: sqlite3.Connection, budget_s: float | None = None)
     return {"items": done_items, "faces": done_faces, "complete": complete}
 
 
+NESTED_KEY = "nested_faces_v1"
+
+
+def drop_nested_twins(conn: sqlite3.Connection) -> int:
+    from app import storage
+    from app.analysis import cluster, guess
+    from app.ml.faces import CONTAIN_THRESH
+
+    if kv_get(conn, NESTED_KEY) == "1":
+        return 0
+    gone: list[int] = []
+    gone_bodies: list[int] = []
+    items: set[int] = set()
+    with tx(conn):
+        groups: dict[tuple[int, str], list[sqlite3.Row]] = {}
+        for r in conn.execute(
+            "SELECT id, item_id, person_id, assigned_by, det_score, created_at, x, y, w, h FROM faces "
+            "WHERE frame_time_s IS NULL AND source = 'detector' AND moved = 0 ORDER BY item_id, created_at, id"
+        ):
+            groups.setdefault((int(r["item_id"]), str(r["created_at"])), []).append(r)
+        persons: set[int] = set()
+        for faces in groups.values():
+            for i, a in enumerate(faces):
+                for b in faces[i + 1:]:
+                    if int(a["id"]) in gone or int(b["id"]) in gone:
+                        continue
+                    ix = max(0.0, min(a["x"] + a["w"], b["x"] + b["w"]) - max(a["x"], b["x"]))
+                    iy = max(0.0, min(a["y"] + a["h"], b["y"] + b["h"]) - max(a["y"], b["y"]))
+                    smaller = min(a["w"] * a["h"], b["w"] * b["h"])
+                    if smaller <= 0 or ix * iy / smaller < CONTAIN_THRESH:
+                        continue
+                    a_mine = a["assigned_by"] == "user" and a["person_id"] is not None
+                    b_mine = b["assigned_by"] == "user" and b["person_id"] is not None
+                    if a_mine and b_mine and a["person_id"] != b["person_id"]:
+                        continue  # the owner said these are two people
+                    keep, drop = (a, b) if (a_mine, float(a["det_score"])) >= (b_mine, float(b["det_score"])) else (b, a)
+                    gone.append(int(drop["id"]))
+                    items.add(int(drop["item_id"]))
+                    if drop["person_id"] is not None:
+                        persons.add(int(drop["person_id"]))
+                    held = conn.execute("SELECT 1 FROM bodies WHERE face_id = ? LIMIT 1", (int(keep["id"]),)).fetchone()
+                    for body in conn.execute("SELECT id FROM bodies WHERE face_id = ?", (int(drop["id"]),)).fetchall():
+                        if held:
+                            conn.execute("DELETE FROM bodies WHERE id = ?", (int(body["id"]),))
+                            gone_bodies.append(int(body["id"]))
+                        else:
+                            conn.execute("UPDATE bodies SET face_id = ? WHERE id = ?", (int(keep["id"]), int(body["id"])))
+                            held = True
+        if gone:
+            cluster.remove_faces(conn, gone)
+            if gone_bodies:
+                cluster.drop_rejections(conn, "body", gone_bodies)
+            for item_id in sorted(items):
+                conn.execute(
+                    "UPDATE items SET face_count = (SELECT COUNT(*) FROM faces WHERE item_id = ?), "
+                    "body_count = (SELECT COUNT(*) FROM bodies WHERE item_id = ?) WHERE id = ?", (item_id, item_id, item_id))
+            cluster.sync_bodies_to_faces(conn, sorted(items))
+            cluster.prune_empty_persons(conn, persons)
+            bump_faces_version(conn)
+        kv_set(conn, NESTED_KEY, "1")
+    for fid in gone:
+        storage.safe_unlink(storage.face_crop_path(fid))
+    for bid in gone_bodies:
+        storage.safe_unlink(storage.body_crop_path(bid))
+    if items:
+        guess.refresh_fts(conn, items)
+        log.info("faces: removed %d nested duplicate face box(es) on %d photo(s)", len(gone), len(items))
+    return len(gone)
+
+
 def _measure_in_background() -> dict[str, Any]:
     from app.db import connect
 
@@ -152,6 +229,10 @@ def _measure_in_background() -> dict[str, Any]:
 
 
 def start(conn: sqlite3.Connection) -> None:
+    try:
+        drop_nested_twins(conn)
+    except Exception:
+        log.exception("startup: removing nested duplicate face boxes failed")
     try:
         retrack_videos(conn)
     except Exception:

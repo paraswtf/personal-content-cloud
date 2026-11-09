@@ -119,7 +119,15 @@ def align_face(img_bgr: np.ndarray, kps: np.ndarray, size: int = 112) -> np.ndar
     return cv2.warpAffine(img_bgr, m, (size, size), borderValue=0.0)
 
 
-def _nms(dets: np.ndarray, thresh: float) -> list[int]:
+# A box at least this much inside a better one is the same face seen twice (two input sizes of
+# detect_multiscale, or a tight and a loose box around a hooded or turned face): its IoU with the other can
+# stay under nms_thresh, as a small box inside a big one overlaps little of it (2026-11-09).
+CONTAIN_THRESH = 0.8
+
+
+def _nms(dets: np.ndarray, thresh: float, contain: float = CONTAIN_THRESH) -> list[int]:
+    """Greedy non-maximum suppression, best score first: a box goes when its IoU with a kept one is above
+    `thresh`, or when at least `contain` of the smaller of the two lies inside the other (nested twins)."""
     x1, y1, x2, y2, scores = dets[:, 0], dets[:, 1], dets[:, 2], dets[:, 3], dets[:, 4]
     areas = (x2 - x1 + 1) * (y2 - y1 + 1)
     order = scores.argsort()[::-1]
@@ -135,7 +143,8 @@ def _nms(dets: np.ndarray, thresh: float) -> list[int]:
         h = np.maximum(0.0, yy2 - yy1 + 1)
         inter = w * h
         ovr = inter / (areas[i] + areas[order[1:]] - inter)
-        order = order[np.where(ovr <= thresh)[0] + 1]
+        inside = inter / np.minimum(areas[i], areas[order[1:]])
+        order = order[np.where((ovr <= thresh) & (inside < contain))[0] + 1]
     return keep
 
 

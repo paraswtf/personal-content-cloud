@@ -429,6 +429,16 @@ Faces follow the hub (`buffalo_l`, clustering thresholds 0.45 good / 0.52 other,
 locked `user` assignments, merge suggestions). Bodies come from YOLOX-S person boxes (score `>= 0.5`,
 NMS 0.45); a body whose box contains a face centre takes `face_id` and shares its person.
 
+One face, one box (2026-11-09). Faces are detected at two input sizes (640 and 1280, `detect_multiscale`) and the
+results merged by non-maximum suppression: a box goes when its IoU with a better one is above 0.4, and also when at
+least 80 percent of the smaller of the two lies inside the other (`app.ml.faces.CONTAIN_THRESH`), as a tight and a
+loose box around one hooded or turned face overlap too little for IoU alone. Photos analysed before that keep
+such twins until a one-time pass at startup (`face_upkeep.drop_nested_twins`, kv `nested_faces_v1`): two detector
+boxes of one photo from the same analysis, one at least 80 percent inside the other, leave one face; a face the
+owner tagged stays over one they did not, then the better detector score, and two faces the owner tagged as
+different people both stay. A body around the face that goes takes the one that stays (or goes when that one
+already has a body), and an unnamed group left empty goes. It is housekeeping, not an owner action (no undo).
+
 The reference for a person is every face they have, never one picture: a new face scores a person by
 the weighted mean of its top-3 cosine similarities to that person's faces (`index._topk_means`), the
 owner's own assignments weighing 1.5 and automatic ones 1.0, so the reference sharpens as faces are added
@@ -452,7 +462,12 @@ merged person, the mean over its faces of the top-3 mean to the target's faces; 
 happens, and then every unnamed person whose faces are all automatic and who matches the merged person at
 `>= max(accepted, 0.30, the person's learned threshold)`, ahead of any other person by 0.05, with the rejected
 look-alikes rule applied, is merged in too (`follow_merge`): never a named person, one with a face, body or tag
-the owner assigned, one dismissed against the target (`merge_dismissals`), or one seen in the same photo.
+the owner assigned, one dismissed against the target (`merge_dismissals`), or one seen in the same photo. A quick
+pass (2026-11-09) settles most of the unnamed groups with one matrix product: a face's score for a person is a
+weighted mean of its best similarities to the person's faces, so a group with any face whose best similarity to
+the target is under the cut cannot follow (`FaceIndex.least_best_match`); the full check runs for the rest. It
+gives the same pulls as before (checked against every named person on the owner's library) in a fraction of the
+time: a merge or "Change to..." on a library of about 1,300 unnamed groups took 12 seconds, now under one.
 `PersonOut.followed` counts them for the toast. The merge is a learning event (section 18, kind `merge`), so the
 person is matched down to that similarity from then on; taking a face away again (`POST faces/assign`) records a
 rejection that raises the threshold above it and keeps its look-alikes out of the next pull.

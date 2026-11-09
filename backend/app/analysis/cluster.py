@@ -919,8 +919,13 @@ def follow_merge(conn: sqlite3.Connection, target_id: int, accepted: float) -> l
     idx = get_index()
     with idx.lock:
         idx.sync(conn)
-        for cid in candidates:
-            if cid in dismissed or cid in together:
+        pool = [c for c in candidates if c not in dismissed and c not in together]
+        # Quick pass, exact: a person follows only when every face of theirs scores the target at >= cut, and no
+        # score exceeds the face's best similarity to a face of the target. One matrix product for all of them
+        # (scoring each of a thousand unnamed groups took seconds); the full check runs for the rest.
+        least = idx.least_best_match(target_id, pool)
+        for cid in pool:
+            if least.get(cid, -1.0) < cut:
                 continue
             ids = [int(r["id"]) for r in conn.execute(
                 "SELECT id FROM faces WHERE person_id = ? AND embedding IS NOT NULL", (cid,))]

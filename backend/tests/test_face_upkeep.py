@@ -186,3 +186,66 @@ def test_a_job_can_be_queued_below_its_usual_priority(conn):
     assert int(jobs.claim_next(conn, "main")["id"]) == low
     added = jobs.enqueue_many(conn, "analyze", [{"item_id": 3, "version": 1}], priority=85)
     assert added == 1 and conn.execute("SELECT priority FROM jobs WHERE payload LIKE '%\"item_id\":3%'").fetchone()[0] == 85
+
+
+# ------------------------------------------------------------------ nested twins (2026-11-09)
+def _twin(conn, item_id: int, person: int | None, by: str, det: float, box, created: str = "2026-11-09T05:22:23Z") -> int:
+    with tx(conn):
+        fid = int(conn.execute(
+            "INSERT INTO faces(item_id, person_id, assigned_by, x, y, w, h, det_score, size_px, quality, embedding, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 120, 0.7, ?, ?)",
+            (item_id, person, by, *box, det, np.zeros(512, dtype=np.float32).tobytes(), created)).lastrowid)
+    return fid
+
+
+def _person(conn, name: str | None) -> int:
+    with tx(conn):
+        return int(conn.execute("INSERT INTO persons(name, name_key, created_at, updated_at) VALUES (?, ?, ?, ?)",
+                                (name, name.casefold() if name else None, now_iso(), now_iso())).lastrowid)
+
+
+def test_nested_twins_from_one_analysis_leave_one_face(conn):
+    from tests.helpers import make_item
+
+    big, small = (0.30, 0.20, 0.20, 0.30), (0.33, 0.24, 0.12, 0.22)   # the small box is wholly inside the big one
+    darshana, group, ravi, asha = _person(conn, "Darshana"), _person(conn, None), _person(conn, "Ravi"), _person(conn, "Asha")
+    a = make_item(conn, write_files=False)          # both the owner's, the same person: the better score stays
+    a1 = _twin(conn, a["id"], darshana, "user", 0.67, big)
+    a2 = _twin(conn, a["id"], darshana, "user", 0.60, small)
+    b = make_item(conn, write_files=False)          # the owner's face stays over a better automatic one
+    b1 = _twin(conn, b["id"], group, "auto", 0.90, big)
+    b2 = _twin(conn, b["id"], ravi, "user", 0.55, small)
+    with tx(conn):
+        body = int(conn.execute("INSERT INTO bodies(item_id, face_id, person_id, assigned_by, x, y, w, h, det_score, created_at) "
+                                "VALUES (?, ?, ?, 'auto', 0.2, 0.1, 0.4, 0.8, 0.8, ?)", (b["id"], b1, group, now_iso())).lastrowid)
+    c = make_item(conn, write_files=False)          # the owner said two people: both stay
+    c1 = _twin(conn, c["id"], ravi, "user", 0.80, big)
+    c2 = _twin(conn, c["id"], asha, "user", 0.70, small)
+    d = make_item(conn, write_files=False)          # two analyses (the second added later): not twins of one run
+    d1 = _twin(conn, d["id"], None, "auto", 0.80, big)
+    d2 = _twin(conn, d["id"], None, "auto", 0.70, small, created="2026-11-10T00:00:00Z")
+    e = make_item(conn, write_files=False)          # overlapping, but not nested enough: two faces
+    e1 = _twin(conn, e["id"], None, "auto", 0.80, (0.30, 0.20, 0.20, 0.30))
+    e2 = _twin(conn, e["id"], None, "auto", 0.70, (0.42, 0.20, 0.20, 0.30))
+    with tx(conn):
+        conn.execute("DELETE FROM kv WHERE key = ?", (face_upkeep.NESTED_KEY,))
+
+    assert face_upkeep.drop_nested_twins(conn) == 2
+    left = {int(r[0]) for r in conn.execute("SELECT id FROM faces")}
+    assert left == {a1, b2, c1, c2, d1, d2, e1, e2}
+    assert tuple(conn.execute("SELECT face_id, person_id FROM bodies WHERE id = ?", (body,)).fetchone()) == (b2, ravi)
+    assert conn.execute("SELECT COUNT(*) FROM persons WHERE id = ?", (group,)).fetchone()[0] == 0   # its group went
+    assert conn.execute("SELECT face_count FROM items WHERE id = ?", (a["id"],)).fetchone()[0] == 1
+    assert kv_get(conn, face_upkeep.NESTED_KEY) == "1"
+    assert face_upkeep.drop_nested_twins(conn) == 0   # once
+
+
+def test_the_detector_merge_drops_a_box_nested_in_a_better_one():
+    from app.ml.faces import _nms
+
+    dets = np.array([[100, 100, 220, 260, 0.87],     # the face
+                     [125, 140, 185, 230, 0.66],     # the same face, a tighter box from the other input size
+                     [400, 100, 500, 230, 0.80]],    # someone else
+                    dtype=np.float32)
+    assert sorted(_nms(dets, 0.4)) == [0, 2]
+    assert sorted(_nms(dets, 0.4, contain=1.01)) == [0, 1, 2]   # IoU alone (about 0.29) kept the twin
