@@ -356,6 +356,21 @@ export interface Suggestion {
   /** 'childhood': their childhood photos look alike (section 10); the samples are those childhood photos. */
   kind?: 'same' | 'childhood'
 }
+/** Why an item may be related to someone (section 10): it looks like an item marked as related to them, or
+ *  somewhat like it and taken at the same moment or the same place. */
+export type RelatedReason = 'alike' | 'moment' | 'place'
+export interface RelatedSuggestion {
+  item: ItemCard
+  reason: RelatedReason
+  /** The item marked as related it comes from. */
+  because_uid: string
+}
+export interface RelatedSuggestionList {
+  items: RelatedSuggestion[]
+}
+export interface ItemRelatedSuggestions {
+  people: { person: PersonRef; reason: RelatedReason; because_uid: string }[]
+}
 /** Who an unnamed group of childhood photos may be as a child, best first (no bar, section 10). */
 export interface ChildhoodOut {
   candidates: { person: PersonOut; similarity: number }[]

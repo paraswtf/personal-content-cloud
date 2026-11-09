@@ -240,6 +240,8 @@ The full DDL is `backend/app/schema.sql`. Summary of tables and the columns code
   in it, section 10) came through `MIGRATED_COLUMNS`. A tag names a person or a pet (section 22).
 - `guess_rejections(kind CHECK ('face','body'), ref_id, person_id, created_at, PK(kind, ref_id, person_id))`.
 - `merge_dismissals(person_a, person_b)`.
+- `related_dismissals(item_id, person_id, created_at, PK(item_id, person_id))`: "Not related to NAME", a related-tag
+  suggestion the owner turned down (section 10); journaled for undo, carried along by merges.
 - `animals` (section 22) gains `species_source` (auto|user), `species_scores` (JSON) and `source` (detector|user: a box
   the owner drew) through `MIGRATED_COLUMNS`.
 - `item_text(item_id PK, text, source CHECK ('pdf','ocr','office','plain','mixed'), lang, char_count, created_at)`.
@@ -782,6 +784,40 @@ Tests (`tests/test_people_bulk.py`): the list with faces, bodies, pet boxes and 
 existing person and to a new name, with look-alikes following and the tags re-pointed (relation kept, `in`
 winning); a pet moved to a pet and refused to a person or another species; remove; a bulk tag of both kinds
 and relations with `species_needed`; vault items with the vault locked; the same person as target.
+
+### Related tags suggested (2026-11-09)
+
+An item the owner marked as related to someone (`item_tags` relation `related`, source `user`: about them, without
+them in it) makes other items candidates for the same mark (`app/analysis/related.py`). SigLIP whole-image similarity
+alone cannot tell the same scene from a merely similar one: on the owner's library random pairs reach 0.77 at the
+99th percentile, a dark red-lit video was 0.83 to 0.90 alike to unrelated dark scenes, and the same candle-and-rose
+decoration from other angles was 0.84 to 0.90. So each candidate is measured against the related item's own baseline:
+z = (s - median) / (1.4826 x median absolute deviation) of the related item's best-frame similarity to every item
+(the search matrix, `app.search.service.get_matrix`). The decoration stood at 5.0 to 6.0, the dark scenes at 3.4 to
+4.3.
+
+- Reasons: `alike` (z >= `Z_ALIKE` 4.5, anywhere), `moment` (z >= `Z_CONTEXT` 3.0 and the same moment: capture times
+  within 3 hours, or, when either has none, saved in the same batch: created within 120 s and at most 30 ids apart,
+  as a camera-roll sync saves them in order) and `place` (z >= 3.0 and GPS within 100 m). Place alone is not enough:
+  the owner's home holds most of the library. The best related item per candidate wins (score z + 0.5 for the moment,
+  + 0.3 for the place).
+- Never suggested: an item already tagged with them (either relation), one they are in through a face, body or pet
+  box, one the owner turned down (`related_dismissals`), a related item itself, and anything a listing would not show
+  (trash, mis-clicks, forwards, collapsed duplicates; the vault only with `vault=1` unlocked). Every related item the
+  owner marked counts as a source (a copy or a forward too), on the side of the vault being listed, the
+  `related.MAX_SEEDS` (200) most recently marked; all of them are scored in one matrix product, and a related item's
+  baseline is cached by its own vectors and the library's size in steps of 512 rows.
+- `GET /api/people/{id}/related-suggestions?limit=24&vault -> {items: [{item: ItemCard, reason, because_uid}]}`,
+  best first; `POST /api/people/{id}/related-suggestions/dismiss {uids}` ("Not related", an owner action, undoable);
+  `GET /api/items/{uid}/related-suggestions -> {people: [{person: PersonRef, reason, because_uid}]}` (the related
+  items on the item's own side of the vault count; a vault item needs the vault unlocked; the related items'
+  baselines are cached per state of the search matrix). Adding uses the existing tag routes with `relation:
+  'related'`. On the owner's library: the three other decoration photos for both people the decoration was marked
+  for, and for one of them a photo from the same evening; nothing from the dark video.
+- UI: the person page's Related tab shows "Maybe related to NAME" above the grid (tiles with the reason, "Add",
+  "Not related", and "Add all"); the viewer's people section shows "Maybe related to" under "Related to" (the person,
+  why, and Add and No buttons). Accepted items become related items themselves, so the next suggestions build on them.
+- Tests: `tests/test_related_suggestions.py`.
 
 ### Ages and childhood photos (2026-11-09)
 

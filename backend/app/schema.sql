@@ -354,6 +354,15 @@ CREATE TABLE IF NOT EXISTS merge_dismissals (
   CHECK (person_a < person_b)
 );
 
+-- "Not related to NAME" (section 10): a related-tag suggestion the owner turned down is not made again.
+CREATE TABLE IF NOT EXISTS related_dismissals (
+  item_id    INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+  person_id  INTEGER NOT NULL REFERENCES persons(id) ON DELETE CASCADE,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (item_id, person_id)
+);
+CREATE INDEX IF NOT EXISTS related_dismissals_person ON related_dismissals(person_id);
+
 -- Extracted text of an item (all pages, separated by form feeds).
 CREATE TABLE IF NOT EXISTS item_text (
   item_id    INTEGER PRIMARY KEY REFERENCES items(id) ON DELETE CASCADE,

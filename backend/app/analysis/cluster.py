@@ -9,7 +9,7 @@ CONTRACT.
   drop_rejections keep guess_rejections on live boxes)
 - recluster_unassigned(conn) -> int (never creates people; refreshes the FTS rows it changed)
 - merge_persons(conn, target_id, source_ids): moves faces, bodies, item_tags, guesses,
-  guess_rejections, merge_dismissals and the cover; deletes the sources. ValueError on bad ids.
+  guess_rejections, merge_dismissals, related_dismissals and the cover; deletes the sources. ValueError on bad ids.
 - merge_suggestions(conn, limit) -> [(a, b, similarity)] with a < b
 - new_person(conn, name) / find_person_by_name(conn, name) / prune_empty_persons(conn, ids) /
   clear_guesses_for(conn, person_ids): person helpers for the pipeline and the people API.
@@ -812,6 +812,12 @@ def merge_persons(conn: sqlite3.Connection, target_id: int, source_ids: list[int
             [target_id, target_id, *sources, *sources, *sources, target_id, *sources],
         )
         conn.execute(f"UPDATE learning_events SET person_id = ? WHERE person_id IN ({s})", [target_id, *sources])
+        # "Not related to NAME" (section 10) carries over, as rejected guesses do
+        conn.execute(
+            "INSERT OR IGNORE INTO related_dismissals(item_id, person_id, created_at) "
+            f"SELECT item_id, ?, MIN(created_at) FROM related_dismissals WHERE person_id IN ({s}) GROUP BY item_id",
+            [target_id, *sources],
+        )
         target = found[target_id]
         now = now_iso()
         if target["name"] is None:

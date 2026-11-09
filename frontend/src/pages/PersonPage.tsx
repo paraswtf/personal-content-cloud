@@ -9,7 +9,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import clsx from 'clsx'
 import { ArrowLeft, Baby, Check, CheckCheck, GitMerge, Images, Link2, ListChecks, PawPrint, Pencil, ScanFace, Sparkles, Star, Trash2, UserMinus, X } from 'lucide-react'
 import { ApiError, api } from '../lib/api'
-import { SPECIES, type AnimalListItem, type FaceListItem, type GuessItem, type PersonKind, type PersonOut, type Species } from '../lib/types'
+import { SPECIES, type AnimalListItem, type FaceListItem, type GuessItem, type PersonKind, type PersonOut, type RelatedReason, type RelatedSuggestionList, type Species } from '../lib/types'
 import { followedTail, formatCount, personName, speciesLabel } from '../lib/format'
 import { useInfiniteSentinel, usePageTitle, useRefreshLibrary, useStableCallback } from '../lib/hooks'
 import { useItemList } from '../lib/useItemList'
@@ -141,6 +141,92 @@ function SpeciesEditor({ id, species }: { id: number; species: Species | null })
   )
 }
 
+const RELATED_REASON: Record<RelatedReason, string> = {
+  alike: 'Looks like one of the related items',
+  moment: 'From the same moment as one',
+  place: 'From the same place as one',
+}
+
+/** Items that may be related to this person or pet too (section 10): found from the items the owner marked as
+ *  related, looking alike or taken at the same moment or place. "Add" marks one related, "Not related" is
+ *  remembered (both undoable). Nothing when there is nothing to suggest. */
+function RelatedSuggestions({ id, from, onOpen }: { id: number; from: BulkFrom; onOpen: (uid: string) => void }) {
+  const toast = useToast()
+  const qc = useQueryClient()
+  const refresh = useRefreshLibrary()
+  // under the 'person' key, so useRefreshLibrary asks again after any change
+  const key = ['person', id, 'related-suggestions']
+  const q = useQuery({ queryKey: key, queryFn: () => api.people.relatedSuggestions(id), staleTime: 30_000 })
+  const items = q.data?.items ?? []
+  const who = from.name?.trim() || (from.kind === 'pet' ? 'this pet' : 'this person')
+  const done = (uids: string[]) => {
+    // the answered tiles go at once, so a second click cannot answer them again before the list is asked again
+    qc.setQueryData<RelatedSuggestionList>(key, (old) => (old ? { items: old.items.filter((s) => !uids.includes(s.item.uid)) } : old))
+    void qc.invalidateQueries({ queryKey: ['person', id] })
+    void refresh()
+  }
+  const add = useMutation({
+    mutationFn: (uids: string[]) => api.people.tagItems({ uids, person_id: id, relation: 'related' }),
+    onSuccess: (r, uids) => {
+      if (r.updated) toast.success(`${formatCount(r.updated, 'item')} marked as related to ${who}.`)
+      else toast.info(`Already related to ${who}.`)
+      done(uids)
+    },
+    onError: (e) => toast.error(errorMessage(e, 'Could not mark them.')),
+  })
+  const no = useMutation({
+    mutationFn: (uids: string[]) => api.people.dismissRelated(id, uids),
+    onSuccess: (_r, uids) => {
+      toast.success(`Not suggested for ${who} again.`)
+      done(uids)
+    },
+    onError: (e) => toast.error(errorMessage(e, 'Could not save that.')),
+  })
+  const busy = add.isPending || no.isPending
+  if (!items.length) return null
+  return (
+    <section aria-label={`Maybe related to ${who}`} className="mx-4 mb-4 rounded-2xl bg-surface-2 p-3 sm:mx-0">
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <div className="min-w-0">
+          <p className="flex items-center gap-1.5 text-sm font-semibold text-ink">
+            <Sparkles className="size-4" aria-hidden />
+            Maybe related to {who}
+          </p>
+          <p className="mt-0.5 text-xs text-ink-soft">
+            Found from the items you marked as related: they look alike, or were taken at the same moment or place.
+          </p>
+        </div>
+        {items.length > 1 && (
+          <Button size="sm" variant="secondary" disabled={busy} onClick={() => add.mutate(items.map((s) => s.item.uid))}>
+            <CheckCheck className="size-4" aria-hidden />
+            Add all
+          </Button>
+        )}
+      </div>
+      <ul className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-4 lg:grid-cols-6" aria-label="Suggested items">
+        {items.map((s) => (
+          <li key={s.item.uid} className="flex flex-col overflow-hidden rounded-xl bg-surface ring-1 ring-line">
+            <button type="button" onClick={() => onOpen(s.item.uid)} aria-label={`Open ${s.item.filename}`} className="block">
+              <img src={s.item.urls.thumb} alt="" loading="lazy" className="aspect-square w-full bg-surface-2 object-cover" />
+            </button>
+            <p className="px-2 pt-1.5 text-xs text-ink-soft">{RELATED_REASON[s.reason]}</p>
+            <div className="mt-auto flex flex-wrap gap-1 p-1.5">
+              <Button size="sm" className="flex-1" disabled={busy} onClick={() => add.mutate([s.item.uid])} aria-label={`Add ${s.item.filename} as related to ${who}`}>
+                <Check className="size-4" aria-hidden />
+                Add
+              </Button>
+              <Button size="sm" variant="ghost" className="flex-1" disabled={busy} onClick={() => no.mutate([s.item.uid])} aria-label={`Not related: ${s.item.filename} (${who})`}>
+                <X className="size-4" aria-hidden />
+                Not related
+              </Button>
+            </div>
+          </li>
+        ))}
+      </ul>
+    </section>
+  )
+}
+
 function ItemsTab({ id, relation = 'in', from }: { id: number; relation?: 'in' | 'related'; from: BulkFrom }) {
   const related = relation === 'related'
   // The default relation is not sent: the request stays what older servers know.
@@ -157,6 +243,7 @@ function ItemsTab({ id, relation = 'in', from }: { id: number; relation?: 'in' |
   }
   return (
     <div className="-mx-4 sm:mx-0">
+      {related && <RelatedSuggestions id={id} from={from} onOpen={openItem} />}
       {list.items.length > 0 && (
         <div className="mb-3 flex flex-wrap items-center gap-2 px-4 sm:px-0">
           <Button variant="secondary" aria-pressed={selectingNow} onClick={() => (selectingNow ? stopSelecting() : setSelecting(true))}>

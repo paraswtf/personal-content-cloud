@@ -70,6 +70,7 @@ import PersonPicker, { choiceBody, type PersonChoice } from '../people/PersonPic
 import { boxKey, stillBoxes, videoBoxes, type BoxTarget } from './boxes'
 import GuessChip from './GuessChip'
 import { PersonEditCard, usePersonEdits, type BoxRemoval, type PersonEditMode, type PersonEditTarget } from './PersonEdit'
+import RelatedSuggest from './RelatedSuggest'
 import TagsPanel from './TagsPanel'
 import TextPanel from './TextPanel'
 import { darkButton, useInvalidateItem } from './shared'
@@ -867,6 +868,8 @@ export default function InfoPanel({
               </ul>
             </div>
           )}
+
+          <RelatedSuggest detail={detail} onToast={onToast} />
 
           {personEdit && (
             <PersonEditCard

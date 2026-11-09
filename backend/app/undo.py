@@ -62,7 +62,7 @@ NOT_UNDOABLE = re.compile(
 JOURNALED: tuple[str, ...] = (
     "items", "faces", "bodies", "animals", "persons", "item_tags", "guess_rejections", "merge_dismissals",
     "learning_events", "not_faces", "albums", "album_items", "shares", "share_items", "tags", "item_user_tags",
-    "tag_rejections", "documents",
+    "tag_rejections", "documents", "related_dismissals",
 )
 CROPS: dict[str, Callable[[int], Path]] = {
     "faces": storage.face_crop_path, "bodies": storage.body_crop_path, "animals": storage.animal_crop_path,

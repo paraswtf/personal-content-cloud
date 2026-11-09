@@ -51,6 +51,8 @@ import type {
   Stats,
   SuggestionList,
   ChildhoodOut,
+  ItemRelatedSuggestions,
+  RelatedSuggestionList,
   SystemOut,
   TagIn,
   TagOut,
@@ -415,6 +417,8 @@ export const api = {
     pages: (uid: string) => get<PageOut[]>(`/api/items/${enc(uid)}/pages`),
     text: (uid: string, vault = false) => get<ItemTextOut>(`/api/items/${enc(uid)}/text${qs({ vault })}`),
     addTag: (uid: string, body: TagIn) => post<PersonRef[]>(`/api/items/${enc(uid)}/tags`, body),
+    /** The people this item may be related to (section 10), best first. */
+    relatedSuggestions: (uid: string) => get<ItemRelatedSuggestions>(`/api/items/${enc(uid)}/related-suggestions`),
     removeTag: (uid: string, personId: number) => del<PersonRef[]>(`/api/items/${enc(uid)}/tags/${personId}`),
     /** Free-form tag (section 19): by id, or by name (created when new). An auto row becomes the owner's. */
     addUserTag: (uid: string, body: UserTagIn) => post<ItemTagOut[]>(`/api/items/${enc(uid)}/user-tags`, body),
@@ -483,6 +487,10 @@ export const api = {
     rejectGuesses: (body: GuessIdsIn) => post<BulkOut>('/api/guesses/reject', body),
     suggestions: (limit = 30) => get<SuggestionList>(`/api/suggestions${qs({ limit })}`),
     childhood: (id: number) => get<ChildhoodOut>(`/api/people/${id}/childhood`),
+    /** Items that may be related to the person too (section 10), best first. */
+    relatedSuggestions: (id: number, limit = 24) => get<RelatedSuggestionList>(`/api/people/${id}/related-suggestions${qs({ limit })}`),
+    /** "Not related to NAME": not suggested again (undoable). */
+    dismissRelated: (id: number, uids: string[]) => post<OkOut>(`/api/people/${id}/related-suggestions/dismiss`, { uids }),
     dismissSuggestion: (a: number, b: number) => post<OkOut>('/api/suggestions/dismiss', { a, b }),
     recluster: () => post<OkOut>('/api/recluster'),
     /** Section 10, people on a selection: who the selected items show (faces, bodies, pet boxes, tags). */

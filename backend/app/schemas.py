@@ -649,6 +649,34 @@ class Suggestion(BaseModel):
     kind: Literal["same", "childhood"] = "same"  # 'childhood': their childhood photos look alike (section 10)
 
 
+class RelatedSuggestionOut(BaseModel):
+    """An item that may be related to someone (section 10): it looks like an item the owner marked as related to
+    them ('alike'), or somewhat like it and taken at the same moment ('moment') or place ('place'); `because_uid` is
+    that item."""
+
+    item: ItemCard
+    reason: Literal["alike", "moment", "place"]
+    because_uid: str
+
+
+class RelatedSuggestionList(BaseModel):
+    items: list[RelatedSuggestionOut]
+
+
+class RelatedDismissIn(BaseModel):
+    uids: list[str] = Field(min_length=1, max_length=500)
+
+
+class ItemRelatedSuggestion(BaseModel):
+    person: PersonRef
+    reason: Literal["alike", "moment", "place"]
+    because_uid: str
+
+
+class ItemRelatedSuggestions(BaseModel):
+    people: list[ItemRelatedSuggestion]
+
+
 class ChildhoodCandidate(BaseModel):
     person: PersonOut
     similarity: float

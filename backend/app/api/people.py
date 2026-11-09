@@ -28,6 +28,10 @@ Routes (all under /api, all require a logged-in session; writes need the CSRF he
          boxes remembered as not them, look-alikes follow; a move to a person is learned like a merge)
   POST   /items/people/remove {uids, person_id} -> PeopleBulkOut (their boxes there unassigned, tags deleted)
   POST   /items/people/tag {uids, person_id | new_person_name, kind?, species?, relation?} -> PeopleBulkOut
+  Related tags suggested (section 10, app.analysis.related):
+  GET    /people/{id}/related-suggestions?limit&vault -> RelatedSuggestionList;  POST .../dismiss {uids} -> Ok
+  GET    /items/{uid}/related-suggestions -> ItemRelatedSuggestions
+  GET    /people/{id}/childhood -> ChildhoodOut (who an unnamed group of childhood photos may be, section 10)
   POST   /recluster -> Ok
 Faces, bodies and counts in NSFW or trashed items are never shown here (person items take vault=1
 with an unlocked session). With the vault locked, acting on a box or the tags of an NSFW item is
@@ -47,6 +51,7 @@ from app import undo as undo_mod
 from app.analysis import cluster, guess
 from app.analysis import animals as animals_mod
 from app.analysis import box_edit, person_boxes
+from app.analysis import related as related_mod
 from app.analysis.index import get_index
 from app.analysis import pets as pets_mod
 from app.learning import not_faces as not_faces_mod
@@ -78,6 +83,11 @@ from app.schemas import (
     ChildhoodCandidate,
     ChildhoodOut,
     DismissIn,
+    ItemRelatedSuggestion,
+    ItemRelatedSuggestions,
+    RelatedDismissIn,
+    RelatedSuggestionList,
+    RelatedSuggestionOut,
     FaceListItem,
     FacePage,
     GuessIdsIn,
@@ -1373,6 +1383,78 @@ def _tag_target(conn: sqlite3.Connection, body: TagIn, session: SessionInfo) -> 
         pid = _target_person(conn, None, body.new_person_name, True, session)
     assert pid is not None
     return pid
+
+
+# ------------------------------------------------------------------ related tags suggested (section 10)
+def _cards_by_id(conn: sqlite3.Connection, ids: list[int]) -> dict[int, sqlite3.Row]:
+    out: dict[int, sqlite3.Row] = {}
+    ids = sorted(set(ids))
+    for start in range(0, len(ids), 500):
+        chunk = ids[start:start + 500]
+        for r in conn.execute(f"SELECT {ITEM_CARD_COLUMNS} FROM items i WHERE i.id IN ({_ids_sql(chunk)})", chunk):
+            out[int(r["id"])] = r
+    return out
+
+
+@router.get("/people/{person_id}/related-suggestions", response_model=RelatedSuggestionList)
+def related_suggestions(
+    person_id: int,
+    limit: int = Query(default=24, ge=1, le=60),
+    vault: bool = Depends(want_vault),
+    conn: sqlite3.Connection = Depends(get_db),
+    session: SessionInfo = Depends(require_user),
+) -> RelatedSuggestionList:
+    """Items that may be related to the person too (app.analysis.related): they look like an item the owner marked
+    as related to them, or somewhat like it and were taken at the same moment or place. Best first. Vault items with
+    vault=1 (unlocked), as the person's items."""
+    _visible_person_row(conn, session, person_id)
+    visible = visible_sql(vault=vault, misclicks="exclude", dups="collapse")
+    # every related item the owner marked counts (a copy, a forward), on the side of the vault being listed
+    seeds = "i.deleted_at IS NULL AND i.nsfw = " + ("1" if vault else "0")
+    found = related_mod.suggest(conn, person_id, visible=visible, seed_visible=seeds, limit=limit)
+    if not found:
+        return RelatedSuggestionList(items=[])
+    rows = _cards_by_id(conn, [s.item_id for s in found] + [s.because for s in found])
+    return RelatedSuggestionList(items=[
+        RelatedSuggestionOut(item=item_card(rows[s.item_id]), reason=s.reason, because_uid=str(rows[s.because]["uid"]))
+        for s in found if s.item_id in rows and s.because in rows
+    ])
+
+
+@router.post("/people/{person_id}/related-suggestions/dismiss", response_model=Ok)
+def dismiss_related(person_id: int, body: RelatedDismissIn, conn: sqlite3.Connection = Depends(get_db),
+                    session: SessionInfo = Depends(require_user)) -> Ok:
+    """"Not related to NAME": these items are not suggested for the person again (related_dismissals; undoable)."""
+    with tx(conn):
+        _visible_person_row(conn, session, person_id)
+        item_ids = _selection(conn, session, body.uids)
+        related_mod.dismiss(conn, person_id, item_ids)
+    return Ok()
+
+
+@router.get("/items/{uid}/related-suggestions", response_model=ItemRelatedSuggestions)
+def item_related_suggestions(uid: str, conn: sqlite3.Connection = Depends(get_db),
+                             session: SessionInfo = Depends(require_user)) -> ItemRelatedSuggestions:
+    """The people this item may be related to (app.analysis.related.suggest_for_item), best first. Only items on the
+    item's own side of the vault count as the owner's marks, and a vault item needs the vault unlocked."""
+    item = _item_row(conn, uid)
+    if item["nsfw"] and not session.vault_unlocked:
+        raise _vault_locked()
+    visible = "i.deleted_at IS NULL AND i.nsfw = " + ("1" if item["nsfw"] else "0")
+    found = related_mod.suggest_for_item(conn, int(item["id"]), visible=visible)
+    found = [(pid, reason, seed) for pid, reason, seed in found if not _hidden_person(conn, session, pid)]
+    if not found:
+        return ItemRelatedSuggestions(people=[])
+    persons = {int(r["id"]): r for r in conn.execute(
+        f"SELECT id, name, kind FROM persons WHERE id IN ({_ids_sql([p for p, _, _ in found])})",
+        [p for p, _, _ in found])}
+    uids = {int(r[0]): str(r[1]) for r in conn.execute(
+        f"SELECT id, uid FROM items WHERE id IN ({_ids_sql([s for _, _, s in found])})", [s for _, _, s in found])}
+    return ItemRelatedSuggestions(people=[
+        ItemRelatedSuggestion(person=PersonRef(id=pid, name=persons[pid]["name"], kind=persons[pid]["kind"] or "person"),
+                              reason=reason, because_uid=uids[seed])
+        for pid, reason, seed in found if pid in persons and seed in uids
+    ])
 
 
 @router.post("/items/{uid}/tags", response_model=list[PersonRef])
