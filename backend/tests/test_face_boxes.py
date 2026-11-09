@@ -1,0 +1,164 @@
+"""Face boxes the owner draws (section 10): the route, the face the detector must find inside, a stored face under
+the box, videos, undo, and what a re-analysis keeps. The models are off (PCC_NO_MODELS=1); the face search is
+faked where a face matters."""
+from __future__ import annotations
+
+import numpy as np
+import pytest
+
+from app import storage
+from app.analysis import person_boxes, pipeline
+from app.analysis.index import get_index
+from app.db import tx
+from tests.helpers import make_face, make_item, make_person, make_video
+from tests.test_person_boxes import FakeFace, _record, _unit
+
+BOX = {"x": 0.3, "y": 0.2, "w": 0.2, "h": 0.3}           # on an 800 x 600 photo: (240, 120) to (400, 300)
+FOUND = (262.0, 140.0, 380.0, 280.0)                       # the face the detector finds in it, in pixels
+
+
+def _photo(conn, **kw):
+    return make_item(conn, width=800, height=600, **kw)
+
+
+def _detector(monkeypatch, face: FakeFace | list[FakeFace] | None) -> None:
+    monkeypatch.setattr(pipeline, "_model", lambda name: object() if name == "faces" else None)
+    faces = face if isinstance(face, list) else [face] if face is not None else []
+    monkeypatch.setattr(person_boxes, "_faces_in", lambda bgr, px: faces)
+
+
+def _face(conn, face_id: int):
+    return conn.execute("SELECT * FROM faces WHERE id = ?", (face_id,)).fetchone()
+
+
+def test_a_drawn_face_box_holds_the_person_with_the_found_face(client, conn, monkeypatch):
+    item = _photo(conn)
+    _detector(monkeypatch, FakeFace(bbox=np.array(FOUND, dtype=np.float32), embedding=_unit(9)))
+    r = client.post(f"/api/items/{item['uid']}/faces", json={**BOX, "new_person_name": "Meera"})
+    assert r.status_code == 201, r.text
+    out = r.json()
+    assert out["person"]["name"] == "Meera" and out["assigned_by"] == "user" and out["source"] == "user"
+    assert (out["x"], out["y"], out["w"], out["h"]) == pytest.approx((0.3, 0.2, 0.2, 0.3))   # the owner's box
+    row = _face(conn, out["id"])
+    assert np.allclose(np.frombuffer(row["embedding"], dtype=np.float32), _unit(9))
+    assert row["det_score"] == pytest.approx(0.92) and row["clarity"] == pytest.approx(24.5)
+    assert storage.face_crop_path(out["id"]).is_file()
+    assert conn.execute("SELECT face_count FROM items WHERE id = ?", (item["id"],)).fetchone()[0] == 1
+    idx = get_index()
+    idx.sync(conn)
+    assert np.allclose(idx.embeddings_of([out["id"]])[0], _unit(9))
+    detail = client.get(f"/api/items/{item['uid']}").json()
+    assert [f["id"] for f in detail["faces"]] == [out["id"]] and detail["people"][0]["name"] == "Meera"
+
+
+def test_no_face_inside_no_detector_and_bad_boxes_are_refused(client, conn, monkeypatch):
+    item = _photo(conn)
+    asha = make_person(conn, "Asha")
+    body = {**BOX, "person_id": asha}
+    assert client.post(f"/api/items/{item['uid']}/faces", json=body).status_code == 409   # no detector here
+    _detector(monkeypatch, None)
+    r = client.post(f"/api/items/{item['uid']}/faces", json=body)
+    assert r.status_code == 422 and r.json()["detail"] == "no_face"
+    _detector(monkeypatch, FakeFace(bbox=np.array((10.0, 10.0, 60.0, 60.0), dtype=np.float32)))   # beside the box
+    assert client.post(f"/api/items/{item['uid']}/faces", json=body).json()["detail"] == "no_face"
+    r = client.post(f"/api/items/{item['uid']}/faces", json={"x": 0.3, "y": 0.2, "w": 0.01, "h": 0.01, "person_id": asha})
+    assert r.status_code == 422 and "pixels" in r.json()["detail"]
+    assert client.post(f"/api/items/{item['uid']}/faces", json=BOX).json()["detail"] == "person_needed"
+    assert client.post("/api/items/nope/faces", json=body).status_code == 404
+    assert conn.execute("SELECT COUNT(*) FROM faces").fetchone()[0] == 0
+
+
+def test_a_stored_face_under_the_box_is_assigned_instead(client, conn, monkeypatch):
+    item = _photo(conn)
+    asha = make_person(conn, "Asha")
+    stored = make_face(conn, item["id"], None, box=(262 / 800, 140 / 600, 118 / 800, 140 / 600))
+    _detector(monkeypatch, FakeFace(bbox=np.array(FOUND, dtype=np.float32)))
+    r = client.post(f"/api/items/{item['uid']}/faces", json={**BOX, "person_id": asha})
+    assert r.status_code == 201, r.text
+    assert r.json()["id"] == stored and r.json()["person"]["id"] == asha
+    row = _face(conn, stored)
+    assert row["person_id"] == asha and row["assigned_by"] == "user"
+    assert conn.execute("SELECT COUNT(*) FROM faces").fetchone()[0] == 1
+
+
+def test_a_video_face_box_needs_its_frame_and_gets_a_short_span(client, conn, monkeypatch, tmp_path):
+    path = make_video(tmp_path / "clip.mp4", seconds=4, size="640x360", fps=25)
+    clip = make_item(conn, kind="video", ext=".mp4", mime="video/mp4", data=path.read_bytes(), width=640, height=360,
+                     duration_s=4.0, fps=25.0)
+    asha = make_person(conn, "Asha")
+    r = client.post(f"/api/items/{clip['uid']}/faces", json={**BOX, "person_id": asha})
+    assert r.status_code == 400 and r.json()["detail"] == "frame_time_needed"
+    _detector(monkeypatch, FakeFace(bbox=np.array((200.0, 80.0, 300.0, 170.0), dtype=np.float32)))   # in 640 x 360
+    r = client.post(f"/api/items/{clip['uid']}/faces", json={**BOX, "t": 2.0, "person_id": asha})
+    assert r.status_code == 201, r.text
+    out = r.json()
+    assert out["frame_time_s"] == pytest.approx(2.0) and out["spans"] == [[1.5, 2.5]]
+
+
+def test_undo_takes_the_drawn_face_and_its_crop_away(client, conn, monkeypatch):
+    item = _photo(conn)
+    _detector(monkeypatch, FakeFace(bbox=np.array(FOUND, dtype=np.float32)))
+    r = client.post(f"/api/items/{item['uid']}/faces", json={**BOX, "new_person_name": "Meera"})
+    fid = r.json()["id"]
+    u = client.post(f"/api/actions/{r.headers['x-action-id']}/undo")
+    assert u.status_code == 200, u.text
+    assert _face(conn, fid) is None and not storage.face_crop_path(fid).exists()
+    assert conn.execute("SELECT face_count FROM items WHERE id = ?", (item["id"],)).fetchone()[0] == 0
+
+
+def test_reanalysis_keeps_a_drawn_photo_face_and_drops_its_twin(client, conn, monkeypatch):
+    item = _photo(conn)
+    _detector(monkeypatch, FakeFace(bbox=np.array(FOUND, dtype=np.float32)))
+    fid = client.post(f"/api/items/{item['uid']}/faces", json={**BOX, "new_person_name": "Meera"}).json()["id"]
+    with tx(conn):
+        conn.execute("UPDATE items SET analysis_status = 'pending' WHERE id = ?", (item["id"],))
+    real_run = pipeline._run_models
+
+    def run(item_row, v, siglip, nsfw, faces_engine, not_face=None):
+        r = real_run(item_row, v, siglip, nsfw, faces_engine, not_face=not_face)
+        r.faces = [_record((0.305, 0.205, 0.195, 0.295), 21), _record((0.7, 0.1, 0.1, 0.13), 22)]
+        r.face_torsos = [None, None]
+        r.faces_ran = True
+        return r
+
+    monkeypatch.setattr(pipeline, "_run_models", run)
+    pipeline.analyze_item(conn, item["id"], 1)
+    kept = _face(conn, fid)
+    assert kept is not None and kept["source"] == "user" and kept["person_id"] is not None
+    xs = sorted(round(r["x"], 2) for r in conn.execute("SELECT x FROM faces WHERE item_id = ?", (item["id"],)))
+    assert xs == [0.3, 0.7]
+
+
+def test_a_face_drawn_inside_a_detected_person_box_becomes_its_face(client, conn, monkeypatch):
+    item = _photo(conn)
+    group = make_person(conn, None)   # the unnamed group the box was left with after its face went
+    with tx(conn):
+        body = int(conn.execute(
+            "INSERT INTO bodies(item_id, person_id, assigned_by, x, y, w, h, det_score, created_at) "
+            "VALUES (?, ?, 'auto', 0.25, 0.15, 0.3, 0.8, 0.8, '2026-11-09T00:00:00Z')", (item["id"], group)).lastrowid)
+    _detector(monkeypatch, FakeFace(bbox=np.array(FOUND, dtype=np.float32)))
+    r = client.post(f"/api/items/{item['uid']}/faces", json={**BOX, "new_person_name": "Meera"})
+    assert r.status_code == 201, r.text
+    row = conn.execute("SELECT face_id, person_id FROM bodies WHERE id = ?", (body,)).fetchone()
+    assert row["face_id"] == r.json()["id"] and row["person_id"] == r.json()["person"]["id"]
+    assert conn.execute("SELECT COUNT(*) FROM persons WHERE id = ?", (group,)).fetchone()[0] == 0
+    detail = client.get(f"/api/items/{item['uid']}").json()
+    assert [p["name"] for p in detail["people"]] == ["Meera"]
+
+
+def test_the_only_face_of_an_unnamed_group_moves_to_someone(client, conn, monkeypatch):
+    """Regression: the emptied group is pruned before the look-alikes are followed, so no memory is kept of it
+    (a foreign key failure answered 500 before)."""
+    item = _photo(conn)
+    group = make_person(conn, None)
+    fid = make_face(conn, item["id"], group, box=(262 / 800, 140 / 600, 118 / 800, 140 / 600))
+    r = client.post("/api/faces/assign", json={"face_ids": [fid], "new_person_name": "Neil"})
+    assert r.status_code == 200, r.text
+    assert conn.execute("SELECT COUNT(*) FROM persons WHERE id = ?", (group,)).fetchone()[0] == 0
+    # and through a face box drawn over it
+    other = make_person(conn, None)
+    f2 = make_face(conn, item["id"], other, box=(0.6, 0.2, 0.15, 0.2))
+    _detector(monkeypatch, FakeFace(bbox=np.array((480.0, 120.0, 600.0, 240.0), dtype=np.float32)))
+    r = client.post(f"/api/items/{item['uid']}/faces", json={"x": 0.59, "y": 0.19, "w": 0.17, "h": 0.22, "new_person_name": "Buzz"})
+    assert r.status_code == 201, r.text
+    assert r.json()["id"] == f2 and r.json()["person"]["name"] == "Buzz"

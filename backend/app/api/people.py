@@ -9,6 +9,9 @@ Routes (all under /api, all require a logged-in session; writes need the CSRF he
   GET    /people/{id}/faces?cursor&limit -> FacePage;  GET /people/{id}/items?cursor&limit&vault -> ItemPage
   GET    /faces/unassigned -> FacePage;  POST /faces/assign -> AssignOut;  DELETE /faces/{id} -> Ok
   POST   /bodies/assign -> AssignOut;  DELETE /bodies/{id} -> Ok
+  POST   /items/{uid}/faces {x, y, w, h, t?, person_id | new_person_name} -> 201 FaceOut: a face box the owner
+         draws (section 10, person_boxes.prepare_face); 422 no_face when no face shows inside, 409 when the face
+         model is not loaded (models_unavailable) or the photo or frame cannot be opened
   PUT    /faces/{id}/box, /bodies/{id}/box, /animals/{id}/box {x, y, w, h} -> FaceOut | BodyOut | AnimalOut: the
          owner moves or resizes a box (section 10, app.analysis.box_edit); 422 for a bad box or no_face (a face
          box moved where no face is), 409 when the photo or frame cannot be opened
@@ -105,6 +108,7 @@ from app.schemas import (
     AnimalOut,
     BodyOut,
     BoxIn,
+    FaceBoxIn,
     FaceOut,
     RedetectIn,
 )
@@ -755,6 +759,8 @@ def _follow_lookalikes(conn: sqlite3.Connection, leaving: dict[int, list[int]],
     followed: list[int] = []
     items: set[int] = set()
     for pid, seeds in leaving.items():
+        if conn.execute("SELECT 1 FROM persons WHERE id = ?", (pid,)).fetchone() is None:
+            continue  # an unnamed group the move emptied is gone (prune_empty_persons): no look-alikes, no memory
         cluster.record_rejections(conn, seeds, pid)
         more = cluster.followers(conn, seeds, pid)
         if more and target is not None:
@@ -998,6 +1004,44 @@ def add_person_box(uid: str, body: PersonBoxIn, conn: sqlite3.Connection = Depen
     body_row = conn.execute("SELECT * FROM bodies WHERE id = ?", (drawn.body_id,)).fetchone()
     face_row = conn.execute("SELECT * FROM faces WHERE id = ?", (drawn.face_id,)).fetchone() if drawn.face_id else None
     return PersonBoxOut(body=body_out(conn, body_row), face=face_out(conn, face_row) if face_row is not None else None)
+
+
+@router.post("/items/{uid}/faces", response_model=FaceOut, status_code=201)
+def add_face_box(uid: str, body: FaceBoxIn, conn: sqlite3.Connection = Depends(get_db),
+                 session: SessionInfo = Depends(require_user)) -> FaceOut:
+    """A face box the owner drew around a face the detector missed (section 10, person_boxes.prepare_face): the
+    detector must find the face inside it (422 no_face otherwise; 409 models_unavailable without it); the face
+    is the person's, as a hand assignment is, and a stored face there is assigned instead. A video takes `t`."""
+    item = _boxable_or_400(conn, session, uid)
+    video = item["kind"] == "video"
+    if video and body.t is None:
+        raise HTTPException(status_code=400, detail="frame_time_needed")
+    name_given = body.new_person_name is not None and body.new_person_name.strip() != ""
+    if body.person_id is None and not name_given:
+        raise HTTPException(status_code=400, detail="person_needed")
+    try:
+        prep = person_boxes.prepare_face(item, (body.x, body.y, body.w, body.h), t=body.t if video else None)
+    except animals_mod.FrameTimeNeeded:
+        raise HTTPException(status_code=400, detail="frame_time_needed") from None
+    except animals_mod.ModelsUnavailable:
+        raise HTTPException(status_code=409, detail="models_unavailable") from None
+    except animals_mod.NoImage:
+        raise HTTPException(status_code=409, detail="The photo or frame could not be opened") from None
+    except person_boxes.NoFace:
+        raise HTTPException(status_code=422, detail="no_face") from None
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
+    with tx(conn):
+        target = _target_person(conn, body.person_id, body.new_person_name if name_given else None, name_given, session)
+        if target is None:
+            raise HTTPException(status_code=400, detail="person_needed")
+        drawn = person_boxes.store_face(conn, prep, int(target))
+        bump_faces_version(conn)
+        bump_search_version(conn)
+    if drawn.existing:
+        _assign(conn, "faces", [drawn.face_id], int(target), None, False, session)
+    _after_people_change(conn, {int(item["id"])}, {(int(target), int(item["id"]))})
+    return face_out(conn, conn.execute("SELECT * FROM faces WHERE id = ?", (drawn.face_id,)).fetchone())
 
 
 @router.post("/items/{uid}/animals/detect", response_model=list[AnimalOut])

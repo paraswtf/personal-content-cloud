@@ -25,7 +25,9 @@ CONTRACT.
   keeps it on a photo), assigned_by 'user' for the person, frame_time_s = t and spans t +- VIDEO_SPAN_S on a
   video, the head-and-torso vector when SigLIP is loaded, and its crop; on a photo a stored face over the found
   one (IoU >= EXISTING_IOU) is used instead and returned as existing, for the caller to assign through the
-  people API. items.face_count follows. Opens its own transaction (nested in the caller's when one is open).
+  people API; a new face inside a detector's faceless person box (its centre in the box's upper half) becomes that
+  box's face, as a detected one would, and the box follows its person. items.face_count follows. Opens its own
+  transaction (nested in the caller's when one is open).
 - drawn_body_rows(rows) / protected_face_ids(rows): a re-analysis keeps the owner's drawn boxes and the
   faces they point at (app.analysis.pipeline).
 - drop_over_drawn(conn, table, new_ids, drawn_rows) -> dropped ids: new detector boxes over a kept drawn
@@ -363,6 +365,8 @@ def store_face(conn: sqlite3.Connection, prep: PreparedFace, person_id: int) -> 
             ).lastrowid)
             path = storage.face_crop_path(face_id)
             storage.write_bytes_atomic(path, prep.crop)
+            if not prep.video:
+                _link_body(conn, item_id, face_id, prep.box)
             conn.execute("UPDATE items SET face_count = (SELECT COUNT(*) FROM faces WHERE item_id = ?), updated_at = ? "
                          "WHERE id = ?", (item_id, now, item_id))
     except BaseException:
@@ -370,6 +374,26 @@ def store_face(conn: sqlite3.Connection, prep: PreparedFace, person_id: int) -> 
             storage.safe_unlink(path)
         raise
     return DrawnFace(face_id=face_id, existing=False)
+
+
+def _link_body(conn: sqlite3.Connection, item_id: int, face_id: int, box: tuple[float, float, float, float]) -> None:
+    """A face drawn inside a person box the detector found (with no face of its own, not the owner's) belongs to it,
+    as a detected face would: the smallest such box with the face's centre in its upper half points at the face and
+    follows its person; the unnamed person the box had goes when nothing else holds them."""
+    from app.analysis import cluster
+
+    cx, cy = box[0] + box[2] / 2.0, box[1] + box[3] / 2.0
+    rows = [r for r in conn.execute(
+        "SELECT id, person_id, x, y, w, h FROM bodies WHERE item_id = ? AND face_id IS NULL AND frame_time_s IS NULL "
+        "AND source = 'detector' AND assigned_by != 'user'", (item_id,))
+        if r["x"] <= cx <= r["x"] + r["w"] and r["y"] <= cy <= r["y"] + r["h"] / 2.0]
+    if not rows:
+        return
+    body = min(rows, key=lambda r: r["w"] * r["h"])
+    conn.execute("UPDATE bodies SET face_id = ? WHERE id = ?", (face_id, int(body["id"])))
+    cluster.sync_bodies_to_faces(conn, [item_id])
+    if body["person_id"] is not None:
+        cluster.prune_empty_persons(conn, {int(body["person_id"])})
 
 
 def relink_twin_bodies(conn: sqlite3.Connection, new_face_ids: list[int], kept: list[sqlite3.Row],

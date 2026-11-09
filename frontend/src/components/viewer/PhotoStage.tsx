@@ -146,7 +146,10 @@ export default function PhotoStage({
   const [pendingEl, setPendingEl] = useState<HTMLDivElement | null>(null)
   const invalidate = useInvalidateItem(detail.uid)
   const person = drawing === 'person'
-  const what = person ? 'person' : 'pet'
+  const faceBox = drawing === 'face'
+  // a person or a face box is named in PersonBoxCard; a pet box gets its species
+  const named = person || faceBox
+  const what = faceBox ? 'face' : person ? 'person' : 'pet'
 
   useEffect(() => {
     // off, or switched between a pet and a person: start over
@@ -382,7 +385,7 @@ export default function PhotoStage({
             <div
               className={clsx(
                 'pointer-events-none absolute rounded-lg border-2 border-dashed',
-                person ? 'border-sky-300 bg-sky-300/10' : 'border-emerald-300 bg-emerald-300/10',
+                faceBox ? 'border-white bg-white/10' : person ? 'border-sky-300 bg-sky-300/10' : 'border-emerald-300 bg-emerald-300/10',
               )}
               style={dragRect}
             />
@@ -397,7 +400,7 @@ export default function PhotoStage({
               Drag over the {what}
             </span>
           )}
-          {!pending && (
+          {!pending && !faceBox && (
             <button
               type="button"
               onClick={() => setPending({ x: WHOLE_MARGIN, y: WHOLE_MARGIN, w: 1 - 2 * WHOLE_MARGIN, h: 1 - 2 * WHOLE_MARGIN })}
@@ -412,15 +415,19 @@ export default function PhotoStage({
         </div>
       )}
 
-      {person && pending && (
+      {named && pending && (
         <>
           <div
             ref={setPendingEl}
-            className="pointer-events-none absolute z-20 rounded-lg border-2 border-sky-300 bg-sky-300/10"
+            className={clsx(
+              'pointer-events-none absolute z-20 rounded-lg border-2',
+              faceBox ? 'border-white bg-white/10' : 'border-sky-300 bg-sky-300/10',
+            )}
             style={{ left: `${pending.x * 100}%`, top: `${pending.y * 100}%`, width: `${pending.w * 100}%`, height: `${pending.h * 100}%` }}
           />
           {pendingEl && (
             <PersonBoxCard
+              kind={faceBox ? 'face' : 'person'}
               uid={detail.uid}
               box={pending}
               anchor={pendingEl}

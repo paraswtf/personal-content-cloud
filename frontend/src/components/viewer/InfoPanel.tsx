@@ -96,6 +96,8 @@ interface Props {
   onAddPetBox?: () => void
   /** Draw mode for a person box (section 10): someone in a helmet, from behind or far away, or a face the detector missed. */
   onAddPersonBox?: () => void
+  /** Draw mode for a face box (section 10): a face the detector missed, tagged with who it is. */
+  onAddFaceBox?: () => void
   /** Opened from the documents page: the document card comes first. */
   documentFirst?: boolean
   /** A tap on a person's badge (section 14): on a video, jump to them as their chip under the video does (onScreen:
@@ -446,6 +448,7 @@ export default function InfoPanel({
   onEditBox,
   onAddPetBox,
   onAddPersonBox,
+  onAddFaceBox,
   documentFirst = false,
   onShowPerson,
   onShowBox,
@@ -460,6 +463,7 @@ export default function InfoPanel({
   const boxable = detail.kind === 'image' || isVideo
   const canAddBoxes = boxable && !!onAddPetBox
   const canAddPersonBox = boxable && !!onAddPersonBox
+  const canAddFaceBox = boxable && !!onAddFaceBox
   // section 10: the tag form's switch, and the new pet whose species is still to pick
   const [related, setRelated] = useState(false)
   const [newPet, setNewPet] = useState<string | null>(null)
@@ -995,9 +999,15 @@ export default function InfoPanel({
             </button>
           )}
 
-          {(canAddBoxes || canAddPersonBox) && (
+          {(canAddBoxes || canAddPersonBox || canAddFaceBox) && (
             <div className="mt-3">
               <div className="flex flex-wrap gap-2">
+                {canAddFaceBox && (
+                  <button type="button" onClick={onAddFaceBox} className={darkButton('default')}>
+                    <ScanFace className="size-4" aria-hidden />
+                    Add a face box
+                  </button>
+                )}
                 {canAddPersonBox && (
                   <button type="button" onClick={onAddPersonBox} className={darkButton('default')}>
                     <SquareUser className="size-4" aria-hidden />

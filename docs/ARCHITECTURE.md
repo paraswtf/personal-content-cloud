@@ -609,6 +609,24 @@ Person boxes the owner draws (2026-11-08), like the pet boxes of section 22. `PO
 - Tests: `tests/test_video_tracking.py`, `tests/test_face_weights.py`, `tests/test_not_faces.py`,
   `tests/test_person_boxes.py`, `tests/test_face_upkeep.py`.
 
+Face boxes the owner draws (2026-11-09), around a face the detector missed: `POST /api/items/{uid}/faces`
+(`FaceBoxIn {x, y, w, h, t?, person_id | new_person_name}`, 201 `FaceOut`; `person_boxes.prepare_face` and
+`store_face`):
+- The slow part runs first: the photo or the frame at `t`, the box checked (inside the picture, at least 12 pixels
+  a side in the analysed frame), and the face detector inside the box padded by 15 percent. The region is enlarged
+  for the detector, so a small or soft face it missed in the whole picture is often found; of several, the one most
+  inside the box (`pick_face`). It must find one: 422 `no_face` otherwise (a helmet, a back or someone far away is a
+  person box), 409 `models_unavailable` without the face model.
+- The row keeps the owner's box with `source 'user'`, `assigned_by 'user'` for the person (a new name makes them),
+  the found face's vector, score, size, quality, clarity and sharpness, the head-and-torso vector with SigLIP, and
+  its crop; on a video `frame_time_s = t` and spans `t +- 0.5 s`. On a photo a stored face under it (IoU `>= 0.4`
+  with the found face) is assigned instead, as a hand assignment is. A new face inside a person box the detector
+  found with no face of its own (the face's centre in the box's upper half; not a box the owner drew or tagged)
+  becomes that box's face, as a detected one would, and the box follows its person (its unnamed group goes when
+  nothing else holds it). items.face_count follows, and the person's guesses run as after any tag. Undo takes the
+  face and its crop away; a re-analysis keeps it on a photo (a moved or drawn face, below).
+- 400 `frame_time_needed`, 400 `person_needed`, 400 for documents, 404, 409, 422. Tests: `tests/test_face_boxes.py`.
+
 Moving or resizing a box (2026-11-09, `app/analysis/box_edit.py`): `PUT /api/faces/{id}/box`,
 `/api/bodies/{id}/box` and `/api/animals/{id}/box` with `BoxIn {x, y, w, h}` answer the box (`FaceOut`, `BodyOut`,
 `AnimalOut`), for any face, person or pet box, a guess's too.
@@ -1057,6 +1075,14 @@ than the stage, holding a `PersonPicker` (a typed name creates the person) with 
 someone posts `items/{uid}/people-boxes` (`person_id` or `new_person_name`); the toast says when a face inside the
 box was tagged too. The new box shows with the name like any person box (a video's as a chip under it), and its
 editor's "Not a person" removes it.
+
+Face boxes (2026-11-09, section 10 for the server side): "Add a face box" sits before "Add a person box" in the
+People section, on photos and videos, for a face the detector missed. Draw mode works as for a person box (no
+"Whole photo": a face is never the whole picture), the drawn box is white like a face box, and the same "Who is it?"
+card (`PersonBoxCard` with `kind 'face'`, "Face box" over the title) posts `items/{uid}/faces`. It says what went
+wrong in words: no face in the box ("Draw it closer around the face, or add a person box when the face does not
+show") or the face model not loaded. The new face shows with the name and the person icon like any face the owner
+tagged.
 
 Moving or resizing a box (2026-11-09, `viewer/BoxAdjuster.tsx`, section 10 for the server side): on photos and videos
 the face and pet editors offer "Move or resize", for every face, person and pet box, guesses included (a video's box

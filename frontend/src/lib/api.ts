@@ -399,6 +399,9 @@ export const api = {
     /** A person box the owner drew (section 10): a person box with who it is, plus their face when the detector
      *  finds one inside it. Removed like any person box (people.deleteBody). */
     addPersonBox: (uid: string, body: AddPersonBoxIn) => post<PersonBoxOut>(`/api/items/${enc(uid)}/people-boxes`, body),
+    /** A face box the owner drew around a face the detector missed (section 10), with who it is: 422 `no_face` when
+     *  no face shows inside, 409 when the face model is not loaded. A stored face there is assigned instead. */
+    addFaceBox: (uid: string, body: AddPersonBoxIn) => post<FaceOut>(`/api/items/${enc(uid)}/faces`, body),
     /** The detector looks once more at a lower threshold; 409 models_unavailable when it is not loaded. */
     detectAnimals: (uid: string, threshold?: number) =>
       post<AnimalOut[]>(`/api/items/${enc(uid)}/animals/detect`, threshold === undefined ? {} : { threshold }),

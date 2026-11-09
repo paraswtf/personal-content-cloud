@@ -569,6 +569,18 @@ class PersonBoxIn(BaseModel):
         return self
 
 
+class FaceBoxIn(BaseModel):
+    """A face box the owner draws around a face the detector missed (section 10): normalised, inside the frame (the
+    route checks at least 12 pixels a side); `t` for a video; the person: person_id or new_person_name."""
+    x: float = Field(ge=0.0, le=1.0)
+    y: float = Field(ge=0.0, le=1.0)
+    w: float = Field(gt=0.0, le=1.0)
+    h: float = Field(gt=0.0, le=1.0)
+    t: float | None = Field(default=None, ge=0.0, le=86400.0)
+    person_id: int | None = None
+    new_person_name: str | None = Field(default=None, max_length=120)
+
+
 class PersonBoxOut(BaseModel):
     """The drawn person box and the face found inside it (null for a helmet, a back, someone far away)."""
     body: BodyOut

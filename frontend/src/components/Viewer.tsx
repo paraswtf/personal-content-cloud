@@ -446,6 +446,7 @@ function ViewerInner({ uid, onClose, onPrev, onNext, position, startAt = null, v
       : errorMessage(moveBox.error, 'Could not move the box')
     : null
   const addPetBox = useCallback(() => startDrawing('pet'), [startDrawing])
+  const addFaceBox = useCallback(() => startDrawing('face'), [startDrawing])
   const addPersonBox = useCallback(() => startDrawing('person'), [startDrawing])
   /** A tap on a person's badge in the details (section 14): on a video, the same as their chip under the video
    *  (the first of their tracks, or with `now` the one on screen); on a photo, their boxes light up for a moment.
@@ -938,6 +939,7 @@ function ViewerInner({ uid, onClose, onPrev, onNext, position, startAt = null, v
                 onEditBox={editBox}
                 onAddPetBox={addPetBox}
                 onAddPersonBox={addPersonBox}
+                onAddFaceBox={addFaceBox}
                 onShowPerson={showPerson}
                 onShowBox={showBox}
                 activePersonId={activePersonId}
