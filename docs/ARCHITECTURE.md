@@ -896,7 +896,12 @@ a paper frame, type badge), video duration, mis-click, forward and duplicate bad
 (section 29: the viewer's info panel names the app an item came through, with the forward reasons and a keep or mark button).
 Viewer: the hub's viewer with a document mode (a page strip of 30 pages either side of the current one plus the first and last, text, the virtual document card), face and
 body boxes with guess chips (confirm, reject, assign), an info panel (category with override, quality
-scores, labels, camera, dates), download original.
+scores, labels, camera, dates), download original. A gallery page opens it with `?m=<uid>` (`useViewerParam`,
+prev and next over the page's list). An item that drops out of that list while it is open (2026-11-09: the owner
+took the person off it on their page, kept a mis-click on the review, changed what a filter matches) stays open at
+its old place, still counted in "3 of 10", with prev and next going to the items now either side of it; once the
+owner moves to another item it is gone from the list. Deleting an item or moving it to the vault leaves it from
+the viewer itself (the next item, else close), as before.
 Vault: locked screen asking for password or passkey; once unlocked the same Library component with
 `vault=1`; a countdown shows the remaining minutes.
 Upload: DropZone, camera button (in-app `CameraCapture` using getUserMedia for photos and MediaRecorder
