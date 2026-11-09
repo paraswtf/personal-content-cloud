@@ -269,7 +269,7 @@ CREATE TABLE IF NOT EXISTS animals (
   assigned_by     TEXT NOT NULL DEFAULT 'auto' CHECK (assigned_by IN ('auto','user')),
   x REAL NOT NULL, y REAL NOT NULL, w REAL NOT NULL, h REAL NOT NULL,  -- normalised [0,1]
   det_score       REAL NOT NULL,
-  species         TEXT NOT NULL,                -- bird, cat, dog, horse, sheep, cow, elephant, bear, zebra, giraffe
+  species         TEXT NOT NULL,                -- animals.SPECIES: the detector's ten classes and fifteen more kinds
   species_source  TEXT NOT NULL DEFAULT 'auto' CHECK (species_source IN ('auto','user')),  -- 'user': the owner said so
   species_scores  TEXT,                         -- JSON {species: probability} from the zero-shot check (section 22)
   source          TEXT NOT NULL DEFAULT 'detector' CHECK (source IN ('detector','user')),  -- 'user': the owner drew it

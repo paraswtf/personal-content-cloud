@@ -252,3 +252,55 @@ def test_backfill_rechecks_automatic_crops_and_never_a_user_row(conn, monkeypatc
     st = animals_mod.status(conn)
     assert st["unchecked"] == 0 and st["corrected"] == 1 and st["running"] is False
     assert animals_mod.housekeeping(conn, budget_s=5.0) == 0
+
+
+# ------------------------------------------------------------------ more kinds (2026-11-09)
+class _RabbitEngine:
+    """A SigLIP stand-in: every crop is a rabbit."""
+    def zero_shot(self, embs, groups):
+        out = np.full((embs.shape[0], len(groups)), 0.005, dtype=np.float32)
+        out[:, list(groups).index("rabbit")] = 0.86
+        return out
+
+
+def test_the_check_knows_kinds_the_detector_has_no_class_for():
+    for kind in ("rabbit", "alpaca", "guinea_pig", "turtle", "monkey", "duck"):
+        assert kind in animals_mod.SPECIES and kind in animals_mod.SPECIES_PROMPTS
+    from app import schemas
+
+    assert set(schemas.SPECIES_NAMES) == set(animals_mod.SPECIES_PROMPTS)
+    scores = {sp: 0.005 for sp in animals_mod.SPECIES}
+    scores.update(rabbit=0.82, cat=0.1)
+    species, _, changed = animals_mod.species_check(None, "cat", scores=scores)   # the detector said cat
+    assert (species, changed) == ("rabbit", True)
+
+
+def test_new_kinds_check_the_systems_labels_again_but_never_a_named_pet_or_the_owners(conn, monkeypatch):
+    item = make_item(conn, filename="r.jpg", write_files=False)
+    with tx(conn):
+        bunny = pets.new_pet(conn, "cat", "Bunny")       # named as a cat when there was no rabbit
+        unnamed = pets.new_pet(conn, "cat", None)
+    loose = _animal(conn, item["id"], "cat", unit(5))
+    grouped = _animal(conn, item["id"], "cat", unit(6), person_id=unnamed, box=(0.5, 0.1, 0.3, 0.3))
+    named = _animal(conn, item["id"], "cat", unit(7), person_id=bunny, box=(0.1, 0.5, 0.3, 0.3))
+    owners = _animal(conn, item["id"], "cat", unit(8), species_source="user", box=(0.5, 0.5, 0.3, 0.3))
+    with tx(conn):   # all were checked once against the ten old kinds
+        conn.execute("UPDATE animals SET species_scores = '{\"cat\": 0.9}'")
+        conn.execute("UPDATE kv SET value = '1' WHERE key = ?", (animals_mod.SPECIES_LABELS_KEY,))
+    monkeypatch.setattr(animals_mod, "_engine", lambda: _RabbitEngine())
+    assert animals_mod.housekeeping(conn, budget_s=5.0) == 2   # the loose crop and the unnamed group's
+    assert _row(conn, loose)["species"] == "rabbit" and _row(conn, grouped)["species"] == "rabbit"
+    assert (_row(conn, named)["species"], _row(conn, named)["person_id"]) == ("cat", bunny)   # Bunny keeps hers
+    assert _row(conn, owners)["species"] == "cat"
+    assert animals_mod.housekeeping(conn, budget_s=5.0) == 0   # once
+
+
+def test_the_owner_can_pick_the_new_kinds(client, conn):
+    item = make_item(conn, width=800, height=600)
+    r = client.post(f"/api/items/{item['uid']}/animals", json={"x": 0.1, "y": 0.1, "w": 0.6, "h": 0.6, "species": "alpaca"})
+    assert r.status_code == 201, r.text
+    assert r.json()["species"] == "alpaca"
+    r = client.post(f"/api/items/{item['uid']}/tags", json={"new_person_name": "Thumper", "kind": "pet", "species": "rabbit"})
+    assert r.status_code in (200, 201), r.text
+    assert client.post(f"/api/items/{item['uid']}/animals", json={"x": 0.1, "y": 0.1, "w": 0.6, "h": 0.6,
+                                                                   "species": "unicorn"}).status_code == 422

@@ -12,7 +12,10 @@ CONTRACT.
 - detect_animals(img, img_bgr, frame_time_s=None) -> list[AnimalRecord]: one detector run.
 
 Species corrections (section 22):
-- SPECIES_PROMPTS: one zero-shot prompt group per species. species_scores_of(engine, emb) -> {species: p}.
+- SPECIES: the detector's ten COCO animal classes and fifteen kinds it has no class for (rabbit, hamster,
+  guinea_pig, turtle, fish, goat, pig, donkey, camel, alpaca, llama, deer, monkey, chicken, duck), which the
+  zero-shot check and the owner name. SPECIES_PROMPTS: one zero-shot prompt group per species.
+  species_scores_of(engine, emb) -> {species: p}.
 - species_check(embedding, detected, *, engine=None, scores=None) -> (species, scores, changed): the
   zero-shot answer wins over the detector's class when it is at least SPECIES_SWAP_MIN and the detector's
   species gets at most SPECIES_DETECTED_MAX; `scores` (a table, for tests and the backfill) or `engine`
@@ -22,6 +25,7 @@ Species corrections (section 22):
 - animal_faces(faces, animals, bodies) -> list[int]: indices of face boxes that sit inside an animal box
   (FACE_IN_ANIMAL of their area) with no person box over them: an animal's face, dropped before clustering.
 - housekeeping(conn, budget_s) -> int and status(conn): the backfill for stored crops without species_scores
+  (once per SPECIES_LABELS_VERSION, the system's labels outside a named pet are cleared to be checked again)
 - add_box(conn, item, (x, y, w, h), *, species=None, engine=None) -> int: a box the owner drew on a photo
   (section 22, boxes the owner adds): crop, look embedding, species (the owner's, else the zero-shot's, else
   SpeciesNeeded), the row with source 'user', the pet match. redetect(conn, item, threshold) -> list[int]:
@@ -55,13 +59,29 @@ PAD_SHARE = 0.10
 MIN_BOX_PX = 24
 MAX_PER_SPECIES = 6
 MAX_ANIMALS = 12
-SPECIES = ("bird", "cat", "dog", "horse", "sheep", "cow", "elephant", "bear", "zebra", "giraffe")
+# The detector's ten COCO animal classes, then kinds it has no class for (2026-11-09): the zero-shot check below
+# names them when the detector calls a rabbit a cat or an alpaca a sheep, and the owner can pick them for a box
+# they draw or a pet they correct.
+SPECIES = ("bird", "cat", "dog", "horse", "sheep", "cow", "elephant", "bear", "zebra", "giraffe",
+           "rabbit", "hamster", "guinea_pig", "turtle", "fish", "goat", "pig", "donkey", "camel", "alpaca",
+           "llama", "deer", "monkey", "chicken", "duck")
 SPECIES_PROMPTS: dict[str, list[str]] = {
     "bird": ["a photo of a bird"], "cat": ["a photo of a cat"], "dog": ["a photo of a dog"],
     "horse": ["a photo of a horse"], "sheep": ["a photo of a sheep"], "cow": ["a photo of a cow"],
     "elephant": ["a photo of an elephant"], "bear": ["a photo of a bear"], "zebra": ["a photo of a zebra"],
     "giraffe": ["a photo of a giraffe"],
+    "rabbit": ["a photo of a rabbit", "a photo of a bunny"], "hamster": ["a photo of a hamster"],
+    "guinea_pig": ["a photo of a guinea pig"], "turtle": ["a photo of a turtle", "a photo of a tortoise"],
+    "fish": ["a photo of a fish", "a photo of an aquarium fish"], "goat": ["a photo of a goat"],
+    "pig": ["a photo of a pig"], "donkey": ["a photo of a donkey"], "camel": ["a photo of a camel"],
+    "alpaca": ["a photo of an alpaca"], "llama": ["a photo of a llama"], "deer": ["a photo of a deer"],
+    "monkey": ["a photo of a monkey"], "chicken": ["a photo of a chicken", "a photo of a hen"],
+    "duck": ["a photo of a duck"],
 }
+# Bumped with SPECIES: the stored crops the system labelled, outside a named pet, are checked again once
+# (housekeeping clears their species_scores, kv species_labels_version), so a "cat" that is a rabbit is told.
+SPECIES_LABELS_KEY = "species_labels_version"
+SPECIES_LABELS_VERSION = 2
 SPECIES_SWAP_MIN = 0.6      # the zero-shot's species replaces the detector's from this probability
 SPECIES_DETECTED_MAX = 0.25  # and only when the detector's species gets at most this
 CROSS_SPECIES_IOU = 0.6     # boxes of different species this overlapping are one animal
@@ -407,6 +427,17 @@ def housekeeping(conn: sqlite3.Connection, budget_s: float = 5.0) -> int:
         engine = _engine()
         if engine is None:
             return done
+        if (kv_get(conn, SPECIES_LABELS_KEY, "1") or "1") != str(SPECIES_LABELS_VERSION):
+            # New kinds: the system's labels outside a named pet are checked again. A named pet keeps its species
+            # and its crops (the owner changes it with Species...); the owner's own species stay.
+            with tx(conn):
+                n = conn.execute(
+                    "UPDATE animals SET species_scores = NULL WHERE species_source = 'auto' AND embedding IS NOT NULL "
+                    "AND assigned_by != 'user' AND (person_id IS NULL OR person_id IN "
+                    "(SELECT id FROM persons WHERE name IS NULL))").rowcount
+                kv_set(conn, SPECIES_LABELS_KEY, SPECIES_LABELS_VERSION)
+            if n:
+                log.info("pets: %d crop(s) to check against the new animal kinds", n)
         while time.monotonic() < deadline:
             rows = conn.execute(
                 "SELECT id, item_id, person_id, assigned_by, species, species_source, embedding FROM animals "

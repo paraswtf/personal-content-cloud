@@ -1540,6 +1540,16 @@ wrong at times (a white cat on a lap read as a dog). Three things change that:
   (`animals.housekeeping(conn, budget_s)`, 500 crops per run from the stored embeddings, never a `user`
   row; a changed crop is unassigned from a pet of another species and offered to the pets of the new species
   through `pets.assign_new_animals`). Without SigLIP the detector's class stands.
+- More kinds than the detector has classes (2026-11-09): `SPECIES` (and `schemas.SPECIES_NAMES`, the app's
+  `Species`) holds the detector's ten and fifteen more: rabbit, hamster, guinea_pig ("Guinea pig"), turtle, fish,
+  goat, pig, donkey, camel, alpaca, llama, deer, monkey, chicken and duck, each with its zero-shot prompts ("a photo
+  of a bunny" with the rabbit's, "a photo of a tortoise" with the turtle's). The detector finds such an animal as
+  its nearest class (a rabbit as a cat, an alpaca as a sheep) and the zero-shot check names it; one it does not
+  find is drawn with "Add a pet box". Every species picker lists all 25, pets first, then farm animals, then wild
+  ones. Once per `SPECIES_LABELS_VERSION` (2, kv `species_labels_version`) housekeeping clears the scores of the
+  crops the system labelled outside a named pet (not the owner's species, not a box the owner assigned), so the
+  backfill checks them against the new kinds; a named pet keeps its species and its crops (the owner changes it
+  with Species..., for a rabbit saved as a cat).
 - The owner's correction. `POST /api/animals/species {animal_ids, species}` (one call may carry boxes of
   several species): each box takes the species with `species_source='user'`; a box assigned to a pet of
   another species leaves it (an unnamed pet left empty is pruned; a named one stays for the owner) and is

@@ -135,7 +135,15 @@ export function personName(p: { name: string | null; kind?: PersonKind; species?
 
 /** "dog" -> "Dog". */
 export function speciesLabel(species: string | null | undefined): string {
-  return species ? species.charAt(0).toUpperCase() + species.slice(1) : 'Pet'
+  if (!species) return 'Pet'
+  const words = species.replace(/_/g, ' ')
+  return words.charAt(0).toUpperCase() + words.slice(1)
+}
+
+/** "a cat", "an alpaca": a species in a sentence. */
+export function aSpecies(species: string | null | undefined): string {
+  const word = speciesLabel(species).toLowerCase()
+  return `${/^[aeiou]/.test(word) ? 'an' : 'a'} ${word}`
 }
 
 /** 0.861 -> "86%". */

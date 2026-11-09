@@ -6,7 +6,7 @@ import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from
 import { useMutation } from '@tanstack/react-query'
 import { Ban, Move, PawPrint, Shuffle, UserX, X } from 'lucide-react'
 import { api } from '../../lib/api'
-import { formatCount, personName, speciesLabel } from '../../lib/format'
+import { aSpecies, formatCount, personName, speciesLabel } from '../../lib/format'
 import { boxOrigin, mergeOrigins } from '../../lib/origin'
 import { SPECIES, type PersonOut, type Species } from '../../lib/types'
 import OriginIcon from '../people/OriginIcon'
@@ -79,7 +79,7 @@ export default function AnimalEditor({ uid, box, anchor, onClose, onDone, tracks
       invalidate()
       setMismatch(null)
       if (!v.choice) onDone((box.person ? `Removed from ${personName(box.person)}` : 'Unassigned') + trackTail)
-      else if (v.fix && res.person) onDone(`Tagged as ${personName(res.person)}, now a ${species.toLowerCase()}${trackTail}`)
+      else if (v.fix && res.person) onDone(`Tagged as ${personName(res.person)}, now ${aSpecies(box.species)}${trackTail}`)
       else onDone((res.person ? `Tagged as ${personName(res.person)}` : 'Saved') + trackTail)
     },
   })
@@ -156,7 +156,7 @@ export default function AnimalEditor({ uid, box, anchor, onClose, onDone, tracks
           excludeIds={box.person ? [box.person.id] : undefined}
           onPick={pick}
         />
-        <p className="mt-2 text-xs text-ink-soft">Pets of the same species come first. A pet of another species can take this box once it becomes a {species.toLowerCase()} too.</p>
+        <p className="mt-2 text-xs text-ink-soft">Pets of the same species come first. A pet of another species can take this box once it becomes {aSpecies(box.species)} too.</p>
         {trackList && (
           <div className="mt-2 rounded-xl bg-surface-2 p-2 text-xs text-ink-soft" role="status">
             <p>{onlyTrack ? 'Applies to this track only.' : `Applies to all ${trackList.length} tracks of this pet in the video.`}</p>
@@ -171,7 +171,7 @@ export default function AnimalEditor({ uid, box, anchor, onClose, onDone, tracks
       {mismatch && (
         <div className="mt-2 rounded-xl bg-surface-2 p-2 text-sm" role="status">
           <p className="text-ink-soft">
-            {personName(mismatch)} is a {speciesLabel(mismatch.species).toLowerCase()}; this box is a {species.toLowerCase()}.
+            {personName(mismatch)} is {aSpecies(mismatch.species)}; this box is {aSpecies(box.species)}.
           </p>
           <Button
             className="mt-2"
@@ -181,7 +181,7 @@ export default function AnimalEditor({ uid, box, anchor, onClose, onDone, tracks
             onClick={() => assign.mutate({ choice: { personId: mismatch.id }, fix: true })}
           >
             <Shuffle className="size-4" aria-hidden />
-            Move and make {personName(mismatch)} a {species.toLowerCase()}
+            Move and make {personName(mismatch)} {aSpecies(box.species)}
           </Button>
         </div>
       )}
@@ -220,7 +220,7 @@ export default function AnimalEditor({ uid, box, anchor, onClose, onDone, tracks
       <div className="mt-3 flex flex-wrap gap-2">
         <Button variant="secondary" disabled={busy} aria-expanded={picking} onClick={() => setPicking((v) => !v)}>
           <PawPrint className="size-4" aria-hidden />
-          Not a {species.toLowerCase()}
+          Not {aSpecies(box.species)}
         </Button>
         {box.person && (
           <Button

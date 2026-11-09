@@ -137,7 +137,9 @@ class FaceDeleteOut(Ok):
 # ---------------------------------------------------------------- items
 
 PersonKind = Literal["person", "pet"]
-Species = Literal["bird", "cat", "dog", "horse", "sheep", "cow", "elephant", "bear", "zebra", "giraffe"]
+Species = Literal["bird", "cat", "dog", "horse", "sheep", "cow", "elephant", "bear", "zebra", "giraffe",
+                  "rabbit", "hamster", "guinea_pig", "turtle", "fish", "goat", "pig", "donkey", "camel", "alpaca",
+                  "llama", "deer", "monkey", "chicken", "duck"]
 
 
 TagRelation = Literal["in", "related"]
@@ -549,7 +551,9 @@ class AssignAnimalsIn(BaseModel):
     fix_species: bool = False
 
 
-SPECIES_NAMES = ("bird", "cat", "dog", "horse", "sheep", "cow", "elephant", "bear", "zebra", "giraffe")
+SPECIES_NAMES = ("bird", "cat", "dog", "horse", "sheep", "cow", "elephant", "bear", "zebra", "giraffe",
+                 "rabbit", "hamster", "guinea_pig", "turtle", "fish", "goat", "pig", "donkey", "camel", "alpaca",
+                 "llama", "deer", "monkey", "chicken", "duck")
 MIN_BOX_SHARE = 0.005  # analysis.animals.MIN_BOX_SHARE
 
 

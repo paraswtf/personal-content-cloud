@@ -95,9 +95,61 @@ export interface UndoOut {
 }
 
 // people
-export type Species = 'bird' | 'cat' | 'dog' | 'horse' | 'sheep' | 'cow' | 'elephant' | 'bear' | 'zebra' | 'giraffe'
-/** The species the detector knows (section 22), in the order the pickers show them. */
-export const SPECIES: readonly Species[] = ['cat', 'dog', 'bird', 'horse', 'cow', 'sheep', 'elephant', 'bear', 'zebra', 'giraffe']
+export type Species =
+  | 'bird'
+  | 'cat'
+  | 'dog'
+  | 'horse'
+  | 'sheep'
+  | 'cow'
+  | 'elephant'
+  | 'bear'
+  | 'zebra'
+  | 'giraffe'
+  | 'rabbit'
+  | 'hamster'
+  | 'guinea_pig'
+  | 'turtle'
+  | 'fish'
+  | 'goat'
+  | 'pig'
+  | 'donkey'
+  | 'camel'
+  | 'alpaca'
+  | 'llama'
+  | 'deer'
+  | 'monkey'
+  | 'chicken'
+  | 'duck'
+/** The kinds of animal (section 22): the detector's ten, and fifteen the species check and the owner name
+ *  (2026-11-09), in the order the pickers show them: pets first, then farm animals, then the wild ones. */
+export const SPECIES: readonly Species[] = [
+  'cat',
+  'dog',
+  'bird',
+  'rabbit',
+  'fish',
+  'hamster',
+  'guinea_pig',
+  'turtle',
+  'horse',
+  'cow',
+  'goat',
+  'sheep',
+  'pig',
+  'chicken',
+  'duck',
+  'donkey',
+  'camel',
+  'alpaca',
+  'llama',
+  'monkey',
+  'deer',
+  'elephant',
+  'bear',
+  'zebra',
+  'giraffe',
+]
 export type PersonKind = 'person' | 'pet'
 /** How a tag ties someone to an item (section 10, related items): in the picture, or about them without them in it. */
 export type TagRelation = 'in' | 'related'
