@@ -81,7 +81,7 @@ VIDEO_BYTES_MARGIN = 1.15
 
 _FAMILIES = {
     ".jpg": "jpeg", ".jpeg": "jpeg",
-    ".heic": "heif", ".heif": "heif", ".avif": "heif",
+    ".heic": "heif", ".heif": "heif", ".avif": "heif", ".jxl": "jxl",
     ".png": "lossless", ".tif": "lossless", ".tiff": "lossless", ".bmp": "lossless",
     ".webp": "webp",
     ".gif": "gif",

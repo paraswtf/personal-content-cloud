@@ -450,7 +450,7 @@ def tidy_derivatives(conn: sqlite3.Connection, force: bool = False) -> int:
 # ------------------------------------------------------------------ plain files probed again
 PROBE_VERSION_KEY = "probe_version"  # kv: the probe.PROBE_VERSION whose re-probe pass has completed
 PLAIN_MEDIA_SQL = ("kind = 'other' AND deleted_at IS NULL AND companion_of IS NULL AND "
-                   "(mime LIKE 'image/%' OR mime LIKE 'video/%' OR mime = 'application/pdf')")
+                   "(mime LIKE 'image/%' OR mime LIKE 'video/%' OR mime = 'application/pdf' OR ext = '.jxl')")
 
 
 def plain_media_count(conn: sqlite3.Connection) -> int:

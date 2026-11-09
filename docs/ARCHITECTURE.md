@@ -288,12 +288,23 @@ mtime) and returns `["-strict", "strict"]` for such a file; every ffmpeg and ffp
 it before the input, so the real index is read. `MediaInfo.strict_input` marks them and
 `video.needs_web_preview` always gives them a web copy (browsers trip over the placeholder as ffmpeg does). A
 non-zero ffmpeg or ffprobe exit whose stderr names a resource problem (no memory, too many open files, no
-space, an I/O error) is a `ToolFailure`, not a verdict on the file. `probe.PROBE_VERSION` (2) is bumped when
+space, an I/O error) is a `ToolFailure`, not a verdict on the file. `probe.PROBE_VERSION` (3) is bumped when
 the probe learns to read files it used to keep as `other`; at startup, when kv `probe_version` is lower,
 `ingest.reprobe_plain` runs once on a background thread over the items kept as `other` whose MIME says image,
-video or PDF: one that now probes as a real kind (with the same storage extension) gets its derivatives, its
-row's media columns, fingerprint and statuses, its analysis, text and web-copy jobs and a Live Photo pairing;
-the kv is set when the pass completes (a `ToolFailure` stops it for the next start).
+video or PDF, or whose extension is `.jxl`: one that now probes as a real kind (with the same storage extension)
+gets its derivatives, its row's media columns, fingerprint and statuses, its analysis, text and web-copy jobs and
+a Live Photo pairing; the kv is set when the pass completes (a `ToolFailure` stops it for the next start).
+
+JPEG XL and ProRAW DNGs (2026-11-09, version 3). JPEG XL (`.jxl`, `image/jxl`: a bare codestream starting
+`FF 0A`, or the `JXL ` box container) is a photo like any other, decoded by `pillow-jxl-plugin` (registered with
+Pillow by `media.images` as pillow-heif is); its orientation lives in the codestream and the decoder applies it,
+so an Exif box's orientation is ignored (the format's rule; turning it again would put the picture on its side).
+An iPhone ProRAW DNG from the iPhone 17 Pro on stores its raw image JPEG XL compressed (DNG 1.7, compression
+52546), which the LibRaw inside `rawpy` cannot open at all; such a file is read from its largest embedded JPEG
+preview instead (`raw.embedded_preview`: IFD0, the chained IFDs and their SubIFDs, at least 640 pixels on its long
+side; an iPhone keeps a full-size one in IFD0), turned upright once by its own EXIF orientation or else the
+file's, with the dates, camera and place from the file's EXIF. DNGs LibRaw reads are demosaiced as before.
+Version 3 turned the owner's stored ones (five DNGs and a `.jxl` kept as plain files) into photos.
 
 Every job that ran to a verdict leaves a `job_runs` row (type, queue, finished_at, duration_ms, ok) for the
 processing speed charts (section 32); deferrals (full disk, ffmpeg not running) are not runs. Housekeeping

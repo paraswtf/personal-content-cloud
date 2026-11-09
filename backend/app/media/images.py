@@ -48,6 +48,24 @@ def register_heif() -> None:
 
 register_heif()
 
+_jxl_registered = False
+
+
+def register_jxl() -> None:
+    """Register pillow-jxl-plugin's JPEG XL opener with Pillow (idempotent). Called at import time."""
+    global _jxl_registered
+    if _jxl_registered:
+        return
+    try:
+        import pillow_jxl  # noqa: F401 - importing it registers the opener
+
+        _jxl_registered = True
+    except ImportError:  # pragma: no cover - dependency is declared, but stay importable without it
+        log.warning("pillow-jxl-plugin is not installed; JPEG XL photos cannot be decoded")
+
+
+register_jxl()
+
 
 def _flatten_rgb(im: Image.Image) -> Image.Image:
     """Any mode -> RGB, compositing transparency onto white."""
@@ -90,7 +108,9 @@ def load_oriented(path: Path, max_side: int | None = None, *, raw: bool | None =
                     s = max_side / longer
                     im.draft("RGB", (max(1, int(im.width * s)), max(1, int(im.height * s))))
             im.load()
-            out = ImageOps.exif_transpose(im)
+            # JPEG XL carries its orientation in the codestream, applied by the decoder; an Exif box's
+            # orientation must be ignored (the format's rule), or the picture turns twice.
+            out = im if im.format == "JXL" else ImageOps.exif_transpose(im)
             out = _flatten_rgb(out)
             if out is im:
                 out = im.copy()

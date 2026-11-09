@@ -3,7 +3,7 @@
 CONTRACT. Every non-empty file is accepted and kept byte for byte; probing only decides how it is
 processed. Kinds, judged by content (magic bytes plus a successful decode or probe), with the
 original file name used only where content cannot tell (plain text, some camera RAW formats):
-  image     JPEG, PNG, GIF, WebP, HEIC/HEIF, AVIF, TIFF, BMP, camera RAW (app.media.raw)
+  image     JPEG, PNG, GIF, WebP, HEIC/HEIF, AVIF, JPEG XL, TIFF, BMP, camera RAW (app.media.raw)
   video     MP4/M4V/3GP/MOV, WebM/MKV, AVI, MPEG-TS/M2TS
   pdf       PDF (app.media.documents)
   document  DOCX, XLSX, PPTX, plain text / Markdown / CSV (app.media.documents)
@@ -38,7 +38,7 @@ log = logging.getLogger(__name__)
 
 # Value for the upload page's <input accept>. Any file is accepted; the list helps pickers show the
 # usual ones. Browsers often report HEIC/MOV oddly, so list extensions too.
-ACCEPT_ATTR = ("image/*,video/*,application/pdf,.heic,.heif,.avif,.mov,.m4v,.mkv,.3gp,.mts,.m2ts,"
+ACCEPT_ATTR = ("image/*,video/*,application/pdf,.heic,.heif,.avif,.jxl,.mov,.m4v,.mkv,.3gp,.mts,.m2ts,"
                ".dng,.cr2,.cr3,.nef,.arw,.raf,.orf,.rw2,.pef,.srw,.pdf,.docx,.xlsx,.pptx,.txt,.md,.csv")
 OTHER_MIME = "application/octet-stream"
 _SAFE_EXT = re.compile(r"^\.[a-z0-9]{1,8}$")
@@ -64,7 +64,7 @@ TOOL_TROUBLE = ("cannot allocate memory", "out of memory", "resource temporarily
 
 # Bumped when the probe learns to read files it used to keep as 'other'; ingest.reprobe_plain then
 # probes those again once (kv probe_version). 2: a placeholder index before the real one (input_flags).
-PROBE_VERSION = 2
+PROBE_VERSION = 3  # 3: JPEG XL, and DNGs LibRaw cannot open read from their embedded preview (2026-11-09)
 
 
 def _top_atoms(path: Path, limit: int = 64) -> list[tuple[bytes, int, int]]:
@@ -148,7 +148,7 @@ class MediaInfo:
     kind: Literal["image", "video", "pdf", "document", "other"]
     mime: str  # canonical MIME from sniffing, e.g. 'image/jpeg', 'video/mp4', 'application/pdf';
     #            'application/octet-stream' for 'other' files of unknown type
-    ext: str  # canonical storage extension, lowercase with dot: .jpg .png .webp .gif .heic .avif .tif .bmp
+    ext: str  # canonical storage extension, lowercase with dot: .jpg .png .webp .gif .heic .avif .jxl .tif .bmp
     #           .dng .cr2 ... .mp4 .mov .m4v .webm .mkv .avi .3gp .mts .pdf .docx .xlsx .pptx .txt .md .csv;
     #           for 'other' the uploaded name's suffix when it is safe, else .bin
     width: int | None  # display orientation (EXIF orientation / video rotation applied); for documents
@@ -201,6 +201,8 @@ _WEBP = ("image", "image/webp", ".webp")
 _HEIC = ("image", "image/heic", ".heic")
 _HEIF = ("image", "image/heif", ".heif")
 _AVIF = ("image", "image/avif", ".avif")
+_JXL = ("image", "image/jxl", ".jxl")  # JPEG XL: a bare codestream or the ISO BMFF-style container (2026-11-09)
+_JXL_CONTAINER = b"\x00\x00\x00\x0cJXL \r\n\x87\n"
 _TIFF = ("image", "image/tiff", ".tif")
 _BMP = ("image", "image/bmp", ".bmp")
 _MP4 = ("video", "video/mp4", ".mp4")
@@ -308,7 +310,7 @@ def sniff(path: Path, filename: str | None = None) -> tuple[str, str, str] | Non
     documents (PDF, office zip, plain text by the file name's extension).
 
     Must recognise: JPEG, PNG, GIF, WebP, HEIC/HEIF (ftyp heic/heix/hevc/heim/heis/hevm/hevs/mif1/msf1),
-    AVIF (ftyp avif/avis), TIFF, BMP; MP4/M4V/3GP/MOV (ftyp brands, or QuickTime 'moov'/'mdat'/'wide'
+    AVIF (ftyp avif/avis), JPEG XL (FF0A codestream or the 'JXL ' container), TIFF, BMP; MP4/M4V/3GP/MOV (ftyp brands, or QuickTime 'moov'/'mdat'/'wide'
     atoms), WebM/MKV (EBML 1A45DFA3; DocType webm vs matroska), AVI (RIFF....AVI ), MPEG-TS/MTS
     (0x47 sync byte every 188 bytes, or 192-byte M2TS packets). Note 'mif1'/'msf1' can be HEIF or AVIF:
     check compatible brands for 'avif'.
@@ -334,6 +336,8 @@ def sniff(path: Path, filename: str | None = None) -> tuple[str, str, str] | Non
 def _sniff_media(data: bytes) -> tuple[str, str, str] | None:
     if data[:3] == b"\xff\xd8\xff":
         return _JPEG
+    if data[:2] == b"\xff\x0a" or data[:12] == _JXL_CONTAINER:
+        return _JXL
     if data[:8] == b"\x89PNG\r\n\x1a\n":
         return _PNG
     if data[:6] in (b"GIF87a", b"GIF89a"):
@@ -657,6 +661,7 @@ def probe_image(path: Path, kind_mime_ext: tuple[str, str, str]) -> MediaInfo:
             if width * height > _images.MAX_PIXELS:
                 raise ValueError(f"image too large ({width}x{height})")
             exif = im.getexif()
+            jxl = im.format == "JXL"
             animated = bool(getattr(im, "is_animated", False)) and int(getattr(im, "n_frames", 1)) > 1
             # Make sure pixel data actually decodes (cheaply for JPEG via draft mode).
             if im.format == "JPEG":
@@ -667,7 +672,8 @@ def probe_image(path: Path, kind_mime_ext: tuple[str, str, str]) -> MediaInfo:
     except Exception as e:  # OSError, SyntaxError, DecompressionBombError, decoder errors
         raise ValueError(f"cannot decode image: {e}") from e
 
-    orientation = exif.get(0x0112, 1)
+    # JPEG XL: the decoder applies the codestream's orientation; an Exif box's orientation is ignored.
+    orientation = 1 if jxl else exif.get(0x0112, 1)
     try:
         orientation = int(orientation)
     except (TypeError, ValueError):

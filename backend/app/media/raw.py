@@ -12,6 +12,11 @@ CONTRACT.
 - load_raw(path, max_side=None) -> PIL RGB image: half-size demosaic (fast, enough for previews
   and analysis), camera white balance, flip applied; falls back to the embedded JPEG preview when
   demosaicing fails. ValueError when nothing decodes.
+- A TIFF-based RAW that LibRaw cannot open at all (an iPhone ProRAW DNG whose raw image is JPEG XL
+  compressed, DNG 1.7, which this LibRaw build cannot decode) is read from its largest embedded JPEG
+  preview instead (embedded_preview: IFD0, the chained IFDs and their SubIFDs; an iPhone keeps a
+  full-size one), turned upright once by its own EXIF orientation or else the file's; probe_raw then
+  takes the size from that preview and the EXIF from the file (2026-11-09).
 The original bytes are never modified.
 """
 from __future__ import annotations
@@ -126,8 +131,99 @@ def _exif_from(path: Path, raw_obj) -> Image.Exif:
     return Image.Exif()
 
 
+_JPEG_COMPRESSION = (6, 7)  # old-style and new-style JPEG in TIFF
+_MIN_PREVIEW_SIDE = 640  # a smaller embedded image is a thumbnail, not a picture to show or analyse
+
+
+def _ifds(data: bytes) -> list[dict[int, tuple[int, int, int]]]:
+    """Every IFD of a TIFF file (IFD0 and its chain, and their SubIFDs one level down) as {tag: (type, count,
+    value or offset)}. Empty on a malformed header."""
+    if len(data) < 8 or data[:2] not in (b"II", b"MM"):
+        return []
+    e = "<" if data[:2] == b"II" else ">"
+    out: list[dict[int, tuple[int, int, int]]] = []
+    seen: set[int] = set()
+
+    def read(off: int, depth: int) -> int:
+        if off in seen or off + 2 > len(data) or len(out) > 64:
+            return 0
+        seen.add(off)
+        n = struct.unpack(e + "H", data[off:off + 2])[0]
+        tags: dict[int, tuple[int, int, int]] = {}
+        for i in range(min(n, 512)):
+            at = off + 2 + 12 * i
+            if at + 12 > len(data):
+                break
+            tag, typ, cnt = struct.unpack(e + "HHI", data[at:at + 8])
+            if typ == 3 and cnt == 1:
+                val = struct.unpack(e + "H", data[at + 8:at + 10])[0]
+            else:
+                val = struct.unpack(e + "I", data[at + 8:at + 12])[0]
+            tags[tag] = (typ, cnt, val)
+        out.append(tags)
+        if 330 in tags and depth == 0:  # SubIFDs
+            typ, cnt, val = tags[330]
+            offs = [val] if cnt == 1 else [struct.unpack(e + "I", data[val + 4 * k:val + 4 * k + 4])[0]
+                                           for k in range(min(cnt, 16)) if val + 4 * k + 4 <= len(data)]
+            for o in offs:
+                read(o, depth + 1)
+        end = off + 2 + 12 * n
+        return struct.unpack(e + "I", data[end:end + 4])[0] if end + 4 <= len(data) else 0
+
+    nxt = struct.unpack(e + "I", data[4:8])[0]
+    while nxt and len(out) < 64:
+        nxt = read(nxt, 0)
+    return out
+
+
+def embedded_preview(path: Path) -> Image.Image | None:
+    """The largest JPEG picture embedded in a TIFF-based RAW file, upright (its own EXIF orientation, else the
+    file's), in RGB; None when there is none at least _MIN_PREVIEW_SIDE pixels on its long side."""
+    try:
+        data = Path(path).read_bytes()
+    except OSError:
+        return None
+    ifds = _ifds(data)
+    if not ifds:
+        return None
+    best: tuple[int, bytes] | None = None
+    for tags in ifds:
+        comp = tags.get(259, (0, 0, 0))[2]
+        width, height = tags.get(256, (0, 0, 0))[2], tags.get(257, (0, 0, 0))[2]
+        chunk = None
+        if 513 in tags and 514 in tags:  # JPEGInterchangeFormat and its length
+            chunk = (tags[513][2], tags[514][2])
+        elif comp in _JPEG_COMPRESSION and 273 in tags and 279 in tags and tags[273][1] == 1:
+            chunk = (tags[273][2], tags[279][2])  # one strip holding a whole JPEG
+        if chunk is None or chunk[0] + chunk[1] > len(data) or chunk[1] < 4:
+            continue
+        blob = data[chunk[0]:chunk[0] + chunk[1]]
+        if blob[:2] != b"\xff\xd8":
+            continue
+        area = int(width) * int(height) if width and height else len(blob)
+        if best is None or area > best[0]:
+            best = (area, blob)
+    if best is None:
+        return None
+    try:
+        with Image.open(io.BytesIO(best[1])) as im:
+            im.load()
+            exif = im.getexif()
+            if not exif.get(0x0112):
+                orientation = ifds[0].get(0x0112, (0, 0, 1))[2]
+                if orientation and orientation != 1:
+                    exif[0x0112] = orientation
+            img = ImageOps.exif_transpose(im).convert("RGB")
+    except Exception:  # noqa: BLE001 - not a JPEG Pillow decodes
+        return None
+    if max(img.size) < _MIN_PREVIEW_SIDE:
+        return None
+    return img
+
+
 def probe_raw(path: Path, kind_mime_ext: tuple[str, str, str]) -> tuple[int, int, Image.Exif]:
-    """(display width, display height, EXIF) of a RAW file. ValueError when LibRaw cannot read it."""
+    """(display width, display height, EXIF) of a RAW file. ValueError when neither LibRaw nor an embedded
+    preview can read it."""
     try:
         import rawpy
     except ImportError as e:  # pragma: no cover - declared dependency
@@ -139,8 +235,18 @@ def probe_raw(path: Path, kind_mime_ext: tuple[str, str, str]) -> tuple[int, int
             if sizes.flip in (5, 6):
                 width, height = height, width
             exif = _exif_from(Path(path), raw)
-    except Exception as e:  # LibRawError and friends: not a readable RAW file
-        raise ValueError(f"cannot read RAW file: {e}") from e
+    except Exception as e:  # LibRawError and friends: LibRaw cannot read it, perhaps its preview can
+        preview = embedded_preview(Path(path))
+        if preview is None:
+            raise ValueError(f"cannot read RAW file: {e}") from e
+        log.info("RAW %s: LibRaw cannot read it (%s), using its embedded preview", path, e)
+        width, height = preview.size
+        exif = Image.Exif()
+        try:
+            with Image.open(path) as im:
+                exif = im.getexif()
+        except Exception:  # noqa: BLE001 - the preview alone then
+            pass
     if width <= 0 or height <= 0:
         raise ValueError("RAW file has no pixels")
     return width, height, exif
@@ -170,7 +276,9 @@ def load_raw(path: Path, max_side: int | None = None) -> Image.Image:
     except ValueError:
         raise
     except Exception as e:
-        raise ValueError(f"cannot decode RAW file: {e}") from e
+        img = embedded_preview(Path(path))  # LibRaw cannot open it: its embedded preview (a ProRAW JPEG XL DNG)
+        if img is None:
+            raise ValueError(f"cannot decode RAW file: {e}") from e
     if img is None:
         raise ValueError("RAW file has no decodable image")
     if max_side and max(img.size) > max_side:
