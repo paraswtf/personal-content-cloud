@@ -1404,6 +1404,19 @@ decision is being saved, or in the viewer until the item has been fetched again 
 stays pending until then), so a quick second key never answers the same guess twice. The person page and the other
 viewers do not take them, and touch screens get no automatic focus and no ring.
 
+Trash keys (2026-11-10, `pages/TrashPage.tsx`, `trash/TrashPreview.tsx`): on a computer the first tile's Restore is
+focused once the list is in, with a ring on the tile (not after a Tab while it loads). Arrows move between tiles (Up
+and Down by row, nearest in x), Home and End to the ends, and the next page loads near the end; Enter (the focused
+Restore's own click) or R restores, and Ctrl+Z undoes it as before; Delete or Backspace opens "Delete forever" with its
+confirm button focused, so Enter deletes for good and Esc cancels; Space opens a larger preview (the preview image, a
+video with controls, a document's first page; private items stay locked) where Left and Right go to the previous and
+next item, Enter or R restores, Delete asks, and Space or Esc closes back to that item's tile. An answered tile's
+buttons do nothing until a list fetched after the answer is in (aria-disabled, so focus stays and the arrows keep
+moving; an undo before that fetch makes it usable again); when it leaves with the focus on it, the tile now in its
+place takes focus (counting earlier answered tiles that left). Loading the next page never cancels the list fetch
+that follows an answer. Nothing fires while typing, with Ctrl, Cmd or Alt, or as a held repeat; touch screens get
+no automatic focus, ring or hint.
+
 Body traits (section 34; `people/evidence.ts`, `TraitCompare.tsx`, `TraitsTab.tsx`, `useTraitActions.ts`):
 - Guess labels follow `evidence.basis` (`guessBasis`, `guessLabel`): "Face" and "By clothes" as before, "By" and the
   kinds that counted for a trait-only guess ("By tattoo", "By tattoo and nails", "By mehndi and nails"), and "By

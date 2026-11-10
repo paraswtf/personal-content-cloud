@@ -24,7 +24,7 @@ import { Confirm } from '../components/admin/AdminModal'
 import { errorMessage, useSelection } from '../components/admin/adminHooks'
 import { LoadMore, SelectionBar } from '../components/admin/fields'
 import { useViewerParam } from '../components/public/useViewerParam'
-import { Button, EmptyState, ErrorState } from '../components/ui'
+import { Button, EmptyState, ErrorState, Kbd } from '../components/ui'
 
 type Tab = 'misclicks' | 'forwards' | 'duplicates' | 'guesses'
 const TABS: { value: Tab; label: string; icon: typeof Copy }[] = [
@@ -534,10 +534,6 @@ function focusTaken(): boolean {
       !!a.closest('[role="dialog"]') ||
       !!a.closest('article'))
   )
-}
-
-function Kbd({ children }: { children: ReactNode }) {
-  return <kbd className="rounded border border-line bg-surface-2 px-1 font-sans text-xs text-ink">{children}</kbd>
 }
 
 export default function ReviewPage() {

@@ -299,6 +299,7 @@ export function ConfirmModal({
   loading = false,
   onConfirm,
   onClose,
+  focusConfirm = false,
 }: {
   open: boolean
   title: string
@@ -308,6 +309,8 @@ export function ConfirmModal({
   loading?: boolean
   onConfirm: () => void
   onClose: () => void
+  /** The confirm button takes focus, so Enter confirms (the dialog was opened by a key meant for this). */
+  focusConfirm?: boolean
 }) {
   return (
     <Modal
@@ -319,7 +322,7 @@ export function ConfirmModal({
           <Button variant="ghost" onClick={onClose}>
             Cancel
           </Button>
-          <Button variant={danger ? 'danger' : 'primary'} loading={loading} onClick={onConfirm}>
+          <Button variant={danger ? 'danger' : 'primary'} loading={loading} onClick={onConfirm} autoFocus={focusConfirm}>
             {confirmLabel}
           </Button>
         </>
@@ -328,4 +331,9 @@ export function ConfirmModal({
       <div className="text-sm text-ink-soft">{body}</div>
     </Modal>
   )
+}
+
+/** A key name in running text ("Keys: Enter yes ..."). */
+export function Kbd({ children }: { children: ReactNode }) {
+  return <kbd className="rounded border border-line bg-surface-2 px-1 font-sans text-xs text-ink">{children}</kbd>
 }
