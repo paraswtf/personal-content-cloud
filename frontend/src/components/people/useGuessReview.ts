@@ -12,6 +12,11 @@ type Action = 'confirm' | 'reject' | 'correct'
 
 export const guessKey = (g: Pick<GuessItem, 'kind' | 'id'>) => `${g.kind}:${g.id}`
 
+/** Per-call callbacks of a decision. */
+export interface DecideOpts {
+  onError?: () => void
+}
+
 export function useGuessReview() {
   const toast = useToast()
   const refresh = useRefreshLibrary()
@@ -38,10 +43,12 @@ export function useGuessReview() {
   })
   const busyFor = (g: GuessItem): Action | null =>
     m.isPending && m.variables && m.variables.items.some((x) => guessKey(x) === guessKey(g)) ? m.variables.action : null
+  // opts.onError: the caller's own reaction to a failed decision (the Review page puts focus back on that card)
   return {
-    confirm: (items: GuessItem[]) => m.mutate({ items, action: 'confirm' }),
-    reject: (items: GuessItem[]) => m.mutate({ items, action: 'reject' }),
-    correct: (items: GuessItem[], choice: PersonChoice) => m.mutate({ items, action: 'correct', choice }),
+    confirm: (items: GuessItem[], opts?: DecideOpts) => m.mutate({ items, action: 'confirm' }, opts),
+    reject: (items: GuessItem[], opts?: DecideOpts) => m.mutate({ items, action: 'reject' }, opts),
+    correct: (items: GuessItem[], choice: PersonChoice, opts?: DecideOpts) =>
+      m.mutate({ items, action: 'correct', choice }, opts),
     busyFor,
     pending: m.isPending,
   }

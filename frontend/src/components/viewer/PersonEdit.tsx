@@ -90,7 +90,7 @@ export function usePersonEdits(uid: string, onToast: (message: string) => void, 
       return followed
     },
     // Some boxes may be gone after a failure half way: the item is read again either way.
-    onSettled: () => invalidate(),
+    onSettled: () => void invalidate(),
     onSuccess: (followed, v) => {
       onDone()
       const name = displayName({ name: v.who.name, kind: kindOf(v.who) })

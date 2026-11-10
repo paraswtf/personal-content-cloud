@@ -4,8 +4,10 @@
 // person picked, in one step). A clothes guess shows its score ("By clothes, 85% sure") and its line ("25 min apart,
 // same scene 0.86, same clothes 0.91"). Tattoos, nails and mehndi (section 34) show their strongest reason with the
 // two crops side by side, and the other signs folded under "N more signs"; a guess from traits alone says "strong
-// match", never a percentage.
-import { useState } from 'react'
+// match", never a percentage. With `keys` (the Review page): Enter on the focused Yes confirms (the button's own
+// click), Space on any of the three buttons opens the "Someone else" name box with its field focused, X rejects,
+// and Escape in an empty name box closes it and puts focus back on Yes. Nothing fires while typing in the name box.
+import { useEffect, useId, useRef, useState, type KeyboardEvent } from 'react'
 import { Link } from 'react-router'
 import { Check, Hand, PenTool, Shirt, UserRoundPen, X } from 'lucide-react'
 import type { GuessItem } from '../../lib/types'
@@ -24,6 +26,7 @@ export default function GuessCard({
   onReject,
   onCorrect,
   onOpenItem,
+  keys = false,
 }: {
   g: GuessItem
   busy: 'confirm' | 'reject' | 'correct' | null
@@ -32,8 +35,64 @@ export default function GuessCard({
   /** "Someone else": who it really is. */
   onCorrect?: (choice: PersonChoice) => void
   onOpenItem: (uid: string, t?: number | null) => void
+  /** Review page keyboard: Enter on the focused Yes confirms, Space opens "Someone else", X rejects. */
+  keys?: boolean
 }) {
   const [picking, setPicking] = useState(false)
+  const articleRef = useRef<HTMLElement>(null)
+  const pickerRef = useRef<HTMLDivElement>(null)
+  const spaceDown = useRef(false) // the Space that opened the name box is still held
+  const nameId = useId()
+  const focusYes = () => articleRef.current?.querySelector<HTMLButtonElement>('[data-guess-yes]')?.focus({ preventScroll: true })
+  useEffect(() => {
+    // The name box opens under the buttons and its field takes focus without scrolling: keep the box in view, also
+    // as its list of people loads and changes with the typing.
+    const el = pickerRef.current
+    if (!picking || !el) return
+    const show = new ResizeObserver(() => el.scrollIntoView({ block: 'nearest' }))
+    show.observe(el)
+    return () => show.disconnect()
+  }, [picking])
+  const onKey = (e: KeyboardEvent<HTMLElement>) => {
+    if (e.defaultPrevented || e.altKey || e.ctrlKey || e.metaKey) return
+    if (e.key === ' ' && e.repeat && spaceDown.current) {
+      e.preventDefault() // a held Space does not type into the name box it opened
+      return
+    }
+    if (e.key === 'Escape' && picking) {
+      // an empty name box: PersonPicker clears text first and stops the event, so only an empty field gets here
+      e.preventDefault()
+      setPicking(false)
+      focusYes()
+      return
+    }
+    if (typing(e.target)) return
+    if (e.key === 'Enter' && e.repeat && onAction(e.target)) {
+      e.preventDefault() // a held Enter answers once
+      return
+    }
+    if (e.key === ' ' && onCorrect && onAction(e.target)) {
+      e.preventDefault() // not the button's own click: Space opens the name box
+      if (e.repeat || busy) return
+      spaceDown.current = true
+      if (picking) {
+        const input = articleRef.current?.querySelector('input')
+        input?.focus()
+        input?.select()
+      } else setPicking(true)
+      return
+    }
+    if ((e.key === 'x' || e.key === 'X') && !e.repeat && !busy) {
+      e.preventDefault()
+      onReject()
+    }
+  }
+  // Firefox turns the keyup of Space on a focused button into a click: it would confirm
+  const onKeyUp = (e: KeyboardEvent<HTMLElement>) => {
+    if (e.key !== ' ') return
+    spaceDown.current = false
+    if (onAction(e.target)) e.preventDefault()
+  }
   const name = personName(g.guess.person)
   const reasons = traitReasons(g.guess)
   const lead = reasons[0]
@@ -44,7 +103,12 @@ export default function GuessCard({
   const inVideo = g.item.kind === 'video' && t !== null && t !== undefined
   const scene = inVideo ? frameUrl(g.item.uid, g.item.version, t, 'preview', false, g.item.nsfw) : g.item.urls.thumb
   return (
-    <article className="flex flex-col gap-3 rounded-2xl border border-line bg-surface p-3">
+    <article
+      ref={articleRef}
+      onKeyDown={keys ? onKey : undefined}
+      onKeyUp={keys ? onKeyUp : undefined}
+      className="flex flex-col gap-3 rounded-2xl border border-line bg-surface p-3"
+    >
       <div className="flex items-center gap-3">
         <img src={g.box.url} alt={g.kind === 'face' ? 'Face' : 'Person'} className="size-20 shrink-0 rounded-xl bg-surface-2 object-cover ring-1 ring-line" />
         <button
@@ -76,7 +140,7 @@ export default function GuessCard({
           </p>
           <Link to={`/people/${g.guess.person.id}`} className="mt-1 flex min-w-0 items-center gap-2 hover:underline">
             <Avatar src={g.guess.person.cover_url} name={g.guess.person.name} size={28} />
-            <span className="truncate text-sm font-semibold">{name}?</span>
+            <span id={nameId} className="truncate text-sm font-semibold">{name}?</span>
             <OriginIcon origin="guess" className="-ml-1 text-ink-soft" />
           </Link>
         </div>
@@ -101,11 +165,35 @@ export default function GuessCard({
         </details>
       )}
       <div className="flex flex-wrap gap-2">
-        <Button size="md" className="flex-1" loading={busy === 'confirm'} disabled={!!busy} onClick={onConfirm}>
+        <Button
+          size="md"
+          className={
+            'flex-1' +
+            (keys
+              ? ' pointer-fine:focus:outline-none pointer-fine:focus:ring-2 pointer-fine:focus:ring-accent pointer-fine:focus:ring-offset-2 pointer-fine:focus:ring-offset-surface'
+              : '')
+          }
+          loading={busy === 'confirm'}
+          disabled={!!busy}
+          onClick={onConfirm}
+          data-guess-yes=""
+          data-guess-action=""
+          aria-keyshortcuts={keys ? 'Enter' : undefined}
+          aria-describedby={keys ? nameId : undefined}
+        >
           {busy !== 'confirm' && <Check className="size-4" aria-hidden />}
           Yes
         </Button>
-        <Button size="md" variant="secondary" className="flex-1" loading={busy === 'reject'} disabled={!!busy} onClick={onReject}>
+        <Button
+          size="md"
+          variant="secondary"
+          className="flex-1"
+          loading={busy === 'reject'}
+          disabled={!!busy}
+          onClick={onReject}
+          data-guess-action=""
+          aria-keyshortcuts={keys ? 'X' : undefined}
+        >
           {busy !== 'reject' && <X className="size-4" aria-hidden />}
           No
         </Button>
@@ -118,6 +206,8 @@ export default function GuessCard({
             disabled={!!busy}
             aria-expanded={picking}
             onClick={() => setPicking((v) => !v)}
+            data-guess-action=""
+            aria-keyshortcuts={keys ? 'Space' : undefined}
           >
             {busy !== 'correct' && <UserRoundPen className="size-4" aria-hidden />}
             Someone else
@@ -125,18 +215,29 @@ export default function GuessCard({
         )}
       </div>
       {onCorrect && picking && (
-        <PersonPicker
-          autoFocus
-          kind="person"
-          excludeIds={[g.guess.person.id]}
-          placeholder={`Not ${name}? Type who it is`}
-          onPick={(choice) => {
-            if (busy) return
-            setPicking(false)
-            onCorrect(choice)
-          }}
-        />
+        <div ref={pickerRef}>
+          <PersonPicker
+            autoFocus
+            kind="person"
+            excludeIds={[g.guess.person.id]}
+            placeholder={`Not ${name}? Type who it is`}
+            onPick={(choice) => {
+              if (busy) return
+              setPicking(false)
+              onCorrect(choice)
+            }}
+          />
+        </div>
       )}
     </article>
   )
+}
+
+
+function typing(t: EventTarget): boolean {
+  return t instanceof HTMLElement && (t.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(t.tagName))
+}
+
+function onAction(t: EventTarget): boolean {
+  return t instanceof Element && !!t.closest('[data-guess-action]')
 }

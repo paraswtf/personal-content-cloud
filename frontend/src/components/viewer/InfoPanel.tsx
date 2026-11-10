@@ -69,7 +69,7 @@ import OriginIcon from '../people/OriginIcon'
 import PersonPicker, { choiceBody, type PersonChoice } from '../people/PersonPicker'
 import TraitCompare from '../people/TraitCompare'
 import { evidenceLine, guessLabel, guessSure, traitReasons } from '../people/evidence'
-import { boxKey, stillBoxes, videoBoxes, type BoxTarget } from './boxes'
+import { boxKey, guessTargets as guessTargetsOf, stillBoxes, videoBoxes, type BoxTarget } from './boxes'
 import GuessChip from './GuessChip'
 import { PersonEditCard, usePersonEdits, type BoxRemoval, type PersonEditMode, type PersonEditTarget } from './PersonEdit'
 import RelatedSuggest from './RelatedSuggest'
@@ -95,6 +95,9 @@ interface Props {
     /** "Someone else": the box's editor at its name field. */
     other?: (t: BoxTarget, anchor: HTMLElement) => void
     pendingKey: string | null
+    /** Review page: the guess Enter, Space and X answer (boxKey), and whether the keys are on. */
+    selectedKey?: string | null
+    keys?: boolean
   }
   onEditBox: (target: BoxTarget, anchor: HTMLElement) => void
   /** Draw mode for a pet the detector missed (section 22): the photo or video stage takes a box from the owner. */
@@ -513,10 +516,7 @@ export default function InfoPanel({
   )
   const relatedPeople = detail.people.filter((p) => p.relation === 'related')
   const unmatched = detail.faces.filter((f) => !f.person && !f.guess).length
-  const guessTargets: BoxTarget[] = [
-    ...detail.faces.filter((f) => !f.person && f.guess).map((box) => ({ kind: 'face' as const, box })),
-    ...detail.bodies.filter((b) => !b.person && b.guess).map((box) => ({ kind: 'body' as const, box })),
-  ]
+  const guessTargets: BoxTarget[] = guessTargetsOf(detail)
 
   const inFrame: PersonRef[] = []
   if (isVideo && onScreen) {
@@ -893,6 +893,9 @@ export default function InfoPanel({
 
           {guessTargets.length > 0 && (
             <div className="mt-3">
+              {guesses.keys && (
+                <p className="mb-1.5 hidden text-xs text-white/55 pointer-fine:block">Keys: Enter yes, Space someone else, X no.</p>
+              )}
               <p className="mb-1.5 text-xs text-white/55">Guesses and why:</p>
               <ul className="flex flex-col gap-3">
                 {guessTargets.map((t) => {
@@ -916,6 +919,8 @@ export default function InfoPanel({
                           onConfirm={() => guesses.confirm(t)}
                           onReject={() => guesses.reject(t)}
                           onOther={guesses.other ? (el) => guesses.other?.(t, el) : undefined}
+                          guessKey={boxKey(t)}
+                          selected={guesses.selectedKey === boxKey(t)}
                           onShow={onShowBox && (!isVideo || !!detail.urls.video) ? () => onShowBox(t) : undefined}
                           showLabel={`Show the ${t.kind === 'face' ? 'face' : 'person'} guessed as ${personName(t.box.guess!.person)} in the ${isVideo ? 'video' : 'photo'}${
                             isVideo && t.box.frame_time_s !== null ? `, at ${formatDuration(t.box.frame_time_s)}` : ''

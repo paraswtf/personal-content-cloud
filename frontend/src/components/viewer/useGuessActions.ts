@@ -22,8 +22,10 @@ export function useGuessActions(uid: string, onToast: (msg: string) => void) {
       return v.action === 'confirm' ? api.people.confirmGuesses(body) : api.people.rejectGuesses(body)
     },
     onSuccess: (_r, v) => {
-      invalidate()
       onToast(v.action === 'confirm' ? `Tagged as ${personName(v.guess.person)}` : `Not ${personName(v.guess.person)}`)
+      // Pending until the item is fetched again: until then the answered guess is still listed, and a quick second
+      // key in the Review viewer would answer it again instead of the next one.
+      return invalidate()
     },
     onError: (e) => onToast(errorMessage(e, 'That did not work. Try again.')),
   })

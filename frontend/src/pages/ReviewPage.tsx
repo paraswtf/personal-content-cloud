@@ -1,7 +1,10 @@
 // Review (/review): the bins that need a decision. Mis-clicks (keep or delete), forwards (keep or
 // delete, section 29), duplicates (pick the best copy, delete the others) and person guesses (confirm
 // or reject), all of them or only those from clothes, or from tattoos, nails and mehndi (section 34).
-import { useCallback, useMemo, useState, type ReactNode } from 'react'
+// Guesses take keys on a computer (section 14): the first card's Yes is focused, Enter confirms, Space opens the
+// "Someone else" name box, X rejects, and focus moves to the next card after each decision; the viewer opened from
+// a card answers the same keys for that card's guess.
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { useSearchParams } from 'react-router'
 import { useMutation, useQuery } from '@tanstack/react-query'
 import clsx from 'clsx'
@@ -15,7 +18,7 @@ import MediaGrid from '../components/MediaGrid'
 import Viewer from '../components/Viewer'
 import { forwardReasons } from '../components/library/forwards'
 import GuessCard from '../components/people/GuessCard'
-import { guessKey, useGuessReview } from '../components/people/useGuessReview'
+import { guessKey, useGuessReview, type DecideOpts } from '../components/people/useGuessReview'
 import { useToast } from '../components/Toast'
 import { Confirm } from '../components/admin/AdminModal'
 import { errorMessage, useSelection } from '../components/admin/adminHooks'
@@ -351,11 +354,75 @@ function GuessesTab() {
   const [confirmAll, setConfirmAll] = useState(false)
   const viewer = useViewerParam(items, list.hasMore, list.loadMore)
 
+  // Keys (a computer only): the first card's Yes takes focus once per filter (not after a Tab while the list loads:
+  // the person is moving focus themselves), and after a decision the card now in the decided one's place does, once
+  // the decided card has left the list (its buttons are disabled meanwhile, so focus sits on the page and a second
+  // Enter cannot answer twice). A viewer closed after its card was decided there hands focus to that card's place.
+  const listRef = useRef<HTMLUListElement>(null)
+  const after = useRef<{ key: string; index: number } | null>(null)
+  const initFor = useRef<Basis | null>(null)
+  const tabbed = useRef(false)
+  const wasOpen = useRef(false)
+  const openedAt = useRef(0)
+  const [openedFor, setOpenedFor] = useState<string | null>(null)
+  useEffect(() => {
+    const onKey = (e: globalThis.KeyboardEvent) => {
+      if (e.key === 'Tab') tabbed.current = true
+    }
+    document.addEventListener('keydown', onKey, true)
+    return () => document.removeEventListener('keydown', onKey, true)
+  }, [])
+  const focusYesAt = (i: number) => {
+    const ys = listRef.current?.querySelectorAll<HTMLButtonElement>('[data-guess-yes]')
+    const y = ys?.[Math.min(i, ys.length - 1)]
+    y?.focus({ preventScroll: true })
+    y?.closest('li')?.scrollIntoView({ block: 'nearest' })
+  }
+  useEffect(() => {
+    const closed = wasOpen.current && !viewer.uid
+    wasOpen.current = !!viewer.uid
+    if (!list.items.length || viewer.uid || !finePointer()) return
+    const decided = after.current
+    if (decided && !list.items.some((g) => guessKey(g) === decided.key)) {
+      after.current = null
+      if (focusFree(listRef.current)) focusYesAt(decided.index)
+      return
+    }
+    if (initFor.current !== basis) {
+      initFor.current = basis
+      if (!tabbed.current && !focusTaken()) focusYesAt(0)
+      return
+    }
+    if (closed && document.activeElement === document.body) focusYesAt(openedAt.current)
+  }, [list.items, basis, viewer.uid])
+  // A failed decision keeps its card: its Yes takes focus back once its buttons are enabled again, which is the render
+  // after the error (focus() on a disabled button does nothing).
+  const refocusAt = useRef<number | null>(null)
+  useEffect(() => {
+    if (review.pending || refocusAt.current === null) return
+    const i = refocusAt.current
+    refocusAt.current = null
+    if (finePointer() && focusFree(listRef.current)) focusYesAt(i)
+  }, [review.pending])
+  const decide = (g: GuessItem, i: number): DecideOpts => {
+    after.current = { key: guessKey(g), index: i }
+    return {
+      onError: () => {
+        after.current = null
+        refocusAt.current = i
+      },
+    }
+  }
+
   return (
     <div>
       <p className="mb-3 text-sm text-ink-soft">
         People guessed from someone tagged within an hour in the same scene and clothes, or from the same tattoo in a photo
         taken at any time. Confirming tags them; rejecting stops that guess.
+      </p>
+      <p className="mb-3 hidden text-sm text-ink-soft pointer-fine:block">
+        Keys: <Kbd>Enter</Kbd> says yes to the selected guess, <Kbd>Space</Kbd> opens the name box for someone else,{' '}
+        <Kbd>X</Kbd> says no, <Kbd>Esc</Kbd> closes the name box.
       </p>
       <div role="group" aria-label="Show guesses made from" className="mb-3 flex flex-wrap gap-1.5">
         {BASES.map((b) => (
@@ -363,7 +430,10 @@ function GuessesTab() {
             key={b.value}
             type="button"
             aria-pressed={basis === b.value}
-            onClick={() => setBasis(b.value)}
+            onClick={() => {
+              tabbed.current = false
+              setBasis(b.value)
+            }}
             className={clsx(
               'h-10 rounded-full border px-4 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent',
               basis === b.value ? 'border-ink bg-ink text-bg' : 'border-line text-ink-soft hover:bg-ink/5',
@@ -395,16 +465,21 @@ function GuessesTab() {
           tattoo, get a guess.
         </EmptyState>
       ) : (
-        <ul className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
-          {list.items.map((g) => (
+        <ul ref={listRef} className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+          {list.items.map((g, i) => (
             <li key={guessKey(g)}>
               <GuessCard
+                keys
                 g={g}
                 busy={review.busyFor(g)}
-                onConfirm={() => review.confirm([g])}
-                onReject={() => review.reject([g])}
-                onCorrect={(choice) => review.correct([g], choice)}
-                onOpenItem={(uid, t) => viewer.open(uid, t)}
+                onConfirm={() => review.confirm([g], decide(g, i))}
+                onReject={() => review.reject([g], decide(g, i))}
+                onCorrect={(choice) => review.correct([g], choice, decide(g, i))}
+                onOpenItem={(uid, t) => {
+                  setOpenedFor(guessKey(g))
+                  openedAt.current = i
+                  viewer.open(uid, t)
+                }}
               />
             </li>
           ))}
@@ -424,10 +499,45 @@ function GuessesTab() {
         onClose={() => setConfirmAll(false)}
       />
       {viewer.uid && (
-        <Viewer uid={viewer.uid} onClose={viewer.close} onPrev={viewer.onPrev} onNext={viewer.onNext} position={viewer.position} />
+        <Viewer
+          uid={viewer.uid}
+          onClose={viewer.close}
+          onPrev={viewer.onPrev}
+          onNext={viewer.onNext}
+          position={viewer.position}
+          guessKeys
+          openedFor={openedFor}
+        />
       )}
     </div>
   )
+}
+
+/** A mouse or trackpad: keys and the focus ring; touch screens keep their taps only. */
+function finePointer(): boolean {
+  return typeof window !== 'undefined' && window.matchMedia('(pointer: fine)').matches
+}
+
+/** Focus is on the page itself or already in the guess list: moving it to a card takes nothing from the person. */
+function focusFree(list: HTMLElement | null): boolean {
+  const a = document.activeElement
+  return !a || a === document.body || !!list?.contains(a)
+}
+
+/** Focus is somewhere the person put it (a field, a dialog, a card): the first-card focus leaves it there. */
+function focusTaken(): boolean {
+  const a = document.activeElement
+  return (
+    a instanceof HTMLElement &&
+    (a.isContentEditable ||
+      ['INPUT', 'TEXTAREA', 'SELECT'].includes(a.tagName) ||
+      !!a.closest('[role="dialog"]') ||
+      !!a.closest('article'))
+  )
+}
+
+function Kbd({ children }: { children: ReactNode }) {
+  return <kbd className="rounded border border-line bg-surface-2 px-1 font-sans text-xs text-ink">{children}</kbd>
 }
 
 export default function ReviewPage() {

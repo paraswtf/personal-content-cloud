@@ -1,7 +1,8 @@
 // "Alice?" with confirm and reject buttons: a person guess waiting for an answer, with the bot of a
 // suggestion made by the system (section 10). In the details the name is a button that shows the box (section 14).
 // "Someone else" (onOther) opens the box's editor at its name field: the guess is learned as wrong and the box goes
-// to the person picked, in one step.
+// to the person picked, in one step. In a viewer opened from the Review page the selected guess (`selected`) shows a
+// ring on its check: Enter confirms it, Space opens "Someone else", X rejects (Viewer.tsx).
 import clsx from 'clsx'
 import { Check, Loader2, UserRoundPen, X } from 'lucide-react'
 import type { GuessOut } from '../../lib/types'
@@ -19,6 +20,8 @@ export default function GuessChip({
   onShow,
   showLabel,
   onOther,
+  guessKey,
+  selected = false,
 }: {
   guess: GuessOut
   busy: boolean
@@ -32,6 +35,10 @@ export default function GuessChip({
   /** Show the guessed box on the stage: the name becomes a button labelled `showLabel`. */
   onShow?: () => void
   showLabel?: string
+  /** The box's key (boxKey): the viewer finds the chip of the selected guess by it. */
+  guessKey?: string
+  /** The guess the viewer's keys answer (Review page): a ring on the check. */
+  selected?: boolean
 }) {
   const name = personName(guess.person)
   const why = evidenceLine(guess)
@@ -47,6 +54,7 @@ export default function GuessChip({
         className,
       )}
       title={`Maybe ${name}, ${guessSure(guess)}${why ? `: ${why}` : ''}`}
+      data-guess-key={guessKey}
     >
       {onShow ? (
         <button
@@ -70,10 +78,29 @@ export default function GuessChip({
         </span>
       ) : (
         <>
-          <button type="button" onClick={onConfirm} className={clsx(btn, 'hover:bg-black/10')} aria-label={`Yes, this is ${name}`}>
+          <button
+            type="button"
+            onClick={onConfirm}
+            className={clsx(
+              btn,
+              'hover:bg-black/10',
+              // a computer only: touch screens have no keys to answer it with
+              selected && 'pointer-fine:ring-2 pointer-fine:ring-black pointer-fine:ring-offset-1 pointer-fine:ring-offset-amber-300',
+            )}
+            aria-label={`Yes, this is ${name}`}
+            aria-keyshortcuts={selected ? 'Enter' : undefined}
+            data-guess-yes=""
+            data-selected={selected ? '' : undefined}
+          >
             <Check className="size-4" aria-hidden />
           </button>
-          <button type="button" onClick={onReject} className={clsx(btn, 'hover:bg-black/10')} aria-label={`No, this is not ${name}`}>
+          <button
+            type="button"
+            onClick={onReject}
+            className={clsx(btn, 'hover:bg-black/10')}
+            aria-label={`No, this is not ${name}`}
+            aria-keyshortcuts={selected ? 'X' : undefined}
+          >
             <X className="size-4" aria-hidden />
           </button>
           {onOther && (
@@ -84,6 +111,7 @@ export default function GuessChip({
               aria-label={`Someone else, not ${name}`}
               title="Someone else"
               data-editor-opener=""
+              aria-keyshortcuts={selected ? 'Space' : undefined}
             >
               <UserRoundPen className="size-4" aria-hidden />
             </button>

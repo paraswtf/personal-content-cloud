@@ -92,7 +92,9 @@ export default function PersonPicker({
 
   useEffect(() => setActive(0), [q, options.length])
   useEffect(() => {
-    if (autoFocus) inputRef.current?.focus({ preventScroll: true })
+    if (!autoFocus) return
+    inputRef.current?.focus({ preventScroll: true })
+    inputRef.current?.select() // the name box opens highlighted, ready to type over
   }, [autoFocus])
   useEffect(() => {
     listRef.current?.querySelector<HTMLElement>(`[data-index="${active}"]`)?.scrollIntoView({ block: 'nearest' })

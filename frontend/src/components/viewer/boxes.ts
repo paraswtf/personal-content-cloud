@@ -88,3 +88,11 @@ export function groupVideoBoxes(targets: BoxTarget[]): VideoGroup[] {
     return { key, targets: sorted, first: sorted[0] }
   })
 }
+
+/** The open guesses of an item, faces first, then person boxes: the order of "Guesses and why" in the details. */
+export function guessTargets(detail: ItemDetail): PersonBoxTarget[] {
+  return [
+    ...detail.faces.filter((f) => !f.person && f.guess).map((box) => ({ kind: 'face' as const, box })),
+    ...detail.bodies.filter((b) => !b.person && b.guess).map((box) => ({ kind: 'body' as const, box })),
+  ]
+}

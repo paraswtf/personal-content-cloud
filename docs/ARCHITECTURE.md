@@ -1386,6 +1386,24 @@ undone last, never while typing or while a dialog other than the viewer is open.
 menu, and in the More sheet on phones, opens a dialog listing every change with its time, Undo or Redo, and
 "Clear history" (this browser only).
 
+Guess keys (2026-11-10, `pages/ReviewPage.tsx`, `people/GuessCard.tsx` with `keys`, `Viewer.tsx` with `guessKeys`):
+on a computer (a fine pointer), Review > Guesses focuses the first card's Yes, with a ring, once per filter (not when
+the person pressed Tab while the list loaded). Enter on the focused Yes confirms (the button's own click; a held Enter
+answers once); Space on any of the card's three buttons opens the "Someone else" name box with its field focused and
+selected, scrolled into view (its keydown and keyup are prevented, so it never confirms, Firefox included, and holding
+it types nothing); X rejects; Esc in an empty name box closes it and puts focus back on Yes (with text, Esc clears it
+first). After a decision, once the card has left the list, focus moves to the Yes of the card now in its place, or
+back to the same card when the request failed (in the render that enables its buttons again). A line under the intro
+names the keys. The viewer opened from a card selects that card's guess (else the first open guess of the item;
+focusing a chip's button selects that one), rings its check in the photo and in "Guesses and why", opens the details
+once per item, and takes Enter (only when the viewer itself has focus: a focused button keeps its own click), Space
+(the box editor at its name field; closing that editor returns focus to the viewer, so the next Enter confirms) and X.
+Closing it after its card was answered there focuses the card now in that card's place. None of these keys fire while
+typing, with Ctrl, Cmd or Alt, as a held repeat, while a dialog, the tag picker or a Live Photo clip is open, while a
+decision is being saved, or in the viewer until the item has been fetched again after a change (a viewer decision
+stays pending until then), so a quick second key never answers the same guess twice. The person page and the other
+viewers do not take them, and touch screens get no automatic focus and no ring.
+
 Body traits (section 34; `people/evidence.ts`, `TraitCompare.tsx`, `TraitsTab.tsx`, `useTraitActions.ts`):
 - Guess labels follow `evidence.basis` (`guessBasis`, `guessLabel`): "Face" and "By clothes" as before, "By" and the
   kinds that counted for a trait-only guess ("By tattoo", "By tattoo and nails", "By mehndi and nails"), and "By

@@ -19,13 +19,14 @@ export function darkButton(kind: 'default' | 'danger' | 'primary' = 'default', e
 export const iconButton =
   'inline-flex size-10 shrink-0 items-center justify-center rounded-full text-white/85 transition-colors hover:bg-white/10 hover:text-white aria-pressed:bg-white/15 aria-pressed:text-white disabled:opacity-40'
 
-/** Invalidate everything a change made in the viewer can affect (the item, lists, people, documents). */
+/** Invalidate everything a change made in the viewer can affect (the item, lists, people, documents). The promise
+ *  settles once what is on screen has been fetched again. */
 export function useInvalidateItem(uid: string) {
   const refresh = useRefreshLibrary()
   const qc = useQueryClient()
   return useCallback(() => {
     void qc.invalidateQueries({ queryKey: ['item', uid] })
-    void refresh()
+    return refresh()
   }, [qc, uid, refresh])
 }
 

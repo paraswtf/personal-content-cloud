@@ -38,6 +38,8 @@ interface Props {
   spotlightKeys?: ReadonlySet<string>
   onEditBox: (target: BoxTarget, anchor: HTMLElement) => void
   guessPendingKey: string | null
+  /** The guess the viewer's keys answer (Review page), by boxKey. */
+  guessSelectedKey?: string | null
   onConfirmGuess: (target: BoxTarget) => void
   onRejectGuess: (target: BoxTarget) => void
   /** "Someone else" on a guess: the box's editor at its name field. */
@@ -122,6 +124,7 @@ export default function PhotoStage({
   spotlightKeys,
   onEditBox,
   guessPendingKey,
+  guessSelectedKey = null,
   onConfirmGuess,
   onRejectGuess,
   onOtherGuess,
@@ -363,6 +366,8 @@ export default function PhotoStage({
                     onConfirm={() => onConfirmGuess(t)}
                     onReject={() => onRejectGuess(t)}
                     onOther={onOtherGuess ? (el) => onOtherGuess(t, el) : undefined}
+                    guessKey={key}
+                    selected={guessSelectedKey === key}
                   />
                 ) : (
                   <span

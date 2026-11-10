@@ -2,7 +2,8 @@
 // guesses, prev/next (keys, buttons, swipe), the info panel, downloads of the original, and a
 // document mode with the page viewer. `vault` shows vault items (every request carries vault=1).
 // Live Photos and motion photos get a LIVE button over the stage that plays the clip in place of the
-// still (section 20); leaving the item, Escape or a second tap stops it.
+// still (section 20); leaving the item, Escape or a second tap stops it. Opened from the Review page (`guessKeys`),
+// one guess is selected (the card's, else the first) and Enter confirms it, Space opens "Someone else", X rejects.
 import { useCallback, useEffect, useMemo, useRef, useState, type TouchEvent } from 'react'
 import { createPortal } from 'react-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
@@ -31,7 +32,7 @@ import LiveButton from './viewer/LiveButton'
 import PhotoStage from './viewer/PhotoStage'
 import VideoPreparing from './viewer/VideoPreparing'
 import VideoStage, { currentFrameTime, posterTime } from './viewer/VideoStage'
-import { animalLabel, boxKey, findBox, groupVideoBoxes, stillBoxes, videoBoxes, type AnimalBox, type BoxKind, type BoxTarget, type DrawKind, type PersonBoxTarget } from './viewer/boxes'
+import { animalLabel, boxKey, findBox, groupVideoBoxes, guessTargets, stillBoxes, videoBoxes, type AnimalBox, type BoxKind, type BoxTarget, type DrawKind, type PersonBoxTarget } from './viewer/boxes'
 import { useGuessActions } from './viewer/useGuessActions'
 import { useOnScreenFaces } from './viewer/useOnScreenFaces'
 import { seekToFrame } from './viewer/videoSeek'
@@ -50,6 +51,10 @@ export interface ViewerProps {
   vault?: boolean
   /** 'document' opens the info panel with the document card first (from the documents page). */
   mode?: 'document' | null
+  /** The Review page: Enter, Space and X answer the selected guess (section 14). */
+  guessKeys?: boolean
+  /** The boxKey of the guess the viewer was opened for (a Review card): selected first. */
+  openedFor?: string | null
 }
 
 // Remembered for the rest of the visit so prev/next and reopening keep the choice.
@@ -193,7 +198,18 @@ export default function Viewer(props: ViewerProps) {
   )
 }
 
-function ViewerInner({ uid, onClose, onPrev, onNext, position, startAt = null, vault = false, mode = null }: ViewerProps) {
+function ViewerInner({
+  uid,
+  onClose,
+  onPrev,
+  onNext,
+  position,
+  startAt = null,
+  vault = false,
+  mode = null,
+  guessKeys = false,
+  openedFor = null,
+}: ViewerProps) {
   const qc = useQueryClient()
   const config = useConfig()
   const auth = useAuth()
@@ -264,6 +280,9 @@ function ViewerInner({ uid, onClose, onPrev, onNext, position, startAt = null, v
     setDrawing(null)
     setAdjusting(null)
     setPage(0)
+    setGuessPick({ key: openedFor, index: 0 })
+    // openedFor names a box of the item opened from the card; another item starts at its first guess
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [uid])
 
   const detailVersion = detail?.version
@@ -299,6 +318,17 @@ function ViewerInner({ uid, onClose, onPrev, onNext, position, startAt = null, v
     [],
   )
   const guessActions = useGuessActions(uid, showToast)
+  // Review keys: the selected guess, by key (the card's at first), else by place, so a decided guess hands the
+  // selection to the one now in its place.
+  const guessList = useMemo(() => (guessKeys && detail ? guessTargets(detail) : []), [guessKeys, detail])
+  const [guessPick, setGuessPick] = useState<{ key: string | null; index: number }>({ key: openedFor, index: 0 })
+  const selectedGuess =
+    guessList.find((t) => boxKey(t) === guessPick.key) ?? guessList[Math.min(guessPick.index, guessList.length - 1)] ?? null
+  useEffect(() => {
+    const i = guessList.findIndex((t) => boxKey(t) === guessPick.key)
+    if (i >= 0 && i !== guessPick.index) setGuessPick({ key: guessPick.key, index: i })
+  }, [guessList, guessPick])
+  const selectedKey = selectedGuess ? boxKey(selectedGuess) : null
   const guesses = useMemo(
     () => ({
       confirm: (t: BoxTarget) => t.kind !== 'animal' && t.box.guess && guessActions.confirm(t.kind, t.box.id, t.box.guess),
@@ -306,9 +336,18 @@ function ViewerInner({ uid, onClose, onPrev, onNext, position, startAt = null, v
       // "Someone else": the box's editor at its name field; the pick there corrects the guess in one step
       other: (t: BoxTarget, anchor: HTMLElement) => editBox(t, anchor, false, true),
       pendingKey: guessActions.pendingKey,
+      selectedKey,
+      keys: guessKeys,
     }),
-    [guessActions, editBox],
+    [guessActions, editBox, selectedKey, guessKeys],
   )
+  // With a guess to answer, the details open once per item on a computer, so its chip is in view (not remembered).
+  const infoFor = useRef<string | null>(null)
+  useEffect(() => {
+    if (!guessKeys || !guessList.length || infoFor.current === uid) return
+    infoFor.current = uid
+    if (window.matchMedia('(pointer: fine)').matches) setShowInfo(true)
+  }, [guessKeys, guessList.length, uid])
 
   const fps = detail?.fps ?? null
   const seekTo = useCallback(
@@ -519,10 +558,12 @@ function ViewerInner({ uid, onClose, onPrev, onNext, position, startAt = null, v
 
   const closeEditor = useCallback(() => {
     setEditing((cur) => {
-      if (cur?.anchor.isConnected) setTimeout(() => cur.anchor.focus({ preventScroll: true }), 0)
+      // Review keys: back to the viewer itself, not to "Someone else", so the next Enter confirms the guess
+      const back = cur?.pick && guessKeys ? rootRef.current : cur?.anchor
+      if (back?.isConnected) setTimeout(() => back.focus({ preventScroll: true }), 0)
       return null
     })
-  }, [])
+  }, [guessKeys])
 
   useEffect(() => {
     const prevFocus = document.activeElement as HTMLElement | null
@@ -546,7 +587,19 @@ function ViewerInner({ uid, onClose, onPrev, onNext, position, startAt = null, v
   const isDocKind = detail?.kind === 'pdf' || detail?.kind === 'document'
   const pageCount = detail?.urls.pages.length ?? 0
 
-  // Keyboard: Esc, arrows, i (info), f (faces), s (favourite), [ and ] for pages, and a focus trap.
+  // The visible "Someone else" button of a guess (the details or the photo): the editor is anchored to it.
+  const opener = useCallback(
+    (k: string) =>
+      Array.from(rootRef.current?.querySelectorAll<HTMLElement>(`[data-guess-key="${k}"] [data-editor-opener]`) ?? []).find(
+        (el) => el.getClientRects().length > 0,
+      ) ?? null,
+    [],
+  )
+  const spaceHeld = useRef(false)
+  const itemFetching = detailQ.isFetching
+
+  // Keyboard: Esc, arrows, i (info), f (faces), s (favourite), [ and ] for pages, and a focus trap. From the Review
+  // page also Enter (yes), Space (someone else) and X (no) for the selected guess.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (confirmDelete || sharing) {
@@ -591,6 +644,8 @@ function ViewerInner({ uid, onClose, onPrev, onNext, position, startAt = null, v
         if (e.key === 'Escape') {
           e.preventDefault()
           closeEditor()
+        } else if (e.key === ' ' && e.repeat && spaceHeld.current) {
+          e.preventDefault() // the held Space that opened the editor does not type into its name field
         }
         return
       }
@@ -627,6 +682,40 @@ function ViewerInner({ uid, onClose, onPrev, onNext, position, startAt = null, v
         return
       }
       if (isTyping(e.target) || e.altKey || e.ctrlKey || e.metaKey) return
+      if (guessKeys && selectedGuess && !tagging && !livePlaying) {
+        const tgt = e.target
+        const onRoot = tgt === rootRef.current || tgt === document.body
+        const inChip = tgt instanceof Element && !!tgt.closest('[data-guess-key]')
+        // Enter on a focused button keeps its own click (a chip's check confirms that chip)
+        const enter = e.key === 'Enter' && onRoot
+        const space = e.key === ' ' && (onRoot || inChip)
+        const x = (e.key === 'x' || e.key === 'X') && !(tgt instanceof HTMLVideoElement)
+        if (enter || space || x) {
+          e.preventDefault()
+          if (space) spaceHeld.current = true
+          // One answer per press, and none until the photo shows the last one: until it is fetched again the
+          // answered guess (or the box just named in the editor) is still the selected one.
+          if (e.repeat || guesses.pendingKey !== null || itemFetching) return
+          if (enter) guesses.confirm(selectedGuess)
+          else if (x) guesses.reject(selectedGuess)
+          else {
+            const k = boxKey(selectedGuess)
+            const el = opener(k)
+            if (el) guesses.other(selectedGuess, el)
+            else {
+              // the details are closed: open them (not remembered) and anchor the editor to the chip there
+              setShowInfo(true)
+              requestAnimationFrame(() =>
+                requestAnimationFrame(() => {
+                  const again = opener(k)
+                  if (again) guesses.other(selectedGuess, again)
+                }),
+              )
+            }
+          }
+          return
+        }
+      }
       const onVideo = e.target instanceof HTMLVideoElement
       if (e.key === 'ArrowLeft' && onPrev && !onVideo) {
         e.preventDefault()
@@ -648,9 +737,20 @@ function ViewerInner({ uid, onClose, onPrev, onNext, position, startAt = null, v
         setPage((p) => Math.min(Math.max(pageCount - 1, 0), p + 1))
       }
     }
+    // Firefox turns the keyup of Space on a focused button into a click: the Space that opened the editor must not
+    const onKeyUp = (e: KeyboardEvent) => {
+      if (e.key === ' ' && spaceHeld.current) {
+        spaceHeld.current = false
+        e.preventDefault()
+      }
+    }
     document.addEventListener('keydown', onKey)
-    return () => document.removeEventListener('keydown', onKey)
-  }, [confirmDelete, sharing, editing, drawing, adjusting, tagging, livePlaying, onClose, onPrev, onNext, closeEditor, toggleInfo, toggleFaces, detail, favorite, isDocKind, pageCount])
+    document.addEventListener('keyup', onKeyUp)
+    return () => {
+      document.removeEventListener('keydown', onKey)
+      document.removeEventListener('keyup', onKeyUp)
+    }
+  }, [confirmDelete, sharing, editing, drawing, adjusting, tagging, livePlaying, onClose, onPrev, onNext, closeEditor, toggleInfo, toggleFaces, detail, favorite, isDocKind, pageCount, guessKeys, selectedGuess, guesses, opener, itemFetching])
 
   const onTouchStart = (e: TouchEvent) => {
     const t = e.touches[0]
@@ -744,6 +844,7 @@ function ViewerInner({ uid, onClose, onPrev, onNext, position, startAt = null, v
           spotlightKeys={spotlightKeys}
           onEditBox={editBox}
           guessPendingKey={guesses.pendingKey}
+          guessSelectedKey={guesses.selectedKey}
           onConfirmGuess={guesses.confirm}
           onRejectGuess={guesses.reject}
           onOtherGuess={guesses.other}
@@ -822,6 +923,12 @@ function ViewerInner({ uid, onClose, onPrev, onNext, position, startAt = null, v
       data-undo-keys=""
       aria-label={isVideo ? 'Video viewer' : isDocKind ? 'Document viewer' : 'Photo viewer'}
       tabIndex={-1}
+      onFocus={(e) => {
+        // Review keys: focusing a guess's button (Tab or a click) selects that guess
+        if (!guessKeys) return
+        const k = (e.target as Element).closest?.('[data-guess-key]')?.getAttribute('data-guess-key')
+        if (k) setGuessPick({ key: k, index: Math.max(0, guessList.findIndex((t) => boxKey(t) === k)) })
+      }}
       className="fixed inset-0 z-40 flex flex-col bg-[#111] text-white outline-none"
     >
       <div className="flex h-14 shrink-0 items-center gap-1 px-1.5 sm:px-3">
