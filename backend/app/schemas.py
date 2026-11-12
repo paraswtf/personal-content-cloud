@@ -753,6 +753,97 @@ class ChildhoodOut(BaseModel):
     candidates: list[ChildhoodCandidate]
 
 
+class RecognitionCut(BaseModel):
+    """One cut of the check (section 10): of the faces the model was not trained on, how many of the person's it
+    found at probability p or more, and how many faces of other people it mistook for them."""
+
+    p: float
+    found: int
+    mistaken: int
+    unclear_found: int = 0
+    unclear_mistaken: int = 0
+
+
+class RecognitionCheck(BaseModel):
+    positives: int
+    negatives: int
+    unclear_positives: int = 0
+    unclear_negatives: int = 0
+    cuts: list[RecognitionCut] = []
+
+
+class RecognitionProgress(BaseModel):
+    done: int
+    total: int
+    step: str  # read | fit | check | save (training), scan | write (looking again)
+
+
+class RecognitionScan(BaseModel):
+    """The last look: faces looked at, the model's guesses standing after it (sure: at the sure cut or more),
+    faces taken out of unnamed groups for a guess, and faces on other named people that look like the person."""
+
+    at: str
+    looked: int
+    guesses: int
+    sure: int
+    detached: int
+    elsewhere: int
+
+
+class RecognitionOut(BaseModel):
+    """Recognition trained on one person (section 10, app.learning.person_model)."""
+
+    available: bool
+    reason: str | None = None  # why it cannot be trained or used (learning off, too few faces)
+    trained: bool = False
+    trained_at: str | None = None
+    counts: dict[str, float] = {}
+    check: RecognitionCheck | None = None
+    guess_p: float | None = None
+    sure_p: float | None = None
+    conflicts: int = 0  # faces on the person that look like faces the owner took off them, still standing
+    elsewhere: int = 0  # faces on other named people that look like the person, still standing
+    guesses: int = 0  # the model's open guesses now
+    withdrawn: bool = False  # its guesses were taken back: it makes none until the next look
+    scan: RecognitionScan | None = None
+    running: Literal["train", "scan"] | None = None
+    progress: RecognitionProgress | None = None
+    error: str | None = None
+    answers_since: int = 0  # the owner's answers about this person since the training
+    busy: bool = False  # a run for another person is going
+
+
+class RecognitionStartIn(BaseModel):
+    scan: bool = True
+
+
+class RecognitionStartOut(BaseModel):
+    started: bool
+
+
+class RecognitionConflict(BaseModel):
+    face: FaceListItem
+    like: FaceListItem | None = None  # the face it looks like; None when that one cannot be shown
+    like_person: PersonRef | None = None  # who that face is now
+    sim: float
+
+
+class RecognitionConflictPage(BaseModel):
+    items: list[RecognitionConflict]
+    next_cursor: str | None = None
+    total: int
+
+
+class RecognitionElsewhere(BaseModel):
+    face: FaceListItem
+    person: PersonRef
+    p: float
+
+
+class RecognitionElsewhereList(BaseModel):
+    items: list[RecognitionElsewhere]
+
+
 class SuggestionList(BaseModel):
     items: list[Suggestion]
 

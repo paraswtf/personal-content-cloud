@@ -9,7 +9,7 @@
 // and Escape in an empty name box closes it and puts focus back on Yes. Nothing fires while typing in the name box.
 import { useEffect, useId, useRef, useState, type KeyboardEvent } from 'react'
 import { Link } from 'react-router'
-import { Check, Hand, PenTool, Shirt, UserRoundPen, X } from 'lucide-react'
+import { Check, Hand, PenTool, ScanFace, Shirt, UserRoundPen, X } from 'lucide-react'
 import type { GuessItem } from '../../lib/types'
 import { frameUrl } from '../../lib/api'
 import { formatDuration, personName } from '../../lib/format'
@@ -132,6 +132,7 @@ export default function GuessCard({
         </button>
         <div className="min-w-0 flex-1">
           <p className="flex items-center gap-1 text-xs text-ink-soft">
+            {icons.includes('face') && <ScanFace className="size-3.5 shrink-0" aria-hidden />}
             {icons.includes('clothes') && <Shirt className="size-3.5 shrink-0" aria-hidden />}
             {icons.includes('tattoo') && <PenTool className="size-3.5 shrink-0" aria-hidden />}
             {icons.includes('hand') && <Hand className="size-3.5 shrink-0" aria-hidden />}

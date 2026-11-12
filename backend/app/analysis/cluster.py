@@ -285,6 +285,8 @@ def _score(idx: FaceIndex, faces: list[sqlite3.Row], exclude: frozenset[int],
         scored.append(scores)
     if conn is not None:
         out = _drop_rejected_lookalikes(conn, embs, out)
+        if threshold is None:
+            out = _drop_gated(idx, ids, embs, child, out)
     for i, young in enumerate(child):
         if young and out[i]:
             # One option only, with the lead over every other person scored (below the cut too): a best that is
@@ -330,6 +332,35 @@ def _drop_rejected_lookalikes(conn: sqlite3.Connection, embs: np.ndarray,
             kept.append((pid, score))
         out.append(kept)
     return out
+
+
+def _drop_gated(idx: FaceIndex, ids: list[int], embs: np.ndarray, child: np.ndarray,
+                options: list[list[tuple[int, float]]]) -> list[list[tuple[int, float]]]:
+    """Recognition trained on one person (section 10, app.learning.person_model): an option for a person who has
+    such a model is dropped when the model says the face is not them (its score there as the top-3). It only ever
+    removes options, so nothing more is tagged than before; it keeps the look-alikes the owner took off the person
+    from being put back on them. Faces in the child band are left to the child rules (the model knows adults)."""
+    try:
+        from app.learning import person_model
+
+        trained = set(person_model.trained_ids())
+        if not trained or not any(pid in trained for opts in options for pid, _ in opts):
+            return options
+        weights = idx.weights_of(ids)
+        out: list[list[tuple[int, float]]] = []
+        for i, opts in enumerate(options):
+            kept = []
+            for pid, score in opts:
+                if pid in trained and not child[i]:
+                    model = person_model.load(pid)
+                    if model is not None and not model.gate(embs[i], float(weights[i]), float(score)):
+                        continue
+                kept.append((pid, score))
+            out.append(kept)
+        return out
+    except Exception:  # noqa: BLE001 - a trained model never blocks clustering
+        log.exception("cluster: the trained recognition gate failed; matching without it")
+        return options
 
 
 def followers(conn: sqlite3.Connection, seed_ids: list[int], person_id: int) -> list[int]:
@@ -666,8 +697,12 @@ def recluster_unassigned(conn: sqlite3.Connection) -> int:
     Works in steps of about _RECLUSTER_CHUNK faces (whole items). Each step scores its faces with no
     write transaction open (holding only the index lock), then applies the result in one short
     transaction that skips faces no longer unassigned and people that no longer exist."""
+    # A face holding the guess of a model trained on one person (basis 'face', section 10) waits for the owner's
+    # answer: the scan may have taken it out of the very group this pass would put it back into.
     rows = conn.execute(
-        "SELECT id, item_id, quality FROM faces WHERE person_id IS NULL AND assigned_by IN ('auto', 'guess')"
+        "SELECT id, item_id, quality FROM faces WHERE person_id IS NULL AND assigned_by IN ('auto', 'guess') "
+        "AND NOT (assigned_by = 'guess' AND (CASE WHEN json_valid(guess_evidence) "
+        "THEN json_extract(guess_evidence, '$.basis') END) IS 'face')"
     ).fetchall()
     if not rows:
         return 0

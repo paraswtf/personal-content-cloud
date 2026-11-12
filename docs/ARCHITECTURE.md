@@ -974,6 +974,82 @@ sampled faces in the adult groups and found every baby and child that could be s
   cross-age and below-floor merges, old merges under the floor, the learner, childhood follow, suggestions and
   candidates, the off switch).
 
+### Recognition trained on one person (2026-11-13)
+
+The owner cleans one person's faces and says they are right. Recognition is then trained on that person alone and
+looks again at every face that is not theirs (`app/learning/person_model.py`, `app/analysis/person_scan.py`). What it
+finds becomes guesses: nothing is tagged until the owner confirms.
+
+Why the usual score is not enough, measured on the owner's library for the person with the most faces (5,096, 72
+tagged by hand, 706 faces taken off them): their learned cut had risen to 0.7555, because the removed faces raise it
+(section 18), so about a quarter of their own clear faces would not be tagged today. About 148 of the removed faces
+still score 0.5 to 0.88 against the person by the top-3 mean; 123 of them sit on two other named people whom the face
+model can hardly tell from the person (2,597 of the person's faces have a removed face at cosine 0.6 or more). No cut
+on the top-3 score separates them (it finds 19 percent of the person's faces at 1 mistake in 1,000 once the removed
+faces count as negatives). A logistic regression on the 512 values, trained with those faces as negatives, does.
+
+- The model (`person_model.train(conn, person_id)`, pure numpy, about 35 s and 410 MB on that person): positives are
+  the person's faces of weight > 0 outside the child band, each by its face weight (times 1.5 when the owner assigned
+  it). Trusted negatives: faces the owner took off the person (`guess_rejections`), faces the owner assigned to someone
+  else, and the other faces of photos (not videos) the person has a face in, except ambiguous ones (top-3 against the
+  person `>= 0.5`: a mirror, a print or a collage shows one person twice) unless such a face sits on another person it
+  matches better by 0.05. Never the faces the app put on other people elsewhere, nor loose faces: those are what the
+  scan looks at. Conflicts: a positive the owner did not lock whose nearest explicit negative is at cosine `>= 0.55`
+  and nearer than its own top-3 to the person's other faces; they are left out of the training and of the reference
+  and listed for the owner (22 on that person, each a near copy, cosine 0.67 to 0.99, of a face that now sits on
+  another person).
+- Fit and check: five folds by the local calendar day of the photo (by photo when the days do not spread the
+  examples). Out-of-fold regression logit (weighted logistic loss, L2 0.001, each side half the weight, 400 momentum
+  steps from zero, so deterministic) and out-of-fold top-3 (reference: the positives of the other folds). A second
+  logistic regression stacks `[top3, logit / 10, w, top3 * (1 - w), (logit / 10) * (1 - w)]` (w the face weight) into
+  one probability; the check fits it on four folds of out-of-fold rows and scores the fifth. `guess_p` is 0.5;
+  `sure_p` is the lowest cut on a 0.01 grid whose checked precision is 0.995 or more. On that person: at 0.5 it found
+  4,892 of 5,031 held-out faces with 50 of 5,474 negatives mistaken, at 0.9 4,738 with 10, and `sure_p` came out at
+  0.67; of 331 unclear faces (weight under 0.5) it found 259 at 0.5.
+- Storage: `learned/person_<id>.json` (`store.save`): `{rev, person_id, trained_at, faces_version, w[512], b,
+  stack{w[5], b}, guess_p, sure_p, ref_ids, counts, check{positives, negatives, unclear_*, cuts[{p, found, mistaken,
+  unclear_found, unclear_mistaken}]}, conflicts[{face_id, like_face_id, like_person_id, sim}], scan, withdrawn_at}`.
+  Not in `train.LEARNERS`: only the owner trains it. A learning reset removes it; with learning off `load()` answers
+  None and nothing below runs. Deleting the person, or merging them into someone else, forgets it.
+- Scoring a face (`Model.probability`): its top-3 against the reference (`ref_ids` still on the person, weights as the
+  face index), the regression and the stacker. Two vetoes in `person_scan`: a face the owner took off the person is
+  nearer than the person's own faces (cosine `>= max(top3, 0.6)`), and another named person scores the face at least
+  as high as its top-3 here (unless that person's own model refuses it).
+- The scan (`person_scan.scan`): candidates are faces with `assigned_by` auto or guess, weight > 0, outside the child
+  band, in live items outside the vault, not turned down for the person, in items the person is not in yet (a face,
+  a person box or a tag; videos too, since a confirmation is refused there). A loose face or one in an unnamed group
+  with probability `>= guess_p` is picked; `guess_item` then writes the guess for every picked photo, so one code
+  path decides (one person per photo, clothes agreeing). A face in an unnamed group is taken out of the group first
+  (`person_id` NULL, the person box around it follows, an emptied group is pruned), but only when `guess_item` would
+  keep the guess (it is tried with the face added to the photo's open boxes, nothing written); its evidence remembers
+  the group (`was_person_id`). Faces the app put on other named people are never touched: those at `sure_p` or more
+  are listed (`scan.elsewhere`). A guess of an earlier scan that the model no longer makes is cleared. On that person:
+  23,110 faces looked at in about 10 s, 18 guesses (7 out of unnamed groups, 16 of them under the old 0.7555 cut), 2
+  faces on other people listed; a second scan writes nothing.
+- The guess: `assigned_by 'guess'`, `guess_score` the probability, `guess_evidence {"basis": "face", "score", "face"
+  (the top-3), "p", "model": {"rev", "trained_at"}, "was_person_id"?, "also"?}`. `guess.guess_item` calls
+  `person_scan.merge_item` after the clothes and trait paths: the same person by both keeps the higher score and notes
+  the other (`also` on a model guess, `p` on a clothes guess); a different person: the higher score wins, except that
+  a candidate for an unnamed person never displaces the model's; then one person per photo again. So the guess is
+  recomputed on every run, and a new photo gets one when it is analysed. Without a model the result is the same
+  object, untouched. A guess whose model has no say any more (paused, forgotten, learning off) stays until the owner
+  answers it. `apply_window_change` keeps basis `face`; `record_outcome` records `{basis, p, face, score}` and the
+  clothes weights leave these out (`people.RULES_REV` 4).
+- Answers: confirming is the usual confirm (the face becomes the owner's, an example for the next training).
+  Turning down records the rejection and puts a face that was taken out of a group back into it (`person_scan.regroup`:
+  the group when it still exists unnamed, else a clear face starts an unnamed person of its own; never a matching
+  step, never a named person). `withdraw` clears the model's open guesses the same way, pauses the model
+  (`withdrawn_at`) until the next scan, and has `guess_item` run again on those photos so guesses of other evidence
+  come back.
+- The automatic matching: `cluster._score` (default path) drops an option for a person with a model when the model
+  gives the face less than 0.2 (`_drop_gated`, the option's score as the top-3). It only removes options, so nothing
+  more is tagged than before; it keeps the look-alikes from being put back on the person. `recluster_unassigned`
+  leaves faces that hold a `face` guess. The person's learned cut is unchanged, so a new face of theirs under it
+  becomes a guess, not a tag.
+- A run (`person_scan.start`): training then the scan on one background thread (`worker.run_in_background`, nice 19,
+  own connection, nothing journaled), progress in module state; inline with `WORKERS_ENABLED` off.
+- Tests: `tests/test_person_model.py`.
+
 ## 11. Documents (`app/documents`)
 
 Text extraction order: text layer (pdf) -> OCR (rapidocr; English, Hindi and Marathi: each detected line is
@@ -1081,7 +1157,7 @@ Library (`/api`): `GET items` (query: `category`, `kind`, `person` repeated, `fr
 `DELETE items/{uid}` (trash); `POST items/{uid}/restore`; `POST items/bulk {uids, action: delete|restore|keep|category|nsfw|favorite|unfavorite|forward|unforward, value?}`;
 `POST items/{uid}/reprocess {stages?: [analyze, text, preview]}`; `GET items/{uid}/pages`; `GET items/{uid}/text`;
 `GET trash` -> `ItemPage`; `POST trash/empty`; `DELETE trash/{uid}` (purge one);
-`GET review/misclicks` -> `ItemPage` (with `misclick_reasons`); `GET review/forwards` -> `ItemPage` (the forwards set apart, section 29); `GET review/guesses?person=&basis=all|clothes|trait` -> `GuessPage` (served by the people router; `basis=clothes` keeps guesses with no `basis`, `basis=trait` keeps `trait` and `clothes+trait`, section 34);
+`GET review/misclicks` -> `ItemPage` (with `misclick_reasons`); `GET review/forwards` -> `ItemPage` (the forwards set apart, section 29); `GET review/guesses?person=&basis=all|clothes|trait|face` -> `GuessPage` (served by the people router; `basis=clothes` keeps guesses with no `basis`, `basis=trait` keeps `trait` and `clothes+trait`, section 34, `basis=face` the guesses of recognition trained on one person, section 10);
 `GET duplicates` -> `DupGroupPage{groups:[{best: ItemCard, copies: [ItemCard]}]}`; `POST duplicates/{uid}/best`;
 `GET stats` -> `Stats{items, by_kind, by_category, people, documents, misclicks, forwards, guesses, trash, queue{queued, running, failed, by_queue}, disk{free_bytes, total_bytes, originals_bytes}, analysis{pending, done, error}, text{pending, done}}`.
 Listing rules: `total` is counted on the first page only (cursor pages carry `total: 0`) for `items`, `trash`,
@@ -1136,6 +1212,17 @@ say yes then change it, which taught the guess learner a wrong yes, or no then t
 button that opens the box editor at its name field (an editor already open for that box stays open and moves to
 the field); in the box editor a name picked for boxes holding an open guess (the box, or any track of a whole-video
 group) goes through this route instead of a plain assignment);
+Recognition trained on one person (section 10; people only, 404 for a pet): `GET people/{id}/recognition` ->
+`RecognitionOut {available, reason, trained, trained_at, counts, check, guess_p, sure_p, conflicts, elsewhere, guesses,
+withdrawn, scan{at, looked, guesses, sure, detached, elsewhere}, running: train|scan|null, progress{done, total, step},
+error, answers_since, busy}`; `POST people/{id}/recognition/train {scan = true}` -> 202 `{started}` (409 with the
+reason when learning is off or the person has under 20 faces, 409 `busy` while another person's run is going; the run
+is in the background and writes no undo action); `POST people/{id}/recognition/scan` -> 202 (409 `not_trained`);
+`GET people/{id}/recognition/conflicts?limit&cursor` -> `{items: [{face: FaceListItem, like: FaceListItem | null,
+like_person: PersonRef | null, sim}], next_cursor, total}` (those still standing, strongest first);
+`GET people/{id}/recognition/elsewhere` -> `{items: [{face, person, p}]}`; `POST people/{id}/recognition/withdraw` ->
+`BulkOut` (an owner action with its undo); `DELETE people/{id}/recognition` -> `Ok`. Conflicts and faces elsewhere are
+settled with `faces/assign` (to the person: locked as the owner's; to another person or to nobody).
 `GET people/{id}/traits` -> `PersonTraitsOut {tattoos: TraitGroupOut[], mehndi: TraitOut[], nails: TraitOut[]}`
 (tattoos grouped by part: `{kind, part, label, photos, first_seen, last_seen, best, item_uids}`; mehndi and nails of the
 last 60 days, at most 12 each; vault rows only while the vault is open); `PUT traits/{id} {hidden, verdict:
@@ -1417,6 +1504,19 @@ place takes focus (counting earlier answered tiles that left). Loading the next 
 that follows an answer. Nothing fires while typing, with Ctrl, Cmd or Alt, or as a held repeat; touch screens get
 no automatic focus, ring or hint.
 
+Recognition trained on one person (section 10; `people/RecognitionCard.tsx`, `lib/recognition.ts`): a card under
+the header of a named person's page (hidden for pets, unnamed groups, people with under 20 faces and with learning
+off). Not trained: what it will do in three sentences and "Train and look again". Running: the step in words and a
+progress bar, polled every 2 s. Trained: when and on how many faces, the check with its counts as they are ("it
+found 4,892 of NAME's 5,031 faces and mistook 50 of 5,474 faces of other people for NAME"), the last look with a
+link to the Guesses tab, "N answers since the training", and "Look again", "Train again", "Take back its guesses" and
+"Forget" (the last two behind a confirm). Two lists open in the card: faces on NAME that look the same as faces taken
+off NAME (pairs of crops with "This is NAME", "Not NAME" and "Move to OTHER") and faces the app put on other people
+("This is NAME", "Leave"); each answer is the usual face assignment, so it has its undo. A guess with basis `face`
+reads "By face, NN% sure" with a face icon and the line "Looks like NAME's photos, 0.61" (", and the same clothes"
+when clothes agree); a clothes guess the model agrees with adds "trained face NN%". Review > Guesses has a "Trained
+face" chip (`basis=face`).
+
 Body traits (section 34; `people/evidence.ts`, `TraitCompare.tsx`, `TraitsTab.tsx`, `useTraitActions.ts`):
 - Guess labels follow `evidence.basis` (`guessBasis`, `guessLabel`): "Face" and "By clothes" as before, "By" and the
   kinds that counted for a trait-only guess ("By tattoo", "By tattoo and nails", "By mehndi and nails"), and "By
@@ -1517,6 +1617,11 @@ models (run alone with `ORT_THREADS=2`). `tests/conftest.py` resets the verifica
 database, since trait ids restart at 1 in each. `scripts/trait_eval.py` checks the whole path on a snapshot of a
 library (never the live one): stage timings, the gate sheets, the per-query verification table, the watched bodies
 and a leave-one-out run.
+
+Recognition trained on one person (section 10) runs without models: `tests/test_person_model.py` builds a person, a
+look-alike identity at cosine 0.7 and strangers from hand-made vectors and covers the training (examples, conflicts,
+the check, determinism), the scan (what may become a guess and what is never touched), `guess_item` recomputing the
+guesses, the review actions, the gate in the automatic matching and the routes.
 
 ## 17. Build notes
 
@@ -1634,7 +1739,12 @@ Learners (one module each, all pure numpy, all with a `status()` and a `train(co
   events with both outcomes); `guess.guess_score` returns it instead of the fixed 0.5/0.3/0.2 mix. Outcomes of
   guesses made from body traits alone (features `basis: 'trait'`, section 34) are left out of this fit and of its
   event count, as their terms are not the clothes terms; `clothes+trait` outcomes keep the clothes features and add
-  `basis` and `trait_llr`. `RULES_REV` is 3 (2026-11-09: the trait outcomes left out).
+  `basis` and `trait_llr`. `RULES_REV` is 4 (3, 2026-11-09: the trait outcomes left out; 4, 2026-11-13: so are the
+  outcomes of guesses with basis `face`, below).
+- `person_model.py` (section 10, "Recognition trained on one person"): one model per person the owner asked for,
+  `learned/person_<id>.json`: a logistic regression on the face vectors stacked with the top-3 score and the face
+  weight, checked on days it was not trained on. Not in `LEARNERS` and not in `signature`: only the owner trains it
+  (`POST /api/people/{id}/recognition/train`). It obeys the learning switch and a reset removes it.
 - `traits.py` (section 34): `params() -> TraitParams` (the tattoo and mehndi tiers, `tattoo_min_inliers`,
   `tattoo_single_min`, `single_pair_ok`, `nail_color_de`, `admission_p`, `source`), the numbers
   `analysis/trait_match.py` reads. Tiers are not fitted in this version: the library has one heavily tattooed

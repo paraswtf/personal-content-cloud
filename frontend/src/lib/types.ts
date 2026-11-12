@@ -173,14 +173,17 @@ export interface GuessOut {
   person: PersonRef
   score: number
   /** Read through components/people/evidence.ts. Body traits (section 34) add `basis`, `trait_llr`, `traits` and
-   *  `against` (see TraitEvidence and GuessBasis). */
+   *  `against` (see TraitEvidence and GuessBasis). A guess of recognition trained on one person (section 10) has
+   *  basis 'face', `p` (its probability, also the score), `face` (the usual similarity) and `also` when clothes or
+   *  traits name the same person. */
   evidence: Record<string, unknown>
 }
 // body traits (section 34): tattoos, nails and mehndi read from people boxes
 export type TraitKind = 'tattoo' | 'nails' | 'mehndi'
 /** What a guess rests on: 'trait' (tattoo or mehndi alone), 'clothes+trait' (clothes that traits agree with or
- *  broke a tie for), or clothes as before (no basis in the evidence). */
-export type GuessBasis = 'clothes' | 'trait' | 'clothes+trait'
+ *  broke a tie for), 'face' (recognition trained on that one person, section 10), or clothes as before (no basis
+ *  in the evidence). */
+export type GuessBasis = 'clothes' | 'trait' | 'clothes+trait' | 'face'
 /** One trait region of a person box, normalised to the picture like the box. */
 export interface TraitOut {
   id: number

@@ -17,6 +17,7 @@ Guess weights: a logistic regression on the evidence terms of confirmed and reje
 (learning_events kind 'guess'), used instead of the fixed 0.5/0.3/0.2 mix once MIN_GUESS_EVENTS outcomes
 with both labels exist. Outcomes of guesses made from body traits alone (features basis 'trait', section 34)
 are left out of the fit and the event count: their terms are not the clothes terms (app.learning.traits reads them).
+The same goes for the guesses of a model trained on one person (basis 'face', app.learning.person_model).
 """
 from __future__ import annotations
 
@@ -30,8 +31,9 @@ from app.learning import events, store
 from app.util import json_loads, now_iso
 
 MODEL = "people"
-RULES_REV = 3  # 2 (2026-11-09): merges under PULL_FLOOR teach nothing; childhood photos left out (train.signature);
-#               3 (2026-11-09): outcomes of guesses from traits alone (basis 'trait', section 34) are left out
+RULES_REV = 4  # 2 (2026-11-09): merges under PULL_FLOOR teach nothing; childhood photos left out (train.signature);
+#               3 (2026-11-09): outcomes of guesses from traits alone (basis 'trait', section 34) are left out;
+#               4 (2026-11-13): outcomes of guesses of a model trained on one person (basis 'face') are left out
 MIN_GUESS_EVENTS = 30
 MIN_USER_FACES = 3
 FLOOR = 0.30
@@ -242,13 +244,14 @@ def fit_logistic(x: np.ndarray, y: np.ndarray, steps: int = 500, lr: float = 0.5
 
 def _clothes_events(conn: sqlite3.Connection) -> list[tuple[int, dict[str, Any]]]:
     """(label, features) of the labelled guess outcomes the clothes weights learn from: every one except the
-    guesses made from traits alone (basis 'trait')."""
+    guesses made from traits alone (basis 'trait') and those of a model trained on one person (basis 'face',
+    section 10): neither has the clothes terms."""
     out: list[tuple[int, dict[str, Any]]] = []
     for r in events.rows(conn, "guess"):
         if r["label"] is None:
             continue
         f = json_loads(r["features"], {}) or {}
-        if isinstance(f, dict) and f.get("basis") == "trait":
+        if isinstance(f, dict) and f.get("basis") in ("trait", "face"):
             continue
         out.append((int(r["label"]), f if isinstance(f, dict) else {}))
     return out

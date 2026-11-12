@@ -4,6 +4,7 @@
 // (section 10): the items tagged as about them without them in it. The Items and Related tabs select items
 // for People (section 10, people on a selection): move them to someone else, remove them, tag or rename.
 // A person with tattoos, nails or mehndi matched to them (section 34) also has a "Tattoos and nails" tab.
+// A named person gets the card of recognition trained on them alone (section 10, RecognitionCard).
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
@@ -21,6 +22,7 @@ import FaceGrid from '../components/people/FaceGrid'
 import GuessCard from '../components/people/GuessCard'
 import PeopleBulkAction, { type BulkFrom } from '../components/people/PeopleBulkAction'
 import PersonChoiceModal from '../components/people/PersonChoiceModal'
+import RecognitionCard from '../components/people/RecognitionCard'
 import TraitsTab from '../components/people/TraitsTab'
 import { choiceBody, type PersonChoice } from '../components/people/PersonPicker'
 import { guessKey, useGuessReview } from '../components/people/useGuessReview'
@@ -550,7 +552,7 @@ function GuessesTab({ id }: { id: number }) {
       ) : mine.length === 0 && !list.hasMore ? (
         <EmptyState icon={<Sparkles className="size-8" aria-hidden />} title="No guesses for this person">
           When this person is tagged, other photos within an hour with the same clothes, and photos taken at any time with the same
-          tattoo, get a guess here.
+          tattoo, get a guess here. Recognition trained on them adds the faces it finds.
         </EmptyState>
       ) : (
         <ul className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
@@ -756,6 +758,7 @@ function PersonView({ id }: { id: number }) {
           onOther={() => setMergeOpen(true)}
         />
       )}
+      {!pet && !!p.name && <RecognitionCard id={p.id} name={name} faceCount={p.face_count} />}
 
       <div role="tablist" aria-label="Person sections" className="-mx-4 mb-4 mt-6 flex gap-1 overflow-x-auto border-b border-line px-4 sm:mx-0 sm:px-0">
         {tabs.map((t) => (

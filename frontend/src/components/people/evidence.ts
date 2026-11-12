@@ -2,7 +2,8 @@
 // same clothes 0.91"); body traits (section 34) add their own reasons ("Same tattoo on the forearm as Priya's photo
 // from 14 Mar 2026", "Same blue nail art, long, 2 days earlier"), always first. A guess from traits alone
 // (basis "trait") carries no clothes or time-window keys and shows no percentage: its score is not calibrated, so
-// it reads "strong match".
+// it reads "strong match". A guess of recognition trained on one person (basis "face", section 10) reads "By face"
+// with its probability as the percentage and one line: "Looks like Priya's photos, 0.61, and the same clothes".
 import type { GuessBasis, GuessOut, PersonRef, TraitAgainst, TraitEvidence, TraitKind } from '../../lib/types'
 import { formatDate, formatPercent, personName } from '../../lib/format'
 
@@ -32,10 +33,11 @@ export function safeHex(v: unknown): string | undefined {
   return typeof v === 'string' && /^#[0-9a-fA-F]{6}$/.test(v) ? v : undefined
 }
 
-/** What the guess rests on: clothes (no basis in the evidence, as before traits), traits alone, or both. */
+/** What the guess rests on: clothes (no basis in the evidence, as before traits), traits alone, both, or
+ *  recognition trained on the person. */
 export function guessBasis(guess: Ev): GuessBasis {
   const b = guess.evidence?.basis
-  return b === 'trait' || b === 'clothes+trait' ? b : 'clothes'
+  return b === 'trait' || b === 'clothes+trait' || b === 'face' ? b : 'clothes'
 }
 
 /** The positive trait entries of the evidence, strongest first as the server sorted them; malformed ones dropped. */
@@ -208,9 +210,10 @@ function joinWords(words: string[]): string {
   return `${words.slice(0, -1).join(', ')} and ${words[words.length - 1]}`
 }
 
-/** "Face", "By clothes", "By tattoo", "By mehndi and nails", "By clothes and tattoo". */
+/** "Face", "By clothes", "By tattoo", "By mehndi and nails", "By clothes and tattoo", "By face". */
 export function guessLabel(kind: 'face' | 'body', guess: Ev): string {
   const basis = guessBasis(guess)
+  if (basis === 'face') return 'By face'
   const kinds = traitKinds(guess)
   if (basis === 'trait' && kinds.length) return `By ${joinWords(kinds)}`
   if (basis === 'clothes+trait' && kinds.length) return `By ${joinWords(['clothes', ...kinds])}`
@@ -218,25 +221,46 @@ export function guessLabel(kind: 'face' | 'body', guess: Ev): string {
   return kind === 'face' ? 'Face' : 'By clothes'
 }
 
-/** The icons that go with the label: clothes, a tattoo, a hand (mehndi or nails). */
-export function guessIcons(kind: 'face' | 'body', guess: Ev): Array<'clothes' | 'tattoo' | 'hand'> {
+/** The icons that go with the label: clothes, a tattoo, a hand (mehndi or nails), a face (trained recognition). */
+export function guessIcons(kind: 'face' | 'body', guess: Ev): Array<'clothes' | 'tattoo' | 'hand' | 'face'> {
   const basis = guessBasis(guess)
+  if (basis === 'face') return alsoClothes(guess) ? ['face', 'clothes'] : ['face']
   const kinds = traitKinds(guess)
-  const out: Array<'clothes' | 'tattoo' | 'hand'> = []
+  const out: Array<'clothes' | 'tattoo' | 'hand' | 'face'> = []
   if (basis !== 'trait' && (kind === 'body' || basis === 'clothes+trait')) out.push('clothes')
   if (kinds.includes('tattoo')) out.push('tattoo')
   else if (kinds.length) out.push('hand')
   return out
 }
 
-/** "85% sure" for a clothes guess (its score is learned); "strong match" for traits alone (no percentage). */
+/** "85% sure" for a clothes guess (its score is learned) and for trained recognition (its probability, checked on
+ *  photos it was not trained on); "strong match" for traits alone (no percentage). */
 export function guessSure(guess: Pick<GuessOut, 'evidence' | 'score'>): string {
   return guessBasis(guess) === 'trait' ? 'strong match' : `${formatPercent(guess.score)} sure`
 }
 
-/** The clothes part of the evidence: time window, scene, place, clothes, face. Empty for a guess from traits alone. */
-export function clothesLine(guess: Ev): string {
-  if (guessBasis(guess) === 'trait') return ''
+function alsoClothes(guess: Ev): boolean {
+  const also = guess.evidence?.also
+  return also === 'clothes' || also === 'clothes+trait'
+}
+
+/** A guess of recognition trained on the person: "Looks like Priya's photos, 0.61" and what else names them. */
+export function faceLine(guess: Ev & { person?: PersonRef | null }): string {
+  const e = guess.evidence ?? {}
+  const face = num(e.face)
+  let text = `Looks like ${whose(guess.person)} photos${face !== null ? `, ${face.toFixed(2)}` : ''}`
+  if (e.also === 'clothes') text += ', and the same clothes'
+  else if (e.also === 'trait') text += ', and the same tattoo or nails'
+  else if (e.also === 'clothes+trait') text += ', and the same clothes and tattoo or nails'
+  return text
+}
+
+/** The line under a guess. Clothes: time window, scene, place, clothes, face (and the trained recognition when it
+ *  agrees). Trained recognition: faceLine. Empty for a guess from traits alone. */
+export function clothesLine(guess: Ev & { person?: PersonRef | null }): string {
+  const basis = guessBasis(guess)
+  if (basis === 'trait') return ''
+  if (basis === 'face') return faceLine(guess)
   const e = guess.evidence ?? {}
   const parts: string[] = []
   const minutes = num(e.minutes_apart)
@@ -251,6 +275,8 @@ export function clothesLine(guess: Ev): string {
   if (clothes !== null) parts.push(`same clothes ${clothes.toFixed(2)}`)
   const face = num(e.face)
   if (face !== null && face >= 0.2) parts.push(`face ${face.toFixed(2)}`)
+  const trained = num(e.p)
+  if (trained !== null) parts.push(`trained face ${formatPercent(trained)}`)
   return parts.join(', ')
 }
 
@@ -264,8 +290,9 @@ function traitPhrases(guess: Ev): string[] {
   })
 }
 
-/** The whole evidence as one line: trait phrases first, then the clothes parts (never for traits alone). */
-export function evidenceLine(guess: Ev): string {
+/** The whole evidence as one line: trait phrases first, then the clothes parts (never for traits alone) or the
+ *  trained recognition's line. */
+export function evidenceLine(guess: Ev & { person?: PersonRef | null }): string {
   const parts = traitPhrases(guess)
   const clothes = clothesLine(guess)
   if (clothes) parts.push(clothes)

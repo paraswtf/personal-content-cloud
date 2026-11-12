@@ -23,6 +23,11 @@ CONTRACT.
   tie-breaks as basis 'clothes+trait', a guess from a tattoo alone as basis 'trait'); otherwise _compute_clothes
   runs, exactly the clothes path below. propagate also queues photos at any date with a similar tattoo for a
   re-guess on the traits runner thread.
+- Recognition trained on one person (section 10, app.learning.person_model): guess_item then asks
+  app.analysis.person_scan.merge_item for the trained models' guesses on the item's open faces (basis 'face') and
+  merges them with the result above. Without a model the result is untouched. Such a guess has no time window
+  (apply_window_change keeps it), its outcome is recorded with its own terms (record_outcome; the clothes weights
+  leave it out), and turning one down sends a face the scan took out of an unnamed group back to a group.
 
 Scoring for an open box D in item I against a reference box F (face or body of a person with
 assigned_by user or auto) in item J:
@@ -509,6 +514,19 @@ def _compute_fused(conn: sqlite3.Connection, item: sqlite3.Row, boxes: list[Box]
     return results
 
 
+def _merge_models(conn: sqlite3.Connection, item: sqlite3.Row, boxes: list[Box],
+                  results: dict[tuple[str, int], Candidate | None]) -> dict[tuple[str, int], Candidate | None]:
+    """The guesses of the models trained on one person (section 10) for the item's open faces, merged into
+    `results`; `results` itself when no model has a say or anything fails."""
+    try:
+        from app.analysis import person_scan
+
+        return person_scan.merge_item(conn, item, boxes, results)
+    except Exception:  # noqa: BLE001 - a trained model never blocks guessing
+        log.exception("guess: the trained recognition failed for item %s; without it", item["id"])
+        return results
+
+
 def _advance_index(conn: sqlite3.Connection, nested: bool, base: int | None, new: int | None) -> None:
     """Guess writes touch only guess fields, which the face index does not hold: an index that was
     current at `base` is current at `new` too, so the next sync need not re-read every face."""
@@ -533,7 +551,7 @@ def guess_item(conn: sqlite3.Connection, item_id: int, cache: dict[str, Any] | N
     if item["nsfw"]:
         results: dict[tuple[str, int], Candidate | None] = {(b.kind, b.id): None for b in boxes}  # clears stale ones
     else:
-        results = _compute(conn, item, boxes, cache)
+        results = _merge_models(conn, item, boxes, _compute(conn, item, boxes, cache))
     changed = 0
     nested = conn.in_transaction
     base = new = None
@@ -676,8 +694,8 @@ def apply_window_change(conn: sqlite3.Connection) -> int:
                     ev = json_loads(r["guess_evidence"]) or {}
                 except Exception:
                     ev = {}
-                if isinstance(ev, dict) and ev.get("basis") == "trait":
-                    continue  # a guess from traits alone has no time window (section 34)
+                if isinstance(ev, dict) and ev.get("basis") in ("trait", "face"):
+                    continue  # a guess from traits alone (section 34) or from a trained model has no time window
                 ref_uid = ev.get("ref_item_uid") if isinstance(ev, dict) else None
                 ref = conn.execute("SELECT taken_at FROM items WHERE uid = ?", (ref_uid,)).fetchone() if ref_uid else None
                 t0 = parse_iso(r["taken_at"])
@@ -736,6 +754,12 @@ def record_outcome(conn: sqlite3.Connection, row: sqlite3.Row, person_id: int, l
             from app.analysis import trait_match
 
             features = {"basis": "trait", **trait_match.outcome_terms(ev), "score": ev.get("score")}
+            events.record(conn, "guess", label, features, item_id=int(row["item_id"]), person_id=int(person_id))
+            return
+        if basis == "face":
+            # A guess of the model trained on this person (section 10): no clothes terms; the people learner
+            # leaves these out as well.
+            features = {"basis": "face", "p": ev.get("p"), "face": ev.get("face"), "score": ev.get("score")}
             events.record(conn, "guess", label, features, item_id=int(row["item_id"]), person_id=int(person_id))
             return
         scene_term = ev.get("scene_term")
@@ -844,10 +868,13 @@ def confirm(conn: sqlite3.Connection, face_ids: list[int], body_ids: list[int]) 
     return updated
 
 
-def reject(conn: sqlite3.Connection, face_ids: list[int], body_ids: list[int]) -> int:
-    """Turn down open guesses: remember the pair in guess_rejections and clear the guess."""
+def reject(conn: sqlite3.Connection, face_ids: list[int], body_ids: list[int], *, regroup: bool = True) -> int:
+    """Turn down open guesses: remember the pair in guess_rejections and clear the guess. A face that a model
+    trained on one person took out of an unnamed group for its guess (evidence was_person_id, section 10) then
+    goes back to that group, unless `regroup` is off (the caller moves the box itself) or a transaction is open."""
     updated = 0
     now = now_iso()
+    detached: list[tuple[int, int]] = []
     with tx(conn):
         for kind, table, ids in (("face", "faces", face_ids), ("body", "bodies", body_ids)):
             for chunk in _chunks(sorted({int(i) for i in ids})):
@@ -859,6 +886,9 @@ def reject(conn: sqlite3.Connection, face_ids: list[int], body_ids: list[int]) -
                 ).fetchall()
                 for r in rows:
                     record_outcome(conn, r, int(r["guess_person_id"]), 0)
+                    was = _detached_by_model(r["guess_evidence"]) if kind == "face" else None
+                    if was is not None:
+                        detached.append((int(r["id"]), was))
                     conn.execute(
                         "INSERT OR IGNORE INTO guess_rejections(kind, ref_id, person_id, created_at) VALUES (?, ?, ?, ?)",
                         (kind, r["id"], r["guess_person_id"], now),
@@ -871,4 +901,16 @@ def reject(conn: sqlite3.Connection, face_ids: list[int], body_ids: list[int]) -
                     updated += 1
         if updated:
             bump_faces_version(conn)
+    if detached and regroup and not conn.in_transaction:
+        from app.analysis import person_scan
+
+        person_scan.regroup(conn, detached)
     return updated
+
+
+def _detached_by_model(evidence: str | None) -> int | None:
+    """The unnamed person a scan took the face out of for a model's guess (evidence was_person_id, kept on
+    whatever guess the face holds since), or None."""
+    ev = json_loads(evidence, {}) or {}
+    was = ev.get("was_person_id") if isinstance(ev, dict) else None
+    return int(was) if isinstance(was, int) else None

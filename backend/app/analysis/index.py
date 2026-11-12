@@ -419,6 +419,22 @@ class FaceIndex:
             rows = [self._pos[int(f)] for f in face_ids]
             return self._emb[rows].copy() if rows else np.zeros((0, DIM), dtype=np.float32)
 
+    def examples_of(self, face_ids: list[int] | np.ndarray, person_id: int | None = None,
+                    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """(ids, embeddings, face weights, owner flags, item ids) of those of the given faces the index holds, in
+        the order given; with person_id only the ones on that person now. Copies (the reference of a model trained
+        on one person, app.learning.person_model). Call after sync."""
+        with self.lock:
+            rows = [self._pos[int(f)] for f in face_ids if int(f) in self._pos]
+            if person_id is not None:
+                rows = [r for r in rows if int(self._person[r]) == int(person_id)]
+            if not rows:
+                return (np.zeros(0, dtype=np.int64), np.zeros((0, DIM), dtype=np.float32),
+                        np.zeros(0, dtype=np.float32), np.zeros(0, dtype=bool), np.zeros(0, dtype=np.int64))
+            sel = np.asarray(rows, dtype=np.int64)
+            return (self._ids[sel].copy(), self._emb[sel].copy(), self._weight[sel].copy(),
+                    self._user[sel].copy(), self._item[sel].copy())
+
 
 USER_WEIGHT = 1.5  # a face the owner assigned counts this much in the top-k mean (an automatic one 1.0)
 
