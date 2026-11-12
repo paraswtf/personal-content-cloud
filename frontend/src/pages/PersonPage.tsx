@@ -4,7 +4,8 @@
 // (section 10): the items tagged as about them without them in it. The Items and Related tabs select items
 // for People (section 10, people on a selection): move them to someone else, remove them, tag or rename.
 // A person with tattoos, nails or mehndi matched to them (section 34) also has a "Tattoos and nails" tab.
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
+// A person (not a pet) has a "3D" tab (section 36), loaded only when it is opened.
+import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import clsx from 'clsx'
@@ -31,7 +32,9 @@ import { LoadMore, SelectionBar } from '../components/admin/fields'
 import { useViewerParam } from '../components/public/useViewerParam'
 import { Avatar, Button, EmptyState, ErrorState, PageSpinner, buttonClasses } from '../components/ui'
 
-type Tab = 'items' | 'faces' | 'guesses' | 'animals' | 'related' | 'traits'
+const Model3dTab = lazy(() => import('../components/people/Model3dTab'))
+
+type Tab = 'items' | 'faces' | 'guesses' | 'animals' | 'related' | 'traits' | '3d'
 
 function NameEditor({ id, name, kind, species }: { id: number; name: string | null; kind: PersonKind; species: Species | null }) {
   const toast = useToast()
@@ -693,7 +696,7 @@ function PersonView({ id }: { id: number }) {
     ? raw === 'animals' || raw === 'related'
       ? raw
       : 'items'
-    : raw === 'faces' || raw === 'guesses' || raw === 'related' || (raw === 'traits' && hasTraits)
+    : raw === 'faces' || raw === 'guesses' || raw === 'related' || raw === '3d' || (raw === 'traits' && hasTraits)
       ? raw
       : 'items'
   const relatedTab = { value: 'related' as const, label: 'Related', count: p.related_count ?? 0 }
@@ -709,6 +712,7 @@ function PersonView({ id }: { id: number }) {
         { value: 'guesses', label: 'Guesses', count: p.guess_count },
         ...(hasTraits ? [{ value: 'traits' as const, label: 'Tattoos and nails', count: p.trait_count ?? 0 }] : []),
         relatedTab,
+        { value: '3d', label: '3D' },
       ]
 
   return (
@@ -783,6 +787,11 @@ function PersonView({ id }: { id: number }) {
         {tab === 'animals' && <AnimalsTab id={id} name={name} species={p.species} />}
         {tab === 'guesses' && <GuessesTab id={id} />}
         {tab === 'traits' && <TraitsTab id={id} name={p.name} />}
+        {tab === '3d' && (
+          <Suspense fallback={<PageSpinner />}>
+            <Model3dTab id={id} name={p.name} />
+          </Suspense>
+        )}
       </div>
 
       <PersonChoiceModal

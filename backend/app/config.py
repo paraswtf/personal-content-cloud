@@ -202,6 +202,15 @@ class Settings:
     wallet_key_password: str | None  # passphrase of key.pem, when it has one
     wallet_dir: Path | None
 
+    # 3D heads (section 36): the generator is a separate program with its own Python environment
+    gen3d_dir: Path              # GEN3D_DIR: the generator's venv/, weights/ and src/ (default MODELS_DIR/gen3d)
+    gen3d_python: Path | None    # GEN3D_PYTHON: the generator's Python (default GEN3D_DIR/venv/bin/python)
+    gen3d_generator: str         # GEN3D_GENERATOR: auto | a backend's name
+    gen3d_sandbox: str           # GEN3D_SANDBOX: auto | on | off (the generator runs inside bwrap)
+    gen3d_max_rss_mb: int        # the generator is stopped above this much resident memory
+    gen3d_look_timeout_s: float  # ... and when one head takes longer than this
+    gen3d_fake: bool             # GEN3D_FAKE: the stand-in generator that needs no model (tests, a first look)
+
     # tests turn off the background worker threads
     workers_enabled: bool
 
@@ -342,6 +351,14 @@ def _load(**overrides) -> Settings:
         gpu_arena_shrink=_bool("GPU_ARENA_SHRINK", True),
         learning_enabled=_bool("LEARNING_ENABLED", True),
         vault_sensitivity=(_env("VAULT_SENSITIVITY", "normal") or "normal").strip().lower(),
+        gen3d_dir=Path(_env("GEN3D_DIR") or (Path(_env("MODELS_DIR", str(REPO_ROOT / "models"))) / "gen3d")).resolve(),
+        # not resolved: a venv's python is a symlink, and following it would lose the venv
+        gen3d_python=Path(_env("GEN3D_PYTHON")).absolute() if _env("GEN3D_PYTHON") else None,
+        gen3d_generator=(_env("GEN3D_GENERATOR", "auto") or "auto").strip().lower(),
+        gen3d_sandbox=(_env("GEN3D_SANDBOX", "auto") or "auto").strip().lower(),
+        gen3d_max_rss_mb=max(256, _int("GEN3D_MAX_RSS_MB", 5000)),
+        gen3d_look_timeout_s=max(5.0, _float("GEN3D_LOOK_TIMEOUT_S", 600.0)),
+        gen3d_fake=_bool("GEN3D_FAKE", False),
     )
     values.update(overrides)
     if values.get("originals_dir") is not None:

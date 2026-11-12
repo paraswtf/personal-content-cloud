@@ -25,6 +25,10 @@ What it does with each file:
   seen in their other photos at any date (checked point by point, not just by look), and helped by the
   same nail polish or mehndi a few days apart. Each guess says why and shows the two crops side by side;
   "Not a tattoo" and "Not this person's" correct it, and a person's page lists their tattoos.
+- **3D heads.** A person's page can build a 3D head for each look found in their photos (an age, a hair
+  length, facial hair or none), with a model that runs on this machine, and only when you press Generate.
+  Sliders pick the look, turn the head and move the light. Each head is the model's reading of one photo,
+  not a scan.
 - **Documents.** Text is extracted (text layer or OCR, in English, Hindi and Marathi) and searchable.
   Traffic challans and parking receipts are read into their own cards: a challan shows its number,
   vehicle, violations, amount and printed payment status with a button that opens the right portal to pay
@@ -149,6 +153,9 @@ Environment variables (all optional):
 | `TRAIT_MARGIN_LLR`, `TRAIT_PRIOR_PEOPLE`, `TRAIT_MIN_P` | `2.0`, `20`, `0.90` | The lead a guess from a tattoo alone needs over the next person, the prior used for its sort score, and the floor of the tightening from your answers. |
 | `NAILS_MAX_DAYS`, `MEHNDI_MAX_DAYS` | `14`, `21` | Nails and mehndi are only compared within this many days. |
 | `TRAIT_PROPAGATE_MAX` | `400` | Photos one tagging queues for a new look by tattoos. |
+| `GEN3D_DIR`, `GEN3D_GENERATOR` | `MODELS_DIR/gen3d`, `auto` | The 3D head generator's own environment (see Models, 3D heads) and which backend it uses. |
+| `GEN3D_SANDBOX` | `auto` | Run the generator in a sandbox with no network (`bwrap`): `auto` when it is installed, `on` to insist, `off`. |
+| `GEN3D_MAX_RSS_MB`, `GEN3D_LOOK_TIMEOUT_S` | `5000`, `600` | The generator is stopped above this much memory, or when one head takes longer than this many seconds. |
 | `FORWARDS_ENABLED`, `FORWARD_MAX_SIDE`, `FORWARD_JPEG_QUALITY_MAX`, `FORWARD_MEME_MIN` | `true`, `1600`, `82`, `0.5` | Forwards: the longest side and JPEG quality that mark an image as received through an app, and the content score that sets it apart. |
 | `PETS_ENABLED`, `ANIMAL_DET_THRESHOLD` | `true`, `0.45` | Pet identities (section 22) and the animal detection cut. |
 | `PET_MATCH_THRESHOLD`, `PET_NEW_THRESHOLD` | `0.82`, `0.86` | Cosine cuts for matching a crop to a known pet and for pairing two crops into a new pet. |
@@ -189,12 +196,29 @@ The map's offline basemap (`frontend/public/map/basemap.json`) is Natural Earth 
 boundaries (public domain). Detailed online tiles, when switched on, come from OpenFreeMap (OpenMapTiles
 with OpenStreetMap data); photos never leave the server either way.
 
+### 3D heads (optional)
+
+The 3D heads use a generator that is a separate program with its own Python environment, so PyTorch stays
+out of the server. Until it is set up, the 3D tab says that the generator is not installed and nothing else
+changes. Set it up once:
+
+```bash
+scripts/setup_3d.sh
+```
+
+<!-- scripts/setup_3d.sh: what it downloads, how large it is and the model's licence go here -->
+
+It lives in `MODELS_DIR/gen3d` (`GEN3D_DIR`). The generator runs only while a model is being made, inside a
+sandbox (`bwrap`) with no network and a read-only filesystem apart from its work folder, because it runs
+model code written by others on your face photos. `GEN3D_SANDBOX=off` turns the sandbox off;
+`docs/ARCHITECTURE.md` section 36 has the details.
+
 ## Data, backups and disk
 
 Three places, three jobs. `DATA_DIR` holds `cloud.db` (SQLite, WAL mode) and everything that can be rebuilt
-from your files: `thumbs/`, `previews/`, `pages/`, `videos/`, `faces/`, `bodies/`, `docphoto/`, the learned
-models in `learned/`, your Wallet certificates in `wallet/`, the served copy of the frontend in `site/` and
-`tmp/`. `ORIGINALS_DIR` (the same folder unless you set it) holds the uploaded files themselves in
+from your files: `thumbs/`, `previews/`, `pages/`, `videos/`, `faces/`, `bodies/`, `docphoto/`, the 3D
+heads in `people3d/`, the learned models in `learned/`, your Wallet certificates in `wallet/`, the served
+copy of the frontend in `site/` and `tmp/`. `ORIGINALS_DIR` (the same folder unless you set it) holds the uploaded files themselves in
 `originals/` and the uploads on their way in (`staging/`, `failed/`); put it on your fast or biggest disk.
 `BACKUP_DIR`, when set, gets a snapshot every night at `BACKUP_HOUR`: the database (a consistent online
 copy), the originals, the share-link key, the learned models and the Wallet certificates, as
@@ -217,7 +241,8 @@ BACKEND_URL=http://127.0.0.1:41010 npm run dev                            # Vite
 ```
 
 Layout: `backend/app` (FastAPI app; `api/` routes, `auth/`, `media/`, `ml/`, `analysis/`, `documents/`,
-`search/`, `wallet/`, `ingest.py`, `worker.py`), `frontend/src` (React pages and components),
+`search/`, `wallet/`, `ingest.py`, `worker.py`), `frontend/src` (React pages and components), `gen3d`
+(the 3D head generator, a program of its own),
 `docs/ARCHITECTURE.md` (the contract), `docs/alumni-hub-reuse-map.md` (what came from the alumni hub).
 
 ## License

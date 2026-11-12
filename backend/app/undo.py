@@ -61,6 +61,7 @@ WRITE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 NOT_UNDOABLE = re.compile(
     r"^/api/(auth|uploads|system|actions|trash|search|s)(/|$)"
     r"|^/api/items/[^/]+/reprocess$|^/api/recluster$|^/api/map/refresh$|^/api/documents/[^/]+/reparse$"
+    r"|^/api/people/[^/]+/model3d(/stop)?$"  # a generated 3D head is derived data, not a library edit (section 36)
 )
 JOURNALED: tuple[str, ...] = (
     "items", "faces", "bodies", "animals", "persons", "item_tags", "guess_rejections", "merge_dismissals",

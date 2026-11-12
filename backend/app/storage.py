@@ -17,6 +17,8 @@ from them. The paths below are the same under either root.
   animals/<id // 1000>/<id>.webp           pet crop
   docphoto/<sh>/<uid>.v<version>.webp      photo cropped out of an ID document
   learned/                                 the learned models (section 18)
+  people3d/<person id>/                    a person's 3D heads (section 36): `current` names the folder in use,
+                                           <stamp>/model.json, <key>.glb and <key>.jpg; work/ while one is made
   wallet/                                  Apple Wallet certificates placed by the owner
   tmp/                                     scratch files on the data disk (wiped at startup)
 
@@ -37,7 +39,7 @@ from app.util import new_uid
 TIER_DIRS = ("originals", "staging", "failed")
 # Folders under DATA_DIR: the database's companions, everything derived, and scratch space.
 DERIVED_DIRS = ("thumbs", "previews", "pages", "videos", "faces", "bodies", "animals", "docphoto", "wallet", "tmp",
-                "learned")
+                "learned", "people3d")
 DIRS = TIER_DIRS + DERIVED_DIRS
 # Directories the orphan sweeper walks (names must match the patterns in app.ingest).
 SWEPT_DIRS = ("originals", "thumbs", "previews", "pages", "videos", "faces", "bodies", "animals", "docphoto")

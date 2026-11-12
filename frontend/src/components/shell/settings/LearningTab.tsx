@@ -14,7 +14,7 @@ import { formatCount, formatDate, formatRelative } from '../../../lib/format'
 import { useRefreshLibrary } from '../../../lib/hooks'
 import { CATEGORY_LABELS, type Category, type LearningEventKind, type LearningStatus, type MisclickThresholdKey, type VaultSensitivity } from '../../../lib/types'
 import { docTypeLabel } from '../../documents/docMeta'
-import { Badge, Button, ConfirmModal, ErrorState } from '../../ui'
+import { Badge, Button, ConfirmModal, ErrorState, Switch } from '../../ui'
 import { useToast } from '../../Toast'
 import { SYSTEM_KEY } from './SystemTab'
 import { Section, errorText } from './common'
@@ -116,46 +116,6 @@ function nothingLearned(s: LearningStatus): boolean {
     (l.tags?.examples ?? 0) === 0 &&
     (l.forwards?.examples ?? 0) === 0 &&
     !l.forwards?.learned
-  )
-}
-
-function Switch({
-  checked,
-  onChange,
-  disabled,
-  label,
-}: {
-  checked: boolean
-  onChange: (next: boolean) => void
-  disabled?: boolean
-  label: string
-}) {
-  return (
-    <button
-      type="button"
-      role="switch"
-      aria-checked={checked}
-      aria-label={label}
-      disabled={disabled}
-      onClick={() => onChange(!checked)}
-      className="inline-flex h-10 shrink-0 items-center gap-3 rounded-full pl-1 pr-1 text-sm font-medium disabled:cursor-not-allowed disabled:opacity-60"
-    >
-      <span className="hidden sm:inline">{checked ? 'On' : 'Off'}</span>
-      <span
-        aria-hidden
-        className={clsx(
-          'relative inline-flex h-7 w-12 items-center rounded-full transition-colors',
-          checked ? 'bg-brand' : 'bg-ink/20',
-        )}
-      >
-        <span
-          className={clsx(
-            'inline-block size-5 rounded-full bg-white shadow transition-transform',
-            checked ? 'translate-x-6' : 'translate-x-1',
-          )}
-        />
-      </span>
-    </button>
   )
 }
 
