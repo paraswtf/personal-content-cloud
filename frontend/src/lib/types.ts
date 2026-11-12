@@ -173,14 +173,38 @@ export interface GuessOut {
   person: PersonRef
   score: number
   /** Read through components/people/evidence.ts. Body traits (section 34) add `basis`, `trait_llr`, `traits` and
-   *  `against` (see TraitEvidence and GuessBasis). */
+   *  `against` (see TraitEvidence and GuessBasis); position (section 35) adds `place` (PlaceEvidence). */
   evidence: Record<string, unknown>
 }
 // body traits (section 34): tattoos, nails and mehndi read from people boxes
 export type TraitKind = 'tattoo' | 'nails' | 'mehndi'
 /** What a guess rests on: 'trait' (tattoo or mehndi alone), 'clothes+trait' (clothes that traits agree with or
- *  broke a tie for), or clothes as before (no basis in the evidence). */
-export type GuessBasis = 'clothes' | 'trait' | 'clothes+trait'
+ *  broke a tie for), 'place' (standing in the same spot as the person in a photo taken moments apart, section 35),
+ *  'clothes+place' (clothes that the position agrees with or broke a tie for), or clothes as before (no basis in
+ *  the evidence). */
+export type GuessBasis = 'clothes' | 'trait' | 'clothes+trait' | 'place' | 'clothes+place'
+/** evidence.place (section 35): the box the person was followed from, in another photo of the same sequence. */
+export interface PlaceEvidence {
+  ref_item_uid?: string
+  ref_face_id?: number
+  ref_body_id?: number
+  /** Seconds between this photo and the reference photo. */
+  seconds_apart?: number
+  /** The reference photo was taken first. */
+  ref_before?: boolean
+  /** Photos followed through to reach the reference (1: the reference photo is lined up with this one). */
+  hops?: number
+  /** How far the two head points are apart once the photos are lined up, in widths of the person. */
+  offset?: number
+  /** How the photos lined up: 'still', 'moved' (the camera moved) or 'burst'. */
+  kind?: string
+  /** Other known people who stayed in their place between the two photos. */
+  others?: number
+  clothes?: number
+  llr?: number
+  /** Added by the server for display (no stored URLs). */
+  ref_crop_url?: string
+}
 /** One trait region of a person box, normalised to the picture like the box. */
 export interface TraitOut {
   id: number
@@ -1041,6 +1065,8 @@ export interface LearningStatus {
     forwards?: { examples: number; learned: boolean; weights: Record<string, number> | null }
     /** Section 34: tattoos, nails and mehndi. Optional: older servers lack it. */
     traits?: TraitLearning
+    /** Section 35: how far the photos taken together are lined up. Optional: older servers lack it. */
+    place?: { scan?: PlaceScanProgress | null }
   }
   events: Partial<Record<LearningEventKind, number>>
 }
@@ -1057,6 +1083,18 @@ export interface TraitScanProgress {
   rev: string | null
   /** The models that are missing, when reading is paused; null when it runs or traits are off. */
   paused: string[] | null
+  last_error: string | null
+}
+/** Lining up photos taken together (section 35): how far the library is. */
+export interface PlaceScanProgress {
+  /** False when PLACE_ENABLED is off. */
+  enabled?: boolean
+  /** Photos lined up with their next photos. */
+  scanned: number
+  /** Dated photos with a face or person box. */
+  eligible: number
+  ready: boolean
+  rev: string | null
   last_error: string | null
 }
 export interface TraitLearning {

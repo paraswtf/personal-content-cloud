@@ -68,7 +68,8 @@ import { burstBestUid, reasonKeys, reasonLabel } from '../library/misclick'
 import OriginIcon from '../people/OriginIcon'
 import PersonPicker, { choiceBody, type PersonChoice } from '../people/PersonPicker'
 import TraitCompare from '../people/TraitCompare'
-import { evidenceLine, guessLabel, guessSure, traitReasons } from '../people/evidence'
+import PlaceCompare from '../people/PlaceCompare'
+import { evidenceLine, guessLabel, guessSure, placeReason, traitReasons } from '../people/evidence'
 import { boxKey, guessTargets as guessTargetsOf, stillBoxes, videoBoxes, type BoxTarget } from './boxes'
 import GuessChip from './GuessChip'
 import { PersonEditCard, usePersonEdits, type BoxRemoval, type PersonEditMode, type PersonEditTarget } from './PersonEdit'
@@ -902,6 +903,7 @@ export default function InfoPanel({
                   const g = t.box.guess!
                   const why = evidenceLine(g)
                   const lead = traitReasons(g)[0]
+                  const place = placeReason(g)
                   return (
                     <li key={boxKey(t)} className="flex flex-col gap-1.5">
                       <div className="flex items-center gap-2">
@@ -933,6 +935,9 @@ export default function InfoPanel({
                         </p>
                       )}
                       {lead && <TraitCompare className="pl-12" reason={lead} name={personName(g.person)} dark />}
+                      {place && !lead && (
+                        <PlaceCompare className="pl-12" reason={place} cropUrl={t.box.url} name={personName(g.person)} dark />
+                      )}
                     </li>
                   )
                 })}

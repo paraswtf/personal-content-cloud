@@ -1312,12 +1312,15 @@ def correct_guesses(body: GuessCorrectIn, conn: sqlite3.Connection = Depends(get
 
 
 # Section 34: evidence.basis is 'trait' (traits alone), 'clothes+trait' (clothes backed by traits) or absent (clothes).
+# Section 35: 'place' (the position alone) and 'clothes+place' (clothes backed by the position).
 _BASIS_SQL = {
     "all": "",
     # CASE keeps json_extract away from malformed JSON (AND does not promise an order in SQLite)
     "clothes": " AND (CASE WHEN json_valid(g.guess_evidence) THEN json_extract(g.guess_evidence, '$.basis') END) IS NULL",
     "trait": " AND (CASE WHEN json_valid(g.guess_evidence) THEN json_extract(g.guess_evidence, '$.basis') END) "
              "IN ('trait', 'clothes+trait')",
+    "place": " AND (CASE WHEN json_valid(g.guess_evidence) THEN json_extract(g.guess_evidence, '$.basis') END) "
+             "IN ('place', 'clothes+place')",
 }
 
 
@@ -1326,7 +1329,8 @@ def review_guesses(
     cursor: str | None = Query(default=None, max_length=512),
     limit: int = Query(default=60, ge=1, le=200),
     person: int | None = Query(default=None, description="only guesses naming this person"),
-    basis: Literal["all", "clothes", "trait"] = Query(default="all", description="clothes alone, or with traits"),
+    basis: Literal["all", "clothes", "trait", "place"] = Query(
+        default="all", description="clothes alone, with traits, or with the position"),
     conn: sqlite3.Connection = Depends(get_db),
 ) -> GuessPage:
     person_sql = " AND g.guess_person_id = ?" if person is not None else ""

@@ -84,6 +84,7 @@ backend/
       faces.py         face records, video tracking (from hub faces/pipeline.py)
       bodies.py        person boxes, torso crops, clothes embeddings
       guess.py         person guessing from the same hour + same scene + same clothes
+      place*.py        photos taken moments apart lined up, people followed between them (section 35)
       cluster.py       face clustering, merge, suggestions (from hub faces/cluster.py)
       index.py         in-memory face index (from hub faces/index.py)
     documents/
@@ -293,6 +294,11 @@ verdict are checked in code) and nothing in `MIGRATED_COLUMNS`, so `test_db_upgr
   No foreign key, so an undone unhide finds them again.
 - `trait_hide_hits(trait_id FK CASCADE, hide_id FK CASCADE, PK)`: the look-alikes of a `not_trait` hide.
 - `trait_requeue(item_id PK FK CASCADE, queued_at)`: items to guess again on the traits runner thread.
+- `place_links(a_item FK CASCADE, b_item FK CASCADE, rev, kind, m JSON, inliers, spread, dt_s, computed_at, PK(a_item,
+  b_item))` (section 35): one row per pair of a photo and one of its next photos, a the earlier one. `kind` is
+  `still`, `moved`, `burst` or `none` (did not line up); `m` is the 2 x 3 matrix a -> b in normalised coordinates.
+- `place_scans(item_id PK FK CASCADE, rev, sig, scanned_at)`: a photo whose pairs are stored; `sig` is the ids of its
+  next photos, so a photo arriving later in the middle of a sequence makes its neighbours pending again.
 
 ## 6. Uploads
 
@@ -568,6 +574,12 @@ Guessing (`analysis/guess.py`). For an unassigned face or body D in item I:
   the result: `trait` for a guess from traits alone (a tattoo, under the admission rule of section 34),
   `clothes+trait` for a clothes guess that traits agreed with or broke a tie for, and no `basis` for clothes alone.
   An open face box gets the traits of the body that holds it (`bodies.face_id`).
+- Position (section 35). When the photo is lined up with a photo taken moments before or after it, each box's result
+  is then fused with where people stood (`place_match.fuse`, after the trait step, inside the same one person per
+  photo loop): `clothes+place` for a clothes guess that the position agrees with or broke a tie for, `place` for a
+  guess from the position alone, and no guess when the position contradicts a clothes winner. `_compute` takes the
+  fused loop when a trait context or a place context exists; with neither, `_compute_clothes` runs, and the scene
+  loop is one function for both (`_clothes_inputs`).
 - Confirming sets `person_id`, `assigned_by='user'` and enqueues `guess` for that person; rejecting writes
   `guess_rejections` and clears the guess. A confirmed body without a face adds an `item_tags` row with
   `source='guess'`, removed again when that body is moved or deleted.
@@ -580,7 +592,7 @@ Guessing (`analysis/guess.py`). For an unassigned face or body D in item I:
 - A changed `GUESS_WINDOW_H` takes effect at the next start: `guess.apply_window_change` (from
   `ingest.recover_on_startup`) withdraws every open guess whose reference photo lies outside the window now and
   queues a `guess` job for its item; `kv guess_window_h` records the value in force. Guesses with basis `trait` have
-  no window and are kept.
+  no window and are kept, and so are guesses with basis `place` (their own limits are seconds, section 35).
 - A person is guessed for at most one box per photo (the best score wins, the other boxes are scored again
   without that person; videos are exempt), and confirming skips a box whose person is already in the item.
   Rejections follow a face across a reprocess (carried to the new face, see "Carry-over" below). Vault items are never
@@ -1081,7 +1093,7 @@ Library (`/api`): `GET items` (query: `category`, `kind`, `person` repeated, `fr
 `DELETE items/{uid}` (trash); `POST items/{uid}/restore`; `POST items/bulk {uids, action: delete|restore|keep|category|nsfw|favorite|unfavorite|forward|unforward, value?}`;
 `POST items/{uid}/reprocess {stages?: [analyze, text, preview]}`; `GET items/{uid}/pages`; `GET items/{uid}/text`;
 `GET trash` -> `ItemPage`; `POST trash/empty`; `DELETE trash/{uid}` (purge one);
-`GET review/misclicks` -> `ItemPage` (with `misclick_reasons`); `GET review/forwards` -> `ItemPage` (the forwards set apart, section 29); `GET review/guesses?person=&basis=all|clothes|trait` -> `GuessPage` (served by the people router; `basis=clothes` keeps guesses with no `basis`, `basis=trait` keeps `trait` and `clothes+trait`, section 34);
+`GET review/misclicks` -> `ItemPage` (with `misclick_reasons`); `GET review/forwards` -> `ItemPage` (the forwards set apart, section 29); `GET review/guesses?person=&basis=all|clothes|trait|place` -> `GuessPage` (served by the people router; `basis=clothes` keeps guesses with no `basis`, `basis=trait` keeps `trait` and `clothes+trait`, section 34; `basis=place` keeps `place` and `clothes+place`, section 35; a guess's `evidence.place` carries `ref_crop_url`, the crop of the box the person was followed from);
 `GET duplicates` -> `DupGroupPage{groups:[{best: ItemCard, copies: [ItemCard]}]}`; `POST duplicates/{uid}/best`;
 `GET stats` -> `Stats{items, by_kind, by_category, people, documents, misclicks, forwards, guesses, trash, queue{queued, running, failed, by_queue}, disk{free_bytes, total_bytes, originals_bytes}, analysis{pending, done, error}, text{pending, done}}`.
 Listing rules: `total` is counted on the first page only (cursor pages carry `total: 0`) for `items`, `trash`,
@@ -1417,6 +1429,18 @@ place takes focus (counting earlier answered tiles that left). Loading the next 
 that follows an answer. Nothing fires while typing, with Ctrl, Cmd or Alt, or as a held repeat; touch screens get
 no automatic focus, ring or hint.
 
+Position (section 35; `people/evidence.ts`, `PlaceCompare.tsx`): a guess whose evidence has a `place` part shows
+footprints beside the label and its reason in words, "In the same spot as NAME 8 s earlier" (`placeReason`,
+`gapPhrase`: seconds under 90, then minutes, "in the same second"), "Followed across 2 photos to NAME, 12 s earlier"
+when the reference is more than one photo away, and ", and 2 other people stayed in place" when known people kept
+their places. Labels: "By position" (`place`), "By clothes and position" (`clothes+place`), and "position" added to
+a trait label that also has the part. A guess card shows the box's crop and the crop of the box the person was
+followed from side by side (`PlaceCompare`, the reference a button that opens its photo); the viewer's details and
+box editor show the reason line, and the guess chip's tooltip a short form ("same spot 8 s earlier"). A guess from
+the position alone shows a percentage: its score is the share of right answers measured for that gap (section 35),
+not a learned value. Review > Guesses has a "Position" filter (`basis=place`), and Settings > Learning a "Position"
+card with the progress of the lining up ("Lining up photos taken together: N of M.", badge Ready, Working or Off).
+
 Body traits (section 34; `people/evidence.ts`, `TraitCompare.tsx`, `TraitsTab.tsx`, `useTraitActions.ts`):
 - Guess labels follow `evidence.basis` (`guessBasis`, `guessLabel`): "Face" and "By clothes" as before, "By" and the
   kinds that counted for a trait-only guess ("By tattoo", "By tattoo and nails", "By mehndi and nails"), and "By
@@ -1487,6 +1511,7 @@ Body traits (section 34; `people/evidence.ts`, `TraitCompare.tsx`, `TraitsTab.ts
 | `TRAIT_ONLY_GUESSES`, `TRAIT_ONLY_MEHNDI` | true, false | a guess from a tattoo alone under the admission rule; the same from mehndi alone |
 | `TRAITS_MEHNDI` | false | read mehndi at all (off: SigLIP read plain hands as mehndi on the owner's library; section 34) |
 | `TRAITS_THREADS` | 2 | CPU threads per traits model session (pose, hands, dino) |
+| `PLACE_ENABLED`, `PLACE_ONLY_GUESSES` | true, true | line up photos taken together and use where people stood in guesses (off: guesses exactly as before); a guess from the position alone under the admission rule (section 35) |
 | `TRAIT_MIN_BODY_PX`, `TRAIT_MIN_LIMB_PX`, `NAIL_MIN_HAND_PX` | 200, 64, 96 | smallest box long side and limb segment (pixels of the 2048 px preview), smallest hand span for nails (pixels of the source used) |
 | `TATTOO_GATE_P` | 0.80 | SigLIP tattoo cut (0.60 up to it is "unclear"; measured on the owner's library, section 34) |
 | `TATTOO_MIN_INLIERS`, `MEHNDI_MIN_INLIERS` | 12, 30 | SIFT inliers a verified tattoo or mehndi pair needs |
@@ -1514,9 +1539,24 @@ symmetry), `test_traits_extract.py` (the runner, statuses, ownership, the gate, 
 `test_trait_guess.py` (fusion with clothes guesses, the window exemption, learning, propagation),
 `test_learning_traits.py`, `test_traits_api.py`, `test_traits_integration.py`; `test_ml_traits.py` needs the real
 models (run alone with `ORT_THREADS=2`). `tests/conftest.py` resets the verification caches for every test
-database, since trait ids restart at 1 in each. `scripts/trait_eval.py` checks the whole path on a snapshot of a
+database, since trait ids restart at 1 in each (and the picture features of section 35, cached by item id). `scripts/trait_eval.py` checks the whole path on a snapshot of a
 library (never the live one): stage timings, the gate sheets, the per-query verification table, the watched bodies
 and a leave-one-out run.
+
+Position (section 35) runs without models too; SIFT runs for real on synthetic textured pictures. Files:
+`test_place_align.py` (a shifted, a zoomed and a rolled picture, another size and shape, an unrelated one, a plain
+wall, the burst rule, a person who moved in front of a still background, the cache and its bound),
+`test_place.py` (which photos are pending and with which next photos, the sub-second order, the runner's writes,
+pairs that do not line up, a photo arriving in the middle, duplicates and Live pairs, bursts, the re-guess queue,
+the switch, deleted photos, failures), `test_place_match.py` (head points, mutual matches, the bounds, the
+arrangement check, clothes floors, the child band, the tiers, chains and hops, people present) and
+`test_place_guess.py` (the four fusion rules, guesses from the position alone and their switch, the last tier and
+a burst, people present and rejected, the vault, one person per photo, the face veto, the child band, a chain
+across two photos, outcomes and the people learner, the window change, changed rules, the Review list with the
+reference crop, the learning status). The guess tests of sections 10 and 34 have no links, so they also show that
+nothing changes without them. `scripts/place_eval.py` checks the whole path on a snapshot of a library (never the
+live one): the lining up with its timings, the kinds of link by gap, and a leave-one-out by mode (position,
+clothes, both), kind of box, gap and photos walked.
 
 ## 17. Build notes
 
@@ -1634,7 +1674,9 @@ Learners (one module each, all pure numpy, all with a `status()` and a `train(co
   events with both outcomes); `guess.guess_score` returns it instead of the fixed 0.5/0.3/0.2 mix. Outcomes of
   guesses made from body traits alone (features `basis: 'trait'`, section 34) are left out of this fit and of its
   event count, as their terms are not the clothes terms; `clothes+trait` outcomes keep the clothes features and add
-  `basis` and `trait_llr`. `RULES_REV` is 3 (2026-11-09: the trait outcomes left out).
+  `basis` and `trait_llr`. Outcomes of guesses made from the position alone (`basis: 'place'`, section 35) are left
+  out the same way (`NOT_CLOTHES`), and `clothes+place` outcomes keep the clothes features and add `basis` and
+  `place_llr`. `RULES_REV` is 4 (2026-11-09: the trait outcomes left out; 2026-11-13: the position outcomes).
 - `traits.py` (section 34): `params() -> TraitParams` (the tattoo and mehndi tiers, `tattoo_min_inliers`,
   `tattoo_single_min`, `single_pair_ok`, `nail_color_de`, `admission_p`, `source`), the numbers
   `analysis/trait_match.py` reads. Tiers are not fitted in this version: the library has one heavily tattooed
@@ -1668,7 +1710,8 @@ Learners (one module each, all pure numpy, all with a `status()` and a `train(co
 API (`/api/system/learning`, session required, CSRF on writes): `GET` ->
 `LearningStatus{enabled, trained_at, pending, learners{doc_type{examples, labels[]}, category{examples,
 labels[]}, vault{examples, threshold}, misclick{examples, thresholds{}}, people{persons, events,
-weights{} | null}}, events{category, vault, misclick, doc_type, guess}}`; `PATCH {enabled}` (kv flag);
+weights{} | null}, place{scan{scanned, eligible, ready, rev, last_error, enabled}}}, events{category, vault,
+misclick, doc_type, guess}}` (`place` is the progress of section 35: nothing is learned there); `PATCH {enabled}` (kv flag);
 `POST train` -> `LearningStatus` (trains now); `POST apply` -> `{"items": n, "documents": m}` (queues a
 fresh analysis for live items whose category, vault or mis-click decision was automatic and a fresh text
 stage for documents typed automatically, so the learned models reach existing items); `DELETE` (reset:
@@ -2548,7 +2591,8 @@ and the rows a foreign key cleared.
   would leave the face index stale. Measured on the API tests: no owner write happens outside a transaction.
 - Body traits (section 34): `trait_hides` (the owner's "Not a tattoo", "Not this person's" and "Show again") is
   journaled and holds no BLOBs, so its journal stays small. The derived trait tables (`body_traits`,
-  `trait_scans`, `trait_hide_hits`, `trait_requeue`) are not journaled, as cascades would hex-log their crops;
+  `trait_scans`, `trait_hide_hits`, `trait_requeue`) are not journaled, as cascades would hex-log their crops
+  (nor are `place_links` and `place_scans` of section 35, derived data that the runner rebuilds);
   `trait_hide_desc` (a hide's descriptors) is not journaled either and has no foreign key, so an undone unhide
   finds its descriptors again, and `traits.prune` drops it only when the hide is gone, it is older than
   `undo.KEEP_DAYS` and the hide's removal is no longer in `undo_log`. After its transaction, `undo.undo()` hands the
@@ -2883,3 +2927,255 @@ were the rest), which is why nails only support.
 - Retrieval cosine 0.45, `MEHNDI_MIN_INLIERS` 30, the absence share 0.15, the hide thresholds, pHash 6 and the burst
   rule, the shared-design factor 0.75 and ratio 2.
 - Faceless child bodies are not child-gated; with `FACE_AGE_MATCHING` off there is no child protection.
+
+## 35. Following people between photos (`app/analysis/place.py`, `place_align.py`, `place_match.py`)
+
+Photos taken moments apart at one place show the same background, moved by however the camera moved in between.
+Lining the backgrounds up tells where each box of one photo would be in the next, and a box found there is the same
+person: also when the face is turned away, when the camera panned or zoomed, and when the clothes vector is under the
+clothes cut. This is evidence for a guess, along with clothes, never an assignment: the owner confirms or corrects
+every guess (2026-11-13). With `PLACE_ENABLED` off, guesses are exactly as before.
+
+### Lining two photos up (`place_align`)
+
+1. The picture (`load_gray`): the small preview (1280 px) when there is one, else the 2048 px preview, else the photo
+   as the analysis saw it (`animals.open_photo`); grey, the long side reduced to `ALIGN_SIDE` (1024). The three have
+   the same geometry, as boxes are normalised to the upright picture.
+2. Features (`describe`): CLAHE (2.0, 8 x 8), then SIFT (`SIFT_FEATURES` 3,000, contrast 0.02), descriptors kept as
+   uint8. A keypoint is flagged when it lies inside a face or person box of its photo (boxes grown by 10 percent).
+   `features(key, loader)` keeps them in an LRU of `FEATURE_CACHE_BYTES` (96 MB, about 230 photos) keyed by
+   (item id, version), behind a lock; each thread has its own SIFT, CLAHE and matcher objects.
+3. The fit (`align`): brute-force matching with the ratio test (0.75), then a similarity (rotation, one scale, a
+   shift: `cv2.estimateAffinePartial2D` with `USAC_MAGSAC`, 3 px at 1024) on the background matches only (neither end
+   inside a people box). When that gives fewer than `MIN_INLIERS` (20) inliers, once more on every match: people who
+   stood still are good anchors, and people who moved are outliers. A fit is kept with 20 or more inliers, a scale
+   within 0.4 to 2.5 and inliers whose convex hull covers at least `MIN_SPREAD` (0.02) of the first picture.
+4. The result is the 2 x 3 matrix from the first photo to the second in normalised coordinates (so a portrait and a
+   landscape photo line up too), with kind `still` (shift under 2 percent of the picture, scale within 2 percent of
+   1, roll under 1 degree) or `moved`.
+5. Without a fit (`burst`): two photos taken within `BURST_S` (3 s) whose whole-picture vectors are at least
+   `BURST_COS` (0.97) alike count as the identity, kind `burst` (a plain wall or a night shot has no keypoints, but
+   nobody moved).
+
+Not tried: a mirrored pair (a front camera's photo saved as its mirror image), and anything but photos.
+
+### The links and the runner (`place`)
+
+A photo takes part when it is a live, dated image outside the vault, analysed, not a Live Photo's clip, not a
+screenshot or a document, and has at least one face or person box (`ELIGIBLE_SQL`). Such photos are ordered by
+capture time, then the EXIF sub-second, then id, and each is paired with its next `AHEAD` (3) photos taken at most
+`MAX_GAP_S` (300 s) after it.
+
+- `place_links` holds one row per pair, the earlier photo as `a_item` (section 5). A pair that did not line up is
+  stored too (kind `none`), so it is not tried again. Two photos of one duplicate group or one Live Photo are stored
+  as `none` without reading pixels: the same moment is no movement. `dt_s` is the gap with the sub-seconds.
+- `place_scans` marks a photo as done; `sig` is the ids of its next photos, so a photo that arrives later in the
+  middle of a sequence makes its neighbours pending again (`pending_items`: no scan row, another rev or another sig;
+  one window-function query over the eligible photos, 0.1 s on the owner's library).
+- The runner (`kick`, `_loop`; `worker.run_in_background("place")`, its own connection, nice 19) works in rounds of
+  30 s by capture time, newest first, so a photo's next photos were just described and each photo costs one read. It
+  measures outside any transaction and writes one short transaction per photo, which first checks that the items
+  still exist. A photo whose measuring raises stays pending; after 3 failures its pairs are stored as `none`. The
+  thread ends when nothing is pending, and stops for now when the process grew by 2 GB or holds 7 GB. It is started
+  at startup (`place.start` from `ingest.recover_on_startup`), after each analysis and by housekeeping. Nothing runs
+  with the workers off (tests call `run_pending`).
+- After a photo's usable links are written, the photos of those pairs that hold an open box are queued for a fresh
+  guess on the traits runner's queue (`traits.requeue`: one queue for every re-guess).
+- kv `place_ready` holds the rev (`PLACE_REV`) the whole library was last lined up with, and `place.progress` gives
+  `{scanned, eligible, ready, rev, last_error, enabled}` for Settings > Learning. kv `place_rules` holds the rules the
+  open position guesses were made under (`place_match.rules_sig`: the two settings and the constants below); when it
+  differs at startup, the photos whose open guesses have basis `place` or `clothes+place` are guessed again.
+- There is no thread setting: OpenCV's thread count is one number for the whole process.
+
+### Following boxes (`place_match`: arithmetic on the stored links and the photos' current boxes, no pixels)
+
+A unit is one person as a photo shows them: a face (with the person box around it), or a person box without a face.
+Its head point is the face's centre, or for a faceless box the top centre lowered by `HEAD_DOWN` (0.25) of the box's
+width. Its width is `FACE_WIDTHS` (3.2) face widths, or `BOX_WIDTH` (0.875) of the box's width, so the two agree at
+the median.
+
+For a lined-up pair, the head points of the earlier photo are put into the later one through the link
+(`match_pair`). Two units are the same person standing there when all of these hold:
+
+- each is the other's nearest, and the distance over their mean width (the offset) is at most `RESIDUAL_MAX` (0.25),
+  or `RESIDUAL_MAX_BOX` (0.35) when one of them is a faceless box, whose head point is only estimated;
+- their widths, after the link's scale, differ by a factor within `WIDTH_RATIO` (0.6 to 1.67);
+- the second nearest on either side is clearly worse: the offset is at most `SECOND_RATIO` (0.75) of it;
+- their age bands do not differ (section 10: a child next to a parent);
+- their clothes do not say no: when both have a clothes vector, its cosine is at least `CLOTHES_NO` (0.80), or
+  `CLOTHES_NO_MIXED` (0.60) between a face's crop and a faceless box's crop, which are cut differently. Two boxes
+  that both have a person are not held to this.
+
+The arrangement check: when a named person of one photo sits on a different named person of the other, people moved
+around, and the whole pair gives no evidence (`PairMatch.swapped`). An unnamed group sitting on anyone else is no
+evidence either way for that one match (the group may be the same person). Each person found in their own place
+(`kept`) is support for the others.
+
+For an open box, the links are walked both ways from its photo, at most `HOPS` (3) photos away, through boxes nobody
+is named for, to boxes that have a person (`assigned_by` user or auto, as clothes references are). The evidence for a
+person is their best chain: its strength is its weakest link, minus `HOP_COST` (0.4) for each hop after the first. A
+link's strength (`link_llr`) is its tier by the gap, plus `CLOTHES_BONUS` (0.5) when the clothes cosine is 0.85 or
+more, plus `KEPT_BONUS` (0.5) for each other person found in place (1.0 at most), minus `FACELESS_COST` (0.5) when
+either end is a faceless box:
+
+| Gap between the two photos | Strength | Share of right answers measured (two faces) |
+|---|---|---|
+| up to 3 s | 3.9 | 0.985 |
+| up to 10 s | 3.7 | 0.985 |
+| up to 60 s | 2.9 | 0.963 |
+| up to 300 s | 1.2 | 0.83 |
+| a burst (no fit) | 1.2 | not measured |
+
+The strengths are log odds near the lower end of each measured interval. A guess from the position alone needs
+`ADMIT_LLR` (2.9, about 0.95) and a lead of `LEAD_LLR` (2.0) over the runner-up, so the last tier and a burst never
+name anyone alone, with every bonus (1.2 + 0.5 + 1.0): they agree with clothes and break ties. The same holds for a
+link with a faceless box at either end and a gap over `FACELESS_NEAR_S` (10 s): it is never stronger than
+`FACELESS_FAR_LLR` (2.7), because with support it was right 29 times of 31, under the bar.
+
+Left out for a box: people already in the photo, pairs the owner rejected, and for a face anyone its own face
+contradicts (the trait path's veto, section 34).
+
+### Fusion (`place_match.fuse`, in `guess._compute_fused` after the trait step)
+
+`guess._compute` asks for a place context when the photo has a usable link (`place_match.context`). Each box's
+result, after `trait_match.fuse`, goes through `place_match.fuse` inside the same one person per photo loop. First
+rule that applies:
+
+1. A winner from clothes or traits, while the position admits another person (the admission rule, so only with
+   `PLACE_ONLY_GUESSES`; with it off, position only agrees and breaks ties): no guess.
+2. A winner that the position agrees with keeps its score and gains the `place` part; its basis becomes
+   `clothes+place` when it was plain clothes (a basis with `trait` in it stays).
+3. No winner, and a clothes tie inside `MARGIN` that the position backs for exactly one of the tied (strength
+   `TIE_LLR`, 1.0, or more, and nothing for the others): that person, `clothes+place`.
+4. No winner: a guess from the position alone, basis `place`, under the admission rule and `PLACE_ONLY_GUESSES`, and
+   only when the clothes path ranked nobody or ranked that person. Its score is sigmoid(strength), 0.99 at most: the
+   share of right answers measured for its tier, which is why it is shown as a percentage.
+
+The evidence part, in a fixed key order (a guess is rewritten only when its JSON differs): `place: {ref_item_uid,
+ref_face_id, ref_body_id, seconds_apart, ref_before, hops, offset, kind, others, clothes, llr}`: the box the person
+was followed from, the time between the two photos and which came first, the photos walked, the offset of the box's
+own first link in widths, how the chain's weakest link lined up, the other people found in place, and the clothes
+cosine of a direct match. A `place` guess also has `basis`, `score`, `place_llr`, `ref_item_uid`, `ref_face_id`,
+`ref_body_id` and `seconds_apart` at the top. `guess.apply_window_change` keeps `place` guesses (their limits are
+seconds, not the clothes window); `record_outcome` stores a `place` outcome with `place_match.outcome_terms` and adds
+`basis` and `place_llr` to a `clothes+place` outcome; the people learner leaves `place` outcomes out
+(`learning.people.NOT_CLOTHES`, section 18). Nothing is learned from position yet: the outcomes are kept for it.
+
+### Measured on the owner's library (2026-11-13, a snapshot, read-only, pictures at 1024 px)
+
+The library: 17,080 dated photos outside the vault that are not screenshots or documents, 12,668 of them with a box,
+and 28,763 pairs of a photo with one of its next 3 photos within 5 minutes (3 percent in the same second, 16 percent
+1 to 3 s apart, 33 percent 3 to 10 s, 37 percent 10 to 60 s, 11 percent 1 to 5 minutes).
+
+Cost. Describing a photo takes 0.18 s and matching a pair 0.10 s on 2 threads. The runner as a whole took 0.3 to
+0.5 s a photo on 2 threads while other work kept the machine busy (12 cores, load 12 to 15), so lining this library
+up takes 65 to 105 minutes, once; a new photo costs one description and at most 3 matches. The process held 0.3 to
+0.7 GB. The pending query takes 0.1 s.
+
+How often a pair lined up (20 or more inliers; 20, 30 or 50 gave similar results up to 60 s):
+
+| Gap | Pairs with a known person in both photos (2,300, whole library) | All pairs of the newest 1,734 photos (3,381) |
+|---|---|---|
+| under 1 s | 97% | 93% |
+| 1 to 3 s | 95% | 84% |
+| 3 to 10 s | 84% | 63% |
+| 10 to 60 s | 60% | 40% |
+| 1 to 5 min | 28% | 27% |
+
+The camera usually moves: 294 of the 1,784 fits were `still`. The burst rule applied to 4 pairs.
+
+The same spot, pair by pair (whole library, a box whose person is also in the other photo: is the box in the same
+spot that person?), two faces, no clothes. The tiers come from this table:
+
+| Gap | Right of decided | Wilson 95% | Decided of chances |
+|---|---|---|---|
+| under 1 s | 0.988 of 1,620 | 0.981 to 0.992 | 85% |
+| 1 to 3 s | 0.982 of 1,484 | 0.974 to 0.988 | 77% |
+| 3 to 10 s | 0.985 of 960 | 0.976 to 0.991 | 61% |
+| 10 to 60 s | 0.963 of 482 | 0.942 to 0.976 | 47% |
+| 1 to 5 min | 0.833 of 72 | 0.731 to 0.902 | 23% |
+
+With the clothes floor of 0.80: 0.991, 0.987, 0.991, 0.984 and 0.941. With the box treated as faceless (bound 0.35):
+0.986, 0.980, 0.979, 0.918 and 0.758.
+
+End to end with the shipped code (`scripts/place_eval.py`, leave-one-out over 800 boxes that have a person, in the
+lined-up photos; each made open inside a rolled-back transaction, its face evidence and the body traits off). From
+the position alone, clothes path off:
+
+| Box | Gap | Right of decided | Wilson 95% | Where both people are named |
+|---|---|---|---|---|
+| face | up to 3 s | 312 of 319 (0.978) | 0.955 to 0.989 | 248 of 248 |
+| face | up to 10 s | 215 of 226 (0.951) | 0.915 to 0.973 | 181 of 181 |
+| face | up to 60 s | 50 of 52 (0.962) | 0.870 to 0.989 | 45 of 45 |
+| faceless | up to 3 s | 246 of 248 (0.992) | 0.971 to 0.998 | 204 of 204 |
+| faceless | up to 10 s | 185 of 194 (0.954) | 0.914 to 0.975 | 166 of 166 |
+
+Faces were decided 597 times of 800 (75 percent) and faceless boxes 442 times of 698 (63 percent). The bar for
+guesses from the position alone is 0.95 on 20 or more decisions of a tier: these five pass, so `PLACE_ONLY_GUESSES`
+is on. Faceless boxes 10 to 60 s apart were right 29 times of 31 (0.935), under the bar, hence `FACELESS_FAR_LLR`.
+
+What the wrong names were. All 20 wrong answers for faces had a group without a name on at least one side (15 on
+both), in 19 the box's own person was not in the other photo at all, and in 10 the two faces match at the face cut
+of 0.40: one person the clustering split over two groups, which counts as a wrong name here. Among named people
+there was no wrong answer in any mode (1,010 decisions with clothes and position together).
+
+Clothes and position together, against clothes alone, on the same boxes:
+
+| Box | Clothes alone | With position | Among named people |
+|---|---|---|---|
+| face | 563 right of 590 decided (74% of boxes) | 639 of 672 (84%) | 474 of 474, then 519 of 519 |
+| faceless | 518 of 531 (76%) | 574 of 596 (85%) | 458 of 458, then 491 of 491 |
+
+By basis with both on: `clothes+place` 571 of 588 (faces) and 465 of 476 (faceless), most of them clothes ties that
+the position decided; `place` alone 18 of 20 and 10 of 12 (13 of 13 among named people). Box by box, position added
+129 right answers and 21 wrong names, turned 4 wrong clothes answers right and withdrew 3 guesses (1 right, 2 wrong).
+
+Chains. With the person taken off every photo one link around the box, only a chain of two photos can name them:
+199 of 202 for faces (0.985, Wilson 0.957 to 0.995) and 127 of 132 for faceless boxes (measured before the rule for
+gaps over 10 s). Two links around: 17 of 18 and 12 of 12 three-photo chains.
+
+Other findings:
+
+- Movement. Of 855 people seen in three photos in a row with gaps up to 10 s, 727 were found standing still. 39 had
+  moved by more than a quarter of their width between the first two photos, and a straight-line prediction put 1 of
+  them within 0.25 widths of where they were (up to 3 s: 197, 163, 9 and 1). Predicting movement is not built.
+- The head point of a faceless box. In 21,668 person boxes that hold a face, the face's centre is at the middle
+  across (median 0.005 of the width off) and 0.25 of the box's width below the top (half within 0.16 widths, nine
+  in ten within 0.34). By the width, because the height depends on how much of the body is in the frame.
+- Clothes on lined-up pairs. Two face crops of one person are under 0.80 in 6 pairs of 100, of different people in
+  63. A face crop against a box crop: one person under 0.60 in 1 of 100, under 0.70 in 4, under 0.80 in 18;
+  different people in 5, 24 and 72. A floor of 0.70 for that mixed pair removed 15 right answers and 1 wrong one of
+  473, so it is 0.60.
+- Support. Decisions with other people found in place were not more often right (faces: 260 of 273 with them, 317
+  of 324 without; all right among named people either way). The bonuses are small and decide admission only for
+  chains.
+- A rule against faceless boxes cut by the left or right edge of the picture (their width is not the person's) was
+  tried and dropped: it removed 160 decisions, 2 of them wrong.
+
+### Limits
+
+- A box of someone who is not known in the photos around it. No leave-one-out contains one, and every guess for
+  such a box is wrong: a stranger who stands where a known person stood moments before gets that person as a guess.
+  With the person taken off every photo one link around, 34 of 800 faces and 21 of 698 faceless boxes still got a
+  guess from the position alone (in 16 of the 34 the two faces match at 0.40, so about half are split groups).
+- Real open boxes. On the 1,290 lined-up photos of that run, 765 boxes were open (238 faces, 527 faceless). Position
+  changed little: 12 new guesses, 17 clothes guesses backed, 2 withdrawn; 10 guesses came from the position alone,
+  all within 3 s. 25 of the 29 guesses with a position part name a group without a name. Of the 12 new ones, 5 were
+  the same person by eye, 1 was someone who had stepped in close to the camera where another person had stood, and
+  6 were too small or too dark to tell. So most open boxes are people nobody has named, and the real share of right
+  answers will show in the outcomes of confirmed and rejected guesses.
+- People who walk, and gaps over a minute: positions say little (the last tier only supports).
+- People who swap places: the arrangement check sees it only between two named people who are both in both photos.
+- Two cameras at one event have different clocks, so their photos interleave wrongly. Nearly every decision above
+  was between two photos of one camera.
+- Photos only: videos track faces inside a clip already, and have no person boxes.
+- The end-to-end run covers the newest 1,734 photos of the library, the pair table the whole library.
+
+### Not verified
+
+- The burst tier (4 pairs) and the strength of the 1 to 5 minute tier (72 decisions).
+- `CLOTHES_BONUS`, `KEPT_BONUS`, `HOP_COST`, `LEAD_LLR` and `TIE_LLR` are not fitted.
+- A faceless box as the reference (a back view the owner named): the runs made the open box faceless, never the
+  reference.
+- Mirrored pairs (a front camera's photo saved as its mirror image) are not tried.
+- The runner inside the server: OpenCV there uses its default thread count, not the 2 threads of these timings.

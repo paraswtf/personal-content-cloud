@@ -450,8 +450,9 @@ export const api = {
     misclicks: (cursor?: string | null, limit = 60) => get<ItemPage>(`/api/review/misclicks${qs({ cursor, limit })}`),
     /** The flagged forwards, newest first (section 29). */
     forwards: (cursor?: string | null, limit = 60) => get<ItemPage>(`/api/review/forwards${qs({ cursor, limit })}`),
-    /** `basis` (section 34): clothes, or trait (tattoos, nails and mehndi, with or without clothes); all when unset. */
-    guesses: (cursor?: string | null, limit = 60, person?: number, basis?: 'all' | 'clothes' | 'trait') =>
+    /** `basis`: clothes, trait (tattoos, nails and mehndi, with or without clothes, section 34) or place (the
+     *  position, with or without clothes, section 35); all when unset. */
+    guesses: (cursor?: string | null, limit = 60, person?: number, basis?: 'all' | 'clothes' | 'trait' | 'place') =>
       get<GuessPage>(`/api/review/guesses${qs({ cursor, limit, person, basis: basis === 'all' ? undefined : basis })}`),
     duplicates: (cursor?: string | null, limit = 30) => get<DupGroupPage>(`/api/duplicates${qs({ cursor, limit })}`),
     setBest: (uid: string) => post<OkOut>(`/api/duplicates/${enc(uid)}/best`),

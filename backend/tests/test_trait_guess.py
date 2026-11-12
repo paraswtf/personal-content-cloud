@@ -262,7 +262,7 @@ def test_settings_change_requeues_and_withdraws_only_when_switched_off(conn, mon
 def test_outcomes_of_trait_guesses_and_the_people_learner(conn):
     from app.learning import events, people
 
-    assert people.RULES_REV == 3
+    assert people.RULES_REV == 4
     p, _, _, q_item, q_body = _trait_guess(conn)
     rng = np.random.default_rng(0)
     for i in range(40):

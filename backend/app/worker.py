@@ -367,6 +367,12 @@ def _housekeeping(conn: sqlite3.Connection) -> dict[str, int]:
         traits.kick(conn)
     except Exception:  # noqa: BLE001 - body traits never block housekeeping
         log.exception("housekeeping: the body traits upkeep failed")
+    try:
+        from app.analysis import place
+
+        place.kick(conn)  # section 35
+    except Exception:  # noqa: BLE001 - lining photos up never blocks housekeeping
+        log.exception("housekeeping: could not start the place runner")
 
     return out
 

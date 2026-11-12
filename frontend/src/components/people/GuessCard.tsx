@@ -4,20 +4,22 @@
 // person picked, in one step). A clothes guess shows its score ("By clothes, 85% sure") and its line ("25 min apart,
 // same scene 0.86, same clothes 0.91"). Tattoos, nails and mehndi (section 34) show their strongest reason with the
 // two crops side by side, and the other signs folded under "N more signs"; a guess from traits alone says "strong
-// match", never a percentage. With `keys` (the Review page): Enter on the focused Yes confirms (the button's own
+// match", never a percentage. Position (section 35) shows its reason ("In the same spot as Priya 8 s earlier") with
+// the box and the box it was followed from side by side. With `keys` (the Review page): Enter on the focused Yes confirms (the button's own
 // click), Space on any of the three buttons opens the "Someone else" name box with its field focused, X rejects,
 // and Escape in an empty name box closes it and puts focus back on Yes. Nothing fires while typing in the name box.
 import { useEffect, useId, useRef, useState, type KeyboardEvent } from 'react'
 import { Link } from 'react-router'
-import { Check, Hand, PenTool, Shirt, UserRoundPen, X } from 'lucide-react'
+import { Check, Footprints, Hand, PenTool, Shirt, UserRoundPen, X } from 'lucide-react'
 import type { GuessItem } from '../../lib/types'
 import { frameUrl } from '../../lib/api'
 import { formatDuration, personName } from '../../lib/format'
 import { Avatar, Button } from '../ui'
 import OriginIcon from './OriginIcon'
 import PersonPicker, { type PersonChoice } from './PersonPicker'
+import PlaceCompare from './PlaceCompare'
 import TraitCompare from './TraitCompare'
-import { againstReasons, clothesLine, guessIcons, guessLabel, guessSure, traitReasons } from './evidence'
+import { againstReasons, clothesLine, guessIcons, guessLabel, guessSure, placeReason, traitReasons } from './evidence'
 
 export default function GuessCard({
   g,
@@ -97,6 +99,7 @@ export default function GuessCard({
   const reasons = traitReasons(g.guess)
   const lead = reasons[0]
   const clothes = clothesLine(g.guess)
+  const place = placeReason(g.guess)
   const more = [...reasons.slice(1).map((r) => r.text), ...againstReasons(g.guess)]
   const icons = guessIcons(g.kind, g.guess)
   const t = g.box.frame_time_s
@@ -135,6 +138,7 @@ export default function GuessCard({
             {icons.includes('clothes') && <Shirt className="size-3.5 shrink-0" aria-hidden />}
             {icons.includes('tattoo') && <PenTool className="size-3.5 shrink-0" aria-hidden />}
             {icons.includes('hand') && <Hand className="size-3.5 shrink-0" aria-hidden />}
+            {icons.includes('place') && <Footprints className="size-3.5 shrink-0" aria-hidden />}
             {guessLabel(g.kind, g.guess)}, {guessSure(g.guess)}
             {inVideo ? `, at ${formatDuration(t)}` : ''}
           </p>
@@ -150,6 +154,12 @@ export default function GuessCard({
         <div className="flex flex-col gap-2">
           <p className="text-xs text-ink-soft">{lead.text}</p>
           <TraitCompare reason={lead} name={name} onOpenRef={(uid) => onOpenItem(uid)} />
+        </div>
+      )}
+      {place && (
+        <div className="flex flex-col gap-2">
+          <p className="text-xs text-ink-soft">{place.text}</p>
+          <PlaceCompare reason={place} cropUrl={g.box.url} name={name} onOpenRef={(uid) => onOpenItem(uid)} />
         </div>
       )}
       {more.length > 0 && (

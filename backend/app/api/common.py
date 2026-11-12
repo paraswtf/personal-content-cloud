@@ -367,7 +367,22 @@ def guess_out(conn: sqlite3.Connection, row: sqlite3.Row, refs: dict[int, Person
     if ref is None:
         return None
     evidence = json_loads(row["guess_evidence"], {}) or {}
-    return GuessOut(person=ref, score=float(row["guess_score"] or 0), evidence=_with_trait_urls(evidence))
+    return GuessOut(person=ref, score=float(row["guess_score"] or 0),
+                    evidence=_with_place_urls(_with_trait_urls(evidence)))
+
+
+def _with_place_urls(evidence: Any) -> Any:
+    """The evidence with ref_crop_url on its `place` fragment (section 35): the crop of the box the person was
+    followed from. No database query; a box that is gone answers 404 at the crop route."""
+    if not isinstance(evidence, dict) or not isinstance(evidence.get("place"), dict):
+        return evidence
+    frag = dict(evidence["place"])
+    face_id, body_id = frag.get("ref_face_id"), frag.get("ref_body_id")
+    if isinstance(body_id, int) and not isinstance(body_id, bool):
+        frag["ref_crop_url"] = body_url(body_id)
+    elif isinstance(face_id, int) and not isinstance(face_id, bool):
+        frag["ref_crop_url"] = face_url(face_id)
+    return {**evidence, "place": frag}
 
 
 def _with_trait_urls(evidence: Any) -> Any:

@@ -1287,7 +1287,7 @@ def recover_on_startup(conn: sqlite3.Connection) -> None:
     text or streaming copy is pending has its job; queue a reparse of the automatic 'other' documents a
     newer detection rule set now types (kv doc_rules_version, section 30); apply a changed guessing window
     (guess.apply_window_change) and changed body trait settings (trait_match.apply_settings_change), and
-    start the body traits runner (traits.start); when kv probe_version is below probe.PROBE_VERSION, probe again on a
+    start the body traits runner (traits.start) and the place runner (place.start, section 35); when kv probe_version is below probe.PROBE_VERSION, probe again on a
     background thread the plain files whose bytes claim a media type (reprobe_plain); bring stored faces
     up to the current face analysis (app.analysis.face_upkeep.start: analysed videos re-tracked once,
     photo faces measured for clarity); wipe data_dir/tmp."""
@@ -1348,6 +1348,12 @@ def recover_on_startup(conn: sqlite3.Connection) -> None:
         traits.start(conn)
     except Exception:
         log.exception("startup: could not start the body traits runner")
+    try:
+        from app.analysis import place  # section 35: photos taken together are lined up on its own thread
+
+        place.start(conn)
+    except Exception:
+        log.exception("startup: could not start the place runner")
     try:
         from app.media.probe import PROBE_VERSION
 
