@@ -1,0 +1,14 @@
+# The 3D head generator's own environment (scripts/setup_3d.sh installs it into GEN3D_DIR/venv; the app never
+# imports these). Versions are the ones the generator was tested with on Python 3.12.
+torch==2.15.0
+numpy==2.5.4
+pillow==13.0.0
+opencv-python-headless
+onnxruntime==1.31.1
+omegaconf==2.4.0
+einops==0.8.2
+# TripoSR's image encoder is written against the ViT classes of transformers 4.x; 5.x renamed their layers
+transformers==4.49.0
+huggingface-hub
+trimesh==5.2.1
+PyMCubes==0.1.6

@@ -206,7 +206,12 @@ changes. Set it up once:
 scripts/setup_3d.sh
 ```
 
-<!-- scripts/setup_3d.sh: what it downloads, how large it is and the model's licence go here -->
+It installs PyTorch and a few libraries into their own environment (about 6 GB), fetches the TripoSR code at
+a pinned commit and downloads three files, each checked against its checksum: the TripoSR weights (1.7 GB, MIT
+licence, Tripo AI and Stability AI), the U2-Net background cutter (176 MB, Apache 2.0) and one small settings
+file of the image encoder (facebook/dino-vitb16, Apache 2.0). About 8.5 GB in all; to keep it on another disk,
+make `models/gen3d` a link to a folder there first. On an RTX 2080 a head takes about 4 seconds and 2.4 GB of
+GPU memory. `scripts/setup_3d.sh --check` says what is installed.
 
 It lives in `MODELS_DIR/gen3d` (`GEN3D_DIR`). The generator runs only while a model is being made, inside a
 sandbox (`bwrap`) with no network and a read-only filesystem apart from its work folder, because it runs
