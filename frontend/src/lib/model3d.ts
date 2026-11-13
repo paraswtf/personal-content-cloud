@@ -38,9 +38,9 @@ export interface Model3dOptions {
   /** How much the surface is evened out: 0 off, 1 light, 2 normal, 3 strong. */
   smoothing: number
   /** The photo laid over the front of the head: 0 off (colours only); 1 and 2 shrink a photo whose longest side is
-   *  over 1024 or 2048 pixels; 3 keeps the photo's own size. The photo is never enlarged. */
+   *  over 1024 or 2048 pixels; 3 keeps the photo's own size. This step never enlarges the picture it is given. */
   texture: number
-  /** 1: a depth model made for faces shapes the nose, lips and chin, when the server has one. 0: off. */
+  /** 1: a depth model made for pictures of people shapes the nose, lips and chin, when the server has one. 0: off. */
   relief: number
 }
 

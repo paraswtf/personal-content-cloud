@@ -135,6 +135,10 @@ interface StageEvents {
   onView: (view: HeadView) => void
   onState: (state: StageState) => void
   onLost: (lost: boolean) => void
+  /** A look's head was read: whether it has a photo over it that can be drawn. The server may list a look as
+   *  carrying its photo when the picture inside the file cannot be decoded here; the head then shows its own
+   *  colours, and whoever offers a "Photo" switch should know. */
+  onPhoto?: (key: string, drawn: boolean) => void
 }
 
 class HeadStage {
@@ -400,6 +404,7 @@ class HeadStage {
         if (parts.photo) entry.photo = this.photoOf(parts.photo.geometry, parts.photo.map, entry.mesh)
         entry.state = 'ready'
         this.scene.add(entry.mesh)
+        this.events.onPhoto?.(key, entry.photo !== null)
       } catch {
         if (this.disposed || this.entries.get(url) !== entry) return
         entry.state = 'error'
@@ -752,6 +757,7 @@ export default function Head3dViewer({
   spin,
   onSupport,
   onLoadError,
+  onPhoto,
   checking = false,
 }: {
   ref?: Ref<Head3dHandle>
@@ -774,6 +780,9 @@ export default function Head3dViewer({
    *  look (its photo went to the trash or the vault, or the face left the person): the model's status is worth
    *  reading again. */
   onLoadError?: () => void
+  /** A look's head was read: whether a photo is drawn over it. False for a look listed with its photo means the
+   *  picture in its file could not be decoded here. */
+  onPhoto?: (key: string, drawn: boolean) => void
   /** That reading is going on: a head that failed waits for the answer before "Try again" is offered, because a
    *  look that is gone drops out of `looks` instead. */
   checking?: boolean
@@ -791,6 +800,7 @@ export default function Head3dViewer({
   })
   const tellSupport = useStableCallback((ok: boolean) => onSupport?.(ok))
   const tellLoadError = useStableCallback(() => onLoadError?.())
+  const tellPhoto = useStableCallback((key: string, drawn: boolean) => onPhoto?.(key, drawn))
   const active = looks.find((l) => l.key === lookKey) ?? looks[0]
 
   useEffect(() => {
@@ -798,7 +808,7 @@ export default function Head3dViewer({
     if (!el) return
     let made: HeadStage
     try {
-      made = new HeadStage(el, startView.current, { onView: tellView, onState: setState, onLost: setLost })
+      made = new HeadStage(el, startView.current, { onView: tellView, onState: setState, onLost: setLost, onPhoto: tellPhoto })
     } catch {
       setSupported(false)
       tellSupport(false)
@@ -810,7 +820,7 @@ export default function Head3dViewer({
       stage.current = null
       made.dispose()
     }
-  }, [tellView, tellSupport])
+  }, [tellView, tellSupport, tellPhoto])
 
   // These run after the stage is made (effects run in order), and again whenever their value changes.
   useEffect(() => {

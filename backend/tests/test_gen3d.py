@@ -532,8 +532,19 @@ def test_the_viewer_reads_the_heads(tmp_path):
     v, f = _tetra(offset=(10.0, 10.0, 10.0), scale=8.0)  # far from the origin and large: the viewer frames it itself
     glb.write(out / "plain.glb", Mesh(v, f))
     (out / "broken.glb").write_bytes(b"not a glb at all")
+    # a head with its photo, as the job writes one: the finishing's own two-part file. With it the script also runs
+    # its group for the photo layer (without it that group is left out, and nothing here would read such a file)
+    from gen3d import prep
+    from gen3d.finishing import finish_head
+
+    with Image.open(_picture(tmp_path / "photo.png", skin=(190, 140, 110), hair=(40, 30, 20))) as image:
+        image.load()
+    with_photo = finish_head(FAKE.generate(image, {}), prep.whole(image), {"texture": 2})
+    assert with_photo.photo is not None and with_photo.texture is not None
+    glb.write(out / "photo.glb", with_photo)
+    assert len(glb.read(out / "photo.glb")["json"]["meshes"][0]["primitives"]) == 2
     done = subprocess.run([node, str(front / "scripts" / "check-head3d.mjs"), str(out), str(tmp_path / "work")],
                           capture_output=True, text=True, timeout=180, check=False)
     assert done.returncode == 0, done.stdout[-1500:] + done.stderr[-3000:]
-    assert "17 groups passed" in done.stdout
+    assert "Q a head with its photo" in done.stdout and "18 groups passed" in done.stdout
 

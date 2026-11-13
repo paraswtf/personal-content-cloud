@@ -171,8 +171,8 @@ function OptionSliders({
       <p className="mt-1 text-xs text-ink-soft">
         More looks, finer detail and a larger texture take longer and make larger files. Framing is how much of the photo
         around the face is used: a wider frame keeps more of the hair and the shoulders. Smoothing evens out the surface.
-        Face relief uses a depth model made for faces to shape the nose, lips and chin, when it is installed on the
-        server.
+        Face relief uses a depth model made for pictures of people to shape the nose, lips and chin, when it is
+        installed on the server.
       </p>
       {reliefInstalled === false && value.relief > 0 && (
         <p className="mt-1 text-xs text-ink-soft">
@@ -182,7 +182,7 @@ function OptionSliders({
       )}
       <p className="mt-1 text-xs text-ink-soft">
         {value.texture > 0
-          ? "The photo is laid over the front of the head, and the sides and back, which one photo does not show, are filled in. The texture is the photo's own pixels and is never enlarged: full keeps them all, standard and fine shrink a large photo."
+          ? "The photo is laid over the front of the head, and the sides and back, which one photo does not show, are filled in. The texture is the photo at its own resolution: full keeps all of it, standard and fine shrink a large photo."
           : 'With Photo texture off the head has plain colours only, without the photo laid over its front.'}
       </p>
     </div>
@@ -223,6 +223,10 @@ function ModelView({ looks, onLoadError, checking }: { looks: Look3d[]; onLoadEr
   const [light, setLight] = useState<HeadLight>(HEAD_LIGHT)
   const [colour, setColour] = useState(true)
   const [photo, setPhoto] = useState(true)
+  // What the viewer found in each look's file. A look the server lists with its photo may turn out to have none
+  // that this browser can draw (the picture inside does not decode): then there is nothing for a switch to hide.
+  const [drawn, setDrawn] = useState<Record<string, boolean>>({})
+  const onPhoto = (key: string, has: boolean) => setDrawn((d) => (d[key] === has ? d : { ...d, [key]: has }))
   const [spin, setSpin] = useState(false)
   const [can3d, setCan3d] = useState(true)
   const axes = useMemo(() => lookAxes(looks), [looks])
@@ -243,6 +247,8 @@ function ModelView({ looks, onLoadError, checking }: { looks: Look3d[]; onLoadEr
   }
   const taken = formatDate(active.taken_at)
   const note = sentence(active.note)
+  // until the viewer has read the file, the server's word counts
+  const showsPhoto = active.textured === true && drawn[active.key] !== false
 
   return (
     <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_22rem]">
@@ -267,6 +273,7 @@ function ModelView({ looks, onLoadError, checking }: { looks: Look3d[]; onLoadEr
               spin={spin}
               onSupport={setCan3d}
               onLoadError={onLoadError}
+              onPhoto={onPhoto}
               checking={checking}
             />
           </Suspense>
@@ -277,7 +284,7 @@ function ModelView({ looks, onLoadError, checking }: { looks: Look3d[]; onLoadEr
               Open the photo
             </Link>
           </p>
-          {active.textured && (
+          {showsPhoto && (
             <p className="mt-1 text-sm text-ink-soft">
               From the front this is the photo; past about 50 degrees the sides and back are filled in.
             </p>
@@ -409,7 +416,7 @@ function ModelView({ looks, onLoadError, checking }: { looks: Look3d[]; onLoadEr
                 <span className="text-sm font-medium">Colour</span>
                 <Switch checked={colour} onChange={setColour} label="Colour" />
               </div>
-              {active.textured && (
+              {showsPhoto && (
                 <div className="flex items-center justify-between gap-3">
                   <span className={clsx('text-sm font-medium', !colour && 'text-ink-soft')}>Photo</span>
                   {/* without colours there is no photo either: the switch waits, and comes back as it was */}
@@ -422,7 +429,7 @@ function ModelView({ looks, onLoadError, checking }: { looks: Look3d[]; onLoadEr
               </div>
               <p className="mt-1 text-xs text-ink-soft">
                 Drag the head to turn it; scroll or pinch to zoom. With Colour off you see the bare shape.
-                {active.textured && ' With Photo off you see the colours under the photo.'}
+                {showsPhoto && ' With Photo off you see the colours under the photo.'}
               </p>
               <Button variant="secondary" size="sm" className="mt-3" onClick={reset}>
                 <RotateCcw className="size-4" aria-hidden />

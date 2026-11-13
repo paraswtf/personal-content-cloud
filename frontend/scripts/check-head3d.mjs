@@ -293,8 +293,13 @@ const look = (key, file = key, rev = 'r1') => {
   return { key, mesh_url: url, textured: carriesPicture(path.join(GLB, `${file}.glb`)) }
 }
 const BASE = 0.62 / Math.tan((15 * Math.PI) / 180)
-const told = { views: [], states: [], lost: [] }
-const events = { onView: (v) => told.views.push(v), onState: (s) => told.states.push(s), onLost: (l) => told.lost.push(l) }
+const told = { views: [], states: [], lost: [], photos: [] }
+const events = {
+  onView: (v) => told.views.push(v),
+  onState: (s) => told.states.push(s),
+  onLost: (l) => told.lost.push(l),
+  onPhoto: (key, drawn) => told.photos.push([key, drawn]),
+}
 const host = element({ clientWidth: 600, clientHeight: 600, append: (...els) => (host.children = els) })
 const keyOf = (stage, mesh) => [...stage.entries.values()].find((e) => e.mesh === mesh || e.photo === mesh)?.key
 /** The looks drawn in one picture (a head and the photo over it are one look). */
@@ -394,6 +399,8 @@ assert.deepEqual(shownIn(stage, renderer.renders.at(-1)), ['l1'])
 }
 assert.equal(rafs.length, 0, 'nothing is drawn while nothing changes')
 const parts = (key) => (stage.entryOf(key)?.photo ? 'two parts' : 'one part')
+// what the stage tells about a look's photo is what its file turned out to hold
+assert.deepEqual(told.photos.at(-1), ['l1', stage.entryOf('l1').photo !== null])
 ok(`B first look (${parts('l1')}), colours linear, face towards the camera`)
 
 // ---------------------------------------------------------------- C: a cross-fade
@@ -673,6 +680,8 @@ if (existsSync(path.join(GLB, 'photo.glb'))) {
   reduced = true
   const e = stage.entryOf('p1')
   checkPhoto(stage, e)
+  assert.ok(told.photos.some(([key, drawn]) => key === 'p1' && drawn === true), 'the stage says that p1 has its photo')
+  assert.ok(told.photos.some(([key, drawn]) => key === 'plain' && drawn === false), 'and that a head without one has none')
   assert.equal(e.mesh.material, stage.skin, 'under the photo the head keeps its own colours')
   assert.deepEqual(last().visible, [e.mesh, e.photo], 'the head first, then the photo over it')
   // once the texture is on the graphics card, the decoded picture is closed (it holds as much memory again)
@@ -791,6 +800,8 @@ if (existsSync(path.join(GLB, 'photo.glb'))) {
   console.error = say
   assert.deepEqual(told.states.at(-1), { shown: 'dull', fading: false, loading: false, failed: false })
   assert.equal(stage.entryOf('dull').photo, null)
+  // the server lists this look with its photo; the stage says that none is drawn, so no switch is offered for it
+  assert.deepEqual(told.photos.filter(([key]) => key === 'dull'), [['dull', false]])
   assert.equal(stage.entryOf('dull').mesh.material, stage.skin)
   await step()
   assert.equal(last().visible.length, 1, 'never a white sheet in place of the photo')
