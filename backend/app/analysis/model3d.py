@@ -119,6 +119,8 @@ STEP_PHOTOS = "Preparing photos"
 CHILD_SAYS = ("progress:", "made:", "look:")   # the lines of the child's output the watch reads (gen3d/__main__.py)
 CHILD_LINE_MAX = 4096      # bytes of one line of the child's output that are read; the rest of a longer line is skipped
 CHILD_LINES = 1000         # lines the watch may be behind before the child waits
+TAIL_BYTES = 8192          # of the child's error output, from its end, that are read for the reason it gave
+RESULT_MAX_BYTES = 4_000_000   # a result file larger than this is not read (a job of 12 looks writes about 4 kB)
 STEP_BUILD = "Building heads"       # the child's first pass: the model makes every look's raw head
 STEP_FINISH = "Finishing heads"     # its second: each head is smoothed, shaped, given its photo and written
 STEP_SAVE = "Saving"
@@ -436,7 +438,7 @@ def _ask_generator(python: Path) -> dict[str, Any]:
         info = json.loads(lines[-1]) if lines else None
         if not isinstance(info, dict):
             log.warning("3D heads: the generator's check said nothing (exit %s): %s", done.returncode,
-                        done.stderr.decode("utf-8", "replace")[-300:])
+                        _plain(done.stderr[-TAIL_BYTES:].decode("utf-8", "replace"))[-300:])
     except GeneratorMissing as e:
         return {**missing, "reason": str(e)}
     except (OSError, ValueError, subprocess.TimeoutExpired) as e:
@@ -854,12 +856,23 @@ def _cancelled() -> bool:
         return _state is None or bool(_state["cancel"])
 
 
+def _plain(text: str) -> str:
+    """Text from the child as one line of printable characters: what is not printable (control characters, the
+    escape sequences a terminal would act on) becomes a space, and runs of spaces become one."""
+    return " ".join("".join(ch if ch.isprintable() else " " for ch in text).split())
+
+
 def _tail(path: Path, limit: int = 400) -> str:
+    """The last line of the child's error output, as plain printable text. Only the file's last TAIL_BYTES are
+    read: the child runs model code written by others, and its log may be of any size and hold anything."""
     try:
-        text = path.read_text(encoding="utf-8", errors="replace").strip()
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            f.seek(max(0, f.tell() - TAIL_BYTES))
+            text = f.read().decode("utf-8", errors="replace")
     except OSError:
         return ""
-    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    lines = [ln for ln in (_plain(ln) for ln in text.splitlines()) if ln]
     return lines[-1][-limit:] if lines else ""
 
 
@@ -904,9 +917,23 @@ def _run_child(work: Path, job_path: Path, total: int, fake: bool,
                     raw = out.readline(CHILD_LINE_MAX)
                 continue
             line = raw.decode("utf-8", "replace").strip()
-            if line.startswith(CHILD_SAYS):
-                lines.put(line)
-        lines.put(None)
+            if line.startswith(CHILD_SAYS) and not hand(line):
+                return                          # the watch has ended: nobody reads any more
+        hand(None)
+
+    watching = threading.Event()
+    watching.set()
+
+    def hand(line: str | None) -> bool:
+        """Put a line where the watch reads it, waiting while it is CHILD_LINES behind; False once the watch has
+        ended, so that this thread and the child's pipe never stay behind a full queue."""
+        while watching.is_set():
+            try:
+                lines.put(line, timeout=0.5)
+                return True
+            except queue.Full:
+                continue
+        return False
 
     threading.Thread(target=pump, name="pcc-model3d-out", daemon=True).start()
     limit_mb = float(settings.gen3d_max_rss_mb)
@@ -964,6 +991,7 @@ def _run_child(work: Path, job_path: Path, total: int, fake: bool,
             except subprocess.TimeoutExpired:
                 reason = "The generator did not exit and was stopped."
     finally:
+        watching.clear()
         _stop_child(proc)
         with _lock:
             _proc = None
@@ -1051,6 +1079,27 @@ def _glb_doc(path: Path) -> dict[str, Any] | None:
         return None
 
 
+def _names_a_place(value: Any, depth: int = 0) -> bool:
+    """Whether a .glb's description names anything outside the file: a `uri` anywhere in it."""
+    if depth > 40:
+        return True                     # nothing the writer makes is this deep: not looked at further, not trusted
+    if isinstance(value, dict):
+        return "uri" in value or any(_names_a_place(v, depth + 1) for v in value.values())
+    if isinstance(value, list):
+        return any(_names_a_place(v, depth + 1) for v in value)
+    return False
+
+
+def _glb_keeps_to_itself(path: Path) -> bool:
+    """Whether a head file is whole in itself, as every file the generator's writer makes is: a description that
+    reads, and nothing in it that sends a viewer elsewhere for a buffer or a picture (a `uri`). The file comes out
+    of the sandbox, where model code written by others runs without a network. The owner's browser has one: a
+    head whose description named an address would have the viewer fetch it, and could carry a picture out in that
+    request. Such a file is never taken into a model."""
+    doc = _glb_doc(path)
+    return doc is not None and not _names_a_place(doc)
+
+
 def _glb_counts(path: Path) -> tuple[int, int]:
     """(vertices, triangles) of a .glb's first part (the whole surface; a photo layer lies over a share of it), as
     the file says them in its own description; (0, 0) when that cannot be read."""
@@ -1090,8 +1139,7 @@ def _note(value: Any) -> str | None:
     code written by others: nothing but a short printable line is kept."""
     if not isinstance(value, str):
         return None
-    text = " ".join("".join(ch if ch.isprintable() else " " for ch in value).split())
-    return text[:NOTE_MAX] or None
+    return _plain(value)[:NOTE_MAX] or None
 
 
 def _finite(value: Any) -> bool:
@@ -1165,7 +1213,10 @@ def _collect(person_id: int, work: Path, rows: list[dict[str, Any]], plan: looks
     # The result file is read as whatever it turns out to be: the child runs model code written by others, and a
     # value of the wrong kind in it must not cost the heads that were built
     try:
-        result = json.loads((work / "out" / "result.json").read_text(encoding="utf-8"))
+        path = work / "out" / "result.json"
+        if path.stat().st_size > RESULT_MAX_BYTES:
+            raise ValueError("the result file is too large to be one")
+        result = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError, RecursionError) as e:
         if finished is None:
             raise _Failed("The generator left no result.") from e
@@ -1191,15 +1242,27 @@ def _collect(person_id: int, work: Path, rows: list[dict[str, Any]], plan: looks
         mesh = work / "out" / f"{row['key']}.glb"
         if made is None or not mesh.is_file():
             continue
+        if not _glb_keeps_to_itself(mesh):
+            log.warning("3D heads: person %s: the head of look %s is not a file of the kind the generator writes; "
+                        "it is left out", person_id, row["key"])
+            continue
         vertices, faces = _count(made.get("vertices")), _count(made.get("faces"))
         if not vertices:
             vertices, faces = _glb_counts(mesh)
         finishing = _finishing(made, mesh)
+        # the look's small picture first: the child can write in the work folder, and a picture that no longer
+        # reads costs this look only, not the heads beside it
+        try:
+            with Image.open(work / f"{row['key']}.png") as im:
+                im.convert("RGB").resize((PICTURE_SIDE, PICTURE_SIDE), Image.Resampling.LANCZOS).save(
+                    dest / f"{row['key']}.jpg", "JPEG", quality=PICTURE_QUALITY)
+        except (OSError, ValueError, SyntaxError, Image.DecompressionBombError) as e:
+            log.warning("3D heads: person %s: the picture of look %s could not be read (%s); the look is left out",
+                        person_id, row["key"], type(e).__name__)
+            storage.safe_unlink(dest / f"{row['key']}.jpg")
+            continue
         target = dest / f"{row['key']}.glb"
         storage.move_into_place(mesh, target)
-        with Image.open(work / f"{row['key']}.png") as im:
-            im.convert("RGB").resize((PICTURE_SIDE, PICTURE_SIDE), Image.Resampling.LANCZOS).save(
-                dest / f"{row['key']}.jpg", "JPEG", quality=PICTURE_QUALITY)
         kept = {k: v for k, v in row.items() if k not in JOB_ONLY}
         looks.append({**kept, "mesh": target.name, "picture": f"{row['key']}.jpg", "bytes": target.stat().st_size,
                       "vertices": vertices, "faces": faces, **finishing})
