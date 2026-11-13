@@ -8,7 +8,7 @@ app.learning.person_model holds the model; this module applies it to faces that 
   the model gives GUESS_P or more becomes a GUESS (basis 'face'), one per photo. guess_item writes the guess (the
   scan runs it for every photo it picked); the scan itself only takes a face out of its unnamed group first, and
   only when the guess will stand (the group goes when it is left empty; the evidence remembers it, was_person_id).
-  Faces the app put on other NAMED people are never touched: the sure ones are listed in the result ("elsewhere").
+  Faces the app put on other named people are never touched: the sure ones are listed in the result ("elsewhere").
   Nothing is ever tagged here.
 - merge_item(conn, item, boxes, results): the same judgement for the open faces of one item, merged into what the
   clothes and trait paths found (guess.guess_item calls it), so a model guess is recomputed on every run instead of
@@ -17,7 +17,7 @@ app.learning.person_model holds the model; this module applies it to faces that 
   the owner's answer for that face: turned down, taken back, or cleared by any other path (guess_item when the
   model stops naming it or the person is in the photo now, the person deleted or merged, the guess window, the
   vault). left_groups() finds such faces before a guess is cleared. A group that went when the scan left it empty
-  comes back as ONE unnamed person for all its faces (the open guesses that remember it are re-pointed, so later
+  comes back as one unnamed person for all its faces (the open guesses that remember it are re-pointed, so later
   answers find it); a group that got a name meanwhile is never joined: a clear face starts a new unnamed one. No
   matching step, never a named person.
 - withdraw(conn, person_id): takes the model's open guesses back and pauses it (no new guesses until the next look
@@ -492,7 +492,7 @@ def regroup(conn: sqlite3.Connection, faces: list[tuple[int, int]], *, clear_gue
             gone: Any = ()) -> int:
     """(face id, the unnamed person a scan took it out of) for faces that are loose again, the guess turned down,
     taken back or cleared: each goes back to that group when it still exists and still has no name. A group that
-    is gone (it went when it was left empty, or is one of `gone`, about to be deleted) comes back as ONE new
+    is gone (it went when it was left empty, or is one of `gone`, about to be deleted) comes back as one new
     unnamed person for all its faces here, and the open guesses that still remember it are re-pointed to the new
     one, so later answers reuse it. A group that has a name now is never joined: when one of its faces here is
     clear, they start a new unnamed person together, else they stay loose. No new matching: a face is never put

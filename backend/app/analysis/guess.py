@@ -25,7 +25,8 @@ CONTRACT.
   re-guess on the traits runner thread.
 - Recognition trained on one person (section 10, app.learning.person_model): guess_item then asks
   app.analysis.person_scan.merge_item for the trained models' guesses on the item's open faces (basis 'face') and
-  merges them with the result above. Without a model the result is untouched. Such a guess has no time window
+  merges them with the result above (a new face that the automatic matching kept loose for the person,
+  cluster._claim, gets its guess here). Without a model the result is untouched. Such a guess has no time window
   (apply_window_change keeps it), its outcome is recorded with its own terms (record_outcome; the clothes weights
   leave it out). A face a scan took out of an unnamed group for such a guess (evidence was_person_id) goes back
   into that group whenever its guess goes without the owner's answer for it: turned down (reject), cleared by

@@ -21,6 +21,8 @@ export interface RecognitionCheck {
   unclear_positives: number
   unclear_negatives: number
   cuts: RecognitionCut[]
+  /** At the cut where the automatic matching keeps a new face for the person instead of giving it to someone else. */
+  claim?: RecognitionCut | null
 }
 export interface RecognitionScan {
   at: string
