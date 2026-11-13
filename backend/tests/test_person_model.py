@@ -2,8 +2,9 @@
 hand-made face vectors: an identity, a look-alike identity at cosine about 0.7 to it, and strangers.
 
 The training (examples, conflicts, the check, determinism), the scan (what may become a guess and what is never
-touched), guess_item recomputing the guesses, the review actions, the gate in the automatic matching, the routes,
-and what an undo brings back (the pause, the model of a deleted or merged person).
+touched), guess_item recomputing the guesses, the review actions, the automatic matching (the gate, and a face the
+model is sure of kept for the person), the routes, and what an undo brings back (the pause, the model of a deleted
+or merged person).
 """
 from __future__ import annotations
 
@@ -129,6 +130,8 @@ def test_training_examples_conflicts_and_check(conn):
     first = check["cuts"][0]
     assert first["p"] == 0.5 and first["found"] >= 38 and first["mistaken"] <= 1
     assert 0.5 <= model["sure_p"] < 1.0 and model["guess_p"] == 0.5
+    claim = check["claim"]  # what the cut of the automatic matching found and mistook
+    assert claim["p"] == person_model.CLAIM_P == 0.8 and claim["found"] <= first["found"] and claim["mistaken"] <= first["mistaken"]
     assert len(model["w"]) == DIM and len(model["stack"]["w"]) == 5
     loaded = person_model.load(w.me)
     assert loaded is not None and loaded.trained_at == model["trained_at"] and person_model.trained_ids() == [w.me]
@@ -485,16 +488,16 @@ def test_the_gate_keeps_lookalikes_off_the_person(conn):
     w.train()
     gated = options(True)
     assert w.me not in gated[faces[0]] and w.me in gated[faces[1]]
-    assert gated[faces[0]] == [w.twin]  # who the face matched better than the person the model refused stays
-    # the option of the refused person goes with every option ranked after it: no runner-up inherits the face
+    assert gated[faces[0]] == [w.twin]  # other people's options are never the gate's business
+    # only the refused person's option goes: the face takes its next option, as if they had scored under their cut
     with idx.lock:
         idx.sync(conn)
         ids = [faces[0], faces[1]]
         embs, child = idx.embeddings_of(ids), idx.child_flags(ids)
         opts = [[(w.me, 0.6), (w.third, 0.5)], [(w.me, 0.8), (w.third, 0.5)]]
-        assert cluster._drop_gated(idx, ids, embs, child, opts) == [[], [(w.me, 0.8), (w.third, 0.5)]]
+        assert cluster._drop_gated(idx, ids, embs, child, opts) == [[(w.third, 0.5)], [(w.me, 0.8), (w.third, 0.5)]]
         opts = [[(w.third, 0.7), (w.me, 0.6), (w.twin, 0.5)], []]
-        assert cluster._drop_gated(idx, ids, embs, child, opts) == [[(w.third, 0.7)], []]
+        assert cluster._drop_gated(idx, ids, embs, child, opts) == [[(w.third, 0.7), (w.twin, 0.5)], []]
 
 
 def test_new_faces_are_matched_through_the_gate(conn, monkeypatch):
@@ -850,8 +853,11 @@ def test_scan_leaves_a_group_the_owner_said_is_not_the_person(conn):
     assert person_scan.scan(conn, w.me)["guesses"] == 0 and row(conn, later)["person_id"] == other
 
 
-# ------------------------------------------------------------------ the automatic matching, the runner-up
-def test_a_face_the_gate_keeps_off_the_person_goes_to_no_runner_up(conn, monkeypatch):
+# ------------------------------------------------------------------ the automatic matching: the gate's price
+def test_a_face_the_gate_takes_off_the_person_goes_to_its_next_option(conn, monkeypatch):
+    """The gate removes the refused person's option and nothing else, so it can change who a face is tagged as:
+    here a look-alike's face whose best raw score is the person goes to the runner-up, as if the person had
+    scored under their cut. (A face of the person that the model misses pays the same price.)"""
     w = World(conn)
     runner = make_person(conn, "Lena")
     for _ in range(3):
@@ -867,10 +873,214 @@ def test_a_face_the_gate_keeps_off_the_person_goes_to_no_runner_up(conn, monkeyp
         idx.sync(conn)
         plain = cluster._score(idx, cluster._face_rows(conn, [face]), frozenset(without), None)[0]
     assert [pid for pid, _ in plain] == [w.me, runner]
-    got = cluster.assign_new_faces(conn, [face], exclude_face_ids=without)
-    # not the person (the model says no) and not the runner-up either: a clear face nobody takes starts a group
-    assert got[face] not in (None, w.me, runner, w.twin)
-    assert conn.execute("SELECT name FROM persons WHERE id = ?", (got[face],)).fetchone()["name"] is None
+    assert cluster.assign_new_faces(conn, [face], exclude_face_ids=without)[face] == runner
+
+
+# ------------------------------------------------------------------ the automatic matching: a face the model is sure of
+def _options(conn, faces: list[int], exclude: frozenset[int] = frozenset()) -> tuple[dict[int, list[int]], set[int]]:
+    """The people each face may join on the default path (cluster._score), and the faces a model kept."""
+    idx = get_index()
+    claimed: set[int] = set()
+    with idx.lock:
+        idx.sync(conn)
+        rows = cluster._face_rows(conn, faces)
+        out = cluster._score(idx, rows, exclude, conn, claimed=claimed)
+    return {int(r["id"]): [pid for pid, _ in opts] for r, opts in zip(rows, out)}, claimed
+
+
+def _cut_keeps_them_off(monkeypatch, w: World) -> None:
+    """The person's own cut is above what their new faces score (on the owner's library the faces taken off the
+    person raised it), so the plain matching gives such a face to the look-alike, whose cut it clears."""
+    monkeypatch.setattr(cluster, "_learned", lambda pid: 0.95 if pid == w.me else None)
+
+
+def test_a_face_the_model_is_sure_of_is_not_given_to_a_lookalike(conn, monkeypatch):
+    w = World(conn)
+    w.train()
+    _cut_keeps_them_off(monkeypatch, w)
+    face = w.face(w.photo(), w.like_me())
+    clip = w.photo(kind="video")
+    tracks = [w.face(clip, w.like_me()), w.face(clip, w.like_me(), box=(0.6, 0.2, 0.2, 0.3))]
+    lookalike = w.face(w.photo(), w.like_twin())
+    everyone = [face, *tracks, lookalike]
+    # without the claim the look-alike takes all of them
+    monkeypatch.setattr(person_model, "CLAIM_P", 1.01)
+    plain, kept = _options(conn, everyone)
+    assert all(plain[f][0] == w.twin for f in everyone) and kept == set()
+    monkeypatch.undo()
+    _cut_keeps_them_off(monkeypatch, w)
+    options, kept = _options(conn, everyone)
+    assert kept == {face, *tracks} and all(options[f] == [] for f in kept)
+    assert options[lookalike] == plain[lookalike]  # the model is not sure of this one: nothing changes for it
+    people = conn.execute("SELECT COUNT(*) FROM persons").fetchone()[0]
+    got = cluster.assign_new_faces(conn, everyone)
+    assert got[lookalike] == w.twin and [got[f] for f in (face, *tracks)] == [None, None, None]
+    # kept loose: no look-alike, and no new unnamed person either (photo and video)
+    assert all((row(conn, f)["person_id"], row(conn, f)["assigned_by"]) == (None, "auto") for f in (face, *tracks))
+    assert conn.execute("SELECT COUNT(*) FROM persons").fetchone()[0] == people
+    # the guess that follows the analysis offers them to the person
+    assert guess.guess_item(conn, row(conn, face)["item_id"]) == 1 and guess.guess_item(conn, clip) == 2
+    for f in (face, *tracks):
+        pid, by, ev = guessed(conn, f)
+        assert (pid, by, ev["basis"]) == (w.me, "guess", "face") and ev["p"] >= person_model.CLAIM_P
+
+
+def test_a_kept_face_is_the_persons_when_their_cut_lets_it(conn, monkeypatch):
+    """The person is among the face's options: nobody else is any more, so the face is theirs even where a
+    look-alike scored higher. Nothing the plain rules would refuse the person is tagged."""
+    w = World(conn)
+    w.train()
+    monkeypatch.setattr(cluster, "_learned", lambda pid: None)
+    face = w.face(w.photo(), w.like_me())
+    idx = get_index()
+    with idx.lock:
+        idx.sync(conn)
+        ids = [face]
+        embs, child = idx.embeddings_of(ids), idx.child_flags(ids)
+        kept: set[int] = set()
+        opts = [[(w.twin, 0.9), (w.me, 0.8), (w.third, 0.5)]]
+        assert cluster._claim(conn, idx, ids, embs, child, frozenset(), opts, kept) == [[(w.me, 0.8)]] and kept == {face}
+    assert cluster.assign_new_faces(conn, [face])[face] == w.me
+
+
+def test_a_kept_face_stays_loose_when_the_person_is_in_the_photo(conn, monkeypatch):
+    w = World(conn)
+    w.train()
+    monkeypatch.setattr(cluster, "_learned", lambda pid: None)
+    here = w.photo()
+    w.face(here, w.like_me(), w.me, "user")
+    second = w.face(here, w.like_me(), box=(0.6, 0.2, 0.2, 0.3))  # a mirror, a print: the person twice
+    monkeypatch.setattr(person_model, "CLAIM_P", 1.01)
+    assert cluster.assign_new_faces(conn, [second])[second] == w.twin  # the plain matching: the next option
+    with tx(conn):
+        conn.execute("UPDATE faces SET person_id = NULL, assigned_by = 'auto' WHERE id = ?", (second,))
+    monkeypatch.undo()
+    monkeypatch.setattr(cluster, "_learned", lambda pid: None)
+    people = conn.execute("SELECT COUNT(*) FROM persons").fetchone()[0]
+    assert cluster.assign_new_faces(conn, [second])[second] is None
+    assert conn.execute("SELECT COUNT(*) FROM persons").fetchone()[0] == people
+    # no guess either (they are in the photo), and the later passes leave it loose as well
+    assert guess.guess_item(conn, here) == 0 and guessed(conn, second)[0] is None
+    assert cluster.recluster_unassigned(conn) == 0
+    assert (row(conn, second)["person_id"], row(conn, second)["assigned_by"]) == (None, "auto")
+
+
+def test_the_claim_cut_and_who_may_claim(conn, monkeypatch):
+    w = World(conn)
+    w.train()
+    _cut_keeps_them_off(monkeypatch, w)
+    a, b = w.face(w.photo(), w.like_me()), w.face(w.photo(), w.like_me())
+    monkeypatch.setattr(person_model, "CLAIM_P", 1.01)
+    plain, _ = _options(conn, [a, b])
+    monkeypatch.undo()
+    _cut_keeps_them_off(monkeypatch, w)
+    said: dict[int, list[float]] = {}
+    monkeypatch.setattr(person_model.Model, "probability",
+                        lambda self, embs, weights, **k: np.asarray(said[self.person_id][: len(embs)], dtype=np.float64))
+    # under the cut nothing changes, at the cut the face is kept
+    said[w.me] = [0.79, 0.8]
+    options, kept = _options(conn, [a, b])
+    assert kept == {b} and options == {a: plain[a], b: []}
+    # a face the owner said is not the person is never kept for them
+    said[w.me] = [0.99, 0.99]
+    with tx(conn):
+        cluster.record_rejections(conn, [a], w.me)
+    options, kept = _options(conn, [a, b])
+    assert kept == {b} and options[a] == plain[a]
+    # a paused model keeps nothing (it would make no guess for the face), nor does one switched off
+    person_model.pause(conn, w.me)
+    assert _options(conn, [a, b]) == (plain, set())
+    person_model.resume(conn, w.me)
+    assert _options(conn, [a, b])[1] == {b}
+    store.set_enabled(conn, False)
+    assert _options(conn, [a, b]) == (plain, set())
+
+
+def test_two_models_sure_of_one_face(conn, monkeypatch):
+    import dataclasses
+
+    w = World(conn)
+    w.train()
+    mine = person_model.load(w.me)
+    theirs = dataclasses.replace(mine, person_id=w.third)
+    monkeypatch.setattr(person_model, "trained_ids", lambda: [w.me, w.third])
+    monkeypatch.setattr(person_model, "load", lambda pid: {w.me: mine, w.third: theirs}.get(int(pid)))
+    said: dict[int, float] = {}
+    monkeypatch.setattr(person_model.Model, "probability",
+                        lambda self, embs, weights, **k: np.full(len(embs), said[self.person_id]))
+    face = w.face(w.photo(), w.like_me())
+    idx = get_index()
+    opts = [[(w.twin, 0.9), (w.me, 0.8), (w.third, 0.7)]]
+
+    def kept_for() -> list[list[tuple[int, float]]]:
+        with idx.lock:
+            idx.sync(conn)
+            return cluster._claim(conn, idx, [face], idx.embeddings_of([face]), idx.child_flags([face]), frozenset(), opts, None)
+
+    said.update({w.me: 0.85, w.third: 0.95})
+    assert kept_for() == [[(w.third, 0.7)]]  # the higher probability has the face
+    said.update({w.me: 0.95, w.third: 0.85})
+    assert kept_for() == [[(w.me, 0.8)]]
+    said.update({w.me: 0.9, w.third: 0.7})
+    assert kept_for() == [[(w.me, 0.8)]]
+    said.update({w.me: 0.7, w.third: 0.7})
+    assert kept_for() == opts
+
+
+def test_the_claim_leaves_a_child_band_face_to_the_child_rules(conn, monkeypatch):
+    from app.analysis import ages
+    from tests.test_age_matching import CHILD, ready
+
+    w = World(conn)
+    w.train()
+    _cut_keeps_them_off(monkeypatch, w)
+    kid = w.face(w.photo(), w.like_me(), age_groups=ages.encode(CHILD))
+    grown = w.face(w.photo(), w.like_me())
+    ready(conn)  # the ages of the library are read: the child band is in force
+    idx = get_index()
+    idx.sync(conn)
+    assert idx.child_flags([kid, grown]).tolist() == [True, False]
+    monkeypatch.setattr(person_model, "CLAIM_P", 1.01)
+    plain, _ = _options(conn, [kid, grown])
+    monkeypatch.undo()
+    _cut_keeps_them_off(monkeypatch, w)
+    options, kept = _options(conn, [kid, grown])
+    assert kept == {grown} and options[kid] == plain[kid] and options[grown] == []
+
+
+def test_without_a_model_the_matching_is_what_it_was(conn, monkeypatch):
+    w = World(conn)
+    _cut_keeps_them_off(monkeypatch, w)
+    faces = [w.face(w.photo(), w.like_me()), w.face(w.photo(), w.like_twin()), w.face(w.photo(), unit(next(w.seed)))]
+    idx = get_index()
+
+    def scored(**more) -> list[list[tuple[int, float]]]:
+        with idx.lock:
+            idx.sync(conn)
+            return cluster._score(idx, cluster._face_rows(conn, faces), frozenset(), conn, **more)
+
+    kept: set[int] = set()
+    before = scored()
+    assert scored(claimed=kept) == before and kept == set()  # nobody trained
+    w.train()
+    assert scored(claimed=kept) != before and kept == {faces[0]}
+    store.set_enabled(conn, False)  # learning off: the trained recognition has no say
+    kept.clear()
+    assert scored(claimed=kept) == before and kept == set()
+
+
+def test_the_models_reference_leaves_faces_out_on_request(conn):
+    w = World(conn)
+    w.train()
+    model = person_model.load(w.me)
+    get_index().sync(conn)
+    emb = np.frombuffer(row(conn, w.mine[7])["embedding"], dtype=np.float32)[None, :]
+    assert model.top3(emb, conn=conn)[0] > 0.86  # the face itself is among its three best
+    alone = model.top3(emb, exclude_ids={w.mine[7]}, conn=conn)[0]
+    assert alone < model.top3(emb, conn=conn)[0] and alone > 0.7
+    assert model.top3(emb, exclude_ids=frozenset(w.mine), conn=conn)[0] == 0.0  # no reference left
+    assert (model.probability(emb, [1.0], exclude_ids=frozenset(w.mine), conn=conn)[0]
+            < model.probability(emb, [1.0], exclude_ids={w.mine[7]}, conn=conn)[0])
 
 
 # ------------------------------------------------------------------ routes, second part

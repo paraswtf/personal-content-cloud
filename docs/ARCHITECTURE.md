@@ -993,7 +993,7 @@ faces count as negatives). A logistic regression on the 512 values, trained with
   the person's faces of weight > 0 outside the child band, each by its face weight (times 1.5 when the owner assigned
   it). Trusted negatives: faces the owner took off the person (`guess_rejections`), faces the owner assigned to someone
   else, and the other faces of photos (not videos) the person has a face in, except ambiguous ones (top-3 against the
-  person `>= 0.5`: a mirror, a print or a collage shows one person twice) unless such a face sits on another NAMED
+  person `>= 0.5`: a mirror, a print or a collage shows one person twice) unless such a face sits on another named
   person it matches better by 0.05 (an unnamed group may hold the person's own faces, the scan takes them out of
   such groups, so it never makes a face a negative). Never the faces the app put on other people elsewhere, nor
   loose faces: those are what the scan looks at.
@@ -1004,7 +1004,7 @@ faces count as negatives). A logistic regression on the 512 values, trained with
   another: several faces of one look-alike on the person, each other's best matches, would otherwise clear
   themselves and be trained as the person (the first version measured each suspect against all of the person's
   faces; with 27 such faces in the test world 14 were trained as positives). The plain rule of that version (nearer
-  to the negative than the top-3 to ALL the person's other faces) still always counts, and it alone counts when the
+  to the negative than the top-3 to all the person's other faces) still always counts, and it alone counts when the
   rule would set aside more face weight than it keeps: the trusted faces do not stand for the person then (someone
   whose every face resembles a face taken off them, with none locked). Conflicts are left out of the training and of
   the reference and listed for the owner, strongest first. On that person 3,537 of the 5,000 faces the owner did
@@ -1027,7 +1027,8 @@ faces count as negatives). A logistic regression on the 512 values, trained with
   look-alikes.
 - Storage: `learned/person_<id>.json` (`store.save`): `{rev, person_id, trained_at, faces_version, w[512], b,
   stack{w[5], b}, guess_p, sure_p, ref_ids, counts, check{folds, positives, negatives, unclear_*, cuts[{p, found,
-  mistaken, unclear_found, unclear_mistaken}]}, conflicts[{face_id, like_face_id, like_person_id, sim}], scan}`.
+  mistaken, unclear_found, unclear_mistaken}], claim{the same at 0.8}}, conflicts[{face_id, like_face_id,
+  like_person_id, sim}], scan}`.
   Not in `train.LEARNERS`: only the owner trains it. A learning reset removes it; with learning off `load()` answers
   None and nothing below runs. Deleting the person, or merging them into someone else (also by giving them a name
   that exists, and the unnamed look-alike groups a merge pulls along), forgets it: `person_model.forget` hands the
@@ -1082,17 +1083,38 @@ faces count as negatives). A logistic regression on the 512 values, trained with
   forgotten as a place to return to. Never a matching step, never a named person. What is lost when a scan
   empties a group: its id, and with it the merge suggestions the owner turned down for that group against other
   people (the rows cascade with the person).
-- The automatic matching: `cluster._score` (default path) asks the model of each person among a face's options
-  (`_drop_gated`, the option's score as the top-3). When a model gives the face less than 0.2, that option goes and
-  so does every option ranked after it: the face keeps only the people it matched better than the one the model
-  refused. So the model's no never hands a face to a runner-up: a face of the person that the model misses (out of
-  fold, 55 of that person's 5,015 faces fall under 0.2) is left without a person, a clear one starts an unnamed
-  group as any unmatched face does, instead of being tagged as the look-alike who came second. The price: a
-  look-alike's own new face whose best score is the person is not tagged as the look-alike by this pass either; it
-  starts or joins an unnamed group that the merge suggestions offer. What it does not rule out: the person it
-  refused for one face stays free for another face of the same photo. `recluster_unassigned` leaves faces that hold
-  a `face` guess, or any guess on a face a scan took out of a group. The person's learned cut is unchanged, so a new
-  face of theirs under it becomes a guess, not a tag.
+- The automatic matching of new faces (`cluster._score`, default path, faces outside the child band) asks the
+  trained models twice.
+  - The gate (`_drop_gated`): a model that gives a face less than 0.2 (`GATE_P`, the option's score as the top-3)
+    takes its person off that face's options. Only that option goes, and the face takes its next option exactly as
+    if the person had scored under their cut. So the gate can change who a face is tagged as, not only whether it
+    is tagged: a look-alike's own new face whose best raw score is the trained person goes to the look-alike, which
+    is what the gate is for, and a face of the person that the model misses goes to its runner-up too (out of fold,
+    55 of that person's 5,015 faces fall under 0.2). Cutting the list at the refused person instead was tried and
+    dropped: the look-alike's face then had no option left and started a one-face unnamed person each time.
+  - The claim (`_claim`): every model at work (learning on, not paused, its person there) gives each face its
+    probability from its own top-3, whether or not the person is among the face's options. At 0.8 or more
+    (`CLAIM_P`) the face is kept for that person: its options shrink to that person alone when they are among them,
+    and to none when they are not (their learned cut, or the rejected look-alikes rule, kept them out). In the
+    second case the face stays loose, `_apply_item` starts no unnamed person for it (`held`), and the guess that
+    follows the analysis offers it to the person (`merge_item`, basis `face`), for the owner to confirm. Two models
+    sure of one face: the higher probability has it. A face the owner said is not the person is never kept for
+    them. The claim removes other people's options; it tags nothing the plain rules would not let the person have.
+    The check stores what this cut found and mistook (`check.claim`): on that person 4,820 of 5,015 held-out faces
+    (96 percent) with 14 of 5,474 negatives mistaken.
+  - Why the claim: that person's learned cut had risen to 0.7555 and the rejected look-alikes rule removes them
+    as an option for faces that resemble a removed face, so a look-alike with a lower cut won their new faces.
+    Measured by scoring existing automatic faces as if they were new (each batch of 64 left out of the reference,
+    the regression has seen them): of that person's 5,006 automatic faces the plain matching sent 3,292 back to
+    them, 1,277 to someone else and 437 to nobody, and the gate changed none of that. With the claim 3,292 still go
+    to them, 1,520 are kept loose (1,499 of them then get a guess for the person; 21 get none, because a face taken
+    off the person is as near as the person's own, and stay loose), 90 go to someone else and 104 to nobody. Of the
+    12,130 automatic faces on other named people the claim keeps none for that person and the gate takes the
+    person off none, so nothing changes for them.
+  - A kept face that ends without the person (they are in the photo already, or no guess follows) stays loose:
+    `recluster_unassigned` scores through the same rule, and it also leaves faces that hold a `face` guess, or any
+    guess on a face a scan took out of a group. The person's learned cut is unchanged, so a new face of theirs
+    under it becomes a guess, not a tag.
 - A run (`person_scan.start`): training then the scan on one background thread (`worker.run_in_background`, nice 19,
   own connection, nothing journaled), progress in module state; inline with `WORKERS_ENABLED` off. The state of a
   run is lost with the process, so a run leaves a mark in `kv` (`recognition_run:<person>`, `{train, look,
@@ -1264,7 +1286,7 @@ button that opens the box editor at its name field (an editor already open for t
 the field); in the box editor a name picked for boxes holding an open guess (the box, or any track of a whole-video
 group) goes through this route instead of a plain assignment);
 Recognition trained on one person (section 10; people only, 404 for a pet): `GET people/{id}/recognition` ->
-`RecognitionOut {available, reason, learning, trained, trained_at, counts, check{folds: day|photo, ...}, guess_p,
+`RecognitionOut {available, reason, learning, trained, trained_at, counts, check{folds: day|photo, ..., claim}, guess_p,
 sure_p, conflicts, elsewhere, guesses, withdrawn, scan{at, looked, guesses, sure, detached, elsewhere}, running:
 train|scan|null, progress{done, total, step}, error, answers_since, busy}` (`available` follows the count the
 training makes: the face weight of the person's faces outside the child band must reach 20, and `reason` says what
@@ -1688,9 +1710,10 @@ look-alike identity at cosine 0.7 and strangers from hand-made vectors and cover
 also a group of look-alike faces that would vouch for each other, the check and which folding it ran, determinism),
 the scan (what may become a guess, what is never touched, a group the owner said is not the person), `guess_item`
 recomputing the guesses, the review actions, a face going back into its group on every path that clears its guess
-(and an emptied group coming back as one), the gate in the automatic matching and its runner-up, the routes (a lost
-run, the keyset cursor, "Leave", whose run is going), and what an undo brings back (the pause, the model of a deleted
-or merged person).
+(and an emptied group coming back as one), the automatic matching (the gate and what it costs, a face the model is
+sure of kept for the person in photos and videos, the cut, the child band, two models, no model), the routes (a
+lost run, the keyset cursor, "Leave", whose run is going), and what an undo brings back (the pause, the model of a
+deleted or merged person).
 
 ## 17. Build notes
 
@@ -1815,7 +1838,11 @@ Learners (one module each, all pure numpy, all with a `status()` and a `train(co
   weight, checked on days (or, when the days do not spread the faces, photos) it was not trained on. Not in
   `LEARNERS` and not in `signature`: only the owner trains it (`POST /api/people/{id}/recognition/train`). It obeys
   the learning switch and a reset removes it. Its file goes through `undo.discard` when the person is deleted or
-  merged, so the undo of that action brings it back (section 33).
+  merged, so the undo of that action brings it back (section 33). Besides making guesses it has two says in the
+  automatic matching of new faces (`cluster._score`): under `GATE_P` 0.2 the person is no option for the face,
+  and at `CLAIM_P` 0.8 or more nobody else is, so a face the person's learned cut (above) keeps off them stays
+  loose for a guess instead of going to a look-alike with a lower cut. The person's learned cut itself is not
+  touched by the model.
 - `traits.py` (section 34): `params() -> TraitParams` (the tattoo and mehndi tiers, `tattoo_min_inliers`,
   `tattoo_single_min`, `single_pair_ok`, `nail_color_de`, `admission_p`, `source`), the numbers
   `analysis/trait_match.py` reads. Tiers are not fitted in this version: the library has one heavily tattooed

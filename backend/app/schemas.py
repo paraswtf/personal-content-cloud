@@ -771,6 +771,7 @@ class RecognitionCheck(BaseModel):
     unclear_positives: int = 0
     unclear_negatives: int = 0
     cuts: list[RecognitionCut] = []
+    claim: RecognitionCut | None = None  # at the cut where the automatic matching keeps a face for the person
 
 
 class RecognitionProgress(BaseModel):

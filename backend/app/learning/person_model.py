@@ -17,7 +17,7 @@ Examples:
 - trusted negatives: (a) faces the owner took off the person (guess_rejections), (b) faces the owner assigned to
   someone else, (c) the other faces of photos the person has a face in, except ambiguous ones (they look like the
   person at AMBIGUOUS or more: a mirror, a print or a collage shows one person twice) unless such a face sits on
-  another NAMED person it matches better by AMBIGUOUS_LEAD (an unnamed group may hold the person's own faces, so
+  another named person it matches better by AMBIGUOUS_LEAD (an unnamed group may hold the person's own faces, so
   it never makes a face a negative). Never the faces the app put on other people elsewhere, nor loose faces:
   those are what a rescan looks at (app.analysis.person_scan);
 - conflicts: a positive the owner did not lock that looks like an (a) or (b) negative (cosine CONFLICT_SIM or
@@ -25,7 +25,7 @@ Examples:
   faces that are no suspects, and each suspect whose top-3 to the trusted faces reaches its cosine to that
   negative; this repeats until no more suspect is cleared, so suspects never vouch for one another (a group of
   one look-alike's faces on the person would clear itself otherwise). The plain rule (nearer to the negative
-  than its top-3 to ALL of the person's other faces) always counts, and it alone counts when the rule above
+  than its top-3 to all of the person's other faces) always counts, and it alone counts when the rule above
   would set aside more face weight than it keeps: the trusted faces do not stand for the person then. Conflicts
   are left out of the training and of the reference, and listed for the owner to settle.
 
@@ -35,6 +35,11 @@ fifth). A photo without a date folds by itself, and when the days do not spread 
 one day) every photo does: the check records which folding it ran (check.folds, 'day' or 'photo'), and the per-photo
 one is the weaker test, since photos of one day share clothes, light and angle. Everything is deterministic: two
 trainings on the same rows give the same file but for the time.
+
+Three cuts on the probability. GUESS_P: a face that is not the person's becomes a guess (person_scan). GATE_P and
+CLAIM_P are for the automatic matching of new faces (app.analysis.cluster): under GATE_P the person is no option for
+the face; at CLAIM_P or more nobody else is, and a face the person's own cut keeps off them stays loose for a guess
+instead of being tagged as a look-alike. The check stores what CLAIM_P found and mistook (check.claim).
 
 State outside the file: whether the model is paused (its guesses were taken back) is persons.recognition_paused_at,
 a journaled column, so the undo of taking the guesses back un-pauses it. forget() removes the file through
@@ -70,6 +75,9 @@ AMBIGUOUS_LEAD = 0.05
 GUESS_P = 0.5         # a face at this probability or more becomes a guess
 SURE_PRECISION = 0.995
 GATE_P = 0.2          # under this the automatic matching does not put a face on the person (cluster._score)
+CLAIM_P = 0.8         # at this or more the automatic matching keeps the face for the person (cluster._claim): it is
+#                       not given to anyone else, and where the person's own cut keeps it off them it stays loose
+#                       for a guess. The check stores what this cut found and mistook (check.claim)
 UNCLEAR_WEIGHT = 0.5  # faces.CLEAR_WEIGHT: the check reports blurred, small or turned faces apart
 CONFLICTS_KEPT = 500
 _CHUNK = 2048
@@ -80,7 +88,7 @@ Progress = Callable[[int, int, str], None]
 
 _lock = threading.Lock()
 _models: dict[int, "Model"] = {}
-_refs: dict[int, tuple[tuple[Any, ...], tuple[np.ndarray, np.ndarray, np.ndarray]]] = {}
+_refs: dict[int, tuple[tuple[Any, ...], tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]]] = {}
 _listing: tuple[tuple[str, int], list[int]] | None = None
 _clear_weights: dict[int, tuple[tuple[Any, ...], tuple[float, int]]] = {}
 _NAME = re.compile(r"person_(\d+)\.json")
@@ -417,6 +425,7 @@ def train(conn: sqlite3.Connection, person_id: int, progress: Progress | None = 
         "folds": scheme, "positives": int((y == 1).sum()), "negatives": int((y == 0).sum()),
         "unclear_positives": int(((y == 1) & unclear).sum()), "unclear_negatives": int(((y == 0) & unclear).sum()),
         "cuts": [cut(GUESS_P), cut(0.9), cut(sure_p)],
+        "claim": cut(CLAIM_P),  # the cut at which the automatic matching keeps a face for the person
     }
 
     # ---- the model itself: every cleaned row, and the stacker on every out-of-fold row
@@ -477,10 +486,10 @@ class Model:
             sure_p=float(raw.get("sure_p", 1.0)), ref_ids=[int(i) for i in raw.get("ref_ids") or []], raw=raw,
         )
 
-    def reference(self, conn: sqlite3.Connection | None = None) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """(vectors, weights, item ids) of the faces the model was trained on that are still the person's: what a
-        face's top-3 is measured against. With a connection the face index is synced first; without, the caller
-        has synced it."""
+    def reference(self, conn: sqlite3.Connection | None = None) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """(vectors, weights, item ids, face ids) of the faces the model was trained on that are still the
+        person's: what a face's top-3 is measured against. With a connection the face index is synced first;
+        without, the caller has synced it."""
         from app.analysis.index import USER_WEIGHT, get_index
 
         idx = get_index()
@@ -492,16 +501,22 @@ class Model:
                 hit = _refs.get(self.person_id)
             if hit is not None and hit[0] == key:
                 return hit[1]
-            _, emb, weight, user, item = idx.examples_of(self.ref_ids, self.person_id)
+            ids, emb, weight, user, item = idx.examples_of(self.ref_ids, self.person_id)
             keep = weight > 0
-            ref = (emb[keep], (weight[keep] * np.where(user[keep], USER_WEIGHT, 1.0)).astype(np.float32), item[keep])
+            ref = (emb[keep], (weight[keep] * np.where(user[keep], USER_WEIGHT, 1.0)).astype(np.float32), item[keep],
+                   ids[keep])
             with _lock:
                 _refs[self.person_id] = (key, ref)
             return ref
 
-    def top3(self, embs: np.ndarray, *, exclude_items: np.ndarray | None = None,
+    def top3(self, embs: np.ndarray, *, exclude_items: np.ndarray | None = None, exclude_ids: Any = None,
              conn: sqlite3.Connection | None = None) -> np.ndarray:
-        emb, weight, item = self.reference(conn)
+        """Each row's top-3 against the reference. exclude_items: per row, an item whose reference faces do not
+        count for it; exclude_ids: reference faces that count for no row (faces scored as if they were new)."""
+        emb, weight, item, ids = self.reference(conn)
+        if exclude_ids:
+            keep = ~np.isin(ids, np.fromiter((int(i) for i in exclude_ids), dtype=np.int64))
+            emb, weight, item = emb[keep], weight[keep], item[keep]
         q = np.asarray(embs, dtype=np.float32).reshape(-1, DIM)
         return _topk(q, emb, weight, max(1, int(settings.cluster_topk)),
                      None if exclude_items is None else np.asarray(exclude_items, dtype=np.int64), item)
@@ -510,11 +525,12 @@ class Model:
         return np.asarray(embs, dtype=np.float64).reshape(-1, DIM) @ self.w + self.b
 
     def probability(self, embs: np.ndarray, weights: Any, *, exclude_items: np.ndarray | None = None,
-                    top3: Any = None, conn: sqlite3.Connection | None = None) -> np.ndarray:
+                    exclude_ids: Any = None, top3: Any = None, conn: sqlite3.Connection | None = None) -> np.ndarray:
         """P(the face is the person) for each row, from its top-3 against the reference (computed here unless
         given), the regression and its face weight."""
         q = np.asarray(embs, dtype=np.float32).reshape(-1, DIM)
-        t = self.top3(q, exclude_items=exclude_items, conn=conn) if top3 is None else np.asarray(top3, dtype=np.float64).reshape(-1)
+        t = (self.top3(q, exclude_items=exclude_items, exclude_ids=exclude_ids, conn=conn) if top3 is None
+             else np.asarray(top3, dtype=np.float64).reshape(-1))
         feats = _features(t, self.logit(q), np.asarray(weights, dtype=np.float64).reshape(-1))
         return _sigmoid(feats @ self.stack_w + self.stack_b)
 

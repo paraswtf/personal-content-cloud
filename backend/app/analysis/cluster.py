@@ -13,7 +13,9 @@ CONTRACT.
 - merge_suggestions(conn, limit) -> [(a, b, similarity)] with a < b
 - new_person(conn, name) / find_person_by_name(conn, name) / prune_empty_persons(conn, ids) /
   clear_guesses_for(conn, person_ids): person helpers for the pipeline and the people API.
-- Recognition trained on one person (section 10): _drop_gated keeps a face off a person whose model refuses it;
+- Recognition trained on one person (section 10): on the default path of _score, _drop_gated takes a person off
+  a face their model refuses (the face takes its next option), and _claim keeps a face a model is sure of for that
+  person alone: theirs when their cut lets it, else loose for a guess (assign_new_faces starts no person for it).
   clear_guesses_for and merge_persons send a face that a scan took out of an unnamed group back into it when
   they clear its guess, and a merge moves that memory from the sources to the target (person_scan).
 
@@ -283,7 +285,8 @@ def _threshold(row: sqlite3.Row) -> float:
 
 
 def _score(idx: FaceIndex, faces: list[sqlite3.Row], exclude: frozenset[int],
-           conn: sqlite3.Connection | None = None, threshold: float | None = None) -> list[list[tuple[int, float]]]:
+           conn: sqlite3.Connection | None = None, threshold: float | None = None,
+           claimed: set[int] | None = None) -> list[list[tuple[int, float]]]:
     """For each face: the people it may join, best first (score >= the face's cut, or `threshold`
     for every face when given). The cut is the default for the face's quality, moved by what the
     owner taught about the person (section 18): a learned threshold replaces the good-face default
@@ -294,8 +297,11 @@ def _score(idx: FaceIndex, faces: list[sqlite3.Row], exclude: frozenset[int],
     each person's child-band faces only, its cut is settings.cluster_child_threshold plus the same
     low-quality extra (or `threshold` when that is higher), a learned threshold only ever raises it
     (it was learned from adults), and it needs a lead of CHILD_LEAD over the next person (young
-    children, siblings above all, look alike to the face model; settings.child_lead). Call with idx.lock held,
-    after idx.sync."""
+    children, siblings above all, look alike to the face model; settings.child_lead).
+    Recognition trained on one person (section 10) has a say on the default path (conn given, no `threshold`), for
+    faces outside the child band: _drop_gated takes a person off a face their model refuses, and _claim keeps a
+    face a model is sure of for that person alone; the ids of the faces it kept are added to `claimed` when given
+    (the caller must not start a new person for them). Call with idx.lock held, after idx.sync."""
     if not faces:
         return []
     ids = [r["id"] for r in faces]
@@ -328,6 +334,7 @@ def _score(idx: FaceIndex, faces: list[sqlite3.Row], exclude: frozenset[int],
         out = _drop_rejected_lookalikes(conn, embs, out)
         if threshold is None:
             out = _drop_gated(idx, ids, embs, child, out)
+            out = _claim(conn, idx, ids, embs, child, exclude, out, claimed)
     for i, young in enumerate(child):
         if young and out[i]:
             # One option only, with the lead over every other person scored (below the cut too): a best that is
@@ -377,14 +384,15 @@ def _drop_rejected_lookalikes(conn: sqlite3.Connection, embs: np.ndarray,
 
 def _drop_gated(idx: FaceIndex, ids: list[int], embs: np.ndarray, child: np.ndarray,
                 options: list[list[tuple[int, float]]]) -> list[list[tuple[int, float]]]:
-    """Recognition trained on one person (section 10, app.learning.person_model): when the model of a person among
-    a face's options says the face is not them (its score there as the top-3), that option goes, and so does every
-    option ranked after it. The face keeps only the people it matched better than the one the model refused, so
-    the model's no never hands a face to someone it matched less well: a face of the person that the model misses
-    is left without a person (a clear one starts an unnamed group, as any unmatched face does) instead of being
-    tagged as the runner-up, a look-alike. This keeps the look-alikes the owner took off the person from being put
-    back on them. What it does not rule out: the person it refused for one face stays free for another face of
-    the same photo that clears their cut and the model. Faces in the child band are left to the child rules (the
+    """Recognition trained on one person (section 10, app.learning.person_model): an option for a person who has
+    such a model is removed when the model says the face is not them (under GATE_P, the option's score as the
+    top-3). Only that option goes. The face then takes its next option, exactly as if the person had scored under
+    their cut: so this can change who a face is tagged as, not only whether it is tagged. A look-alike's own new
+    face whose best raw score is the trained person goes to the look-alike that way, which is what the gate is
+    for; the price is that a face of the person the model misses (out of fold about 1 in 100 of theirs) goes to
+    its runner-up too. Removing every option ranked after the refused person instead was tried and dropped: such
+    a look-alike's face then had no option left and started a one-face unnamed person each time. A face the model
+    is sure of is the business of _claim, not of this. Faces in the child band are left to the child rules (the
     model knows adults)."""
     try:
         from app.learning import person_model
@@ -400,12 +408,70 @@ def _drop_gated(idx: FaceIndex, ids: list[int], embs: np.ndarray, child: np.ndar
                 if pid in trained and not child[i]:
                     model = person_model.load(pid)
                     if model is not None and not model.gate(embs[i], float(weights[i]), float(score)):
-                        break  # nobody ranked after them inherits the face
+                        continue
                 kept.append((pid, score))
             out.append(kept)
         return out
     except Exception:  # noqa: BLE001 - a trained model never blocks clustering
         log.exception("cluster: the trained recognition gate failed; matching without it")
+        return options
+
+
+def _claim(conn: sqlite3.Connection, idx: FaceIndex, ids: list[int], embs: np.ndarray, child: np.ndarray,
+           exclude: frozenset[int], options: list[list[tuple[int, float]]],
+           claimed: set[int] | None) -> list[list[tuple[int, float]]]:
+    """Recognition trained on one person (section 10): a face that a person's model is sure of is kept for that
+    person. Every model at work (learning on, not paused, its person there) gives each face outside the child band
+    its probability, from the model's own top-3 (the faces in `exclude` left out of its reference, as they are
+    left out of the scores), whether or not the person is among the face's options. At CLAIM_P or more the
+    face's options shrink to that person alone when they are among them, and to none when they are not (their
+    learned cut, or the rejected look-alikes rule, kept them out). In the second case the face must stay loose:
+    its id goes into `claimed`, the caller starts no person for it, and guess_item offers it to the person as a
+    guess (person_scan.merge_item) instead of the automatic matching tagging it as a look-alike with a lower cut.
+    Two models sure of one face: the higher probability has it. A face the owner said is not the person
+    (guess_rejections) is never kept for them. Nothing here tags a face the plain rules would not let the person
+    have: it removes other people's options."""
+    try:
+        from app.learning import person_model
+
+        trained = person_model.trained_ids()
+        if not trained:
+            return options
+        weights = idx.weights_of(ids)
+        rows = [i for i in range(len(ids)) if not child[i] and weights[i] > 0]
+        if not rows:
+            return options
+        marks = ",".join("?" * len(trained))
+        at_work = [int(r[0]) for r in conn.execute(
+            f"SELECT id FROM persons WHERE id IN ({marks}) AND kind = 'person' AND recognition_paused_at IS NULL "
+            "ORDER BY id", trained)]
+        sure: dict[int, list[tuple[float, int]]] = {}
+        for pid in at_work:
+            model = person_model.load(pid)
+            if model is None:
+                continue
+            p = model.probability(embs[rows], weights[rows], exclude_ids=exclude)
+            for k, i in enumerate(rows):
+                if p[k] >= person_model.CLAIM_P:
+                    sure.setdefault(i, []).append((float(p[k]), pid))
+        if not sure:
+            return options
+        face_ids = [int(ids[i]) for i in sure]
+        fmarks = ",".join("?" * len(face_ids))
+        refused = {(int(r[0]), int(r[1])) for r in conn.execute(
+            f"SELECT ref_id, person_id FROM guess_rejections WHERE kind = 'face' AND ref_id IN ({fmarks})", face_ids)}
+        out = list(options)
+        for i, claims in sure.items():
+            claims = [c for c in claims if (int(ids[i]), c[1]) not in refused]
+            if not claims:
+                continue
+            _, pid = max(claims, key=lambda c: (c[0], -c[1]))
+            out[i] = [(q, score) for q, score in options[i] if q == pid]
+            if claimed is not None:
+                claimed.add(int(ids[i]))
+        return out
+    except Exception:  # noqa: BLE001 - a trained model never blocks clustering
+        log.exception("cluster: the trained recognition claim failed; matching without it")
         return options
 
 
@@ -502,8 +568,11 @@ def _eligible(rows: list[sqlite3.Row], exclude: frozenset[int]) -> list[sqlite3.
 def _apply_item(
     conn: sqlite3.Connection, idx: FaceIndex | None, faces: list[sqlite3.Row],
     options: list[list[tuple[int, float]]], taken: set[int], create_people: bool, result: dict[int, int | None],
+    held: set[int] | frozenset[int] = frozenset(),
 ) -> int:
-    """Assign the faces of one item from their options. Returns how many got a person."""
+    """Assign the faces of one item from their options. Returns how many got a person. A face in `held` (kept
+    for a person by their trained model, _claim) that ends without a person starts no new person: it stays loose,
+    for the guess that follows."""
     changed = 0
     if faces[0]["kind"] != "video":
         # One person per photo: best-scoring (face, person) pairs win, the rest take their next option.
@@ -524,7 +593,7 @@ def _apply_item(
             done.add(i)
         if create_people:
             for i, r in enumerate(faces):
-                if i in done or not _clear(r):
+                if i in done or not _clear(r) or r["id"] in held:
                     continue
                 pid = new_person(conn)
                 if _set_person(conn, idx, r["id"], pid):
@@ -536,7 +605,7 @@ def _apply_item(
         for r, opts in zip(faces, options):
             pid: int | None = opts[0][0] if opts else None
             if pid is None:
-                if not (create_people and _clear(r)):
+                if not (create_people and _clear(r)) or r["id"] in held:
                     continue
                 pid = new_person(conn)
             if _set_person(conn, idx, r["id"], pid):
@@ -567,8 +636,9 @@ def _auto_assign(
             for item_id in item_order:
                 # Scored item by item: faces assigned (or people started) for earlier items count.
                 faces = by_item[item_id]
-                options = _score(idx, faces, exclude, conn)
-                changed += _apply_item(conn, idx, faces, options, used[item_id], create_people, result)
+                claimed: set[int] = set()  # faces a trained model keeps for its person (section 10): no new person
+                options = _score(idx, faces, exclude, conn, claimed=claimed)
+                changed += _apply_item(conn, idx, faces, options, used[item_id], create_people, result, held=claimed)
             if changed:
                 bump_faces_version(conn)
             log.debug("auto-assigned %d of %d faces", changed, len(eligible))
@@ -588,7 +658,9 @@ def assign_new_faces(conn: sqlite3.Connection, face_ids: list[int],
     settings.cluster_match_threshold for a clear face to settings.cluster_match_threshold_low as its
     face weight falls). In a photo one person appears at most once. Otherwise a clear face
     (faces.is_clear_face) starts a new unnamed person; other faces stay unassigned (a blurred, masked
-    or turned-away face never starts a person).
+    or turned-away face never starts a person). A face that a model trained on one person is sure of
+    (section 10, _claim) goes to that person or stays unassigned, for the guess that follows: it joins
+    nobody else and starts no person.
     Returns {face_id: person_id | None}. The faces must be in the database already (the index syncs
     inside the same transaction)."""
     return _auto_assign(conn, face_ids, exclude_face_ids, create_people=True)
