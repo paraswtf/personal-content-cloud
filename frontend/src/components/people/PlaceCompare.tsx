@@ -23,7 +23,8 @@ export default function PlaceCompare({
   className?: string
 }) {
   const refCaption = reason.when ? `${name}, ${reason.when}` : name
-  const caption = clsx('mt-1 max-w-[72px] truncate text-[11px]', dark ? 'text-white/60' : 'text-ink-soft')
+  // two short lines at most: "NAME, 8 s earlier" must not be cut to "NAME, 8 s e..."
+  const caption = clsx('mt-1 line-clamp-2 max-w-28 text-center text-[11px] leading-tight', dark ? 'text-white/60' : 'text-ink-soft')
   const refUid = reason.refItemUid
   const ref = <Crop key={reason.refCropUrl} src={reason.refCropUrl} alt={`${name} in the other photo`} dark={dark} />
   return (
