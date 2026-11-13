@@ -614,7 +614,7 @@ is tedious. So the item detail of a video groups its tracks and the viewer edits
   (faces by face embedding, bodies by torso, animals by crop embedding, never across kinds), else start one.
   Groups are numbered in order of first appearance.
 - The viewer's strip ("People and pets in this video") shows one chip per group with the number of tracks
-  ("Paras, 4 tracks"; "Not tagged, 3 tracks"), seeks to the group's first track, and its edit control opens
+  ("Priya, 4 tracks"; "Not tagged, 3 tracks"), seeks to the group's first track, and its edit control opens
   the editor in group scope: assign to a person, name, not this person, confirm or reject a guess and remove
   apply to every track of the group (`POST /api/faces/assign`, `/api/bodies/assign`, `/api/animals/assign`,
   the guess routes and the delete routes already take lists or are called per id). The editor says "Applies to
