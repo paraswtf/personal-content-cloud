@@ -31,7 +31,11 @@ def groups(index: int) -> bytes:
 
 @pytest.fixture(autouse=True)
 def _fresh_state(monkeypatch):
-    """The job's state and the remembered generator check are module globals: no test inherits another's."""
+    """The job's state and the remembered generator check are module globals: no test inherits another's. And the
+    people here are made of noise pictures: these tests are about the job, not about reading looks, so the
+    models that read hair and faces stay off even where they are installed (with them no look is found in noise,
+    and every job test failed in a checkout that has the models)."""
+    monkeypatch.setenv("PCC_NO_MODELS", "1")
     monkeypatch.setattr(model3d, "_state", None)
     monkeypatch.setattr(model3d, "_proc", None)
     monkeypatch.setattr(model3d, "_check", None)

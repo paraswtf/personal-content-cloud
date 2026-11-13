@@ -12,6 +12,13 @@ from app.db import kv_set, tx
 from tests.helpers import make_body, make_face, make_item, make_person
 
 
+@pytest.fixture(autouse=True)
+def _no_models(monkeypatch):
+    """The faces here are rows with made-up pictures. With the installed models reading them the plans come out
+    empty, so every test runs as the module says: without any model, also in a checkout that has them."""
+    monkeypatch.setenv("PCC_NO_MODELS", "1")
+
+
 def reading(face_id: int, *, age: float = 30.0, hair: float | None = 0.6, facial: float | None = 0.5,
             faults: tuple[str, ...] = (), day: str = "2024-05-01", size: int = 400, yaw: float | None = 0.0,
             weight: float = 1.0, child: bool = False, year: float | None = 2024.3, expected: float | None = None,
