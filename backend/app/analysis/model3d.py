@@ -74,6 +74,7 @@ import re
 import shutil
 import signal
 import sqlite3
+import stat
 import struct
 import subprocess
 import sys
@@ -856,15 +857,31 @@ def _cancelled() -> bool:
         return _state is None or bool(_state["cancel"])
 
 
+ESCAPES = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b[@-_]")   # what a terminal would act on: colours, cursor moves
+
+
 def _plain(text: str) -> str:
-    """Text from the child as one line of printable characters: what is not printable (control characters, the
-    escape sequences a terminal would act on) becomes a space, and runs of spaces become one."""
-    return " ".join("".join(ch if ch.isprintable() else " " for ch in text).split())
+    """Text from the child as one line of printable characters: a terminal's escape sequences are taken out
+    whole, any other character that is not printable becomes a space, and runs of spaces become one."""
+    return " ".join("".join(ch if ch.isprintable() else " " for ch in ESCAPES.sub("", text)).split())
+
+
+def _own_file(path: Path) -> bool:
+    """Whether `path` is a plain file of its own: there, regular, and not a link. Everything the server reads from
+    a job's work folder once the child is gone is asked this first. The child can write in that folder, and a
+    named pipe in a file's place would hold the job for ever, a link would have the server read another file
+    (its last line into the tab, its bytes into a model)."""
+    try:
+        return stat.S_ISREG(os.lstat(path).st_mode)
+    except OSError:
+        return False
 
 
 def _tail(path: Path, limit: int = 400) -> str:
     """The last line of the child's error output, as plain printable text. Only the file's last TAIL_BYTES are
     read: the child runs model code written by others, and its log may be of any size and hold anything."""
+    if not _own_file(path):
+        return ""
     try:
         with open(path, "rb") as f:
             f.seek(0, os.SEEK_END)
@@ -943,6 +960,12 @@ def _run_child(work: Path, job_path: Path, total: int, fake: bool,
     finished: set[str] = set()
     made = 0
     ended = False
+
+    def done_look(line: str) -> None:
+        words = line.split()
+        if len(words) >= 3 and words[2] == "ok":
+            finished.add(words[1])
+
     try:
         while not ended:
             try:
@@ -966,9 +989,7 @@ def _run_child(work: Path, job_path: Path, total: int, fake: bool,
                 _set(step=STEP_BUILD, done=min(made, total), total=total)
             elif line.startswith("look:"):
                 last_look = time.monotonic()
-                words = line.split()
-                if len(words) >= 3 and words[2] == "ok":
-                    finished.add(words[1])
+                done_look(line)
             if ended:
                 break
             if stopped():
@@ -985,6 +1006,16 @@ def _run_child(work: Path, job_path: Path, total: int, fake: bool,
                 limit = f"{int(timeout // 60)} minutes" if timeout >= 120 else f"{int(timeout)} seconds"
                 reason = f"A head took longer than {limit} and the generator was stopped."
                 break
+        if reason is not None:
+            # Stopped at a limit. The watch reads one line a pass, so lines the child had already said may still
+            # wait in the queue: a head whose line is among them is finished and whole, and is kept like the rest
+            while True:
+                try:
+                    line = lines.get_nowait()
+                except queue.Empty:
+                    break
+                if line and line.startswith("look:"):
+                    done_look(line)
         if ended:  # it closed its output: let it exit by itself, so its exit code is its own
             try:
                 proc.wait(EXIT_WAIT_S)
@@ -1079,6 +1110,35 @@ def _glb_doc(path: Path) -> dict[str, Any] | None:
         return None
 
 
+def _glb_one_description(path: Path) -> dict[str, Any] | None:
+    """A .glb's description when the file is laid out as the generator's writer lays one out, else None: a plain
+    file of its own, the header's length the file's own, the description as the first chunk and no second one, and
+    the chunks ending exactly where the file ends. three.js keeps the last description of a file that has several,
+    so a check of the first alone could be led past with a second one behind the data."""
+    if not _own_file(path):
+        return None
+    try:
+        size = os.lstat(path).st_size
+        with open(path, "rb") as f:
+            magic, _version, total = struct.unpack("<III", f.read(12))
+            if magic != 0x46546C67 or total != size:
+                return None
+            at, doc = 12, None
+            while at < size:
+                f.seek(at)
+                length, kind = struct.unpack("<II", f.read(8))
+                if (at == 12) != (kind == 0x4E4F534A):       # the description first, and only once
+                    return None
+                if at == 12:
+                    if length > 4_000_000:
+                        return None
+                    doc = json.loads(f.read(length).decode("utf-8"))
+                at += 8 + length
+        return doc if at == size and isinstance(doc, dict) else None
+    except (OSError, ValueError, struct.error, RecursionError):
+        return None
+
+
 def _names_a_place(value: Any, depth: int = 0) -> bool:
     """Whether a .glb's description names anything outside the file: a `uri` anywhere in it."""
     if depth > 40:
@@ -1095,8 +1155,9 @@ def _glb_keeps_to_itself(path: Path) -> bool:
     reads, and nothing in it that sends a viewer elsewhere for a buffer or a picture (a `uri`). The file comes out
     of the sandbox, where model code written by others runs without a network. The owner's browser has one: a
     head whose description named an address would have the viewer fetch it, and could carry a picture out in that
-    request. Such a file is never taken into a model."""
-    doc = _glb_doc(path)
+    request. Such a file is never taken into a model. The description that is checked is the only one the file
+    has (_glb_one_description): a viewer that meets two reads the last."""
+    doc = _glb_one_description(path)
     return doc is not None and not _names_a_place(doc)
 
 
@@ -1214,6 +1275,8 @@ def _collect(person_id: int, work: Path, rows: list[dict[str, Any]], plan: looks
     # value of the wrong kind in it must not cost the heads that were built
     try:
         path = work / "out" / "result.json"
+        if not _own_file(path):
+            raise ValueError("there is no result file, or it is not a file of its own")
         if path.stat().st_size > RESULT_MAX_BYTES:
             raise ValueError("the result file is too large to be one")
         result = json.loads(path.read_text(encoding="utf-8"))
@@ -1240,7 +1303,7 @@ def _collect(person_id: int, work: Path, rows: list[dict[str, Any]], plan: looks
     for row in rows:
         made = built.get(row["key"])
         mesh = work / "out" / f"{row['key']}.glb"
-        if made is None or not mesh.is_file():
+        if made is None or not _own_file(mesh):
             continue
         if not _glb_keeps_to_itself(mesh):
             log.warning("3D heads: person %s: the head of look %s is not a file of the kind the generator writes; "
@@ -1253,6 +1316,8 @@ def _collect(person_id: int, work: Path, rows: list[dict[str, Any]], plan: looks
         # the look's small picture first: the child can write in the work folder, and a picture that no longer
         # reads costs this look only, not the heads beside it
         try:
+            if not _own_file(work / f"{row['key']}.png"):
+                raise OSError("not a file of its own")
             with Image.open(work / f"{row['key']}.png") as im:
                 im.convert("RGB").resize((PICTURE_SIDE, PICTURE_SIDE), Image.Resampling.LANCZOS).save(
                     dest / f"{row['key']}.jpg", "JPEG", quality=PICTURE_QUALITY)

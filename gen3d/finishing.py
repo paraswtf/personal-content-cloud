@@ -810,9 +810,12 @@ def finish_head(mesh: Mesh, prepared: Any | None, options: dict[str, Any] | None
         except Exception as e:  # noqa: BLE001 - the head keeps the surface it had, and still gets its photo
             moved, reshape_note = None, f"{type(e).__name__}: {e}"[:300]
         if moved is not None and moved is not vertices:
-            moved = np.asarray(moved, dtype=np.float64)
-            if moved.shape == vertices.shape and np.isfinite(moved).all():
-                vertices = press_base(taubin(moved, graph, rounds_for(RESHAPED_ROUNDS, scale)), level)
+            try:
+                taken = np.asarray(moved, dtype=np.float64)
+            except (TypeError, ValueError):     # not numbers at all: a word, lists of unequal length
+                taken = None
+            if taken is not None and taken.shape == vertices.shape and np.isfinite(taken).all():
+                vertices = press_base(taubin(taken, graph, rounds_for(RESHAPED_ROUNDS, scale)), level)
                 reshaped = True
             else:
                 reshape_note = "the stage returned something that is not this surface"

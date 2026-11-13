@@ -961,6 +961,153 @@ def test_a_head_file_that_names_an_address_is_never_taken_into_a_model(conn, fak
     assert model3d._names_a_place(deep) is True                            # deeper than the writer ever goes: not trusted
 
 
+def test_a_head_file_with_more_than_its_one_description_is_never_taken(conn, fake, monkeypatch, tmp_path):
+    """A viewer that meets two descriptions in a file reads the last one (three.js does). So the description the
+    server checks must be the only one the file has, and the file must be laid out as the writer lays one out."""
+    import struct
+
+    person, _items = person_with_looks(conn)
+    model3d.start(conn, person, {})
+    good = (model3d.person_dir(person) / model3d.manifest(person)["rev"] / "l1.glb").read_bytes()
+    n_json = struct.unpack_from("<I", good, 12)[0]
+    doc = json.loads(good[20:20 + n_json])
+    doc["images"] = [{"uri": "https://example.invalid/out.jpg"}]
+    second = json.dumps(doc, separators=(",", ":")).encode()
+    second += b" " * (-len(second) % 4)
+
+    def sized(body: bytes) -> bytes:
+        return struct.pack("<III", 0x46546C67, 2, 12 + len(body)) + body
+
+    body = good[12:]
+    files = {
+        "as written": good,
+        "a second description behind the data": sized(body + struct.pack("<II", len(second), 0x4E4F534A) + second),
+        "bytes after the last chunk": sized(body + b"\0\0\0\0"),
+        "a length that is not the file's": good[:8] + struct.pack("<I", len(good) - 4) + good[12:],
+        "the data before the description": sized(body[8 + n_json:] + body[:8 + n_json]),
+        "cut short": good[:len(good) // 2],
+        "a header and nothing": good[:12],
+    }
+    for name, data in files.items():
+        path = tmp_path / "head.glb"
+        path.write_bytes(data)
+        assert model3d._glb_keeps_to_itself(path) is (name == "as written"), name
+    assert model3d._glb_doc(tmp_path / "head.glb") is None                 # the last of them reads as nothing anywhere
+    # through the job: the look whose head grew a second description is left out, the other is kept
+    real = model3d._run_child
+
+    def run(work, job_path, total, fake_run, stopped=None):
+        out = real(work, job_path, total, fake_run, stopped)
+        (work / "out" / "l2.glb").write_bytes(files["a second description behind the data"])
+        return out
+
+    monkeypatch.setattr(model3d, "_run_child", run)
+    model3d.start(conn, person, {})
+    assert [lk["key"] for lk in model3d.manifest(person)["looks"]] == ["l1"]
+
+
+def test_a_pipe_or_a_link_in_a_files_place_is_not_read(conn, fake, monkeypatch, tmp_path):
+    """The child can write in the job's work folder. What the server reads from there once the child is gone must
+    be a plain file of its own: a named pipe would hold the job for ever, and a link would have the server read
+    another file, its last line into the tab or its bytes into a model."""
+    secret = tmp_path / "elsewhere.env"
+    secret.write_text("NAME=value\nTOKEN=not-for-the-tab\n")
+    os.mkfifo(tmp_path / "pipe")
+    os.symlink(secret, tmp_path / "link")
+    os.symlink(tmp_path / "nothing", tmp_path / "dangling")
+    assert model3d._own_file(secret)
+    for name in ("pipe", "link", "dangling", "missing", "."):
+        assert not model3d._own_file(tmp_path / name), name
+    got: list = []
+    reader = threading.Thread(target=lambda: got.extend([model3d._tail(tmp_path / "pipe"), model3d._tail(tmp_path / "link")]),
+                              daemon=True)
+    reader.start()
+    reader.join(5)
+    assert not reader.is_alive() and got == ["", ""]                       # no waiting at the pipe, nothing of the other file
+
+    person, _items = person_with_looks(conn)
+    real = model3d._run_child
+
+    def swapping(change):
+        def run(work, job_path, total, fake_run, stopped=None):
+            out = real(work, job_path, total, fake_run, stopped)
+            change(work)
+            return out
+        return run
+
+    def result_is_a_link(work):
+        kept = work / "kept.json"
+        os.replace(work / "out" / "result.json", kept)
+        os.symlink(kept, work / "out" / "result.json")
+
+    def picture_is_a_pipe(work):
+        (work / "l1.png").unlink()
+        os.mkfifo(work / "l1.png")
+
+    def head_is_a_link(work):
+        kept = work / "kept.glb"
+        os.replace(work / "out" / "l2.glb", kept)
+        os.symlink(kept, work / "out" / "l2.glb")
+
+    for change, looks, error in ((result_is_a_link, None, "The generator left no result."),
+                                 (picture_is_a_pipe, ["l2"], None), (head_is_a_link, ["l1"], None)):
+        model3d.remove(conn, person)
+        monkeypatch.setattr(model3d, "_run_child", swapping(change))
+        done: list = []
+        job = threading.Thread(target=lambda: done.append(model3d.start(conn, person, {})), daemon=True)
+        job.start()
+        job.join(60)
+        assert not job.is_alive(), change.__name__                        # never held at a pipe
+        status = model3d.status(conn, person)
+        assert status["error"] == error, change.__name__
+        assert "not-for-the-tab" not in json.dumps(status)
+        doc = model3d.manifest(person)
+        assert (None if doc is None else [lk["key"] for lk in doc["looks"]]) == looks, change.__name__
+        if doc is not None:
+            folder = model3d.person_dir(person) / doc["rev"]
+            assert not any(p.is_symlink() for p in folder.iterdir())
+    # the child itself puts a link in the place of its error output and fails: the reason the tab gets is its exit
+    # code, and not the last line of the other file
+    model3d.remove(conn, person)
+    monkeypatch.setattr(model3d, "_run_child", real)
+    code = "import os, sys; log = sys.argv[1]; os.unlink(log); os.symlink(sys.argv[2], log); sys.exit(4)"
+    monkeypatch.setattr(model3d, "_command",
+                        lambda args, work, fake_run: [sys.executable, "-c", code, str(work / "stderr.log"), str(secret)])
+    model3d.start(conn, person, {})
+    assert model3d.status(conn, person)["error"] == "The generator stopped with an error (exit 4)."
+
+
+def test_heads_whose_lines_wait_behind_others_are_kept_when_a_limit_stops_the_child(conn, fake, monkeypatch):
+    """The watch reads one line a pass. When a limit stops the child, the lines it had already said are still read:
+    a head whose "look:" line waited behind three hundred others is finished and whole, and becomes the model."""
+    person, _items = person_with_looks(conn)
+    code = (
+        "import json, sys, time\n"
+        "from pathlib import Path\n"
+        "from PIL import Image\n"
+        "from gen3d import glb\n"
+        "from gen3d.backends import get\n"
+        "from gen3d.mesh import finish\n"
+        "job = json.loads(Path(sys.argv[1]).read_text())\n"
+        "look = job['looks'][0]\n"
+        "head = finish(get('fake').generate(Image.open(look['image']), {}))\n"
+        "glb.write(Path(job['out_dir']) / (look['key'] + '.glb'), head)\n"
+        "sys.stdout.write('progress: 0/2\\n' * 300 + 'look: %s ok 0.1\\n' % look['key'] + 'progress: 1/2\\n')\n"
+        "sys.stdout.flush()\n"
+        "time.sleep(120)\n")
+    monkeypatch.setattr(model3d, "_command", lambda args, work, fake_run: [sys.executable, "-c", code, args[1]])
+
+    def over_the_limit(pid):
+        time.sleep(0.5)             # the reader has put every line in the queue by the time the limit is seen
+        return 10.0 ** 6
+
+    monkeypatch.setattr(model3d, "tree_rss_mb", over_the_limit)
+    model3d.start(conn, person, {})
+    status = model3d.status(conn, person)
+    assert "more memory" in status["error"]                               # the rest is missing, and that is said
+    assert [lk["key"] for lk in status["looks"]] == ["l1"]                # the head that was finished is the model
+
+
 def test_a_picture_that_no_longer_reads_costs_its_look_only(conn, fake, monkeypatch):
     person, _items = person_with_looks(conn)
     real = model3d._run_child
@@ -1004,7 +1151,7 @@ def test_only_the_end_of_the_childs_error_output_is_read(conn, fake, monkeypatch
     with monkeypatch.context() as patch:
         patch.setattr("builtins.open", spy)
         said = model3d._tail(log_file)
-    assert said == "[31mRuntimeError: [0m the model ran out of memory"     # one printable line, no control characters
+    assert said == "RuntimeError: the model ran out of memory"            # one printable line, the colours taken out whole
     assert opened and sum(opened) <= model3d.TAIL_BYTES                   # not the five megabytes before it
     assert model3d._tail(tmp_path / "missing.log") == ""
     (tmp_path / "empty.log").write_bytes(b"\n\n")
@@ -1018,7 +1165,7 @@ def test_only_the_end_of_the_childs_error_output_is_read(conn, fake, monkeypatch
     monkeypatch.setattr(model3d, "_command", lambda *_a, **_k: [sys.executable, "-c", code])
     model3d.start(conn, person, {})
     error = model3d.status(conn, person)["error"]
-    assert "ValueError: no weights" in error and "\x1b" not in error and len(error) < 500
+    assert error == "The generator stopped with an error: ValueError: no weights."
 
 
 def test_a_result_file_too_large_to_be_one_is_not_read(conn, fake, monkeypatch):

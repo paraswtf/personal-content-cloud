@@ -4013,12 +4013,19 @@ triangle counts are then taken from the file itself, the generator's name and ve
 and the reason no head could be built is one short printable line. The child's output is read with the same care:
 the watch takes at most 4096 bytes of a line and skips the rest, passes on only the three kinds of line the contract
 has, and lets the child wait at its pipe when it is a thousand lines ahead, so nothing the model code prints can
-pile up in the server; the thread that reads ends with the watch, also behind a full queue. Of the child's error
-output only the last 8 kB are read for the reason it gave, as one printable line, and a result file over 4 MB is
-not read at all.
+pile up in the server; the thread that reads ends with the watch, also behind a full queue. When a limit stops the
+child, the lines it had already said are still read, so a head whose `look:` line waited behind others is kept. Of
+the child's error output only the last 8 kB are read for the reason it gave, as one printable line with a terminal's
+escape sequences taken out, and a result file over 4 MB is not read at all. And whatever the server reads from the
+work folder once the child is gone (the result file, the error output, a look's picture, a head) must be a plain file
+of its own: the child can write in that folder, a named pipe in a file's place would hold the job for ever, and a
+link would have the server read another file, its last line into the tab or its bytes into a model.
 
-A head file is taken into a model only when it is whole in itself: its description reads, and nothing in it names an
-address (a `uri`, anywhere) for a buffer or a picture. Every file the generator's writer makes is like that. The
+A head file is taken into a model only when it is whole in itself: it is laid out as the writer lays one out (the
+header's length is the file's, the description is the first chunk and the only one, the chunks end where the file
+ends), its description reads, and nothing in it names an address (a `uri`, anywhere) for a buffer or a picture. Every
+file the generator's writer makes is like that. The layout matters because a viewer that meets two descriptions in a
+file reads the last, so a check of the first alone could be led past. The
 reason is the sandbox's promise. The model code has no network, but the owner's browser has one, and a viewer follows
 an address that a file's description names: a head that named one would have the tab fetch it, and such a request
 could carry a picture out. So the server leaves such a file out of the model, and the viewer has a second lock: its

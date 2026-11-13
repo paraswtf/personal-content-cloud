@@ -797,7 +797,10 @@ def test_a_stage_that_fails_costs_the_head_nothing_else():
         out[3, 1] = np.nan
         return out
 
-    for stage in (wrong, nan):
+    word = lambda v, f, view, prepared: "moved"  # noqa: E731
+    ragged = lambda v, f, view, prepared: [[1.0, 2.0, 3.0], [4.0]]  # noqa: E731
+    thing = lambda v, f, view, prepared: object()  # noqa: E731
+    for stage in (wrong, nan, word, ragged, thing):
         head = F.finish_head(mesh, picture, {"texture": 2}, reshape=stage)
         assert head.reshaped is False and "not this surface" in head.reshape_note and head.photo is not None
         assert np.array_equal(head.base.vertices, plain.base.vertices)
