@@ -1637,8 +1637,10 @@ lists open in the card: faces on NAME that look the same as faces taken off NAME
 owner action with its undo: the usual face assignment, and for "Leave" `recognition/leave`, which keeps the answer, so
 the face leaves the list and its count for good. A guess with basis `face`
 reads "By face, NN% sure" with a face icon and the line "Looks like NAME's photos, 0.61" (", and the same clothes"
-when clothes agree); a clothes guess the model agrees with adds "trained face NN%". Review > Guesses has a "Trained
-face" chip (`basis=face`).
+when clothes agree, a tattoo or the nails likewise); when position agrees too, the card adds the position reason
+with its two crops and the footprints icon, and the guess also sits under the "Position" chip. A clothes, tattoo or
+position guess the model agrees with adds "trained face NN%". Review > Guesses has a "Trained face" chip
+(`basis=face`).
 
 Position (section 35; `people/evidence.ts`, `PlaceCompare.tsx`): a guess whose evidence has a `place` part shows
 footprints beside the label and its reason in words, "In the same spot as NAME 8 s earlier" (`placeReason`,
