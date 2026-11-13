@@ -29,6 +29,10 @@ back onto the mesh:
 6. the triangles that show any photo are written a second time as a layer with the photo as its texture and the
    weight as its transparency, so the photo fades into the colours underneath.
 
+Between 2 and 3 another stage may move the surface (`reshape`: the face's relief, read from the photo by a depth
+model, gen3d.relief). It needs the camera and nothing else of the photo's, so it also runs for a head that is asked
+for without the photo (`texture` 0), and what it did is kept when a later step of the photo fails.
+
 A head whose photo does not line up, or whose backend names no camera, keeps one part with a colour per vertex.
 Nothing here fails a look: when the photo stage raises, the head is written without the layer and says why.
 
@@ -695,23 +699,24 @@ def find_camera(vertices: np.ndarray, faces: np.ndarray, camera: Camera, prepare
     return view, covered, covered_head
 
 
-def _lay_photo(vertices: np.ndarray, faces: np.ndarray, graph: sparse.Rows, colours: np.ndarray | None, camera: Camera,
-               prepared: Any, level: float, scale: float, smoothing: int, limit: int, reshape: Reshape | None,
-               clock: _Clock) -> dict[str, Any]:
-    """Steps 2 to 6 of the module's description. Raises NoPhoto when the photo cannot be used."""
+def picture_camera(vertices: np.ndarray, faces: np.ndarray, camera: Camera,
+                   prepared: Any) -> tuple[View, float | None, float | None]:
+    """Step 2 of the module's description, with the two checks of the picture that come before it: (the picture's
+    camera, how well the outlines overlap, and over the head alone). Raises NoPhoto when the picture cannot be
+    used."""
     left, top, right, bottom = prepared.part()
     if right - left < 2 or bottom - top < 2:
         raise NoPhoto("the picture shows nothing of the photo itself")
     agreed = map_agrees(prepared)
     if agreed < MAP_OVERLAP:
         raise NoPhoto(f"the picture's cut-out does not sit where the model saw it (overlap {agreed:.2f})")
-    view, covered, covered_head = find_camera(vertices, faces, camera, prepared)
-    clock.mark("camera")
-    if reshape is not None:
-        moved = reshape(vertices, faces, view, prepared)
-        if moved is not None and moved is not vertices:
-            vertices = press_base(taubin(np.asarray(moved, dtype=np.float64), graph, rounds_for(RESHAPED_ROUNDS, scale)), level)
-        clock.mark("reshape")
+    return find_camera(vertices, faces, camera, prepared)
+
+
+def _lay_photo(vertices: np.ndarray, faces: np.ndarray, graph: sparse.Rows, colours: np.ndarray | None, view: View,
+               prepared: Any, level: float, scale: float, smoothing: int, limit: int, clock: _Clock) -> dict[str, Any]:
+    """Steps 3 to 6 of the module's description, from the camera `view`. Raises NoPhoto when the photo cannot be
+    used."""
     calm = taubin(vertices, graph, rounds_for(CALM_ROUNDS, scale))
     clock.mark("calm copy")
     weight, xy = photo_weights(vertices, faces, graph, vertex_normals(calm.astype(np.float32), faces).astype(np.float64),
@@ -721,10 +726,10 @@ def _lay_photo(vertices: np.ndarray, faces: np.ndarray, graph: sparse.Rows, colo
     clock.mark("weights")
     known = weight > KNOWN
     if int(known.sum()) < MIN_KNOWN:
-        raise NoPhoto("the photo shows too little of the head", covered, covered_head)
+        raise NoPhoto("the photo shows too little of the head")
     shows = (weight[faces] > LAYER_FROM).any(axis=1)
     if not shows.any():
-        raise NoPhoto("the photo shows too little of the head", covered, covered_head)
+        raise NoPhoto("the photo shows too little of the head")
     # what the photo does not show is the model's guess: pull it smooth, then the base flat again, on the level
     # found before the photo came into it. The photo's place on every vertex (xy) stays the one the camera was
     # fitted to
@@ -754,16 +759,21 @@ def _lay_photo(vertices: np.ndarray, faces: np.ndarray, graph: sparse.Rows, colo
                   alpha=weight[ids].astype(np.float32))
     clock.mark("texture")
     return {"vertices": moved, "colours": np.clip(np.rint(final), 0, 255).astype(np.uint8), "layer": layer,
-            "texture": jpeg, "size": size, "overlap": covered, "overlap_head": covered_head}
+            "texture": jpeg, "size": size}
 
 
 def finish_head(mesh: Mesh, prepared: Any | None, options: dict[str, Any] | None = None,
                 reshape: Reshape | None = None) -> Head:
     """The head that is written for a backend's mesh. `prepared` is the look's picture (gen3d.prep.Prepared) or
-    None; options: `smoothing` and `texture`, each 0 to 3 (see the module's description). `reshape`, when given, is
-    called once the picture's camera is known, as reshape(vertices, faces, view, prepared), and may return the
-    vertices moved (a stage that corrects the face's shape from the photo); they are smoothed a few rounds and the
-    weights, colours and texture are worked out on them."""
+    None; options: `smoothing` and `texture`, each 0 to 3 (see the module's description).
+
+    `reshape`, when given, is called once the picture's camera is known, as reshape(vertices, faces, view,
+    prepared), and may return the vertices moved (a stage that corrects the face's shape from the photo). They are
+    smoothed a few rounds, the base is pressed flat again, and the weights, colours and texture are worked out on
+    them. The camera is found for it also when no photo is asked for (`texture` 0). The head says whether the
+    stage's surface was kept (`reshaped`) and, when the stage could not run, why (`reshape_note`: the camera's
+    reason, or what the stage raised; a stage that ran and returned nothing knows its own reason). A stage that
+    fails costs the head nothing else: the photo is laid on the surface as it was."""
     options = options or {}
     smoothing = min(3, max(0, int(options.get("smoothing", 2))))
     texture = min(3, max(0, int(options.get("texture", 2))))
@@ -779,20 +789,47 @@ def finish_head(mesh: Mesh, prepared: Any | None, options: dict[str, Any] | None
     colours = _own_colours(m, graph, smoothing)
     clock.mark("smoothing")
     layer, jpeg, size, covered, covered_head, note = None, None, None, None, None, None
-    if texture > 0 and m.camera is not None and prepared is not None:
+    view, reshaped, reshape_note = None, False, None
+    if (texture > 0 or reshape is not None) and m.camera is not None and prepared is not None:
         try:
-            laid = _lay_photo(vertices, faces, graph, colours, m.camera, prepared, level, scale, smoothing,
-                              TEXTURE_SIDE[texture], reshape, clock)
+            view, covered, covered_head = picture_camera(vertices, faces, m.camera, prepared)
         except NoPhoto as e:
             note, covered, covered_head = str(e), e.overlap, e.overlap_head
         except Exception as e:  # noqa: BLE001 - the head is still written, with its colours and no photo
             note = f"the photo could not be laid over the head ({type(e).__name__}: {e})"[:300]
+        clock.mark("camera")
+    if reshape is not None and view is None:
+        # without the camera the stage has nothing to go by. The reason is the photo's, when there is one
+        reshape_note = note or ("the backend names no camera" if m.camera is None else "the look has no picture")
+    if texture == 0:
+        note = None                 # no photo layer was asked for, so there is nothing to explain about it
+    if view is not None and reshape is not None:
+        try:
+            moved = reshape(vertices, faces, view, prepared)
+        except Exception as e:  # noqa: BLE001 - the head keeps the surface it had, and still gets its photo
+            moved, reshape_note = None, f"{type(e).__name__}: {e}"[:300]
+        if moved is not None and moved is not vertices:
+            moved = np.asarray(moved, dtype=np.float64)
+            if moved.shape == vertices.shape and np.isfinite(moved).all():
+                vertices = press_base(taubin(moved, graph, rounds_for(RESHAPED_ROUNDS, scale)), level)
+                reshaped = True
+            else:
+                reshape_note = "the stage returned something that is not this surface"
+        clock.mark("reshape")
+    if view is not None and texture > 0:
+        try:
+            laid = _lay_photo(vertices, faces, graph, colours, view, prepared, level, scale, smoothing,
+                              TEXTURE_SIDE[texture], clock)
+        except NoPhoto as e:
+            note = str(e)
+        except Exception as e:  # noqa: BLE001 - the head is still written, with its colours and no photo
+            note = f"the photo could not be laid over the head ({type(e).__name__}: {e})"[:300]
         else:
             vertices, layer, jpeg, size = laid["vertices"], laid["layer"], laid["texture"], laid["size"]
-            colours, covered, covered_head = laid["colours"], laid["overlap"], laid["overlap_head"]
+            colours = laid["colours"]
     v32 = normalise(vertices)
     out_colours = None if colours is None else np.clip(np.rint(colours), 0, 255).astype(np.uint8)
     base = Mesh(vertices=v32, faces=faces.astype(np.uint32), colors=out_colours, normals=vertex_normals(v32, faces))
     clock.mark("normals")
     return Head(base=base, photo=layer, texture=jpeg, texture_size=size, overlap=covered, overlap_head=covered_head,
-                note=note)
+                note=note, reshaped=reshaped, reshape_note=reshape_note)

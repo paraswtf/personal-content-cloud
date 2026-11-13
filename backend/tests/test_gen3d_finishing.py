@@ -741,38 +741,138 @@ def test_what_the_photo_does_not_show_is_pulled_smooth_and_the_rest_stays():
     assert low.sum() > 300
 
 
+def _push(calls: list | None = None):
+    """A stage that moves the front of the head along the camera's rays, towards the camera."""
+    def push(vertices, faces, view, prepared):
+        if calls is not None:
+            calls.append((vertices.shape, faces.shape, view, prepared))
+        out = vertices.copy()
+        at = view.place
+        front = vertices[:, 2] > 0.1
+        out[front] = at + (vertices[front] - at) * 0.97
+        return out
+    return push
+
+
 def test_another_stage_may_move_the_vertices_once_the_camera_is_known():
     mesh = _bust(60, 64, camera=SURE)
     m = clean(mesh)
     picture = _picture(m.vertices, m.faces, View(SURE, Fit(), SQUARE), size=512)
     plain = F.finish_head(mesh, picture, {"texture": 2})
+    assert plain.reshaped is False and plain.reshape_note is None          # no stage was given
     calls = []
-
-    def push(vertices, faces, view, prepared):
-        calls.append((vertices.shape, faces.shape, view, prepared))
-        out = vertices.copy()
-        at = view.place
-        front = vertices[:, 2] > 0.1
-        out[front] = at + (vertices[front] - at) * 0.97                   # along the camera's rays, towards it
-        return out
-
-    pushed = F.finish_head(mesh, picture, {"texture": 2}, reshape=push)
+    pushed = F.finish_head(mesh, picture, {"texture": 2}, reshape=_push(calls))
     assert len(calls) == 1 and calls[0][0] == m.vertices.shape and calls[0][1] == m.faces.shape
     view = calls[0][2]
     assert isinstance(view, View) and view.side == SQUARE and calls[0][3] is picture
     assert np.allclose(view.project(np.zeros((1, 3)))[0], [[512.0, 512.0]])
     assert pushed.photo is not None and not np.allclose(pushed.base.vertices, plain.base.vertices, atol=1e-3)
+    assert pushed.reshaped is True and pushed.reshape_note is None and pushed.note is None
+    low = pushed.base.vertices[:, 1] <= pushed.base.vertices[:, 1].min() + 1e-6
+    assert low.sum() > 50                                                 # the base is flat again after the move
     for same in (lambda v, f, view, prepared: None, lambda v, f, view, prepared: v):    # nothing moved
         left = F.finish_head(mesh, picture, {"texture": 2}, reshape=same)
         assert np.array_equal(left.base.vertices, plain.base.vertices) and left.texture == plain.texture
+        assert left.reshaped is False and left.reshape_note is None      # it ran: why it did nothing is its own to say
+
+
+def test_a_stage_that_fails_costs_the_head_nothing_else():
+    mesh = _bust(60, 64, camera=SURE)
+    m = clean(mesh)
+    picture = _picture(m.vertices, m.faces, View(SURE, Fit(), SQUARE), size=512)
+    plain = F.finish_head(mesh, picture, {"texture": 2})
 
     def broken(*_a):
         raise ValueError("no")
 
     failed = F.finish_head(mesh, picture, {"texture": 2}, reshape=broken)
-    assert failed.photo is None and "ValueError: no" in failed.note
-    never = F.finish_head(mesh, picture, {"texture": 0}, reshape=broken)  # without a photo it is not called
-    assert never.note is None
+    assert failed.photo is not None and failed.note is None              # the photo is laid all the same
+    assert failed.reshaped is False and failed.reshape_note == "ValueError: no"
+    assert np.array_equal(failed.base.vertices, plain.base.vertices) and failed.texture == plain.texture
+    # what is not this surface is not taken: another shape, or a vertex that is not a number
+    wrong = lambda v, f, view, prepared: v[:-1].copy()  # noqa: E731
+
+    def nan(v, f, view, prepared):
+        out = v.copy()
+        out[3, 1] = np.nan
+        return out
+
+    for stage in (wrong, nan):
+        head = F.finish_head(mesh, picture, {"texture": 2}, reshape=stage)
+        assert head.reshaped is False and "not this surface" in head.reshape_note and head.photo is not None
+        assert np.array_equal(head.base.vertices, plain.base.vertices)
+
+    # an order to stop is not a failure of the stage: it passes through
+    class Stop(BaseException):
+        pass
+
+    def stop(*_a):
+        raise Stop()
+
+    with pytest.raises(Stop):
+        F.finish_head(mesh, picture, {"texture": 2}, reshape=stop)
+
+
+def test_the_stage_also_runs_for_a_head_without_the_photo():
+    mesh = _bust(60, 64, camera=SURE)
+    m = clean(mesh)
+    picture = _picture(m.vertices, m.faces, View(SURE, Fit(), SQUARE), size=512)
+    plain = F.finish_head(mesh, picture, {"texture": 0})
+    assert plain.overlap is None                                          # nothing asked for the camera
+    calls = []
+    head = F.finish_head(mesh, picture, {"texture": 0}, reshape=_push(calls))
+    assert len(calls) == 1 and head.reshaped is True and head.reshape_note is None
+    assert head.photo is None and head.texture is None and head.note is None    # no layer was asked for
+    assert not np.allclose(head.base.vertices, plain.base.vertices, atol=1e-3)
+    assert np.array_equal(head.base.colors, plain.base.colors)           # the model's own colours, as without it
+    assert glb.encode(head) == glb.encode(head.base)                      # one part
+    # the same surface as the head with the photo has under its layer, before the unseen part is pulled smooth
+    with_photo = F.finish_head(mesh, picture, {"texture": 2, "smoothing": 0}, reshape=_push())
+    without = F.finish_head(mesh, picture, {"texture": 0, "smoothing": 0}, reshape=_push())
+    assert np.allclose(with_photo.base.vertices, without.base.vertices, atol=1e-6)
+
+
+def test_what_the_stage_did_is_kept_when_the_photo_fails_after_it(monkeypatch):
+    mesh = _bust(60, 64, camera=SURE)
+    m = clean(mesh)
+    picture = _picture(m.vertices, m.faces, View(SURE, Fit(), SQUARE), size=512)
+    alone = F.finish_head(mesh, picture, {"texture": 0}, reshape=_push())
+
+    def broken(*_a, **_k):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(F, "photo_weights", broken)
+    head = F.finish_head(mesh, picture, {"texture": 2}, reshape=_push())
+    assert head.photo is None and "RuntimeError: boom" in head.note
+    assert head.reshaped is True and head.reshape_note is None
+    assert np.array_equal(head.base.vertices, alone.base.vertices)        # the moved surface, without the layer
+
+
+def test_without_the_camera_the_stage_does_not_run_and_the_head_says_why():
+    called = []
+    stage = lambda v, f, view, prepared: called.append(1)  # noqa: E731
+    mesh = _bust(40, 48, camera=GUESS)
+    size = 512
+    alpha = np.zeros((size, size), np.uint8)
+    alpha[60:200, 300:480] = 255                                          # a box in a corner: no head has this outline
+    off = Prepared(rgba=None, source=_gradient(size), alpha=alpha, side=SQUARE, x0=0.0, y0=0.0, sx=2.0, sy=2.0,
+                   ox=0.0, oy=0.0)
+    head = F.finish_head(mesh, off, {"texture": 2}, reshape=stage)
+    assert not called and head.reshaped is False
+    assert "did not line up" in head.note and head.reshape_note == head.note
+    # without the photo there is nothing to say about a layer, but the stage's reason stays, with the overlaps
+    head = F.finish_head(mesh, off, {"texture": 0}, reshape=stage)
+    assert not called and head.note is None and "did not line up" in head.reshape_note
+    assert head.overlap is not None and head.overlap < F.MIN_OVERLAP
+    # a backend that names no camera, a look without a picture
+    m = clean(mesh)
+    picture = _picture(m.vertices, m.faces, View(GUESS, Fit(), SQUARE), size=512)
+    for texture in (0, 2):
+        head = F.finish_head(_bust(40, 48, camera=None), picture, {"texture": texture}, reshape=stage)
+        assert head.reshape_note == "the backend names no camera" and head.note is None
+        head = F.finish_head(mesh, None, {"texture": texture}, reshape=stage)
+        assert head.reshape_note == "the look has no picture" and head.note is None
+    assert not called
 
 
 # ------------------------------------------------------------------ the file

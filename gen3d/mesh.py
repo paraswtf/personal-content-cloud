@@ -60,6 +60,8 @@ class Head:
     overlap: float | None = None                    # how well the mesh's outline covered the person's (0..1)
     overlap_head: float | None = None               # the same over the head alone, the upper part of the person
     note: str | None = None                         # why there is no photo layer, when one was asked for
+    reshaped: bool = False                          # another stage moved the surface (the face's relief) and it was kept
+    reshape_note: str | None = None                 # why such a stage, when one was given, could not run
 
 
 class BadMesh(ValueError):
