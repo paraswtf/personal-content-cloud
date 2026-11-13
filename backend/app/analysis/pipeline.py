@@ -513,6 +513,7 @@ def analyze_item(conn: sqlite3.Connection, item_id: int, version: int) -> None:
             conn.execute("UPDATE items SET analysis_status = 'done', updated_at = ? WHERE id = ?", (now_iso(), item_id))
         return
     uid, kind = item["uid"], item["kind"]
+    waiting_faces: dict[int, Any] = {}  # faces kept loose for a guess (section 10): settled in _after
 
     siglip = _model("siglip")
     nsfw = _model("nsfw")
@@ -705,7 +706,8 @@ def analyze_item(conn: sqlite3.Connection, item_id: int, version: int) -> None:
                 )]
                 if remaining:
                     # _after runs guess_item for this item: no guess job for a face kept loose (section 10)
-                    cluster.assign_new_faces(conn, remaining, exclude_face_ids=set(old_ids), guess_kept=False)
+                    cluster.assign_new_faces(conn, remaining, exclude_face_ids=set(old_ids), guess_kept=False,
+                                             waiting_faces=waiting_faces)
             cluster.sync_bodies_to_faces(conn, [item_id])
 
             # Animals (section 22): boxes, crops, look embeddings, then the pet identities.
@@ -868,7 +870,8 @@ def analyze_item(conn: sqlite3.Connection, item_id: int, version: int) -> None:
         storage.safe_unlink(p)
     log.info("analyze: %s %s v%s -> %s, %d faces, %d bodies, %d animals%s", kind, uid, version, category,
              len(r.faces), len(r.bodies), len(r.animals), f", skipped {sorted(set(r.skipped))}" if r.skipped else "")
-    _after(conn, item_id, int(version), kind, doc_like, bool(r.labels) or people_changed or tags_added > 0)
+    _after(conn, item_id, int(version), kind, doc_like, bool(r.labels) or people_changed or tags_added > 0,
+           waiting_faces)
 
 
 def _decide_forward(conn: sqlite3.Connection, cur: sqlite3.Row, kind: str, scores: dict[str, Any],
@@ -897,7 +900,7 @@ def _decide_forward(conn: sqlite3.Connection, cur: sqlite3.Row, kind: str, score
 
 
 def _after(conn: sqlite3.Connection, item_id: int, version: int, kind: str, doc_like: float | None,
-           fts_changed: bool) -> None:
+           fts_changed: bool, waiting_faces: dict[int, Any] | None = None) -> None:
     """Follow-ups outside the analysis transaction; failures are logged, never raised."""
     from app.analysis import guess
 
@@ -905,6 +908,11 @@ def _after(conn: sqlite3.Connection, item_id: int, version: int, kind: str, doc_
         guess.guess_item(conn, item_id)
     except Exception as e:
         log.warning("analyze: guessing failed for item %s: %s", item_id, e)
+    if waiting_faces:
+        try:
+            cluster.release_unguessed(conn, waiting_faces)  # a kept face whose guess did not come ends somewhere
+        except Exception as e:
+            log.warning("analyze: could not settle the faces kept for a guess in item %s: %s", item_id, e)
     try:
         from app.analysis import traits
 
