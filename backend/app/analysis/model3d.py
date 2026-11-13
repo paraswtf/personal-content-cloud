@@ -7,19 +7,25 @@ GEN3D_*), as a child process that lives only while the job runs, so PyTorch stay
 the memory are free the rest of the time.
 
 Options (OPTION_KEYS, clean_options): max_looks, detail, framing, and for the generator's finishing of a head
-`smoothing` (0 off, 1 light, 2 normal, 3 strong) and `texture` (0 colours only; 1, 2, 3 the photo laid over the
-front as a texture of at most 1024, 2048, 4096 px). The server only passes the last two on.
+`smoothing` (0 off, 1 light, 2 normal, 3 strong), `texture` (0 colours only; 1 and 2 the photo laid over the
+front as a texture of at most 1024 and 2048 px; 3 the photo at its own size, which is the picture's: at most
+3072 px) and `relief` (1: the face's shape corrected from a depth model when its files are installed; 0: not).
+The server only passes the last three on.
 
 Files, under DATA_DIR/people3d/<person id>/:
   current              the name of the folder in use (a time stamp)
   <stamp>/model.json   the manifest: {rev, person_id, generated_at, seconds, generator{name, version}, options,
                        birth_year, scanned, usable, peak_rss_mb, looks: [{key, label, age, age_band, hair, hair_label,
                        facial_hair, facial_hair_label, photos, face_id, item_id, item_uid, taken_at, faults, mesh,
-                       picture, bytes, vertices, faces, textured, texture, overlap, note}]}. `textured`: the head
-                       carries the photo as a texture; `texture` its [width, height]; `overlap` how well the
-                       head's outline covered the person's in the picture; `note` the generator's remark on the
-                       look (why a photo was not used). A manifest written before the finishing existed has none
-                       of the four, nor the two newer options: it reads as not textured, with the default options.
+                       picture, bytes, vertices, faces, textured, texture, overlap, overlap_head, relief,
+                       note}]}. `textured`: the head carries the photo as a texture; `texture` its [width,
+                       height]; `overlap` how well the head's outline covered the person's in the picture, and
+                       `overlap_head` the same over the head alone (kept here to judge a run by: the generator's
+                       own result file goes with the work folder); `relief`: the face's shape was corrected
+                       from the depth model; `note` the generator's remark on the look (why a photo was not
+                       used). A manifest written before the finishing existed has none of the six, nor the three
+                       newer options: it reads as not textured and without relief, and the status leaves the
+                       three options out.
   <stamp>/<key>.glb    a look's mesh;  <stamp>/<key>.jpg  the picture it was made from (512 px)
   work/                the job's scratch folder (pictures, job.json, out/), removed when the job ends
   error.json           why the last run failed, until the next start
@@ -40,6 +46,16 @@ One job at a time for the whole app (one GPU). A look is neither listed nor serv
 in the trash or in the vault, or once its source face is no longer this person's. Folders of people who no longer
 exist, and what an interrupted run left behind, are removed by sweep() (housekeeping); a deleted person's model
 stops being served at once, as its routes ask for the person first.
+
+A head holds the photo's own pixels as its texture, so its files follow the photo:
+- the files are served with "private, no-cache" and an ETag (app.api.model3d), so a browser asks before every use
+  and a look that stopped being listed is not shown again from its cache;
+- sweep() removes the mesh and the picture of a look whose photo is gone for good (its item row no longer exists:
+  the trash was emptied, or the photo was deleted outright) and takes the look out of model.json; when no look is
+  left the model goes;
+- a look whose photo is in the trash or the vault, or whose face is no longer this person's, keeps its files on
+  disk, unlisted and unserved, because the photo or the face can come back; they go with the next generation, with
+  Delete, with the person, or when the photo is gone for good.
 """
 from __future__ import annotations
 
@@ -84,10 +100,13 @@ STOP_WAIT_S = 5.0
 EXIT_WAIT_S = 30.0         # after its last line the child has this long to exit by itself
 DETAIL_MIN, DETAIL_MAX, DETAIL_DEFAULT = 1, 3, 2
 SMOOTHING_MIN, SMOOTHING_MAX, SMOOTHING_DEFAULT = 0, 3, 2   # the finishing's smoothing: off, light, normal, strong
-TEXTURE_MIN, TEXTURE_MAX, TEXTURE_DEFAULT = 0, 3, 2         # 0 colours only; 1 to 3 the photo, to 1024/2048/4096 px
+TEXTURE_MIN, TEXTURE_MAX, TEXTURE_DEFAULT = 0, 3, 2         # colours only; the photo to 1024, to 2048, at its own size
+RELIEF_MIN, RELIEF_MAX, RELIEF_DEFAULT = 0, 1, 1            # the face's shape from a depth model: off, on
 NOTE_MAX = 200             # characters of a look's note that are kept
 SANDBOX_BIN = "bwrap"
-OPTION_KEYS = ("max_looks", "detail", "framing", "smoothing", "texture")
+OPTION_KEYS = ("max_looks", "detail", "framing", "smoothing", "texture", "relief")
+FIRST_OPTIONS = ("max_looks", "detail", "framing")   # every model has these; the rest came with the finishing
+JOB_ONLY = ("inside",)     # keys of a look's row that go into the job file and not into model.json
 
 STEP_LOOKS = "Finding looks"
 STEP_PHOTOS = "Preparing photos"
@@ -503,6 +522,7 @@ def status(conn: sqlite3.Connection, person_id: int) -> dict[str, Any]:
             "picture_url": file_url(person_id, rev, lk["picture"]),
             "mesh_url": file_url(person_id, rev, lk["mesh"]),
             "textured": lk.get("textured") is True,  # a head made before the finishing existed has no such key
+            "relief": lk.get("relief") is True,
         }
         note = _note(lk.get("note"))
         if note:
@@ -525,13 +545,14 @@ def status(conn: sqlite3.Connection, person_id: int) -> dict[str, Any]:
 
 
 def shown_options(stored: Any) -> dict[str, Any] | None:
-    """The options a model was made with, as the status gives them. A model made before the finishing existed has
-    no `smoothing` and no `texture`: those read as today's defaults, because the tab starts "Generate again" from
-    these values and a new run should finish the head (whether the stored head carries a photo is `textured` on
-    each look, not this). None when the manifest holds no usable options."""
-    if not isinstance(stored, dict) or not stored:
+    """The options a model was made with, as the status gives them: every option the manifest has, inside its
+    range. A model made before the finishing existed has no `smoothing`, `texture` or `relief`, and they are left
+    out here, not filled in: that is how the tab can tell that these heads predate the finishing (it fills its
+    sliders with the defaults for what is missing). None when the manifest holds no usable options."""
+    if not isinstance(stored, dict) or not all(k in stored for k in FIRST_OPTIONS):
         return None
-    return {k: v for k, v in clean_options(stored).items() if k in OPTION_KEYS}
+    cleaned = clean_options(stored)
+    return {k: cleaned[k] for k in OPTION_KEYS if k in stored}
 
 
 # ------------------------------------------------------------------ start, cancel, remove
@@ -565,6 +586,7 @@ def clean_options(options: dict[str, Any] | None) -> dict[str, Any]:
                                  looks_mod.FRAMING_MAX, looks_mod.FRAMING_DEFAULT, False), 2),
         "smoothing": whole("smoothing", SMOOTHING_MIN, SMOOTHING_MAX, SMOOTHING_DEFAULT),
         "texture": whole("texture", TEXTURE_MIN, TEXTURE_MAX, TEXTURE_DEFAULT),
+        "relief": whole("relief", RELIEF_MIN, RELIEF_MAX, RELIEF_DEFAULT),
     }
     if o.get("generator") == "fake":
         out["generator"] = "fake"
@@ -627,11 +649,57 @@ def remove(conn: sqlite3.Connection, person_id: int) -> None:  # noqa: ARG001 - 
         storage.remove_tree(person_dir(person_id))
 
 
+def _drop_gone_looks(conn: sqlite3.Connection, person_id: int) -> int:
+    """Take the looks whose photo is gone for good out of the person's model: the item row no longer exists (the
+    trash was emptied, or the photo was deleted outright; an item id is never given out twice, and the uid is
+    compared as well). The manifest is rewritten without them first, then their mesh and picture are removed, and
+    so is any mesh or picture in the folder that the manifest does not name (what a run of this that was cut
+    short left). With no look left the model itself goes, and the person's folder with it unless that still holds
+    an error.json. A photo that is only in the trash or the vault still has its row, so its look stays as it is:
+    not listed, not served, its files kept. A manifest that does not read decides nothing. Returns how many looks
+    went. Call with _lock held and no job running."""
+    rev = current_rev(person_id)
+    doc = manifest(person_id)
+    if rev is None or doc is None:
+        return 0
+    folder = person_dir(person_id) / rev
+    looks = [lk for lk in doc["looks"] if isinstance(lk, dict)]
+    ids = sorted({int(lk.get("item_id") or 0) for lk in looks})
+    there: dict[int, str] = {}
+    for start in range(0, len(ids), 400):
+        part = ids[start:start + 400]
+        for row in conn.execute(f"SELECT id, uid FROM items WHERE id IN ({','.join('?' * len(part))})", part):
+            there[int(row["id"])] = str(row["uid"])
+    kept = [lk for lk in looks
+            if there.get(int(lk.get("item_id") or 0)) is not None
+            and (lk.get("item_uid") is None or there[int(lk.get("item_id") or 0)] == str(lk.get("item_uid")))]
+    gone = len(looks) - len(kept)
+    if gone and not kept:
+        storage.safe_unlink(person_dir(person_id) / "current")  # not listed from this moment
+        storage.remove_tree(folder)
+        try:
+            person_dir(person_id).rmdir()  # the person's folder too, unless it still holds an error.json
+        except OSError:
+            pass
+        return gone
+    if gone:
+        _write_json(folder / "model.json", {**doc, "looks": kept})
+    named = {str(lk.get(k)) for lk in kept for k in ("mesh", "picture")}
+    try:
+        entries = list(folder.iterdir())
+    except OSError:
+        return gone
+    for entry in entries:
+        if entry.is_file() and NAME_RE.fullmatch(entry.name) and entry.name not in named:
+            storage.safe_unlink(entry)
+    return gone
+
+
 def sweep(conn: sqlite3.Connection) -> int:
     """Housekeeping. Removes the model folders of people who no longer exist and, while no job runs, what an
     interrupted run left behind for everyone else: a work folder (a server that stopped in the middle of a job
-    never got to remove it) and model folders that `current` does not name. Returns how many people's folders
-    went."""
+    never got to remove it) and model folders that `current` does not name; and, of the models in use, the looks
+    whose photo is gone for good with their files (_drop_gone_looks). Returns how many people's folders went."""
     base = root()
     if not base.is_dir():
         return 0
@@ -648,6 +716,7 @@ def sweep(conn: sqlite3.Connection) -> int:
             storage.remove_tree(entry)
             gone += 1
     left = 0
+    looks_gone = 0
     with _lock:  # held, so no job can start and make a work folder while the leftovers go
         if _state is None:
             for entry in base.iterdir():
@@ -658,8 +727,14 @@ def sweep(conn: sqlite3.Connection) -> int:
                     if sub.is_dir() and (sub.name == "work" or (STAMP_RE.fullmatch(sub.name) and sub.name != keep)):
                         storage.remove_tree(sub)
                         left += 1
+                try:
+                    looks_gone += _drop_gone_looks(conn, int(entry.name))
+                except (OSError, sqlite3.Error, ValueError, TypeError):
+                    log.exception("3D heads: could not check the looks of person %s against their photos", entry.name)
     if left:
         log.info("3D heads: removed %d folders that interrupted runs left behind", left)
+    if looks_gone:
+        log.info("3D heads: removed %d looks whose photo is gone for good", looks_gone)
     return gone
 
 
@@ -882,16 +957,22 @@ def _prepare(conn: sqlite3.Connection, plan: looks_mod.Plan, work: Path, framing
     """Write each look's picture (the look's best photo, else a runner-up whose pixels read), at the photo's own
     resolution (looks.picture_side: 1024 to 3072 px a side; at 3072 that is 28 MB of pixels, a file of about 15 MB
     for a photo and 28 MB at worst, written in about a second and a half), and return the looks that have one, as
-    manifest rows. The files live in the work folder, which goes when the job ends."""
+    manifest rows. The files live in the work folder, which goes when the job ends. Each row also carries
+    `inside`, for the job file only (JOB_ONLY): the part of the written picture that shows the photo itself
+    (looks.inside), or None when that is not known."""
     rows: list[dict[str, Any]] = []
     for n, look in enumerate(plan.looks, start=1):
         if _cancelled():
             raise _Cancelled()
         by_id = {r.face_id: r for r in plan.readings}
         chosen = None
+        inside = None
         for face_id in [look.face_id, *look.runners_up]:
-            if looks_mod.write_picture(conn, face_id, work / f"{look.key}.png", framing):
+            written = looks_mod.write_picture(conn, face_id, work / f"{look.key}.png", framing)
+            if written:
                 chosen = by_id.get(face_id)
+                if isinstance(written, tuple) and len(written) == 4:
+                    inside = [int(v) for v in written]
                 break
         _set(step=STEP_PHOTOS, done=n, total=len(plan.looks))
         if chosen is None:
@@ -901,8 +982,20 @@ def _prepare(conn: sqlite3.Connection, plan: looks_mod.Plan, work: Path, framing
             "hair_label": look.hair_label, "facial_hair": look.facial_hair, "facial_hair_label": look.facial_hair_label,
             "photos": look.photos, "face_id": chosen.face_id, "item_id": chosen.item_id, "item_uid": chosen.item_uid,
             "taken_at": chosen.taken_at, "faults": list(chosen.faults), "box": [round(float(v), 5) for v in chosen.box],
+            "inside": inside,
         })
     return rows
+
+
+def _job_look(row: dict[str, Any], work: Path) -> dict[str, Any]:
+    """A look as the job file gives it to the generator: its key, its picture and, when it is known, `inside`:
+    [left, top, right, bottom] in pixels of that picture, the part that is the photo itself. Where the square of
+    the picture left the photo, the rest is the photo's edge repeated (up to looks.CUT_OFF_SHARE of the square);
+    the generator lays the photo on the head only inside this rectangle."""
+    look: dict[str, Any] = {"key": row["key"], "image": str(work / f"{row['key']}.png")}
+    if row.get("inside"):
+        look["inside"] = list(row["inside"])
+    return look
 
 
 def _glb_doc(path: Path) -> dict[str, Any] | None:
@@ -961,11 +1054,19 @@ def _note(value: Any) -> str | None:
     return text[:NOTE_MAX] or None
 
 
+def _share(value: Any) -> float | None:
+    """A share between 0 and 1 as the generator gave it, to four places; None for anything else."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0.0 <= float(value) <= 1.0:
+        return None
+    return round(float(value), 4)
+
+
 def _finishing(made: dict[str, Any], mesh: Path) -> dict[str, Any]:
     """What the generator said about a look's finishing (the keys of its result row), checked: `textured` (read
     from the file itself when the row does not say: a head that was finished before the generator was stopped has
     no row, and the generator before the finishing wrote no such key), `texture` as [width, height] and only with
-    a texture, `overlap` as a share between 0 and 1, `note` as one short line."""
+    a texture, `overlap` and `overlap_head` as shares between 0 and 1, `relief` (the face's shape was corrected
+    from the depth model; only a plain true counts), `note` as one short line."""
     said = made.get("textured")
     textured = said if isinstance(said, bool) else _glb_textured(mesh)
     size = made.get("texture")
@@ -973,11 +1074,9 @@ def _finishing(made: dict[str, Any], mesh: Path) -> dict[str, Any]:
     if (textured and isinstance(size, (list, tuple)) and len(size) == 2
             and all(isinstance(v, int) and not isinstance(v, bool) and 0 < v <= 16384 for v in size)):
         texture = [int(size[0]), int(size[1])]
-    overlap = made.get("overlap")
-    if isinstance(overlap, bool) or not isinstance(overlap, (int, float)) or not 0.0 <= float(overlap) <= 1.0:
-        overlap = None
-    return {"textured": bool(textured), "texture": texture,
-            "overlap": None if overlap is None else round(float(overlap), 4), "note": _note(made.get("note"))}
+    return {"textured": bool(textured), "texture": texture, "overlap": _share(made.get("overlap")),
+            "overlap_head": _share(made.get("overlap_head")), "relief": made.get("relief") is True,
+            "note": _note(made.get("note"))}
 
 
 def _collect(person_id: int, work: Path, rows: list[dict[str, Any]], plan: looks_mod.Plan, options: dict[str, Any],
@@ -1018,7 +1117,8 @@ def _collect(person_id: int, work: Path, rows: list[dict[str, Any]], plan: looks
         with Image.open(work / f"{row['key']}.png") as im:
             im.convert("RGB").resize((PICTURE_SIDE, PICTURE_SIDE), Image.Resampling.LANCZOS).save(
                 dest / f"{row['key']}.jpg", "JPEG", quality=PICTURE_QUALITY)
-        looks.append({**row, "mesh": target.name, "picture": f"{row['key']}.jpg", "bytes": target.stat().st_size,
+        kept = {k: v for k, v in row.items() if k not in JOB_ONLY}
+        looks.append({**kept, "mesh": target.name, "picture": f"{row['key']}.jpg", "bytes": target.stat().st_size,
                       "vertices": vertices, "faces": faces, **finishing})
     if not looks:
         storage.remove_tree(dest)
@@ -1100,8 +1200,8 @@ def _run(person_id: int, options: dict[str, Any], fake: bool) -> None:
             "out_dir": str(work / "out"), "weights_dir": str(_weights_dir()),
             "generator": "fake" if fake else settings.gen3d_generator, "device": "auto",
             "options": {"detail": options["detail"], "smoothing": options["smoothing"], "texture": options["texture"],
-                        "seed": 0},
-            "looks": [{"key": r["key"], "image": str(work / f"{r['key']}.png")} for r in rows],
+                        "relief": options["relief"], "seed": 0},
+            "looks": [_job_look(r, work) for r in rows],
         }
         _write_json(work / "job.json", job)
         _set(step=STEP_BUILD, done=0, total=len(rows))
