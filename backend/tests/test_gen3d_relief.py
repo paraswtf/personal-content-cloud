@@ -247,6 +247,24 @@ def test_only_the_part_of_the_picture_that_is_the_photo_is_read_and_moved(head: 
     # without the line the same vertices do move
     full, _ = head.refine()
     assert float(np.abs(full[:head.n_front][below] - front_before[below]).max()) > 0.01
+    # and the head stays in one piece: towards the line the move dies away (measured: 0.006 of the largest)
+    move = np.abs(front_after[:, 2] - front_before[:, 2])
+    last = ~below & (to_source(np.stack([head.u, head.v], axis=1))[:, 1] > line - 3.0 * SRC / SIDE)
+    assert int(last.sum()) > 100 and float(move[last].max()) < 0.02 * float(move.max())
+
+
+def test_the_region_ends_where_the_photo_ends_whatever_the_crop(head: Head, monkeypatch):
+    """Should the crop ever reach past the photo's part, the region still ends at the line and is held there."""
+    line = round(CV * SRC / SIDE)
+    whole = relief.face_crop(SRC, SRC, FRAMING)
+    monkeypatch.setattr(relief, "face_crop", lambda *args, **more: whole)
+    out, info = head.refine((0, 0, SRC, line))
+    assert info["relief"] is True
+    y = to_source(np.stack([head.u, head.v], axis=1))[:, 1]
+    move = np.abs(out[:head.n_front, 2] - head.vertices[:head.n_front, 2])
+    last = (y < line) & (y > line - 3.0 * SRC / SIDE)
+    assert float(move.max()) > 0.01 and not move[y >= line].any()
+    assert int(last.sum()) > 100 and float(move[last].max()) < 0.02 * float(move.max())
 
 
 @pytest.mark.parametrize("case", ["no models", "turned off", "nothing seen", "runner fails", "wrong shape",
@@ -475,6 +493,17 @@ def test_the_face_crop():
     assert relief.photo_part(100, 200, (-5, 10, 400, 90)) == (0.0, 10.0, 200.0, 90.0)
 
 
+def test_which_vertices_the_camera_sees():
+    near = np.full((6, 8), 1e9, dtype=np.float32)        # nothing is drawn, but
+    near[2, 5] = 2.0                                     # a surface at depth 2 around the pixel x 5, y 2
+    pix = np.array([[5.5, 2.5], [5.9, 2.1], [5.5, 2.5], [2.5, 5.5], [0.2, 0.2], [-3.0, 2.5], [99.0, 99.0]])
+    depth = np.array([2.0, 2.04, 2.06, 2.06, 5.0, 5.0, 5.0])
+    # on it; 0.04 behind it with a slack of 0.05; too far behind; the last four have nothing in front of them
+    assert relief.visible(pix, depth, near, 0.05).tolist() == [True, True, False, True, True, True, True]
+    near[:, 0], near[5, 7] = 1.0, 1.0                    # points off the grid are judged by its edge
+    assert relief.visible(pix, depth, near, 0.05).tolist() == [True, True, False, True, False, False, False]
+
+
 def test_the_shift_is_blurred_a_little_and_limited():
     one = np.zeros((21, 21), dtype=np.float64)
     one[10, 10] = 1.0
@@ -525,6 +554,13 @@ def test_the_fit_and_the_sampler():
     a, b, share = relief.affine_fit(x, y, np.ones((40, 40), dtype=bool))
     assert a == pytest.approx(-3.0, abs=0.01) and b == pytest.approx(5.0, abs=0.01) and share > 0.99
     assert relief.affine_fit(x, y, np.zeros((40, 40), dtype=bool)) == (0.0, 0.0, 0.0)
+    # a line that fewer than 16 values agree on says nothing: 14 on a line and 6 far off it, on both sides
+    few_x = np.arange(20, dtype=np.float64)
+    few_y = 2.0 * few_x + 1.0
+    few_y[[1, 4, 8, 11, 15, 18]] += [40.0, -40.0, 40.0, -40.0, 40.0, -40.0]
+    assert relief.affine_fit(few_x, few_y, np.ones(20, dtype=bool)) == (0.0, 0.0, 0.0)
+    a, b, share = relief.affine_fit(few_x, 2.0 * few_x + 1.0, np.ones(20, dtype=bool))
+    assert (a, b) == pytest.approx((2.0, 1.0)) and share == pytest.approx(1.0)
     image = np.arange(12, dtype=np.float32).reshape(3, 4)
     got = relief.sample(image, np.array([[0.5, 0.5], [1.0, 0.5], [3.5, 2.5], [2.5, 1.0], [4.2, 1.0], [-0.1, 1.0]]))
     assert got.tolist() == pytest.approx([0.0, 0.5, 11.0, 4.0, 0.0, 0.0])
