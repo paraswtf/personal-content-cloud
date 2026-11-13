@@ -135,7 +135,7 @@ makes; `ORIGINALS_DIR` (unset by default, then the same folder) holds the bytes 
 | `staging/<uid>.part` | uploads in progress (under `ORIGINALS_DIR`) |
 | `failed/<uid>.part` | uploads whose ingest failed for good (under `ORIGINALS_DIR`); deleted after `TRASH_DAYS`; Settings > System > Retry failed uploads queues them again |
 | `learned/` | the learned models (section 18) |
-| `people3d/<person id>/` | a person's 3D heads (section 36): `current` names the folder in use, `<stamp>/model.json`, `<key>.glb` and `<key>.jpg` per look; `work/` while one is made, `error.json` after a failed run |
+| `people3d/<person id>/` | a person's 3D heads (section 36): `current` names the folder in use, `<stamp>/model.json`, and per look `<key>.glb` (the head, with the look's photo inside it as its texture) and `<key>.jpg`; `work/` while one is made, `error.json` after a failed run |
 | `wallet/` | `cert.pem`, `key.pem`, `wwdr.pem` placed by the owner (never written by the app) |
 | `tmp/` | wiped at startup |
 | `site/` | copy of the frontend build taken at startup, the site that is served (section 14) |
@@ -157,7 +157,8 @@ previews of its own, since the library never shows it; `/files/thumb`, `/files/p
 thumb. Purge removes face, body and pet crops. `ingest.tidy_derivatives` removes what an earlier version
 stored (companion pictures, small previews that repeat the large one) once per `ingest.TIDY_VERSION` (kv
 `derivatives_tidy`), from housekeeping. The 3D heads in `people3d/` are not part of the orphan sweep: housekeeping
-calls `model3d.sweep`, which removes the folders of people who no longer exist (section 36).
+calls `model3d.sweep`, which removes the folders of people who no longer exist, what an interrupted run left behind,
+and the heads of photos that are gone for good (section 36).
 
 ## 4. Authentication and sessions
 
@@ -1421,18 +1422,24 @@ keep, running, progress, last, snapshots[], next_run_at, free_bytes, total_bytes
 jobs per bucket by type, section 32; 422 for another range).
 
 3D heads (section 36; schemas in `api/model3d.py`): `GET people/{id}/model3d` -> `Model3dOut {available, reason,
-generator, usable_photos, state: 'none' | 'running' | 'done' | 'error', busy, stopping, progress {step, done, total}
-| null, error, generated_at, options {max_looks, detail, framing} | null, looks: Look3dOut[]}` with `Look3dOut =
-{key, label, age, age_band, hair, hair_label, facial_hair, facial_hair_label, photos, taken_at, item_uid,
-picture_url, mesh_url, bytes, vertices}` (reading it starts nothing; `available` false comes with a plain `reason`;
-`busy` means another person's job is running; `stopping` means Stop or Delete was pressed and the job is on its way
-out; 404 for a pet); `POST people/{id}/model3d {max_looks 1..12 = 6, detail 1..3 = 2, framing 1.8..3.2 = 2.6}` ->
-202 `{started}` (409 `busy`, 409 `generator_missing`, 422 `not_enough_photos`); `POST people/{id}/model3d/stop` ->
+generator, relief_installed, usable_photos, state: 'none' | 'running' | 'done' | 'error', busy, stopping, progress
+{step, done, total} | null, error, generated_at, options {max_looks, detail, framing, smoothing, texture, relief} |
+null, looks: Look3dOut[]}` with `Look3dOut = {key, label, age, age_band, hair, hair_label, facial_hair,
+facial_hair_label, photos, taken_at, item_uid, picture_url, mesh_url, bytes, vertices, textured, relief, note}`
+(reading it starts nothing; `available` false comes with a plain `reason`; `busy` means another person's job is
+running; `stopping` means Stop or Delete was pressed and the job is on its way out; `relief_installed` is false when
+the depth model files of the face relief are not on the server and null when the generator does not say; `textured`
+and `relief` say whether a look's head carries its photo and had its face shaped, and `note` is the generator's remark
+on it; a model made before the finishing has no `smoothing`, `texture` or `relief` in `options`: the keys are left
+out, not null; 404 for a pet); `POST people/{id}/model3d {max_looks 1..12 = 6, detail 1..3 = 2, framing 1.8..3.2 =
+2.6, smoothing 0..3 = 2, texture 0..3 = 2, relief 0..1 = 1}` (the last three as whole numbers, not text) -> 202
+`{started}` (409 `busy`, 409 `generator_missing`, 422 `not_enough_photos`); `POST people/{id}/model3d/stop` ->
 `{stopped}` (the model in use stays); `DELETE people/{id}/model3d` (removes the model, stopping the person's job
-first); `GET /files/model3d/{person_id}/{rev}/{name}` serves a look's mesh (`model/gltf-binary`) or its picture
-(`image/jpeg`) for the model in use and a look that is still listed, cached with `private, max-age=31536000,
-immutable` because the rev is in the path. These writes are not owner edits of the library, so they are not undoable
-actions (section 33).
+first); `GET` or `HEAD /files/model3d/{person_id}/{rev}/{name}` serves a look's mesh (`model/gltf-binary`) or its
+picture (`image/jpeg`) for the model in use and a look that is still listed. A head holds its photo's own pixels, so
+these files are sent with `Cache-Control: private, no-cache` and an ETag made of the rev and the name: the browser
+keeps a file and asks before every use, and gets 304 while the look is listed and 404 once it is not. These writes are
+not owner edits of the library, so they are not undoable actions (section 33).
 
 Timeline, albums, map and places, share links, video encoders and device uploads: sections 23 to 28.
 
@@ -1732,31 +1739,42 @@ Body traits (section 34; `people/evidence.ts`, `TraitCompare.tsx`, `TraitsTab.ts
 - A person (not a pet) has a "3D" tab (`?tab=3d`), a lazy chunk. Query key `['model3d', id]`, outside
   `LIBRARY_KEYS`, read again every 2 s while the person's job runs and every 5 s while another person's job is in
   the way.
-- Before a model exists: what it does, how many face photos can be used, the options as sliders (Looks, Detail,
-  Framing) and "Generate"; when nothing can be made, the server's reason and a disabled button. While the server
-  works: the step, a bar and "Stop" (an older model stays below it); after Stop or Delete the card reads
-  "Stopping" until the job is gone, which takes about a second. After a failed or shortened run: its reason.
-- With a model: the head, a line that says which photo it came from and when, with a link to the photo, the looks
-  as a row of their pictures, and the controls. Look: sliders Age, Hair and Facial hair. Their stops are the values
-  that exist among the looks (age bands; hair and facial hair labels in the order of their levels), each with a
-  tick and its value in words. Moving one decides that axis first; among the looks at the new stop, the one nearest
-  to the head on screen on the other axes is shown and the other sliders follow it. So the three sliders always
-  describe the head on screen and every stop leads to a look (`lookAxes`, `pickLook`). An axis with one stop is
-  shown disabled with its value; one that was not read is left out. View: Turn, Tilt and Zoom (also drag, wheel and
-  pinch). Light: direction, height and brightness. Switches "Colour" (off shows the bare shape) and "Spin slowly";
-  "Reset view"; "Generate again" (the options, starting from the model's own) and "Delete this model" (confirmed).
+- Before a model exists: what it does, how many face photos can be used, the options (sliders Looks, Detail, Framing,
+  Smoothing and Photo texture and the switch Face relief, with a line when the server says that the depth model of the
+  relief is not installed) and "Generate"; when nothing can be made, the server's reason and a disabled button. While
+  the server works: the step ("Finding looks", "Preparing photos", "Building heads", "Finishing heads", "Saving"), a
+  bar and "Stop" (an older model stays below it); after Stop or Delete the card reads "Stopping" until the job is
+  gone, which takes about a second. After a failed or shortened run: its reason.
+- With a model: the head; a line that says which photo it came from and when, with a link to the photo; for a head
+  that carries its photo a line that says how far round the photo reaches, for one whose face was shaped a line that
+  says so, and the generator's note when it left one; the looks as a row of their pictures; and the controls. Look:
+  sliders Age, Hair and Facial hair. Their stops are the values that exist among the looks (age bands; hair and facial
+  hair labels in the order of their levels), each with a tick and its value in words. Moving one decides that axis
+  first; among the looks at the new stop, the one nearest to the head on screen on the other axes is shown and the
+  other sliders follow it. So the three sliders always describe the head on screen and every stop leads to a look
+  (`lookAxes`, `pickLook`). An axis with one stop is shown disabled with its value; one that was not read is left out.
+  View: Turn, Tilt and Zoom (also drag, wheel and pinch). Light: direction, height and brightness. Switches "Colour"
+  (off shows the bare shape), "Photo" (only for a head that carries one: off shows the colours under the photo, and it
+  waits while Colour is off) and "Spin slowly"; "Reset view"; "Generate again" (the options, starting from the model's
+  own, with the defaults for what an older model does not say) and "Delete this model" (confirmed). A model made
+  before heads carried their photo has a line above the head that says so; its "Generate again" opens the panel and
+  brings it into view.
 - `Head3dViewer` holds all the three.js code and is a lazy chunk of its own, loaded only when a model exists (three
-  0.187, MIT; 657 kB, 166 kB gzipped; the tab itself is 15 kB). Its `HeadStage` draws only when something changed,
-  fetches a look's mesh when it is first wanted and keeps the one on screen and four more, caps the pixel ratio at
-  2, takes its background from the theme, and lets go of everything on unmount, the WebGL context included.
-  (`useTheme` hands React the choice and the theme in effect as one value, so a system switch under "System"
-  re-renders its users: with the choice alone it did not, and the 3D background kept the old colour.) From one look
-  to the next it cross-fades two whole pictures over 300 ms (the old look is drawn and copied to a plain canvas on
-  top, the new one is drawn underneath, the copy fades out), at once under `prefers-reduced-motion`. The view
-  belongs to the viewer, because the owner also drags it: it reports it (`onView`, at most every 60 ms) and takes
-  changes as commands (`Head3dHandle.setView`), so a slider never fights a drag. The lamp hangs on the camera and
-  keeps its place for the viewer while the head turns. Without WebGL the tab says so and shows the look's photo, and
-  the look sliders still work. The wrapper carries `data-ready`, `data-look` and `data-fade` for checks.
+  0.187, MIT; 660 kB, 167 kB gzipped; the tab itself is 19 kB). Its `HeadStage` draws only when something changed,
+  fetches a look's mesh when it is first wanted and keeps the one on screen and four more (at most two of those with a
+  photo), caps the pixel ratio at 2, takes its background from the theme, and lets go of everything on unmount, the
+  WebGL context included. (`useTheme` hands React the choice and the theme in effect as one value, so a system switch
+  under "System" re-renders its users: with the choice alone it did not, and the 3D background kept the old colour.)
+  From one look to the next it cross-fades two whole pictures over 300 ms (the old look is drawn and copied to a plain
+  canvas on top, the new one is drawn underneath, the copy fades out), at once under `prefers-reduced-motion`. The
+  fade starts to move once the graphics card has drawn the new look's first picture (a sync mark, asked about once a
+  frame and given up after 1.5 s), so sending a look's shapes and its photo to the card does not show as a jump in the
+  middle of it. A head that carries its photo has a second mesh over the first, the photo, and a model with such a
+  head is lit more evenly (section 36). The view belongs to the viewer, because the owner also drags it: it reports it
+  (`onView`, at most every 60 ms) and takes changes as commands (`Head3dHandle.setView`), so a slider never fights a
+  drag. The lamp hangs on the camera and keeps its place for the viewer while the head turns. Without WebGL the tab
+  says so and shows the look's photo, and the look sliders still work. The wrapper carries `data-ready`, `data-look`
+  and `data-fade` for checks.
 - `components/ui.tsx` gains `Slider` (the native range input, styled once in `index.css`: a 44 px tall touch
   target, a thin track coloured up to the thumb through `--fill`, tick marks, the value in words as
   `aria-valuetext`) and `Switch` (moved from `LearningTab`).
@@ -1813,7 +1831,7 @@ Body traits (section 34; `people/evidence.ts`, `TraitCompare.tsx`, `TraitsTab.ts
 | `GEN3D_DIR`, `GEN3D_PYTHON` | `MODELS_DIR/gen3d`, `GEN3D_DIR/venv/bin/python` | the 3D head generator's own environment (`venv/`, `weights/`, `src/`) and its Python (section 36) |
 | `GEN3D_GENERATOR` | `auto` | `auto` (the first installed backend), a backend's name, or `fake` (the stand-in: it needs no model and runs with the server's own Python) |
 | `GEN3D_SANDBOX` | `auto` | run the generator inside `bwrap`, where it sees only the system's libraries, its own environment and the job's work folder (section 36): `auto` (the real generator, when `bwrap` is installed), `on` (always, and nothing is generated without it), `off` |
-| `GEN3D_MAX_RSS_MB`, `GEN3D_LOOK_TIMEOUT_S` | 5000, 600 | the generator is stopped above this much resident memory (its whole process tree), or when one head takes longer than this |
+| `GEN3D_MAX_RSS_MB`, `GEN3D_LOOK_TIMEOUT_S` | 5000, 600 | the generator is stopped above this much resident memory (its whole process tree; the job is told the limit, and near it a head is finished without the face relief), or when one head takes longer than this many seconds (counted from the generator's last `made:` or `look:` line) |
 | `GEN3D_FAKE` | false | use the stand-in generator with the server's own Python (tests, or a look at the tab before the model is installed) |
 
 ## 16. Testing
@@ -1873,34 +1891,64 @@ path on a snapshot of a library (never the live one): the lining up with its tim
 and a leave-one-out by mode (position, clothes, both), kind of box, gap and photos walked, also with the person
 taken off the photos around (`--around`).
 
-3D heads (section 36) are tested without PyTorch. `test_gen3d.py`: the mesh clean-up, the GLB writer read back
-(linear 16-bit colours that return to the same sRGB bytes), the stand-in backend, a backend module that offers
-`create()`, `python -m gen3d` end to end with its exit codes and a clean stop on SIGTERM, the check with and
-without `--device` (a stand-in `torch` on the path shows that the plain check never imports it), and the viewer
-check below. `test_looks.py`: the square around a face, another face inside it, the head's turn from five points,
-the faults, ages from the birth year, a day sharing its levels, the bins and the choice of looks, the sample over
-the years and its limit (also for someone who is a child in every photo), the reading's reports before the models
-load and after every photo, and the plan and the picture on hand-made rows with no models. `test_model3d.py`: the
-job end to end with the stand-in generator; one job at a time; Stop and Delete in the child's step and while looks
-are found; a person deleted during either; a child that fails, that cannot start, that passes its memory limit or
-its time limit; heads that were finished before a limit or a crash; a look that fails among others; looks whose
-photo left the library or whose face is no longer the person's; the sweep, also of what an interrupted run left;
-the check asked once, renewed in the background and given a folder of its own; the child's environment; the
-routes and the files route. Three tests need `bwrap` and skip without it. One runs the stand-in job through the
-sandbox and then asks from inside it, with the app's own Python: the work folder can be written and nothing else
-can, a file and a listening unix socket outside it are not there, `/run` is empty, a TCP connection fails, a
-variable of the server's environment is absent, and of the home folder and the repository only the way to what
-is shown exists.
+3D heads (section 36) are tested without PyTorch and without a model file. `test_gen3d.py`: the mesh clean-up, the GLB
+writer read back (linear 16-bit colours that return to the same sRGB bytes), the stand-in backend, a backend module
+that offers `create()`, `python -m gen3d` end to end with its exit codes, the finishing's options and `inside` through
+a job and the values a job file may not hold, the two passes in their order (the model closed before the first head is
+finished, a look's line only once its file is there), a clean stop on SIGTERM in either pass, the check with and
+without `--device` (a stand-in `torch` on the path shows that the plain check never imports it), and the viewer check
+below. `test_gen3d_finishing.py`, on a made-up bust and made-up pictures: the neighbour sums and the solver against
+plain arithmetic, the depth buffer against triangles drawn one by one, the quick outline against the exact one, the
+camera fit finding a known scale and shift and not being pulled by where the picture ends, what is compared, a photo
+that does not line up, the weights (seen, facing, never a step over 0.2, away from a jump in depth, inside the cut-out
+and the photo's own part), colours carried round at their height, the model's colours matched to the photo, the
+texture as the photo's own pixels up to its limit with the background painted over, a head without a photo, a failure
+in any step of the photo, the unseen part pulled smooth, the rules of the reshape step, and the file with two parts
+read back. `test_gen3d_relief.py`, on a made-up sheet with stand-in depth models: the seen front coming closer to the
+true shape and the nose to nearly its true height, vertices keeping their place in the picture, the unseen part and
+the region's edge staying where they were, the factor from the normals and its bounds, `inside`, every way of
+declining, the stop order passing through, the limit, the solver against a direct solve, the two model files never
+loaded together, the check line, and the installer going on without an optional file. `test_gen3d_join.py`: the job
+runner's stage between the camera and the photo (a nose that only the stand-in depth model sees ends up on the bust,
+and the vertices move along the camera's rays), its memory guard, a look's note, and a job with a backend that is
+given a cut-out: both passes, without the relief, without the files, near its memory limit, without the photo, and
+with the stand-in, which never runs it.
 
-`frontend/scripts/check-head3d.mjs` checks the viewer without a browser. It bundles the real `HeadStage` and the
-look sliders' logic with esbuild, gives them three.js with a stand-in renderer and a stand-in page, and lets
-GLTFLoader read files that the Python writer has just written: the first look and its colours, the cross-fade (two
-draws and one copy a frame), a change of mind during a fade, reduced motion, the camera for Turn, Tilt and Zoom,
-the directions of drag and wheel, the spin, the lamp, a file of any size and place, a file that cannot be read,
-which meshes are kept, a new model with the same keys, a lost context, the theme's value under a system switch,
-dispose and a browser without WebGL.
-`test_gen3d.py` runs it and skips when node or the frontend's packages are missing. What the pictures look like is
-not something it can tell: that takes a browser.
+`test_looks.py`: the square around a face, another face inside it, the head's turn from five points, the faults, ages
+from the birth year, a day sharing its levels, the bins and the choice of looks, the sample over the years and its
+limit (also for someone who is a child in every photo), the reading's reports before the models load and after every
+photo, the plan on hand-made rows with no models, and the generator's picture: cut from the original, at the photo's
+own resolution between its two ends, with the part of it that is the photo itself, and at the preview's resolution
+when the original does not read. `test_model3d.py`: the job end to end with the stand-in generator; the options kept
+inside their ranges and passed on to the job and the manifest; a look's picture at the photo's own size, and the part
+of it that is the photo; what the generator says about a head's finishing, checked and kept, and what is read from the
+file when it says nothing; a model made before the finishing; the memory numbers; whether the relief's models are
+installed; one job at a time; Stop and Delete in the child's step and while looks are found; a person deleted during
+either; a child that fails, that cannot start, that passes its memory limit or its time limit; the first pass moving
+the bar and starting a head's time again; heads that were finished before a limit or a crash; a look that fails among
+others; looks whose photo left the library or whose face is no longer the person's; the sweep, also of what an
+interrupted run left, of the heads of photos that are gone for good and of files the manifest does not name; the check
+asked once, renewed in the background and given a folder of its own; the child's environment; the routes, and the
+files route with its ETag (304 while a look is listed, 404 once it is not). Both files switch the installed models off
+for every test (`PCC_NO_MODELS`): their people are rows with noise pictures, in which the real models find no look.
+Three tests need `bwrap` and skip without it. One runs the stand-in job through the sandbox and then asks from inside
+it, with the app's own Python: the work folder can be written and nothing else can, a file and a listening unix socket
+outside it are not there, `/run` is empty, a TCP connection fails, a variable of the server's environment is absent,
+and of the home folder and the repository only the way to what is shown exists.
+
+`frontend/scripts/check-head3d.mjs` checks the viewer without a browser. It bundles the real `HeadStage` and the look
+sliders' logic with esbuild, gives them three.js with a stand-in renderer and a stand-in page, and lets GLTFLoader
+read files that the Python writer has just written: the first look and its colours, the cross-fade (two draws and one
+copy a frame, and its wait for the graphics card's first picture), a change of mind during a fade, reduced motion, the
+camera for Turn, Tilt and Zoom, the directions of drag and wheel, the spin, the lamp, a file of any size and place, a
+file that cannot be read, which meshes are kept, a new model with the same keys, a lost context, the theme's value
+under a system switch, dispose and a browser without WebGL: 17 groups. A head file has one part or two, and every one
+of them holds for both. When the folder also holds a `photo.glb`, a head that is known to carry its photo, an 18th
+group checks the photo layer itself: how it is drawn, the light of a model with such a head, Colour off and Photo off,
+what is kept and let go, and what happens when the browser takes the graphics memory away. `test_gen3d.py` runs the
+script on plain heads of the stand-in (17 groups) and skips when node or the frontend's packages are missing; it
+writes no `photo.glb`, so the 18th group runs only when the script is given one by hand. What the pictures look like
+is not something it can tell: that takes a browser.
 
 ## 17. Build notes
 
@@ -3608,56 +3656,240 @@ With the clothes floor of 0.80: 0.991, 0.987, 0.991, 0.984 and 0.941. With the b
 
 ## 36. 3D heads of a person, one per look (`gen3d/`, `app/analysis/looks.py`, `app/analysis/model3d.py`, `app/api/model3d.py`)
 
-A person's page has a "3D" tab. Its "Generate" button builds one 3D head for each look found in that person's
-photos, on the server, with a local model. A look is how someone looked for a while: an age band, a hair length and
-an amount of facial hair. The viewer shows one head at a time; sliders pick the look (Age, Hair, Facial hair), turn
-and tilt the head, zoom, and move the light. Nothing is read, loaded or generated before the button is used:
-`GET people/{id}/model3d` only reads what is stored, and the generator's Python and its model are never inside the
-server's process.
+A person's page has a "3D" tab. Its "Generate" button builds one 3D head for each look found in that person's photos,
+on the server, with local models. A look is how someone looked for a while: an age band, a hair length and an amount
+of facial hair. A head is the image-to-3D model's shape made smooth, with the face's relief read from the photo by a
+depth model and the photo itself laid over the front as its texture. The viewer shows one head at a time; sliders pick
+the look (Age, Hair, Facial hair), turn and tilt the head, zoom, and move the light. Nothing is read, loaded or
+generated before the button is used: `GET people/{id}/model3d` only reads what is stored, and the generator's Python
+and its models are never inside the server's process.
 
 ### Two programs
 
 - The app finds the looks with the models it already has (SigLIP, the face detector, FairFace ages, DWPose; numpy and
-  onnxruntime only), cuts a head-and-shoulders picture for each, runs the generator, stores what it made and serves
-  it.
+  onnxruntime only), cuts a head-and-shoulders picture for each at the photo's own resolution, runs the generator,
+  stores what it made and serves it.
 - The generator is the `gen3d` package at the repo root: a separate program with its own Python environment, started
   as `python -m gen3d --job JOB.json` for the length of one job. The app never imports it. PyTorch and the model's
   code live in that environment only: `GEN3D_DIR` (default `MODELS_DIR/gen3d`) holds `venv/` (its Python), `weights/`
-  (the model files, with `weights/hf` as `HF_HOME` and `weights/u2net` as `U2NET_HOME`) and `src/` (the model's
-  code); `scripts/setup_3d.sh` makes it. So the server's memory and the GPU are free the rest of the time, and a
-  generator that crashes or runs out of memory cannot take the server with it.
+  (the model files, with `weights/hf` as `HF_HOME`, `weights/u2net` as `U2NET_HOME` and `weights/david` for the two
+  depth models) and `src/` (the model's code); `scripts/setup_3d.sh` makes it. So the server's memory and the GPU are
+  free the rest of the time, and a generator that crashes or runs out of memory cannot take the server with it.
 
 `gen3d/`: `__main__.py` (the job runner and `--check`), `backends/__init__.py` (the interface and the registry
 `{"fake", "triposr"}`; `ORDER = ("triposr",)` is what "auto" tries), `backends/fake.py` (a stand-in that needs no
-model: an egg-shaped head on a neck, 1,900 triangles, coloured from the picture, numpy and Pillow only),
-`backends/triposr.py` and `prep.py` (the real backend and its background cut), `mesh.py` and `glb.py`.
+model: an egg-shaped head on a neck, 1,900 triangles, coloured from the picture, standing where the camera a real
+backend names would see it), `backends/triposr.py` (the real backend), `prep.py` (its background cut, U2-Net through
+onnxruntime, and the record of a picture in two frames: the square the model saw and the picture as it came),
+`finishing.py` (what a head gets between the backend and the file: the smoothing, the picture's camera and the photo
+as a texture), `relief.py` (the face's relief from two depth models, through onnxruntime), `sparse.py` (sums over a
+mesh's edges and a conjugate gradient solver in numpy, because the server's Python has no scipy), `raster.py` (a
+mesh's depth drawn from a camera, in numpy), `mesh.py` and `glb.py`. The finishing needs numpy, OpenCV and Pillow and
+nothing of PyTorch, so the stand-in's heads go through it with the server's own Python, and the tests run it there.
 
 ### The contract between them
 
-Job file: `{"out_dir", "weights_dir", "generator": "auto" | a backend's name, "device": "auto", "options":
-{"detail": 1..3, "seed": 0}, "looks": [{"key", "image"}]}`; `image` is a square picture of the head and shoulders
-with the face in the middle. Output: `OUT/<key>.glb` for every look that worked and `OUT/result.json` `{"generator":
-{"name", "version"}, "looks": [{"key", "ok", "mesh", "vertices", "faces", "seconds", "error"}]}`; on stdout, one
-line per event and flushed at once, `progress: N/M` and `look: <key> ok|error <seconds>`. A look that fails does not
-stop the others. Exit codes: 0 when at least one head was built, 3 when none was, 2 for a bad job file, 4 when the
-backend cannot load, 5 when it was told to stop (SIGTERM) or its parent went away (`PR_SET_PDEATHSIG` and a watch
-on the parent's pid). The last line on stderr is the reason, and the owner reads it in the tab. `python -m gen3d
---check --weights-dir DIR` prints one JSON line `{"backends": {name: installed}, "auto", "device", "torch"}`. It
-only looks at files: `device` and `torch` are null unless `--device` is added, which imports PyTorch and takes
+Job file: `{"out_dir", "weights_dir", "generator": "auto" | a backend's name, "device": "auto", "max_rss_mb",
+"options": {"detail": 1..3, "framing", "smoothing": 0..3, "texture": 0..3, "relief": 0 | 1, "seed": 0}, "looks":
+[{"key", "image", "inside"}]}`. `image` is a square picture of the head and shoulders with the face in the middle, at
+the photo's own resolution (1024 to 3072 px a side): the model is given a smaller copy, and the picture itself becomes
+the head's texture. `inside` may be left out. It is `[left, top, right, bottom]` in pixels of that picture: the part
+that is the photo itself, right and bottom being the first pixels past it. Where a look's square left its photo the
+app filled the picture by repeating the photo's edge, and nothing is read or laid on the head from there. `smoothing`,
+`texture` and `relief` belong to the finishing (below; 2, 2 and 1 when left out). `framing` says how many face sizes
+wide the pictures are (1 to 6; 2.6 when left out): the relief finds the face by it. `max_rss_mb` may be left out: it
+is the resident memory above which the app stops the child. A value outside its range is a bad job file.
+
+A job runs in two passes, because the memory the child may hold is shared with the app and the finishing must not sit
+on top of the model. First every look goes through the background cut and the model, and only its raw mesh and its
+picture's record are kept; the picture itself, up to 28 MB of pixels, is read from its file again later. Then the
+backend is closed and its memory handed back: the model, the cut-out model, what the collector still holds, the blocks
+PyTorch keeps on the graphics card for reuse, and the freed memory the C library keeps for itself. Then every look is
+finished, written and reported, one after the other.
+
+Output: `OUT/<key>.glb` for every look that worked and `OUT/result.json` `{"generator": {"name", "version"},
+"memory_mb": {"peak", "with_model", "released"}, "looks": [{"key", "ok", "mesh", "vertices", "faces", "seconds",
+"error", "textured", "texture", "overlap", "overlap_head", "relief", "note"}]}`. `memory_mb` is the child's own
+resident memory by the kernel's count: the most it held, what it held at the end of the first pass with the model
+loaded, and what it held once the model was let go. `textured` says that the head has the photo layer, and `texture`
+is that picture's `[width, height]`. `overlap` and `overlap_head` say how well the mesh's outline covered the person's
+in the picture, overall and over the head alone (null when nothing was fitted). `relief` says that the face was shaped
+from the photo. `note` says why a head that was asked for a photo layer has none, or else why its face was not shaped
+although that was asked for and the depth models are installed. `seconds` is the look's share of both passes.
+
+On stdout, one line per event and flushed at once: `progress: N/M`, `made: <key> ok|error <seconds>` and `look: <key>
+ok|error <seconds>`. `progress: 0/M` comes at the start. In the first pass a look gets its `made:` line when the model
+is done with it. Nothing is finished by then: the line says how far the pass is and that the job is alive. In the
+second pass a look gets its `look:` line and the next `progress:` line when it is done, in the job's order, and a look
+that worked has its file in place before its line is printed. A look that fails does not stop the others, and no look
+fails because of its photo or its relief: it is written without. Exit codes: 0 when at least one head was built, 3
+when none was, 2 for a bad job file, 4 when the backend cannot load, 5 when it was told to stop (SIGTERM) or its
+parent went away (`PR_SET_PDEATHSIG` and a watch on the parent's pid). The last line on stderr is the reason, and the
+owner reads it in the tab. `python -m gen3d --check --weights-dir DIR` prints one JSON line `{"backends": {name:
+installed}, "auto", "device", "relief", "torch"}`. It only looks at files: `relief` says whether the two depth model
+files are there, and `device` and `torch` are null unless `--device` is added, which imports PyTorch and takes
 seconds.
 
 A backend's module offers `BACKEND`, or a `create()` that returns it, and must be cheap to import (no PyTorch at
 import time). The backend exposes `name`, `version`, `available(weights_dir)` (cheap as well: the check runs for
-status reads), `load(weights_dir, device, options)`, `generate(image, options) -> Mesh` and `close()`. `generate`
-gets an RGB picture, or RGBA with the background cut out when `gen3d.prep.prepare(image, options)` ran first (it runs
-for every backend but the stand-in, when that module is there); `options` are the job's plus `out_dir` and the look's
-`key`.
-The mesh must have +Y up and +Z towards the viewer, at any scale; its colours, when it has any, are one sRGB byte
-triple per vertex. `mesh.finish` then checks it, drops loose parts with fewer than 2 percent of the largest part's
-triangles, centres it, scales it into a box one unit across, turns an inside-out mesh the right way round and
-computes the normals. `glb.write` stores binary glTF 2.0: positions and normals as float32, `COLOR_0` as four
-normalised 16-bit values in linear light (glTF vertex colours are linear, and 8 linear bits would band in dark hair),
-uint32 indices and one rough, double-sided material. Any glTF viewer shows the file as the app does.
+status reads), `load(weights_dir, device, options)`, `generate(image, options) -> Mesh` and `close()`. `generate` gets
+an RGB picture, or RGBA with the background cut out when `gen3d.prep.prepare(image, options)` ran first (it runs for
+every backend but the stand-in); `options` are the job's plus `out_dir`, the look's `key` and its `inside`. The mesh
+must have +Y up and +Z towards the viewer, at any scale; its colours, when it has any, are one sRGB byte triple per
+vertex. A backend that knows where its picture was taken from names that camera on the mesh (`mesh.Camera`: at `(0, 0,
+distance)` looking down -z, with a vertical field of view; 1.9 and 40 degrees for both backends) and leaves the mesh
+in that camera's frame, not centred and not scaled, because the finishing needs the two to line up. `fit` on the
+camera says that the backend only guesses it. TripoSR has no camera input and draws its input view from that camera by
+convention, so its camera is fitted to the picture; the stand-in's egg stands where its camera says, so nothing is
+searched. `close()` lets the model go and hands its memory back, the graphics card's too.
+
+`finishing.finish_head` then makes the head (next) and, at the very end, centres it, scales it into a box one unit
+across and computes the normals. `glb.write` stores binary glTF 2.0 without extensions. A head without a photo layer
+is one part, the file a head always was: positions and normals as float32, `COLOR_0` as four normalised 16-bit values
+in linear light (glTF vertex colours are linear, and 8 linear bits would band in dark hair), uint32 indices and one
+rough, double-sided material. A head with its photo has a second part in the same mesh: the layer's triangles again,
+with the same positions and normals so the two lie exactly on each other, `TEXCOORD_0` with (0, 0) at the texture's
+top left corner, `COLOR_0` white with the photo's weight as its alpha, and a material with the photo as its base
+colour texture, `alphaMode` `BLEND`, single sided. The texture is a JPEG stored inside the file, with one sampler
+(linear, mipmaps, clamped to the edge). A viewer draws the opaque part and then the blended part over it, so the photo
+shows where its weight is high and fades into the colours underneath.
+
+### Finishing a head (`finishing.py`)
+
+An image-to-3D model returns a lumpy surface with a ragged lower edge and one blurred colour per vertex: on a head of
+60,000 vertices the face has about a hundred colours across, and the picture it was made from has twenty times that.
+So every head goes through a finishing stage between the backend and the file, and the picture goes back onto the
+mesh. `finish_head(mesh, prepared, options, reshape)` does this, in order:
+
+- The mesh is checked, loose parts with fewer than 2 percent of the largest part's triangles are dropped, and an
+  inside-out mesh is turned the right way round.
+- Smoothing (`smoothing` 0 to 3: off, light, normal, strong). Taubin smoothing takes the lumps and keeps the volume:
+  0, 12, 30 or 60 rounds. The rounds are counted for a mesh whose edges are 0.0067 of its longest side (a
+  marching-cubes grid of 256 on a head) and scaled by the square of the edge ratio for finer and coarser meshes, at
+  most four times, so every detail level is smoothed over the same distance and the stand-in's coarse egg is left as
+  it is. Unless smoothing is off, the model's own colours are averaged with their neighbours' twice. Then everything
+  under a level 3.5 percent of the height above the lowest point is pressed flat: a clean base in place of the ragged
+  edge.
+- The picture's camera. The backend names the camera it assumes; when it only guesses it, a search over one scale and
+  two shifts lays the mesh's outline over the person's cut-out. It starts from the named camera or from the two
+  bounding boxes, whichever covers better, tries each of the three a step up and a step down (3 percent in scale, 8 px
+  of the model's square in shift), keeps a better try, and halves the steps when none is better, down to a quarter of
+  a pixel or 240 tries. The outlines are compared at 256 px, as intersection over union, and not everywhere. Left out:
+  what lies outside the part of the picture that is the photo itself; the cut-out's lowest 6 percent of rows and
+  everything under them, because the shoulders run out of the picture there and the mesh ends in a base of its own;
+  and a strip of 8 px along the left, the right or the top of the photo's part when the person touches that side.
+  There the picture ends, and that line is no outline of the person. The photo is used when the overlap reaches 0.92
+  over everything that is compared and 0.92 over the head alone (the upper 45 percent of the cut-out's height), since
+  outlines can agree overall while the head, which is what has to line up, does not. Two checks of the picture come
+  before the search: it must show something of the photo itself, and the cut-out, laid into the model's square by the
+  picture's own record, must overlap the cut-out the model was given by 0.95 or more, or the photo would land shifted
+  without the outlines showing it.
+- Another stage may now move the surface (`reshape`): the face's relief, below. It is called with the vertices, the
+  triangles, the camera that was found and the picture's record, and may return the vertices moved; they get 4 more
+  smoothing rounds, and the base is pressed flat again. The stage needs the camera and nothing else of the photo's, so
+  the camera is also found for a head that is asked for without the photo (`texture` 0). Three rules keep one step
+  from costing another's work. A stage that raises leaves the surface as it was, and the photo is still laid on. A
+  surface the stage moved is kept whatever the photo does after it. A result of another shape, or with a vertex that
+  is not a number, is not taken. The head says whether the stage's surface was kept (`reshaped`) and, when the stage
+  could not run at all, why (`reshape_note`: the camera's reason, or what the stage raised).
+- The photo's weights (`texture` 1 to 3). Every vertex gets a weight between 0 and 1: how much of the photo it may
+  show. It must be seen from the camera (no further than 2 percent of the mesh's size behind the nearest surface in a
+  depth buffer of 1024 px). It must keep away from a jump in depth, such as an ear in front of hair: no photo within 2
+  px of one, all of it from 8 px. It must lie inside the cut-out and inside the photo's own part: none within 4 px of
+  their edge, all of it from 16 px, in pixels of the model's square. And it must face the camera, which is read twice:
+  from a much smoother copy of the surface (60 rounds), so a lump does not punch a hole, and from the surface itself,
+  so the underside of a nose does not take the pixels of its tip. Each of these fades, and then the weights are
+  lowered until no two neighbouring vertices differ by more than 0.2: the photo ends nowhere at a line. With fewer
+  than 30 vertices at more than half weight the photo shows too little of the head, and the head is written without
+  it.
+- The part the photo does not show is only the model's guess, so it is pulled smooth (not with smoothing off). Every
+  vertex is put where it balances between its own place and the mean of its neighbours' new places; the mean counts
+  100, 300 or 500 times its own place (light, normal, strong; scaled for the mesh's fineness as the rounds are) where
+  the weight is 0 and not at all where it is 1. That is one linear system, solved by conjugate gradient, and it
+  reaches the long ripples that smoothing rounds leave on a marching-cubes back. One such solve also takes some of the
+  broad shape along: the outline moves in from where the camera was fitted, and ears and shoulders melt. So it is run
+  a second time, on what the first took away, and the smooth part of that is given back. The base is pressed flat
+  again.
+- The colours. Where the weight is over a half, a vertex takes the photo's colour, read from a copy of the photo
+  blurred to the vertices' spacing (at most 8 px of the model's square, counting the person's pixels only), so that
+  one hair or one glint does not decide a vertex. Everywhere else the photo's colours are carried over the surface: a
+  vertex becomes the weighted mean of its neighbours, where a neighbour at the same height counts fully and one
+  straight above or below 65 times less, so hair stays hair and a shirt stays a shirt as the colours go round the
+  head. The carried colours are held weakly (0.003 against a vertex's neighbours) to the model's own, which are first
+  matched to the photo with a gain and an offset per channel (the gain between 0.5 and 2). So far from the photo the
+  back keeps the model's guess at the photo's level, and a part the photo never reaches is not left black. What is
+  written is the photo's colour times the weight plus the carried colour times the rest.
+- The texture. The triangles with a corner whose weight is over 0.004 are written a second time, as the photo layer,
+  each corner with its place in the texture and its weight. The texture is the part of the picture those corners use,
+  with a margin of 24 px: the photo's own pixels. It is shrunk when its longest side is over 1024 px (`texture` 1) or
+  2048 px (2), kept at its own size at 3 (a picture is at most 3072 px), and never enlarged. The person's colours are
+  first spread outwards over the background, because a graphics card mixes neighbouring pixels in when it shrinks a
+  texture and the background would show as a rim. It is stored as a JPEG of quality 90 at full colour resolution.
+
+Nothing in this stage fails a look. When the picture cannot be used, or a step of the photo raises, the head is
+written with its colours and without the layer, and its `note` says why in plain words, for example "the photo did not
+line up with the head (outlines overlap 0.89, over the head 0.85)". Only the job's own order to stop passes through.
+
+### The face's relief (`relief.py`)
+
+The image-to-3D model gives a face that is a blob with a bump for the nose. The relief stage reads the look's picture
+with DAViD (Microsoft, ICCV 2025, MIT licence), a pair of models made for pictures of people: one reads relative
+depth, the other the tilt of the surface. The two files, `weights/david/depth-model-vitb16_384.onnx` and
+`weights/david/normal-model-vitb16_384.onnx` (449 MB each), are plain ONNX and run on the CPU through onnxruntime.
+They are optional: `scripts/setup_3d.sh` fetches them, checks them against pinned checksums, and goes on without them
+when a download fails.
+
+The stage is the `reshape` step of the finishing, so it runs once the picture's camera is known. It works on a grid of
+512 over the model's square picture:
+
+1. The face crop: a square 1.9 face sizes wide around the face, cut from the look's picture at full resolution, inside
+   the part that is the photo itself, and given to each model at 512 px. The app cuts a look's picture `framing` face
+   sizes wide with the face centre 0.08 of the side above the middle, which is how the face is found.
+2. The mesh's own depth, drawn from the fitted camera.
+3. The region that may change: where the mesh has depth, inside the person's cut-out less 4 px at its edge, inside the
+   crop and inside the photo's own part. With under 2,000 grid pixels of it nothing is done, and the models are not
+   run.
+4. How deep the relief is. The depth model's reading is relative, so it needs a factor. A plain fit of the reading to
+   the mesh's depth gives one, but the mesh is too flat or too deep by up to a factor of two. So the normals are the
+   measure: the factor is the trimmed slope of the tilt the normal model reads against the reading's own pixel slopes,
+   over pixels that face the camera, kept within 0.6 to 2.2 times the plain fit's. When the two do not correlate (0.3
+   or less) the plain fit's factor is used. When the plain fit explains under 0.3 of the spread of the mesh's depth,
+   the reading does not match the head and nothing is done.
+5. The new depth takes the reading's slopes between neighbouring pixels, and the mesh's own slope where the reading
+   jumps (steeper than 2 units of depth per unit across: the chin over the neck, a glasses rim). It is held to the
+   mesh's depth firmly within 3 px of the region's edge (weight 4) and barely inside (0.0001, rising to 0.5 next to
+   that band). This is one symmetric system on the grid, solved by conjugate gradient to a millionth of the right-hand
+   side; if it does not settle in 4,000 rounds nothing is done.
+6. The shift, the new depth minus the mesh's, is blurred a little (1.2 px), limited to 0.09 of the head's size, and
+   moves each seen vertex along its camera ray. A vertex therefore keeps its place in the picture, and the photo that
+   is laid on afterwards stays where the camera put it. Vertices the camera does not see, and vertices whose place in
+   the picture is outside the photo's own part, stay bit for bit where they were.
+
+Sizes "of the head's size" are measured in the scene, from where the vertices fall in the picture and how far away
+they are, so the mesh is handed over in its own frame.
+
+The stage never fails a head. When it declines it returns the surface as it came and says why: the face is too small
+in the picture (a crop under 64 px), too little of the face is seen, the depth reading does not match the head, the
+relief did not settle, a model answered in another shape or with something that is not a number, or what a model
+raised. In the job's result that becomes the look's `note`, "the face was not shaped from the photo: ...". A note
+about the look's photo comes first when there is one; it is usually the same reason, since without the camera neither
+can be done.
+
+Memory. The generator shares its memory limit with the app, so the two models are never loaded together: each is
+loaded for its one run and let go, and what it held is handed back to the system. onnxruntime's memory arena is off,
+which lowers the peak by 0.5 GB and costs no time. Measured on three real heads with four threads (`GEN3D_THREADS`, 4
+unless set): 5 to 7 s a head, and 1.0 to 1.1 GB above what the process held for about two seconds a model, nothing
+after. The job runner guards the limit as well. Before the stage loads a model it reads the process's resident memory,
+and when that plus 1,300 MB would pass the job's `max_rss_mb` it leaves the head as it is, with the note "too little
+memory was left for the depth models (N MB held, M MB allowed)". The app would stop the whole job at that limit; this
+way the job ends with its heads, without the relief.
+
+When it runs: for a backend that is given a cut-out (not the stand-in, which takes a picture as it is and whose egg
+has no face), in a job with `relief` 1, on an installation that has both files. A job without the files runs as if
+`relief` were 0, and no look carries a note about it: the check line says `"relief": false`, the status passes that on
+as `relief_installed`, and the tab says once, under the options, that the depth model is not installed and that
+running `scripts/setup_3d.sh` again fetches it. `texture` 0 does not turn the relief off: the head then has its own
+colours on the shaped surface.
 
 ### The sandbox, and why
 
@@ -3676,9 +3908,10 @@ The generator runs model code written by others on the owner's face photos. So t
   it; the folders that only lead to the parts above are read-only too;
 - namespaces of its own for users, process ids, IPC, the host name and the network, where nothing but its own
   loopback exists; it dies with its parent;
-- an environment of its own (`--clearenv`): `PATH`, `HOME=/tmp`, `LANG`, `PYTHONUNBUFFERED`, the cache folders
-  under `/tmp`, `HF_HOME`, `U2NET_HOME`, `HF_HUB_OFFLINE=1`, `TRANSFORMERS_OFFLINE=1`, and from the server only
-  `CUDA_VISIBLE_DEVICES`, `NVIDIA_VISIBLE_DEVICES`, `LD_LIBRARY_PATH` and `GEN3D_THREADS`, when they are set.
+- an environment of its own (`--clearenv`): `PATH`, `HOME=/tmp`, `LANG`, `PYTHONUNBUFFERED`, `USER` and `LOGNAME`
+  (a made-up name: the sandbox has no list of users), the cache folders under `/tmp`, `HF_HOME`, `U2NET_HOME`,
+  `HF_HUB_OFFLINE=1`, `TRANSFORMERS_OFFLINE=1`, and from the server only `CUDA_VISIBLE_DEVICES`,
+  `NVIDIA_VISIBLE_DEVICES`, `LD_LIBRARY_PATH` and `GEN3D_THREADS`, when they are set.
 
 What that hides: the home folder with its credentials, `DATA_DIR` and `ORIGINALS_DIR` (the library, the vault, the
 database), the rest of the repository and its `.env`, every other model, the rest of `/etc`, the server's
@@ -3700,9 +3933,9 @@ an empty folder of its own as the only place to write. Whatever the setting: the
 environment (the same short list, with its home and caches inside the work folder when there is no sandbox, since
 a machine's `/tmp` may be shared); it is its own process group with `oom_score_adj` 1000, so a memory limit takes it
 and not the server; once a second the resident memory of its whole process tree is added up, and the child is
-stopped above `GEN3D_MAX_RSS_MB` (5000), when one head takes longer than `GEN3D_LOOK_TIMEOUT_S` (600), on Stop or
-Delete, when its person is deleted or merged away, and when the server exits. One job runs at a time for the whole
-app, as there is one GPU.
+stopped above `GEN3D_MAX_RSS_MB` (5000), when one head takes longer than `GEN3D_LOOK_TIMEOUT_S` (600 s, counted from
+the child's last `made:` or `look:` line), on Stop or Delete, when its person is deleted or merged away, and when the
+server exits. One job runs at a time for the whole app, as there is one GPU.
 
 ### Finding the looks (`looks.py`)
 
@@ -3739,46 +3972,122 @@ fullest bin of every age band is taken first, then the fullest of the rest, up t
 default 6). When no bin has enough such photos, the one fullest bin of all the photos that can be placed gives a
 single look, so a person with few photos still gets a head. A look's input is its best photo (face weight, size,
 sharpness, how frontal it is, shoulders in view, light), with three runners-up in case its pixels cannot be read.
-The picture is cut from the original at 1024 px: a square "Framing" face sizes wide (1.8 to 3.2, default 2.6).
-Without SigLIP the hair and facial hair are unknown and the bins are age bands only.
+The picture is cut from the original (from the analysis picture when the original does not read): a square "Framing"
+face sizes wide (1.8 to 3.2, default 2.6), written at the photo's own resolution. That is as many pixels a side as the
+square has in the photo, but at least 1024 (a smaller square is enlarged to that) and at most 3072. Where the square
+leaves the photo, the photo's edge row or column is repeated, and `looks.inside` says which part of the picture is the
+photo itself. Without SigLIP the hair and facial hair are unknown and the bins are age bands only.
 
 ### The job (`model3d.py`)
 
-`start` refuses when a job is running (`Busy`), when the generator is not installed (`GeneratorMissing`) and when
-the person has fewer than 3 source faces (`NotEnoughPhotos`). The job then runs in a background thread: "Finding
-looks" (the plan), "Preparing photos" (the pictures, into `people3d/<id>/work/`), "Building heads" (the child; its
-`progress:` lines move the bar) and "Saving". The result goes to `DATA_DIR/people3d/<person id>/<stamp>/`:
-`model.json` (the manifest: generator, options, birth year, and per look its key, label, age, levels and labels,
-photo count, source face with its box and item, faults, file names, bytes, vertices and faces), `<key>.glb`, and
-`<key>.jpg` (the input picture at 512 px). Writing `current` with the new stamp makes it the model in use; the
-older folders are removed after that.
+`start` refuses when a job is running (`Busy`), when the generator is not installed (`GeneratorMissing`) and when the
+person has fewer than 3 source faces (`NotEnoughPhotos`). Its options (`clean_options`: `max_looks`, `detail`,
+`framing`, `smoothing`, `texture`, `relief`) are each moved into their range; the route itself refuses a value outside
+it, and takes the three finishing options as whole numbers only. The job then runs in a background thread: "Finding
+looks" (the plan), "Preparing photos" (the pictures, into `people3d/<id>/work/`, each with the part of it that is the
+photo itself), "Building heads" (the child's first pass; its `made:` lines move the bar), "Finishing heads" (its
+second; the `progress:` lines do) and "Saving". The job file carries `detail`, `framing`, `smoothing`, `texture` and
+`relief`, and `max_rss_mb` from `GEN3D_MAX_RSS_MB`. The result goes to `DATA_DIR/people3d/<person id>/<stamp>/`:
+`model.json`, `<key>.glb`, and `<key>.jpg` (the input picture at 512 px). Writing `current` with the new stamp makes
+it the model in use; the older folders are removed after that.
 
-How a job ends early. Stop and Delete take effect within about a second in every step: between two photos while
-looks are found (the reading reports before the models load and after every photo, and the job looks there),
-between two looks while the pictures are cut, and in the child's watch. Until the job is gone the status says
-`stopping`. Stop keeps the model in use and leaves nothing new. Delete takes the model out of use at once (it is not
-listed or served from that moment), and its folder goes when the job has ended. A person who is deleted or merged
-into someone else takes their job along: no route can reach a job whose person is gone, so the job looks for its
-person itself, once a second and before a head is built or saved, and stops. A run that fails leaves `error.json`
-and the older model as it was. A child that was stopped by the memory or the time limit, or that broke part of the
-way, may have finished some heads: those become the new model (a mesh is written whole before it is reported), and
-`error.json` says why the rest is missing.
+`model.json` is the manifest: `rev`, `person_id`, `generated_at`, `seconds`, `generator`, `options`, `birth_year`,
+`scanned`, `usable`, `peak_rss_mb`, `generator_memory_mb`, and per look its key, label, age, levels and labels, photo
+count, source face with its box and item, faults, file names, bytes, vertices and faces, and what the generator said
+about its finishing: `textured`, `texture`, `overlap`, `overlap_head`, `relief` and `note`. That part comes from a
+process that runs model code written by others, so it is checked before it is kept: a note is cut to one printable
+line of 200 characters, an overlap must be a share between 0 and 1, a texture size two whole numbers, only a plain
+`true` counts for `relief`, and whether a head is textured is read from the file itself when its row does not say.
+`peak_rss_mb` is the most the server saw the child's process tree hold, sampled once a second; `generator_memory_mb`
+is the generator's own count (the `memory_mb` of its result). They are kept to judge a run by, like the overlaps,
+because the generator's result file goes with the work folder. A manifest written before the finishing existed has
+neither the memory numbers nor the six finishing keys nor the three newer options. It still reads: its looks count as
+not textured and without relief, and the status leaves the three options out, which is how the tab knows that these
+heads predate the photo.
 
-`status` reports `none`, `running` (with the step and its counts), `done` or `error`, whether a model can be made
-and why not, and the looks. A look is neither listed nor served once its source photo is deleted, in the trash or
-in the vault, or once its source face is no longer this person's: moved to someone else, unassigned or removed. A
-photo that was processed again has new face rows; its look stays when one of this person's faces there overlaps
-the look's face by half or more. Whether the generator is installed is asked from it with `--check`, which only
-looks at files: measured with the real environment inside the sandbox, 0.4 s the first time and 0.13 s after. The
+How a job ends early. Stop and Delete take effect within about a second in every step: between two photos while looks
+are found (the reading reports before the models load and after every photo, and the job looks there), between two
+looks while the pictures are cut, and in the child's watch. Until the job is gone the status says `stopping`. Stop
+keeps the model in use and leaves nothing new. Delete takes the model out of use at once (it is not listed or served
+from that moment), and its folder goes when the job has ended. A person who is deleted or merged into someone else
+takes their job along: no route can reach a job whose person is gone, so the job looks for its person itself, once a
+second and before a head is built or saved, and stops. A run that fails leaves `error.json` and the older model as it
+was. A child that was stopped by the memory or the time limit, or that broke part of the way, may have finished some
+heads: those become the new model (a mesh is written whole before it is reported), and `error.json` says why the rest
+is missing. No head is finished before the second pass, so a child that is stopped during the first leaves none. The
+time limit is counted from the child's last `made:` or `look:` line, so it bounds one head's share of a pass and not a
+whole pass.
+
+`status` reports `none`, `running` (with the step and its counts), `done` or `error`, whether a model can be made and
+why not, whether the depth model files of the relief are installed (`relief_installed`; null when the generator does
+not say, as the stand-in does not), the options the model was made with, and the looks, each with `textured`, `relief`
+and, when the generator left one, its `note`. A look is neither listed nor served once its source photo is deleted, in
+the trash or in the vault, or once its source face is no longer this person's: moved to someone else, unassigned or
+removed. A photo that was processed again has new face rows; its look stays when one of this person's faces there
+overlaps the look's face by half or more. Whether the generator is installed is asked from it with `--check`, which
+only looks at files: measured with the real environment inside the sandbox, 0.4 s the first time and 0.13 s after. The
 answer is remembered for 5 minutes (30 seconds while it is missing). A status read waits for it once; after that an
-old answer is given at once and renewed in the background, and `start` asks again itself. The stand-in generator
-runs with the server's own Python however it is asked for (`GEN3D_FAKE`, `GEN3D_GENERATOR=fake`).
+old answer is given at once and renewed in the background, and `start` asks again itself. The stand-in generator runs
+with the server's own Python however it is asked for (`GEN3D_FAKE`, `GEN3D_GENERATOR=fake`).
 
 A deleted or merged person's model stops being served at once, because every route asks for the person first, and
-`model3d.sweep` (housekeeping) removes the folder later; that delay also leaves the model in place for an undone
-delete. While no job runs, the sweep also removes what an interrupted run left behind for everyone else: a work
-folder (a server that stops in the middle of a job never gets to remove it) and model folders that `current` does
-not name.
+`model3d.sweep` (housekeeping, every 10 minutes) removes the folder later; that delay also leaves the model in place
+for an undone delete. While no job runs, the sweep also removes what an interrupted run left behind for everyone else:
+a work folder (a server that stops in the middle of a job never gets to remove it) and model folders that `current`
+does not name.
+
+### Files that follow their photo
+
+A head file holds the photo's own pixels as its texture, and a look's picture is a small copy of the photo. So both
+follow the photo they came from:
+
+- A file is served only for the model in use and for a look that is still listed, and the listing is checked on every
+  request. The answer carries `Cache-Control: private, no-cache` and an ETag made of the rev and the name. A browser
+  may keep the file but asks before every use: it gets 304 while the look is listed and 404 once it is not, whatever
+  it holds. Before heads carried their photo these files were cached for a year, which would now keep a photo on
+  screen after it went to the trash or the vault.
+- A look whose photo is in the trash or the vault, or whose face is no longer this person's, is not listed and not
+  served, but its files stay on disk, because the photo or the face can come back (and the look is then listed again).
+  They go with the next generation, with "Delete this model", with the person, or when the photo is gone for good.
+- A look whose photo is gone for good (its item row no longer exists: the trash was emptied, or the photo was deleted
+  outright) is taken out by the sweep. The manifest is rewritten without it first; then its mesh and its picture are
+  removed, along with any mesh or picture in the folder that the manifest does not name. With no look left the model
+  itself goes. Housekeeping empties the expired trash and then sweeps in the same pass, so a head goes with its photo
+  there. After "Empty trash" it goes at the next housekeeping, up to 10 minutes later; until then the files are on
+  disk, unlisted and unserved.
+
+### Showing a head with its photo (`Head3dViewer.tsx`)
+
+A head file has one part or two. The viewer takes the first mesh without a texture as the head, and the first other
+mesh that has a texture and the coordinates to place it as its photo; a layer whose picture could not be read is left
+out, and the head then shows its own colours there. The photo is a mesh of its own that hangs on the head's mesh, so
+it is placed, sized, shown and hidden with it. Its material is the file's texture with the alpha of the vertex colours
+as the photo's weight: blended, single sided, without writing depth, drawn after the head and a hair in front of it (a
+polygon offset), so the two surfaces never compete for a pixel. A head's picture is still one opaque picture when it
+is done, and the cross-fade between looks stays what it was: two whole pictures. The texture is filtered at the card's
+best anisotropy, so it stays sharp where the surface turns away. Once it is on the graphics card its decoded copy is
+closed, which gives back as much memory again. Such a picture cannot be sent to the card a second time, so when the
+browser takes the graphics memory away the heads that carry a photo are let go, and the wanted one is fetched again
+when the context is back (the browser still has the file).
+
+The light. A photo has its own light and shade in it, so a model with a head that carries its photo is lit evenly: the
+lamp at 0.25 of full light and the soft light at 0.9 with a light ground, where a model of plain colours has 0.62 and
+0.5 with a dark ground. With the lamp where it starts, a surface that faces the viewer then comes out at the photo's
+own colours. The rule holds for the whole model, also for a look of it without a photo, so the light does not change
+from one look to the next or in the middle of a fade. The bare shape (Colour off) is lit as before.
+
+Kept in memory: the head on screen and four more, of which at most two with a photo, since a photo is tens of
+megabytes of graphics memory where a head without one is a few. A head that was let go is fetched again when the owner
+comes back to it. A layer's geometry, material and texture are let go with its head.
+
+The tab (section 14) says what the owner is looking at. Under a head that carries its photo: "From the front this is
+the photo; past about 50 degrees the sides and back are filled in." Under one whose face was shaped: a line that says
+so. Under one the generator left a note on: the note. A "Photo" switch beside "Colour" shows the colours under the
+photo, and waits while Colour is off. The generate panel has the sliders Smoothing (off, light, normal, strong) and
+Photo texture (off, standard, fine, full) and the switch Face relief, with a line when the server says that the depth
+model is not installed. A model made before heads carried their photo shows as it did, with a line above the head that
+says so and offers "Generate again"; the panel then opens with that model's own options and the defaults for the three
+it does not have.
 
 ### Measured (2026-11-13, a snapshot of the owner's library, one person)
 
@@ -3795,17 +4104,38 @@ not name.
   set flagged 52 of 397 bare-headed photos, the final one none of them and 17 of the 320 others, all with a hat, cap,
   turban, helmet or hood. The zero-shot "at the face" flag misses raised arms and a hand under the chin, which is
   what the pose check is for.
-- The generator's picture, on 60 source faces (46 JPEG, 7 HEIC, 6 DNG, 1 PNG): every original was read, the square
-  cut from it showed the same thing as the square cut from the preview (correlation of 64 px greys 0.997 or more),
-  and it was 1,229 to 5,024 source pixels wide (median 2,484), so the 1024 px picture never enlarges anything.
+- The generator's picture, on 60 source faces (46 JPEG, 7 HEIC, 6 DNG, 1 PNG): every original was read, the square cut
+  from it showed the same thing as the square cut from the preview (correlation of 64 px greys 0.997 or more), and it
+  was 1,229 to 5,024 source pixels wide (median 2,484). None of these is under 1024 px, so no picture of them is
+  enlarged; the widest are shrunk to 3072 px.
 - The generator (TripoSR on an RTX 2080, four runs on private test pictures, each the backend and the background
   cut alone, before the sandbox was rebuilt): 3 to 6 s a head at detail 2 with 2.4 GB of GPU memory, 3.1 GB at
   detail 3, 9 to 13 s to load, the background cut about 1 s on the CPU, at most 3.7 GB resident.
+- The finishing, on three stored heads of that person (58 to 68 thousand vertices). The meshes were the stored ones,
+  already centred and scaled, each with its look's picture cut again at 1,730 to 2,719 px; the generator itself was
+  not run for these numbers. The finishing alone: 4.3 to 4.9 s a head on one core and about 0.3 GB on top of the
+  process. With the relief: 9 to 10 s a head, about 5 s of it the two depth models on four threads, and 1.26 to 1.33
+  GB resident at the peak for the whole process. A mesh of 130 thousand vertices with the rounds of detail 3: 11.9 to
+  17.1 s and 0.27 GB on top.
+- On the same three heads: the outlines overlap 0.983 to 0.989 after the camera fit, and 0.972 to 0.981 over the head;
+  the photo layer has 37 to 46 thousand triangles; the texture is 1,498 x 1,611 to 1,743 x 2,048 px and 0.29 to 0.57
+  MB; a file is 4.75 to 5.77 MB (3.3 to 3.8 MB before); the relief moved 15,850 to 18,719 vertices, and the tilts the
+  normal model read correlate with the reading's slopes at 0.796 to 0.966.
+- By eye, from several sides: from the front and up to about 40 degrees a head reads as its photo; past about 50
+  degrees the sides and the back are smooth, filled-in colours.
 
 ### Limits
 
-- One head per look, each from one photo: it is the model's reading of that photo, not a scan. The back of the head
-  is a guess, and the expression is the photo's.
+- One head per look, each from one photo. From the front and up to about 40 degrees to either side the head is the
+  photo; past about 50 degrees the sides and the back are filled-in colours without detail, and the back of the head
+  is the model's guess. Where the photo ends, the filled-in colours can differ in tone from the photo beside them (a
+  shirt can look two-toned from the side). The expression is the photo's.
+- What stands in front of the face in the photo (glasses, a strand of hair, a hand) is painted on the surface and
+  smears when the head is turned. A ridge can show along a glasses rim, where the depth model reads the frame.
+- The relief adds the face's relief (nose, lips, chin, brow) to the model's shape. It does not rescale a head that is
+  too flat as a whole, because it is held to the mesh at the edge of the region.
+- The finishing's numbers (the 0.92 gates, the fades of the weights, the pull on the unseen part, the weight of the
+  model's colours) were set on three heads of one person.
 - Hair and facial hair levels are zero-shot readings and can be wrong; the cuts between the bins were set on one
   person against 185 others. Ages are estimates.
 - The person boxes are used to frame the picture and for the raised-arm check only: no body is built.
@@ -3814,12 +4144,21 @@ not name.
 
 ### Not verified
 
-- The viewer in a real browser: the pictures themselves, the copy of the WebGL canvas that the cross-fade uses, and
-  touch gestures. Its logic, and three.js reading the written files, are checked in node (section 16).
+- A whole generation by the real generator with the finishing and the relief in it. The generator without them ran on
+  the owner's server and made the three heads measured above. The new stages were then run on those stored meshes with
+  their pictures, and through the job on the stand-in's heads and on made-up ones (the tests), but not behind the real
+  model: the third-party model code was not run in the session that wrote them. The first "Generate again" on a server
+  is the first run of all of it together. A failure shows as the error in the 3D tab, and a head whose photo or relief
+  could not be used says so in its note.
+- That closing the model frees its memory before the second pass. `generator_memory_mb` in `model.json` shows it after
+  the first real run: `released` should be well under `with_model`. If it is not, the relief's guard leaves the relief
+  out near the limit and the looks say so.
+- `inside` on a real look whose square leaves its photo: the three heads above were finished without one. It is
+  covered by made-up pictures in the tests.
+- The download of the two depth model files by `scripts/setup_3d.sh`. The files used here were fetched by hand and
+  match the pinned checksums.
+- The viewer on a phone's own graphics chip. The photo layer, the even light and the cross-fade were looked at on the
+  development machine, in Chromium at a desktop's and a phone's screen size and in WebKit at a phone's; pinch and the
+  other touch gestures were not tried. The viewer's logic, and three.js reading the written files, are checked in node
+  (section 16).
 - The cuts for sunglasses, a covered head and odd light on libraries other than the owner's.
-- A whole generation by the real generator started by the app. Checked one by one: the backend and the cut on real
-  pictures (above), the app's job with the stand-in through the same command line and sandbox (the tests), the
-  mesh finishing and the writer on a mesh of the real size (136,000 triangles: 0.1 s, a 3.7 MB file), and, inside
-  the rebuilt sandbox, the plain check and a probe (PyTorch sees the card and computes on it; no home folder, no
-  Docker socket, no network; only the work folder takes a write). The first Generate on a server is the first run
-  of all of it together; a failure shows as the error in the 3D tab.
