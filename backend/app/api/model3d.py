@@ -1,11 +1,17 @@
 """3D heads of a person (docs/ARCHITECTURE.md section 36, app.analysis.model3d). Session required on every route.
 
 GET    /api/people/{id}/model3d   Model3dOut: whether a model can be made (`available`, with a plain `reason` when
-                                  not), the running job's `progress`, the last `error`, and the model's `looks` with
-                                  their mesh and picture URLs. Reading it never starts anything. 404 for a pet.
-POST   /api/people/{id}/model3d   Model3dIn {max_looks 1..12 = 6, detail 1..3 = 2, framing 1.8..3.2 = 2.6}
-                                  -> 202 {started: true}. 409 `busy` (one generation at a time), 409
-                                  `generator_missing`, 422 `not_enough_photos`.
+                                  not), the running job's `progress`, the last `error`, the `options` the model
+                                  was made with, and its `looks` with their mesh and picture URLs. A look says
+                                  whether its head carries the photo as a texture (`textured`) and may carry the
+                                  generator's `note` on it. A model made before `smoothing` and `texture` existed
+                                  reports their defaults and `textured: false`. Reading it never starts anything.
+                                  404 for a pet.
+POST   /api/people/{id}/model3d   Model3dIn {max_looks 1..12 = 6, detail 1..3 = 2, framing 1.8..3.2 = 2.6,
+                                  smoothing 0..3 = 2 (off, light, normal, strong), texture 0..3 = 2 (colours only,
+                                  or the photo as a texture of at most 1024, 2048, 4096 px)}; the last two must
+                                  be whole numbers, not text -> 202 {started: true}. 409 `busy` (one generation
+                                  at a time), 409 `generator_missing`, 422 `not_enough_photos`.
 POST   /api/people/{id}/model3d/stop
                                   stops the person's running job -> {stopped}; the model in use, if any, stays.
                                   The job ends within about a second (`stopping` in the status until then).
@@ -42,6 +48,10 @@ class Model3dIn(BaseModel):
     max_looks: int = Field(default=looks.LOOKS_DEFAULT, ge=looks.LOOKS_MIN, le=looks.LOOKS_MAX)
     detail: int = Field(default=model3d.DETAIL_DEFAULT, ge=model3d.DETAIL_MIN, le=model3d.DETAIL_MAX)
     framing: float = Field(default=looks.FRAMING_DEFAULT, ge=looks.FRAMING_MIN, le=looks.FRAMING_MAX)
+    # the generator's finishing of a head; whole numbers only ("2", 2.0 and true are refused)
+    smoothing: int = Field(default=model3d.SMOOTHING_DEFAULT, ge=model3d.SMOOTHING_MIN, le=model3d.SMOOTHING_MAX,
+                           strict=True)
+    texture: int = Field(default=model3d.TEXTURE_DEFAULT, ge=model3d.TEXTURE_MIN, le=model3d.TEXTURE_MAX, strict=True)
 
 
 class Model3dProgress(BaseModel):
@@ -66,12 +76,16 @@ class Look3dOut(BaseModel):
     mesh_url: str
     bytes: int
     vertices: int
+    textured: bool = False       # the head carries the photo as a texture over its front
+    note: str | None = None      # the generator's remark on this look, when it made one
 
 
 class Model3dOptions(BaseModel):
     max_looks: int
     detail: int
     framing: float
+    smoothing: int = model3d.SMOOTHING_DEFAULT
+    texture: int = model3d.TEXTURE_DEFAULT
 
 
 class Model3dOut(BaseModel):

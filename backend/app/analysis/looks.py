@@ -4,7 +4,8 @@ A look is how someone looked for a while: an age band, how much facial hair and 
 person's good face photos (at most MAX_SCORED, spread over the years), puts them into bins of (age band, facial
 hair, hair), keeps the fullest bins (at most max_looks, every age band first) and picks the photo of each that makes
 the best input for the generator, with three runners-up. write_picture() cuts that photo's head and shoulders from
-the original at full quality.
+the original at full quality and at the photo's own resolution (PICTURE_SIDE to PICTURE_SIDE_MAX pixels a side): the
+generator shrinks it for its model and lays the full-size picture over the finished head as its texture.
 
 What is read per face:
 - from a square HEAD_CROP face sizes wide around it in the 2048 px preview (what the generator will see): the hair as
@@ -64,7 +65,8 @@ MIN_BIRTH_FACES = 10       # dated adult faces needed to tell the birth year
 CHILD_AGE = 13.0           # a face read this young keeps its read age (a re-shot print carries today's date)
 HEAD_CROP = 2.6            # the reading square, in face sizes
 READ_SIDE = 384            # and its side in pixels for the models
-PICTURE_SIDE = 1024        # the generator's input picture
+PICTURE_SIDE = 1024        # the generator's picture is at least this many pixels a side (a small face is enlarged)
+PICTURE_SIDE_MAX = 3072    # ... and at most this many; in between it keeps the photo's own resolution
 FRAMING_MIN, FRAMING_MAX, FRAMING_DEFAULT = 1.8, 3.2, 2.6
 FACE_ABOVE = 0.08          # the face centre sits this share of the square above its middle
 CUT_OFF_SHARE = 0.15       # the square may leave the picture by this share of its area
@@ -755,11 +757,20 @@ def plan(conn: sqlite3.Connection, person_id: int, max_looks: int = LOOKS_DEFAUL
 
 
 # ------------------------------------------------------------------ the generator's picture
+def picture_side(native: float) -> int:
+    """The side the generator's picture is written at, for a square that is `native` pixels wide in the photo: the
+    photo's own resolution, never under PICTURE_SIDE and never over PICTURE_SIDE_MAX."""
+    if not math.isfinite(native):
+        return PICTURE_SIDE
+    return int(min(PICTURE_SIDE_MAX, max(PICTURE_SIDE, round(native))))
+
+
 def picture(conn: sqlite3.Connection, face_id: int, framing: float = FRAMING_DEFAULT,
-            side: int = PICTURE_SIDE) -> np.ndarray | None:
+            side: int | None = None) -> np.ndarray | None:
     """The head and shoulders of a face as the generator's input: a square `framing` face sizes wide cut from the
-    original at full quality (the analysis picture when the original does not read), RGB, side x side. None when the
-    face or its pixels are gone."""
+    original at full quality (the analysis picture when the original does not read), RGB. Without `side` it keeps the
+    photo's own resolution: as many pixels a side as the square has in the photo, inside PICTURE_SIDE to
+    PICTURE_SIDE_MAX (picture_side); with `side` it is side x side. None when the face or its pixels are gone."""
     from app.analysis.trait_regions import load_original, load_preview
 
     row = conn.execute(
@@ -775,14 +786,17 @@ def picture(conn: sqlite3.Connection, face_id: int, framing: float = FRAMING_DEF
         return None
     framing = min(FRAMING_MAX, max(FRAMING_MIN, float(framing)))
     h, w = rgb.shape[:2]
-    return cut(rgb, square_for((row["x"], row["y"], row["w"], row["h"]), w, h, framing), side)
+    square = square_for((row["x"], row["y"], row["w"], row["h"]), w, h, framing)
+    return cut(rgb, square, picture_side(square[2]) if side is None else max(2, int(side)))
 
 
-def write_picture(conn: sqlite3.Connection, face_id: int, path: Path, framing: float = FRAMING_DEFAULT) -> bool:
-    """Write picture() as a PNG. False when there is nothing to write."""
+def write_picture(conn: sqlite3.Connection, face_id: int, path: Path, framing: float = FRAMING_DEFAULT,
+                  side: int | None = None) -> bool:
+    """Write picture() as a PNG (at the photo's own resolution unless `side` is given). False when there is nothing
+    to write."""
     from PIL import Image
 
-    rgb = picture(conn, face_id, framing)
+    rgb = picture(conn, face_id, framing, side)
     if rgb is None:
         return False
     path.parent.mkdir(parents=True, exist_ok=True)

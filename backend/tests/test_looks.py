@@ -359,6 +359,81 @@ def test_the_generators_picture_is_cut_from_the_original(conn, tmp_path):
     assert looks.picture(conn, 99999) is None
 
 
+def test_the_picture_s_side_follows_the_photo_between_its_two_ends():
+    assert (looks.PICTURE_SIDE, looks.PICTURE_SIDE_MAX) == (1024, 3072)
+    assert looks.picture_side(374.4) == 1024                        # a small face: enlarged to the least side
+    assert looks.picture_side(1024.0) == 1024 and looks.picture_side(1024.6) == 1025
+    assert looks.picture_side(1785.4) == 1785 and looks.picture_side(2719.5) == 2720
+    assert looks.picture_side(3072.4) == 3072 and looks.picture_side(4160.0) == 3072
+    assert looks.picture_side(0.0) == 1024 and looks.picture_side(-5.0) == 1024
+    assert looks.picture_side(float("nan")) == 1024 and looks.picture_side(float("inf")) == 1024
+
+
+def _gradient(width: int, height: int, tint: int) -> bytes:
+    """A smooth made-up photo: red grows to the right, green downwards, so a wrong cut or size shows."""
+    from tests.helpers import jpeg_bytes
+    from PIL import Image
+
+    x = np.linspace(0, 255, width, dtype=np.float32)[None, :].repeat(height, axis=0)
+    y = np.linspace(0, 255, height, dtype=np.float32)[:, None].repeat(width, axis=1)
+    rgb = np.stack([x, y, np.full_like(x, tint)], axis=2).astype(np.uint8)
+    return jpeg_bytes(Image.fromarray(rgb, "RGB"), quality=92)
+
+
+def test_the_picture_keeps_the_photo_s_own_resolution(conn, tmp_path):
+    """A small face is enlarged to 1024 as before, a middle one keeps exactly the pixels the photo has, and a
+    very large one stops at 3072. All three are the same cut, only at another size."""
+    import cv2
+    from PIL import Image
+
+    person = make_person(conn, "Asha")
+    cases = [  # photo size, face box, the side the square has in the photo at framing 2.6, the side written
+        ((640, 480), (0.4, 0.3, 0.2, 0.3), 2.6 * 144, 1024),          # face 128 x 144 px
+        ((2400, 1800), (0.35, 0.3, 0.25, 0.3), 2.6 * 600, 1560),      # face 600 x 540 px
+        ((4000, 3000), (0.3, 0.2, 0.4, 0.5), 2.6 * 1600, 3072),       # face 1,600 x 1,500 px
+    ]
+    for n, ((width, height), box, native, side) in enumerate(cases):
+        item = make_item(conn, width=width, height=height, data=_gradient(width, height, 40 * n))
+        face = make_face(conn, item["id"], person, box=box, size_px=int(box[2] * width))
+        assert looks.square_for(box, width, height, 2.6)[2] == pytest.approx(native)
+        own = looks.picture(conn, face, 2.6)
+        assert own.shape == (side, side, 3) and own.dtype == np.uint8, (width, height)
+        # asked for a side, it gives that side; shrunk to it, the full-size picture is the same picture
+        small = looks.picture(conn, face, 2.6, side=512)
+        assert small.shape == (512, 512, 3)
+        shrunk = cv2.resize(own, (512, 512), interpolation=cv2.INTER_AREA)
+        assert float(np.abs(shrunk.astype(np.int16) - small.astype(np.int16)).mean()) < 2.0
+        out = tmp_path / f"l{n}.png"
+        assert looks.write_picture(conn, face, out, 2.6)
+        with Image.open(out) as im:
+            assert im.size == (side, side) and im.mode == "RGB" and im.format == "PNG"
+        assert looks.write_picture(conn, face, out, 2.6, side=1024)
+        with Image.open(out) as im:
+            assert im.size == (1024, 1024)
+    # a wider framing takes more of the photo, so more pixels, up to the same end
+    assert looks.picture(conn, face, 3.2).shape == (3072, 3072, 3)
+    middle = make_face(conn, make_item(conn, width=2400, height=1800, data=_gradient(2400, 1800, 200))["id"], person,
+                       box=(0.35, 0.3, 0.25, 0.3), size_px=600)
+    assert looks.picture(conn, middle, 1.8).shape == (1080, 1080, 3)
+    assert looks.picture(conn, middle, 3.2).shape == (1920, 1920, 3)
+
+
+def test_without_the_original_the_picture_has_the_preview_s_resolution(conn):
+    """When the original does not read, the cut comes from the analysis picture, and so does its size."""
+    from app import storage
+    from PIL import Image
+
+    person = make_person(conn, "Asha")
+    item = make_item(conn, width=4000, height=3000, data=_gradient(4000, 3000, 90))
+    face = make_face(conn, item["id"], person, box=(0.3, 0.2, 0.4, 0.5), size_px=1600)
+    assert looks.picture(conn, face, 2.6).shape == (3072, 3072, 3)
+    storage.original_path(item["uid"], 1, ".jpg").write_bytes(b"not a picture any more")
+    with Image.open(storage.preview_path(item["uid"], 1)) as im:
+        im.convert("RGB").resize((2048, 1536)).save(storage.preview_path(item["uid"], 1), "WEBP", quality=70)
+    # the face is 819 px wide in the 2,048 px preview: a square of 2,130 px
+    assert looks.picture(conn, face, 2.6).shape == (2130, 2130, 3)
+
+
 def test_reading_reports_before_the_models_load_and_after_every_photo(conn, monkeypatch):
     person = _person_with_faces(conn)[0]
     rows = looks.source_rows(conn, person)

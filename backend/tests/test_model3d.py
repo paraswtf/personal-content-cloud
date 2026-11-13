@@ -122,8 +122,9 @@ def test_job_end_to_end_with_the_stand_in_generator(conn, fake):
     base = model3d.person_dir(person)
     assert (base / "current").read_text() == rev and {p.name for p in base.iterdir()} == {"current", rev}
     assert doc["person_id"] == person and doc["generator"] == {"name": "fake", "version": "1"}
-    assert doc["options"] == {"max_looks": 6, "detail": 3, "framing": 2.2}
+    assert doc["options"] == {"max_looks": 6, "detail": 3, "framing": 2.2, "smoothing": 2, "texture": 2}
     assert doc["scanned"] == 7 and doc["usable"] == 7 and doc["seconds"] >= 0
+    assert all(isinstance(lk["textured"], bool) for lk in doc["looks"]) and "note" in doc["looks"][0]
     assert [(lk["key"], lk["age_band"], lk["photos"], lk["label"]) for lk in doc["looks"]] == [
         ("l1", "25 to 34", 4, "About 25"), ("l2", "45 to 59", 3, "About 45")]
     for lk in doc["looks"]:
@@ -140,6 +141,8 @@ def test_job_end_to_end_with_the_stand_in_generator(conn, fake):
     assert [lk["mesh_url"] for lk in status["looks"]] == [
         f"/files/model3d/{person}/{rev}/l1.glb", f"/files/model3d/{person}/{rev}/l2.glb"]
     assert status["looks"][0]["picture_url"] == f"/files/model3d/{person}/{rev}/l1.jpg"
+    assert status["options"] == doc["options"]
+    assert [lk["textured"] for lk in status["looks"]] == [lk["textured"] for lk in doc["looks"]]
     assert model3d.file_path(person, rev, "l1.glb") == base / rev / "l1.glb"
     assert model3d.file_path(person, rev, "model.json") is None and model3d.file_path(person, "nope", "l1.glb") is None
     assert model3d.file_path(person, rev, "../current") is None
@@ -155,11 +158,219 @@ def test_job_end_to_end_with_the_stand_in_generator(conn, fake):
     assert not base.exists() and model3d.status(conn, person)["state"] == "none"
 
 
+DEFAULTS = {"max_looks": 6, "detail": 2, "framing": 2.6, "smoothing": 2, "texture": 2}
+
+
 def test_options_are_kept_inside_their_ranges():
-    assert model3d.clean_options(None) == {"max_looks": 6, "detail": 2, "framing": 2.6}
-    assert model3d.clean_options({"max_looks": 99, "detail": 0, "framing": 9}) == {"max_looks": 12, "detail": 1, "framing": 3.2}
+    assert model3d.clean_options(None) == DEFAULTS and model3d.clean_options({}) == DEFAULTS
+    assert set(DEFAULTS) == set(model3d.OPTION_KEYS)
+    # outside the range: the nearest end
+    assert model3d.clean_options({"max_looks": 99, "detail": 0, "framing": 9, "smoothing": 9, "texture": -4}) == {
+        "max_looks": 12, "detail": 1, "framing": 3.2, "smoothing": 3, "texture": 0}
+    assert model3d.clean_options({"smoothing": 0, "texture": 3}) == {**DEFAULTS, "smoothing": 0, "texture": 3}
+    # no number at all: the default, for every option
+    for bad in (None, "strong", True, [2], {"a": 1}, float("nan"), float("inf")):
+        assert model3d.clean_options({k: bad for k in DEFAULTS}) == DEFAULTS, bad
+    assert model3d.clean_options("not a dict") == DEFAULTS  # type: ignore[arg-type]
+    # a number written as text or with a fraction is still taken, as before
+    assert model3d.clean_options({"smoothing": "1", "texture": 2.9, "detail": "3"}) == {
+        **DEFAULTS, "smoothing": 1, "texture": 2, "detail": 3}
     assert model3d.clean_options({"generator": "fake", "junk": 1})["generator"] == "fake"
     assert "generator" not in model3d.clean_options({"generator": "triposr"})
+    assert "junk" not in model3d.clean_options({"junk": 1})
+
+
+def _spy_on_the_job(monkeypatch) -> dict:
+    """The job file the child is started with, read just before the real child runs."""
+    seen: dict = {}
+    real = model3d._run_child
+
+    def run(work, job_path, total, fake_run, stopped=None):
+        seen.update(json.loads(Path(job_path).read_text(encoding="utf-8")))
+        seen["pictures"] = {}
+        for look in seen["looks"]:
+            with Image.open(look["image"]) as im:
+                seen["pictures"][look["key"]] = (im.size, im.mode, im.format)
+        return real(work, job_path, total, fake_run, stopped)
+
+    monkeypatch.setattr(model3d, "_run_child", run)
+    return seen
+
+
+def test_the_finishing_options_reach_the_job_and_the_manifest(conn, fake, monkeypatch):
+    person, _items = person_with_looks(conn)
+    job = _spy_on_the_job(monkeypatch)
+    model3d.start(conn, person, {"smoothing": 3, "texture": 0, "detail": 1})
+    assert job["options"] == {"detail": 1, "smoothing": 3, "texture": 0, "seed": 0}
+    assert [look["key"] for look in job["looks"]] == ["l1", "l2"]
+    doc = model3d.manifest(person)
+    assert doc["options"] == {**DEFAULTS, "detail": 1, "smoothing": 3, "texture": 0}
+    assert model3d.status(conn, person)["options"] == doc["options"]
+    # nothing said: the defaults go to the generator
+    model3d.start(conn, person, None)
+    assert job["options"] == {"detail": 2, "smoothing": 2, "texture": 2, "seed": 0}
+    assert model3d.manifest(person)["options"] == DEFAULTS
+
+
+def test_a_look_s_picture_is_written_at_the_photo_s_own_size(conn, fake, monkeypatch):
+    """The child gets each look's picture as large as the photo has it, inside 1024 to 3072 px; the picture kept
+    with the model stays small."""
+    from tests.helpers import flat_image, jpeg_bytes
+
+    person = make_person(conn, "Asha")
+    # faces 1,000 px wide in 4,000 px photos: a square of 2,200 px at framing 2.2
+    for k in range(3):
+        photo = jpeg_bytes(flat_image(4000, 3000, (200 - 9 * k, 160, 120)))
+        item = make_item(conn, width=4000, height=3000, data=photo, taken_at=f"2024-03-{k + 1:02d}T10:00:00.000Z")
+        make_face(conn, item["id"], person, box=(0.35, 0.3, 0.25, 0.3), size_px=900, age_groups=groups(3))
+    job = _spy_on_the_job(monkeypatch)
+    model3d.start(conn, person, {"framing": 2.2})
+    assert job["pictures"] == {"l1": ((2200, 2200), "RGB", "PNG")}
+    doc = model3d.manifest(person)
+    with Image.open(model3d.person_dir(person) / doc["rev"] / doc["looks"][0]["picture"]) as im:
+        assert im.size == (model3d.PICTURE_SIDE, model3d.PICTURE_SIDE) == (512, 512)
+    assert not (model3d.person_dir(person) / "work").exists()
+
+
+def _with_result_rows(monkeypatch, said: dict[str, dict], meshes: dict[str, bytes] | None = None) -> None:
+    """Let the real stand-in child run, then make its result rows say exactly `said` about the finishing (and
+    nothing where a look is not named), and swap in `meshes`, before the job collects them."""
+    real = model3d._run_child
+
+    def run(work, job_path, total, fake_run, stopped=None):
+        out = real(work, job_path, total, fake_run, stopped)
+        path = work / "out" / "result.json"
+        doc = json.loads(path.read_text(encoding="utf-8"))
+        for row in doc["looks"]:
+            for key in ("textured", "texture", "overlap", "note"):
+                row.pop(key, None)
+            row.update(said.get(row["key"], {}))
+        path.write_text(json.dumps(doc), encoding="utf-8")
+        for key, data in (meshes or {}).items():
+            (work / "out" / f"{key}.glb").write_bytes(data)
+        return out
+
+    monkeypatch.setattr(model3d, "_run_child", run)
+
+
+def _glb(textured: bool, vertices: int = 600, triangles: int = 1100) -> bytes:
+    """The smallest file that reads as a .glb here: the header and a description, no data."""
+    material: dict = {"pbrMetallicRoughness": {"metallicFactor": 0.0}}
+    doc: dict = {
+        "asset": {"version": "2.0"},
+        "accessors": [{"count": vertices, "type": "VEC3"}, {"count": triangles * 3, "type": "SCALAR"}],
+        "meshes": [{"primitives": [{"attributes": {"POSITION": 0}, "indices": 1, "material": 0}]}],
+        "materials": [material],
+    }
+    if textured:
+        doc["images"] = [{"mimeType": "image/jpeg", "bufferView": 0}]
+        doc["textures"] = [{"source": 0}]
+        doc["materials"].append({"pbrMetallicRoughness": {"baseColorTexture": {"index": 0}}, "alphaMode": "BLEND"})
+        doc["meshes"][0]["primitives"].append(
+            {"attributes": {"POSITION": 0, "TEXCOORD_0": 0}, "indices": 1, "material": 1})
+    text = json.dumps(doc).encode("utf-8")
+    text += b" " * ((4 - len(text) % 4) % 4)
+    return (0x46546C67).to_bytes(4, "little") + (2).to_bytes(4, "little") + (20 + len(text)).to_bytes(4, "little") \
+        + len(text).to_bytes(4, "little") + (0x4E4F534A).to_bytes(4, "little") + text
+
+
+def test_what_the_generator_says_about_the_finishing_is_kept(client, conn, fake, monkeypatch):
+    person, _items = person_with_looks(conn)
+    _with_result_rows(monkeypatch, {
+        "l1": {"textured": True, "texture": [1536, 2048], "overlap": 0.9712345, "note": None},
+        "l2": {"textured": False, "texture": None, "overlap": 0.71,
+               "note": "The photo did not line up with the head,\n so the head keeps its own colours.\x07"},
+    })
+    model3d.start(conn, person, {})
+    l1, l2 = model3d.manifest(person)["looks"]
+    assert (l1["textured"], l1["texture"], l1["overlap"], l1["note"]) == (True, [1536, 2048], 0.9712, None)
+    assert (l2["textured"], l2["texture"], l2["overlap"]) == (False, None, 0.71)
+    assert l2["note"] == "The photo did not line up with the head, so the head keeps its own colours."
+    s1, s2 = model3d.status(conn, person)["looks"]
+    assert s1["textured"] is True and "note" not in s1                 # a note is given only when there is one
+    assert s2["textured"] is False and s2["note"] == l2["note"]
+    assert "texture" not in s1 and "overlap" not in s1                 # those two stay in the manifest
+    body = client.get(f"/api/people/{person}/model3d").json()
+    assert [(lk["textured"], lk["note"]) for lk in body["looks"]] == [(True, None), (False, l2["note"])]
+
+
+def test_a_result_without_the_finishing_keys_reads_as_not_textured(conn, fake, monkeypatch):
+    """The generator before the finishing: its rows say nothing, and its files carry no picture."""
+    person, _items = person_with_looks(conn)
+    _with_result_rows(monkeypatch, {}, {"l1": _glb(False), "l2": _glb(False)})
+    model3d.start(conn, person, {})
+    for lk in model3d.manifest(person)["looks"]:
+        assert (lk["textured"], lk["texture"], lk["overlap"], lk["note"]) == (False, None, None, None)
+    assert all(lk["textured"] is False and "note" not in lk for lk in model3d.status(conn, person)["looks"])
+
+
+def test_the_file_says_whether_it_is_textured_when_the_row_does_not(conn, fake, monkeypatch):
+    """A head finished before the generator was stopped has no result row: its file is asked. And what a row
+    says is only taken when it is of the right kind."""
+    assert model3d._glb_textured(Path(__file__)) is False              # not a .glb at all
+    person, _items = person_with_looks(conn)
+    _with_result_rows(monkeypatch, {
+        "l1": {},                                                                       # says nothing
+        "l2": {"textured": "yes", "texture": [0, -5], "overlap": 7, "note": 12},        # says nonsense
+    }, {"l1": _glb(True), "l2": _glb(False)})
+    model3d.start(conn, person, {})
+    l1, l2 = model3d.manifest(person)["looks"]
+    assert (l1["textured"], l1["texture"], l1["overlap"], l1["note"]) == (True, None, None, None)
+    assert (l2["textured"], l2["texture"], l2["overlap"], l2["note"]) == (False, None, None, None)
+    assert (l1["vertices"], l1["faces"]) != (0, 0)
+
+    # a size is kept only with a texture; a long note is cut; a note of blanks is none
+    _with_result_rows(monkeypatch, {
+        "l1": {"textured": False, "texture": [1024, 1024], "note": "x" * 500},
+        "l2": {"textured": True, "texture": [4096, 4096.0], "overlap": True, "note": " \n\t "},
+    })
+    model3d.start(conn, person, {})
+    l1, l2 = model3d.manifest(person)["looks"]
+    assert (l1["textured"], l1["texture"], l1["note"]) == (False, None, "x" * model3d.NOTE_MAX)
+    assert (l2["textured"], l2["texture"], l2["overlap"], l2["note"]) == (True, None, None, None)
+
+
+def test_a_model_made_before_the_finishing_still_shows(client, conn, fake):
+    """An older manifest has neither the two options nor anything about textures. The status gives the
+    defaults for the options (the tab starts "Generate again" from them) and says the heads are not textured."""
+    person, _items = person_with_looks(conn)
+    model3d.start(conn, person, {"max_looks": 6, "detail": 3, "framing": 2.2})
+    rev = model3d.current_rev(person)
+    path = model3d.person_dir(person) / rev / "model.json"
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    doc["options"] = {"max_looks": 6, "detail": 3, "framing": 2.2}
+    doc.pop("peak_rss_mb", None)
+    for lk in doc["looks"]:
+        for key in ("textured", "texture", "overlap", "note"):
+            lk.pop(key, None)
+    path.write_text(json.dumps(doc), encoding="utf-8")
+
+    status = model3d.status(conn, person)
+    assert status["state"] == "done" and len(status["looks"]) == 2
+    assert status["options"] == {"max_looks": 6, "detail": 3, "framing": 2.2, "smoothing": 2, "texture": 2}
+    assert all(lk["textured"] is False and "note" not in lk for lk in status["looks"])
+    body = client.get(f"/api/people/{person}/model3d").json()
+    assert body["options"]["smoothing"] == 2 and body["options"]["texture"] == 2
+    assert [(lk["textured"], lk["note"]) for lk in body["looks"]] == [(False, None), (False, None)]
+    assert client.get(body["looks"][0]["mesh_url"]).status_code == 200
+
+    # a manifest whose options are missing or broken gives none, and the rest still shows
+    for broken in (None, {}, "fast", ["a"]):
+        doc["options"] = broken
+        path.write_text(json.dumps(doc), encoding="utf-8")
+        assert model3d.status(conn, person)["options"] is None
+        assert client.get(f"/api/people/{person}/model3d").json()["options"] is None
+    assert model3d.shown_options({"detail": "x", "framing": None}) == DEFAULTS    # bad values read as the defaults
+
+
+def test_the_manifest_says_how_much_memory_the_child_held(conn, fake, monkeypatch):
+    person, _items = person_with_looks(conn)
+    monkeypatch.setattr(model3d, "tree_rss_mb", lambda pid: 321.4)
+    model3d.start(conn, person, {})
+    assert model3d.manifest(person)["peak_rss_mb"] == 321 and model3d.peak_rss_mb() == 321
+    monkeypatch.setattr(model3d, "tree_rss_mb", lambda pid: 0.0)           # a child that was gone at every look
+    model3d.start(conn, person, {})
+    assert model3d.manifest(person)["peak_rss_mb"] is None
 
 
 def test_status_says_why_nothing_can_be_made(conn, no_generator, monkeypatch):
@@ -863,11 +1074,25 @@ def test_routes(client, conn, fake):
     assert client.post(url, json={"max_looks": 99}).status_code == 422
     assert client.post(url, json={"detail": 0}).status_code == 422
     assert client.post(url, json={"framing": 9.0}).status_code == 422
+    # the finishing options: whole numbers 0 to 3, and nothing that only looks like one
+    for bad in ({"smoothing": 4}, {"smoothing": -1}, {"texture": 4}, {"texture": "2"}, {"smoothing": "2"},
+                {"texture": 2.5}, {"smoothing": True}, {"texture": None}):
+        assert client.post(url, json=bad).status_code == 422, bad
+    assert client.get(url).json()["state"] == "none"                       # none of them started anything
     r = client.post(url, json={"max_looks": 2, "detail": 1, "framing": 2.0})
     assert r.status_code == 202 and r.json() == {"started": True}
     assert "x-action-id" not in r.headers                                  # not an undoable owner action
     body = client.get(url).json()
-    assert body["state"] == "done" and body["options"] == {"max_looks": 2, "detail": 1, "framing": 2.0}
+    assert body["state"] == "done"
+    assert body["options"] == {"max_looks": 2, "detail": 1, "framing": 2.0, "smoothing": 2, "texture": 2}
+    assert all(lk["textured"] in (True, False) and "note" in lk for lk in body["looks"])
+    assert client.post(url, json={"max_looks": 2, "smoothing": 0, "texture": 3}).status_code == 202
+    assert client.get(url).json()["options"] == {
+        "max_looks": 2, "detail": 2, "framing": 2.6, "smoothing": 0, "texture": 3}
+    chosen = {"max_looks": 2, "detail": 1, "framing": 2.0, "smoothing": 3, "texture": 1}
+    assert client.post(url, json=chosen).status_code == 202
+    body = client.get(url).json()
+    assert body["options"] == chosen
     assert [lk["key"] for lk in body["looks"]] == ["l1", "l2"] and body["looks"][0]["label"] == "About 25"
     assert body["generated_at"] and body["error"] is None and body["progress"] is None
 
