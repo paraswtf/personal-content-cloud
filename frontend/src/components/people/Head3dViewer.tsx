@@ -31,6 +31,7 @@ import {
   DoubleSide,
   FrontSide,
   HemisphereLight,
+  LoadingManager,
   Mesh,
   MeshStandardMaterial,
   PerspectiveCamera,
@@ -153,7 +154,7 @@ class HeadStage {
   private readonly soft = new HemisphereLight(0xffffff, GROUND, 1)
   private readonly skin = new MeshStandardMaterial({ vertexColors: true, roughness: 0.9, metalness: 0, side: DoubleSide })
   private readonly clay = new MeshStandardMaterial({ color: CLAY, roughness: 0.9, metalness: 0, side: DoubleSide })
-  private readonly loader = new GLTFLoader()
+  private readonly loader = new GLTFLoader(keptInside())
   private readonly observer: ResizeObserver
   private readonly entries = new Map<string, Entry>() // by mesh URL
   private urls = new Map<string, string>() // look key -> mesh URL
@@ -696,6 +697,17 @@ class HeadStage {
 /** The parts of a loaded file. The head is the first mesh without a texture (the first mesh when all have one).
  *  The photo is the first other mesh that has both a texture and the coordinates to place it: a layer whose
  *  texture could not be read is left out, and the head then shows its own colours there. The rest is let go. */
+/** A head file is whole in itself: its picture sits inside it, and the loader reads that through a blob: address
+ *  of its own making. So a loader for heads follows no other address. A file whose description named one (for a
+ *  buffer or a picture) would otherwise have this page fetch it, with whatever the address carries, and the files
+ *  come from a generator that runs other people's model code without a network of its own. The server refuses
+ *  such a file as well; this is the second lock. */
+function keptInside(): LoadingManager {
+  const manager = new LoadingManager()
+  manager.setURLModifier((url) => (/^(blob|data):/i.test(url) ? url : 'data:,'))
+  return manager
+}
+
 function takeParts(root: Object3D): { head: BufferGeometry; photo: { geometry: BufferGeometry; map: Texture } | null } {
   const meshes: Mesh[] = []
   root.traverse((node) => {

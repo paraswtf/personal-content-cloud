@@ -14,7 +14,8 @@
 // would tell it: `textured` when its file carries a picture. When <glb dir> also holds photo.glb, a head that is
 // known to have two parts, one more group checks the photo layer itself: how it is drawn, the light of a model
 // with such a head, Colour off and Photo off, what is kept and let go, and what happens when the browser takes
-// the graphics memory away.
+// the graphics memory away. With outside.glb, a head whose picture is named by an address outside the file, one more
+// group checks that the page never asks for that address.
 import assert from 'node:assert/strict'
 import { resolveObjectURL } from 'node:buffer'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
@@ -241,7 +242,9 @@ globalThis.createImageBitmap = async (blob) => {
 }
 const files = new Map()
 let fetches = 0
+const asked = [] // every address the page asked for, in order
 globalThis.fetch = async (url, { signal } = {}) => {
+  asked.push(String(url))
   if (String(url).startsWith('blob:')) {
     const blob = resolveObjectURL(String(url))
     return blob ? { ok: true, status: 200, blob: async () => blob } : { ok: false, status: 404, blob: async () => { throw new Error('gone') } }
@@ -812,6 +815,31 @@ if (existsSync(path.join(GLB, 'photo.glb'))) {
   stage.want('l1')
   await settle()
   ok('Q a head with its photo: one picture, the model lit evenly, Colour and Photo off, two kept, let go whole, fetched again after a lost context')
+}
+
+// ---------------------------------------------------------------- R: a head that names an address outside itself
+// A head file holds its picture inside. One whose description names an address for it (which no file of the app's
+// writer does) must not have the page fetch that address: the request could carry anything out. <glb dir> may hold
+// outside.glb, a head with its photo whose picture is named by an address in place of the bytes in the file.
+if (existsSync(path.join(GLB, 'outside.glb'))) {
+  const before = asked.length
+  const say = console.error
+  console.error = () => {} // three.js says that the texture did not load; that is what this step is about
+  const out = look('out', 'outside', 'r20')
+  give(stage, [...looks, plain, out])
+  stage.want('out')
+  await settle()
+  await step()
+  console.error = say
+  const since = asked.slice(before)
+  assert.ok(since.includes(out.mesh_url), 'the head file itself is fetched')
+  assert.ok(!since.some((url) => /^(https?:)?\/\//i.test(url) || url.includes('example')), `the page asked for ${since.join(', ')}`)
+  const e = stage.entryOf('out')
+  assert.ok(e.state === 'error' || e.photo === null, 'the head shows without the picture, or not at all')
+  give(stage, [...looks, plain])
+  stage.want('l1')
+  await settle()
+  ok('R a head that names an address outside itself: the address is never asked for')
 }
 
 // ---------------------------------------------------------------- M: letting meshes go

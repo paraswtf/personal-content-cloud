@@ -543,8 +543,20 @@ def test_the_viewer_reads_the_heads(tmp_path):
     assert with_photo.photo is not None and with_photo.texture is not None
     glb.write(out / "photo.glb", with_photo)
     assert len(glb.read(out / "photo.glb")["json"]["meshes"][0]["primitives"]) == 2
+    # the same head with its picture named by an address in place of the bytes in the file, which the writer never
+    # does: the viewer must not ask for that address
+    data = (out / "photo.glb").read_bytes()
+    n_json = struct.unpack_from("<I", data, 12)[0]
+    doc = json.loads(data[20:20 + n_json])
+    doc["images"] = [{"uri": "https://example.invalid/carried-out.jpg"}]
+    text = json.dumps(doc, separators=(",", ":")).encode()
+    text += b" " * (-len(text) % 4)
+    rest = data[20 + n_json:]
+    (out / "outside.glb").write_bytes(struct.pack("<III", 0x46546C67, 2, 12 + 8 + len(text) + len(rest))
+                                      + struct.pack("<II", len(text), 0x4E4F534A) + text + rest)
     done = subprocess.run([node, str(front / "scripts" / "check-head3d.mjs"), str(out), str(tmp_path / "work")],
                           capture_output=True, text=True, timeout=180, check=False)
     assert done.returncode == 0, done.stdout[-1500:] + done.stderr[-3000:]
-    assert "Q a head with its photo" in done.stdout and "18 groups passed" in done.stdout
+    assert "Q a head with its photo" in done.stdout and "R a head that names an address" in done.stdout
+    assert "19 groups passed" in done.stdout
 
