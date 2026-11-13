@@ -2,12 +2,14 @@
 // Before a model exists it says what it does and shows the options and the "Generate" button; nothing is
 // generated before that button is used. While the server works it shows the step and "Stop". With a model it
 // shows the head (Head3dViewer, a lazy chunk with all the three.js code) and the sliders that pick the look,
-// turn the head and move the light.
+// turn the head and move the light. Under the head it says what the owner is looking at: which photo the head
+// was made from, how far round that photo reaches, and what the generator noted about it. A model from before
+// heads carried their photo says so above the head, with the way to make it again.
 //
 // The status is read again each time the tab is shown, and when a head or a look's picture does not load: the
 // server stops listing a look once its photo is in the trash or the vault or its face left the person, and that
 // look then drops out here instead of staying on screen from the cache.
-import { Suspense, lazy, useMemo, useRef, useState, type ReactNode } from 'react'
+import { Suspense, lazy, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { Link } from 'react-router'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import clsx from 'clsx'
@@ -21,6 +23,8 @@ import {
   MODEL3D_DEFAULTS,
   MODEL3D_LIMITS,
   MODEL3D_POLL_MS,
+  beforePhotoTextures,
+  completeOptions,
   firstLook,
   lookAxes,
   lookAxisText,
@@ -47,6 +51,8 @@ const BUSY_POLL_MS = 5000
 /** Files of one model that fail to load within this time ask for the status once. */
 const LOAD_ERROR_ASK_MS = 1000
 const DETAIL_WORDS = ['coarse', 'normal', 'fine']
+const SMOOTHING_WORDS = ['off', 'light', 'normal', 'strong']
+const TEXTURE_WORDS = ['off', 'standard', 'fine', 'full']
 
 function startError(e: unknown): string {
   if (e instanceof ApiError) {
@@ -64,6 +70,14 @@ function degreesText(value: number, zero: string, half: string, positive: string
   return `${Math.abs(d)}° ${d > 0 ? positive : negative}`
 }
 const percentText = (value: number) => `${Math.round(value * 100)}%`
+
+/** A note of the generator as a sentence of its own: a capital first, a full stop last. */
+function sentence(text: string | null | undefined): string | null {
+  const t = text?.trim()
+  if (!t) return null
+  const s = t[0].toUpperCase() + t.slice(1)
+  return /[.!?]$/.test(s) ? s : `${s}.`
+}
 
 /** "About 33" and "short hair, a beard": a look's label in two lines. */
 function lookLines(look: Look3d): [string, string] {
@@ -84,7 +98,7 @@ function Group({ title, children }: { title: string; children: ReactNode }) {
   )
 }
 
-/** The three choices of a generation, as sliders. */
+/** The choices of a generation, as sliders. */
 function OptionSliders({ value, onChange, disabled }: { value: Model3dOptions; onChange: (next: Model3dOptions) => void; disabled?: boolean }) {
   return (
     <div>
@@ -114,10 +128,45 @@ function OptionSliders({ value, onChange, disabled }: { value: Model3dOptions; o
           valueText={`${value.framing.toFixed(1)} times the face`}
           disabled={disabled}
         />
+        <Slider
+          label="Smoothing"
+          {...MODEL3D_LIMITS.smoothing}
+          value={value.smoothing}
+          onChange={(smoothing) => onChange({ ...value, smoothing })}
+          valueText={SMOOTHING_WORDS[value.smoothing] ?? String(value.smoothing)}
+          ticks={[0, 1, 2, 3]}
+          disabled={disabled}
+        />
+        <Slider
+          label="Photo texture"
+          {...MODEL3D_LIMITS.texture}
+          value={value.texture}
+          onChange={(texture) => onChange({ ...value, texture })}
+          valueText={TEXTURE_WORDS[value.texture] ?? String(value.texture)}
+          ticks={[0, 1, 2, 3]}
+          disabled={disabled}
+        />
+        {/* in the grid its label lines up with the sliders' labels; in one column it is a row like any switch */}
+        <div className="flex items-center justify-between gap-3 sm:items-start">
+          <span className={clsx('text-sm font-medium', disabled ? 'text-ink-soft' : 'text-ink')}>Face relief</span>
+          <Switch
+            checked={value.relief > 0}
+            onChange={(on) => onChange({ ...value, relief: on ? 1 : 0 })}
+            label="Face relief"
+            disabled={disabled}
+          />
+        </div>
       </div>
       <p className="mt-1 text-xs text-ink-soft">
-        More looks and finer detail take longer and make larger files. Framing is how much of the photo around the face is
-        used: a wider frame keeps more of the hair and the shoulders.
+        More looks, finer detail and a larger texture take longer and make larger files. Framing is how much of the photo
+        around the face is used: a wider frame keeps more of the hair and the shoulders. Smoothing evens out the surface.
+        Face relief uses a depth model made for faces to shape the nose, lips and chin, when it is installed on the
+        server.
+      </p>
+      <p className="mt-1 text-xs text-ink-soft">
+        {value.texture > 0
+          ? "The photo is laid over the front of the head, and the sides and back, which one photo does not show, are filled in. The texture is the photo's own pixels and is never enlarged: full keeps them all, standard and fine shrink a large photo."
+          : 'With Photo texture off the head has plain colours only, without the photo laid over its front.'}
       </p>
     </div>
   )
@@ -156,6 +205,7 @@ function ModelView({ looks, onLoadError, checking }: { looks: Look3d[]; onLoadEr
   const [view, setView] = useState<HeadView>(HEAD_VIEW)
   const [light, setLight] = useState<HeadLight>(HEAD_LIGHT)
   const [colour, setColour] = useState(true)
+  const [photo, setPhoto] = useState(true)
   const [spin, setSpin] = useState(false)
   const [can3d, setCan3d] = useState(true)
   const axes = useMemo(() => lookAxes(looks), [looks])
@@ -170,10 +220,12 @@ function ModelView({ looks, onLoadError, checking }: { looks: Look3d[]; onLoadEr
   const reset = () => {
     setSpin(false)
     setColour(true)
+    setPhoto(true)
     setLight(HEAD_LIGHT)
     change(HEAD_VIEW)
   }
   const taken = formatDate(active.taken_at)
+  const note = sentence(active.note)
 
   return (
     <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_22rem]">
@@ -194,6 +246,7 @@ function ModelView({ looks, onLoadError, checking }: { looks: Look3d[]; onLoadEr
               onView={setView}
               light={light}
               colour={colour}
+              photo={photo}
               spin={spin}
               onSupport={setCan3d}
               onLoadError={onLoadError}
@@ -207,6 +260,12 @@ function ModelView({ looks, onLoadError, checking }: { looks: Look3d[]; onLoadEr
               Open the photo
             </Link>
           </p>
+          {active.textured && (
+            <p className="mt-1 text-sm text-ink-soft">
+              From the front this is the photo; past about 50 degrees the sides and back are filled in.
+            </p>
+          )}
+          {note && <p className="mt-1 text-xs text-ink-soft">{note}</p>}
         </div>
 
         <div role="group" aria-label="Looks" className="-mx-1 mt-4 flex gap-2 overflow-x-auto px-1 pb-2 pt-1">
@@ -330,12 +389,20 @@ function ModelView({ looks, onLoadError, checking }: { looks: Look3d[]; onLoadEr
                 <span className="text-sm font-medium">Colour</span>
                 <Switch checked={colour} onChange={setColour} label="Colour" />
               </div>
+              {active.textured && (
+                <div className="flex items-center justify-between gap-3">
+                  <span className={clsx('text-sm font-medium', !colour && 'text-ink-soft')}>Photo</span>
+                  {/* without colours there is no photo either: the switch waits, and comes back as it was */}
+                  <Switch checked={colour && photo} onChange={setPhoto} label="Photo" disabled={!colour} />
+                </div>
+              )}
               <div className="flex items-center justify-between gap-3">
                 <span className="text-sm font-medium">Spin slowly</span>
                 <Switch checked={spin} onChange={setSpin} label="Spin slowly" />
               </div>
               <p className="mt-1 text-xs text-ink-soft">
                 Drag the head to turn it; scroll or pinch to zoom. With Colour off you see the bare shape.
+                {active.textured && ' With Photo off you see the colours under the photo.'}
               </p>
               <Button variant="secondary" size="sm" className="mt-3" onClick={reset}>
                 <RotateCcw className="size-4" aria-hidden />
@@ -367,6 +434,19 @@ export default function Model3dTab({ id, name }: { id: number; name: string | nu
   const [options, setOptions] = useState<Model3dOptions>(MODEL3D_DEFAULTS)
   const [again, setAgain] = useState(false)
   const [deleteOpen, setDeleteOpen] = useState(false)
+  // The "Generate again" panel sits under the head and its sliders. Opened from the line above the head, it is
+  // brought into view and takes the focus, so the next key press is in it.
+  const panel = useRef<HTMLDivElement>(null)
+  const toPanel = useRef(false)
+  const showPanel = () => {
+    panel.current?.focus({ preventScroll: true })
+    panel.current?.scrollIntoView({ block: 'nearest' })
+  }
+  useEffect(() => {
+    if (!again || !toPanel.current) return
+    toPanel.current = false
+    showPanel()
+  }, [again])
   const refetch = () => qc.invalidateQueries({ queryKey: key })
   // A head or a picture that does not load may belong to a look the server stopped listing: read the status again,
   // so that look drops out. Files failing together (every picture of a model deleted elsewhere) ask once.
@@ -435,6 +515,14 @@ export default function Model3dTab({ id, name }: { id: number; name: string | nu
       About the last run: {status.error}
     </p>
   )
+  /** Open the panel with the options as this model was made; what a model from before an option existed does not
+   *  say starts at its default. */
+  const openAgain = (jump: boolean) => {
+    if (again) return showPanel()
+    setOptions(completeOptions(status.options))
+    toPanel.current = jump
+    setAgain(true)
+  }
   const generateButton = (
     <Button onClick={() => generate.mutate()} loading={generate.isPending} disabled={why !== null}>
       <Box className="size-4" aria-hidden />
@@ -501,6 +589,15 @@ export default function Model3dTab({ id, name }: { id: number; name: string | nu
       {hasModel && (
         <>
           {failure}
+          {!running && beforePhotoTextures(status) && (
+            <p className="rounded-xl bg-surface-2 px-3 py-2 text-sm text-ink">
+              These heads were made before photo textures.{' '}
+              <button type="button" className="font-medium text-accent hover:underline" onClick={() => openAgain(true)}>
+                Generate again
+              </button>{' '}
+              to lay the photo over the face.
+            </p>
+          )}
           <ModelView key={status.generated_at ?? ''} looks={status.looks} onLoadError={onLoadError} checking={checking} />
           <Card className="flex flex-col gap-4">
             <div className="flex flex-wrap items-center justify-between gap-3">
@@ -514,10 +611,7 @@ export default function Model3dTab({ id, name }: { id: number; name: string | nu
                     variant="secondary"
                     size="sm"
                     aria-expanded={again}
-                    onClick={() => {
-                      if (!again && status.options) setOptions(status.options)
-                      setAgain(!again)
-                    }}
+                    onClick={() => (again ? setAgain(false) : openAgain(false))}
                   >
                     <RefreshCw className="size-4" aria-hidden />
                     Generate again
@@ -530,7 +624,14 @@ export default function Model3dTab({ id, name }: { id: number; name: string | nu
               </div>
             </div>
             {again && !running && (
-              <div className="flex flex-col gap-4 border-t border-line pt-4">
+              <div
+                ref={panel}
+                tabIndex={-1}
+                role="group"
+                aria-label="Generate again"
+                // the margins keep it clear of the bar at the top, and on a phone of the one at the bottom
+                className="flex scroll-mt-20 scroll-mb-24 flex-col gap-4 border-t border-line pt-4 outline-none"
+              >
                 <p className="text-sm text-ink-soft">
                   The photos are read again and new heads are built. The new model takes this one's place when it is ready.
                 </p>

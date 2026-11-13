@@ -9,8 +9,15 @@
 //   node scripts/check-head3d.mjs <glb dir> <scratch dir>
 // <glb dir> holds l1.glb, l2.glb and l3.glb (the stand-in backend's heads; l1 from a picture with the skin colour
 // 200, 150, 120), plain.glb (four vertices far from the origin, no colours) and broken.glb (not a .glb).
+// A head has one part (a colour at every vertex) or two (the photo over its front as a second, blended part with
+// a texture); every check below holds for both, and says which it met. A look is told to the stage as the server
+// would tell it: `textured` when its file carries a picture. When <glb dir> also holds photo.glb, a head that is
+// known to have two parts, one more group checks the photo layer itself: how it is drawn, the light of a model
+// with such a head, Colour off and Photo off, what is kept and let go, and what happens when the browser takes
+// the graphics memory away.
 import assert from 'node:assert/strict'
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { resolveObjectURL } from 'node:buffer'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
@@ -33,16 +40,54 @@ export class WebGLRenderer {
   constructor(options) {
     if (globalThis.__noWebGL) throw new Error('Error creating WebGL context.')
     this.options = options; this.domElement = options.canvas; this.ratio = 1; this.renders = []; this.clear = null
+    this.capabilities = { getMaxAnisotropy: () => 8 }
+    this.marks = [] // the marks put behind what was sent to the graphics card (a fade waits for its first picture)
+    this.sent = new WeakSet() // the textures on the graphics card
+    this.sentClosed = 0 // ... that were sent from a picture that was closed already: must stay 0
+    this.context = 0 // counts up each time the browser gives the graphics memory back
+    this.staleLetGo = 0 // textures let go after that, though they were on the card before: the browser complains
     globalThis.__renderers.push(this)
   }
+  getContext() { // the card comes to a mark once it was asked more often than globalThis.__cardLag (0: at once)
+    const r = this
+    return {
+      SYNC_GPU_COMMANDS_COMPLETE: 0x9117, SYNC_STATUS: 0x9114, SIGNALED: 0x9119,
+      fenceSync() { const mark = { asked: 0, flushed: false, deleted: false }; r.marks.push(mark); return mark },
+      flush() { for (const mark of r.marks) mark.flushed = true },
+      isContextLost: () => false,
+      getSyncParameter(mark) { mark.asked += 1; return mark.asked > (globalThis.__cardLag ?? 0) ? 0x9119 : 0x9118 },
+      deleteSync(mark) { mark.deleted = true },
+    }
+  }
+  /** The browser gave the graphics memory back: nothing is on the card any more, and three.js starts over with a
+   *  black background. */
+  restore() { this.sent = new WeakSet(); this.context += 1; this.clear = ['000000', 1] }
   setPixelRatio(r) { this.ratio = r }
   setSize(w, h, style) { this.size = [w, h, style]; this.domElement.width = Math.floor(w * this.ratio); this.domElement.height = Math.floor(h * this.ratio) }
   setClearColor(c, a) { this.clear = [c.getHexString(), a] }
   render(scene, camera) {
     scene.updateMatrixWorld()
     const visible = []
-    scene.traverse((o) => { if (o.isMesh && o.visible) visible.push(o) })
-    this.renders.push({ visible, at: globalThis.__clock(), camera: camera.position.toArray() })
+    const light = {}
+    const walk = (o) => { // as the real renderer: what hangs on a hidden object is not drawn
+      if (!o.visible) return
+      if (o.isMesh) {
+        visible.push(o)
+        const map = o.material.map
+        if (map && !this.sent.has(map)) { // as the real renderer: a texture goes to the card when it is first drawn
+          this.sent.add(map)
+          if (map.image?.closed) this.sentClosed += 1
+          const context = this.context
+          map.addEventListener('dispose', () => { if (this.context !== context) this.staleLetGo += 1 })
+          map.onUpdate?.(map)
+        }
+      }
+      if (o.isDirectionalLight) light.lamp = o.intensity
+      if (o.isHemisphereLight) { light.soft = o.intensity; light.ground = o.groundColor.getHex() }
+      for (const child of o.children) walk(child)
+    }
+    walk(scene)
+    this.renders.push({ visible, light, at: globalThis.__clock(), camera: camera.position.toArray() })
   }
   dispose() { this.disposed = true }
   forceContextLoss() { this.lostOnPurpose = true }
@@ -174,9 +219,33 @@ globalThis.requestAnimationFrame = (f) => (rafs.push({ id: ++rafId, f }), rafId)
 globalThis.cancelAnimationFrame = (id) => {
   rafs = rafs.filter((r) => r.id !== id)
 }
+// A head's photo sits inside its file. three.js hands it to the browser as a blob address, fetches that and asks
+// for the decoded picture; here the "decoded picture" is its size, read from the file's own header.
+globalThis.self = globalThis
+const bitmaps = []
+function pictureSize(bytes) {
+  if (bytes[0] === 0x89 && bytes[1] === 0x50) return [bytes.readUInt32BE(16), bytes.readUInt32BE(20)] // PNG
+  for (let at = 2; at + 9 < bytes.length; ) { // JPEG: walk the segments to the frame header
+    if (bytes[at] !== 0xff) return [0, 0]
+    const marker = bytes[at + 1]
+    if (marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc) return [bytes.readUInt16BE(at + 7), bytes.readUInt16BE(at + 5)]
+    at += 2 + bytes.readUInt16BE(at + 2)
+  }
+  return [0, 0]
+}
+globalThis.createImageBitmap = async (blob) => {
+  const [width, height] = pictureSize(Buffer.from(await blob.arrayBuffer()))
+  const bitmap = { width, height, closed: false, close() { this.closed = true } }
+  bitmaps.push(bitmap)
+  return bitmap
+}
 const files = new Map()
 let fetches = 0
 globalThis.fetch = async (url, { signal } = {}) => {
+  if (String(url).startsWith('blob:')) {
+    const blob = resolveObjectURL(String(url))
+    return blob ? { ok: true, status: 200, blob: async () => blob } : { ok: false, status: 404, blob: async () => { throw new Error('gone') } }
+  }
   fetches += 1
   await new Promise((r) => setImmediate(r))
   if (signal?.aborted) throw Object.assign(new Error('aborted'), { name: 'AbortError' })
@@ -207,17 +276,63 @@ async function steps(n, ms = 16) {
 
 const { HeadStage, model, theme, THREE } = await import(pathToFileURL(OUT).href)
 const near = (a, b, eps = 1e-3) => assert.ok(Math.abs(a - b) <= eps, `${a} is not near ${b}`)
+/** Whether a head file carries a picture: what the server says in a look's `textured`. */
+function carriesPicture(file) {
+  try {
+    const bytes = readFileSync(file)
+    if (bytes.readUInt32LE(0) !== 0x46546c67) return false
+    const json = JSON.parse(bytes.subarray(20, 20 + bytes.readUInt32LE(12)).toString('utf8'))
+    return (json.images?.length ?? 0) > 0
+  } catch {
+    return false
+  }
+}
 const look = (key, file = key, rev = 'r1') => {
   const url = `/files/model3d/7/${rev}/${key}.glb`
   files.set(url, path.join(GLB, `${file}.glb`))
-  return { key, mesh_url: url }
+  return { key, mesh_url: url, textured: carriesPicture(path.join(GLB, `${file}.glb`)) }
 }
 const BASE = 0.62 / Math.tan((15 * Math.PI) / 180)
 const told = { views: [], states: [], lost: [] }
 const events = { onView: (v) => told.views.push(v), onState: (s) => told.states.push(s), onLost: (l) => told.lost.push(l) }
 const host = element({ clientWidth: 600, clientHeight: 600, append: (...els) => (host.children = els) })
-const keyOf = (stage, mesh) => [...stage.entries.values()].find((e) => e.mesh === mesh)?.key
-const shownIn = (stage, render) => render.visible.map((m) => keyOf(stage, m))
+const keyOf = (stage, mesh) => [...stage.entries.values()].find((e) => e.mesh === mesh || e.photo === mesh)?.key
+/** The looks drawn in one picture (a head and the photo over it are one look). */
+const shownIn = (stage, render) => [...new Set(render.visible.map((m) => keyOf(stage, m)))]
+const LIGHT = { plain: [0.62, 0.5, 0x77736d], photo: [0.25, 0.9, 0xebebeb] }
+/** The lights a picture was drawn with, as shares of full light at this brightness. */
+const litAs = (render, kind, brightness = 1) => {
+  const [lamp, soft, ground] = LIGHT[kind]
+  near(render.light.lamp, Math.PI * lamp * brightness)
+  near(render.light.soft, Math.PI * soft * brightness)
+  assert.equal(render.light.ground, ground, `the soft light of a ${kind} model`)
+}
+/** The looks the stage was given last, and the light they call for: one rule for the whole model. */
+let model3d = []
+const give = (stage, list) => {
+  model3d = list
+  stage.setLooks(list)
+}
+const kind = () => (model3d.some((l) => l.textured) ? 'photo' : 'plain')
+/** What must hold for the photo over a head, whichever file it came from. */
+function checkPhoto(stage, entry) {
+  const photo = entry.photo
+  assert.equal(photo.parent, entry.mesh, 'the photo hangs on the head: the same place and size, hidden with it')
+  assert.ok(photo.geometry.hasAttribute('uv') && photo.geometry.hasAttribute('normal'))
+  const weight = photo.geometry.getAttribute('color')
+  assert.equal(weight.itemSize, 4, 'the photo carries its weight as the alpha of its vertex colours')
+  const m = photo.material
+  assert.ok(m !== stage.skin && m !== stage.clay)
+  assert.ok(m.map && m.map.isTexture, 'the texture of the file')
+  assert.equal(m.map.colorSpace, THREE.SRGBColorSpace)
+  assert.equal(m.map.anisotropy, 8, 'as sharp at a slant as the card allows')
+  assert.equal(m.map.flipY, false)
+  assert.deepEqual([m.transparent, m.depthWrite, m.side, m.vertexColors], [true, false, THREE.FrontSide, true])
+  assert.deepEqual([m.polygonOffset, m.polygonOffsetFactor, m.polygonOffsetUnits], [true, -1, -2], 'a hair in front of the head')
+  assert.equal(photo.renderOrder, 1)
+  assert.equal(photo.visible, stage.colour && stage.photo)
+  assert.ok(photo.geometry.getAttribute('position').count <= entry.mesh.geometry.getAttribute('position').count)
+}
 const results = []
 const ok = (name) => results.push(name)
 
@@ -244,7 +359,7 @@ ok('A making it')
 
 // ---------------------------------------------------------------- B: the first look
 const looks = [look('l1'), look('l2'), look('l3')]
-stage.setLooks(looks)
+give(stage, looks)
 stage.want('l1')
 assert.deepEqual(told.states.at(-1), { shown: null, fading: false, loading: true, failed: false })
 await settle()
@@ -263,6 +378,9 @@ assert.deepEqual(shownIn(stage, renderer.renders.at(-1)), ['l1'])
   assert.equal(e.hasColour, true)
   assert.equal(e.mesh.material, stage.skin)
   assert.equal(stage.skin.vertexColors, true)
+  if (e.photo) checkPhoto(stage, e)
+  assert.equal(e.photo !== null, looks[0].textured, 'the look says what its file holds')
+  litAs(renderer.renders.at(-1), kind())
   near(e.mesh.scale.x, 1, 1e-4) // the writer's unit box
   near(e.mesh.position.length(), 0, 1e-4)
   // the face (the picture's middle colour, in linear light) is on the +Z side, towards the camera at turn 0
@@ -275,11 +393,13 @@ assert.deepEqual(shownIn(stage, renderer.renders.at(-1)), ['l1'])
   near(colour.getZ(front), lin(120), 0.02)
 }
 assert.equal(rafs.length, 0, 'nothing is drawn while nothing changes')
-ok('B first look, colours linear, face towards the camera')
+const parts = (key) => (stage.entryOf(key)?.photo ? 'two parts' : 'one part')
+ok(`B first look (${parts('l1')}), colours linear, face towards the camera`)
 
 // ---------------------------------------------------------------- C: a cross-fade
 drawn.length = 0
 let before = renderer.renders.length
+let marks = renderer.marks.length
 stage.want('l2')
 assert.equal(told.states.at(-1).loading, true)
 await settle()
@@ -297,17 +417,53 @@ while (stage.fade && fadeFrames < 60) {
     opacities.push(Number(copy.style.opacity))
   }
 }
-assert.ok(fadeFrames >= 17 && fadeFrames <= 19, `the fade took ${fadeFrames} frames`)
+assert.ok(fadeFrames >= 19 && fadeFrames <= 21, `the fade took ${fadeFrames} frames`)
 assert.equal(drawn.length, fadeFrames, 'the old look is copied once a frame')
 assert.ok(drawn.every((d) => d.source === canvas && d.rest.join() === '0,0,1200,1200'))
-assert.ok(opacities[0] > 0.98 && opacities.at(-1) < 0.05, `opacity went ${opacities[0]} to ${opacities.at(-1)}`)
-assert.ok(opacities.every((o, i) => i === 0 || o < opacities[i - 1]), 'the copy only fades out')
+// The first picture has the old look whole on top, and so has the next: the fade begins to move when the graphics
+// card has drawn the first one, so sending the new look there is not taken from the fade.
+assert.deepEqual(opacities.slice(0, 2), [1, 1])
+assert.equal(renderer.marks.length, marks + 1, 'one mark a fade, behind its first picture')
+assert.ok(opacities[2] > 0.98 && opacities.at(-1) < 0.05, `opacity went ${opacities[2]} to ${opacities.at(-1)}`)
+assert.ok(opacities.every((o, i) => i < 2 || o < opacities[i - 1]), 'the copy only fades out')
 assert.equal(copy.style.opacity, '0')
 assert.deepEqual(told.states.at(-1), { shown: 'l2', fading: false, loading: false, failed: false })
 assert.deepEqual(shownIn(stage, renderer.renders.at(-1)), ['l2'])
 await step()
 assert.equal(rafs.length, 0)
-ok(`C cross-fade: ${fadeFrames} frames of two opaque pictures, ${renderer.renders.length - before} draws`)
+const fadeDraws = renderer.renders.length - before
+{
+  // a slow graphics card: the old look stays whole on top until the card has drawn the first picture
+  globalThis.__cardLag = 6
+  stage.want('l1')
+  await settle()
+  const slow = []
+  for (let i = 0; i < 9; i++) {
+    await step()
+    slow.push(Number(copy.style.opacity))
+  }
+  assert.deepEqual(slow.slice(0, 8), Array(8).fill(1), 'the fade waits')
+  assert.ok(slow[8] < 1 && slow[8] > 0.98, 'and then starts from its beginning')
+  assert.deepEqual(shownIn(stage, renderer.renders.at(-1)), ['l1'])
+  while (stage.fade) await step()
+  // one that never says so: the fade runs after a second and a half all the same
+  globalThis.__cardLag = Infinity
+  stage.want('l2')
+  await settle()
+  let waited = 0
+  do {
+    await step()
+    waited += 16
+  } while (Number(copy.style.opacity) === 1 && waited < 3000)
+  assert.ok(waited > 1500 && waited < 1600, `the fade began to move after ${waited} ms`)
+  while (stage.fade) await step()
+  globalThis.__cardLag = 0
+  assert.equal(stage.shown, 'l2')
+  assert.ok(renderer.marks.every((m) => m.flushed && m.deleted), 'every mark is sent and taken away again')
+  await step()
+  assert.equal(rafs.length, 0)
+}
+ok(`C cross-fade: ${fadeFrames} frames of two opaque pictures, ${fadeDraws} draws; it waits for a slow graphics card`)
 
 // ---------------------------------------------------------------- D: changing one's mind during a fade
 stage.want('l3')
@@ -326,7 +482,7 @@ stage.want('l2')
 await settle()
 const n0 = fetches
 const extra = look('l4', 'l1')
-stage.setLooks([...looks, extra])
+give(stage, [...looks, extra])
 stage.want('l4')
 assert.equal(fetches, n0 + 1, 'the next look is fetched during the fade')
 guard = 0
@@ -419,32 +575,35 @@ ok('H spin: 14 degrees a second, waits during a drag, stops drawing when off')
 
 // ---------------------------------------------------------------- I, J: colour and light
 stage.setColour(false)
-assert.ok([...stage.entries.values()].every((e) => e.mesh.material === stage.clay))
+assert.ok([...stage.entries.values()].every((e) => e.mesh.material === stage.clay && (!e.photo || e.photo.visible === false)))
+await step()
+assert.ok(renderer.renders.at(-1).visible.every((m) => m.material === stage.clay), 'with Colour off only the bare shape is drawn')
+litAs(renderer.renders.at(-1), 'plain') // the bare shape is lit the same in every model
 stage.setColour(true)
-assert.ok([...stage.entries.values()].every((e) => e.mesh.material === stage.skin))
+assert.ok([...stage.entries.values()].every((e) => e.mesh.material === stage.skin && (!e.photo || e.photo.visible === true)))
 stage.setView({ turn: 0, tilt: 0, zoom: 1 })
 stage.setLight({ direction: 90, height: 0, brightness: 1 })
 await step()
 const from = () => stage.lamp.getWorldPosition(new THREE.Vector3()).sub(stage.lamp.target.getWorldPosition(new THREE.Vector3()))
 assert.deepEqual(from().toArray().map((v) => Math.round(v * 1e3) / 1e3), [1, 0, 0], 'at 90 degrees the lamp is at the viewer\'s right')
-near(stage.lamp.intensity, Math.PI * 0.62)
-near(stage.soft.intensity, Math.PI * 0.5)
+litAs(renderer.renders.at(-1), kind())
+near(stage.lamp.intensity, renderer.renders.at(-1).light.lamp)
 stage.setView({ turn: 90 })
 await step()
 assert.deepEqual(from().toArray().map((v) => Math.round(v * 1e3) / 1e3 + 0), [0, 0, 1], 'and stays there for the viewer when the head turns')
 stage.setLight({ direction: 0, height: 90, brightness: 1.5 })
 await step()
 near(from().y, 1)
-near(stage.lamp.intensity, Math.PI * 0.62 * 1.5)
+litAs(renderer.renders.at(-1), kind(), 1.5)
 stage.setView({ turn: 0 })
-ok('I colour switch; J the lamp follows the viewer')
+ok(`I colour switch; J the lamp follows the viewer (${kind()} light)`)
 
 // ---------------------------------------------------------------- K, L: odd files
 reduced = true
 const plain = look('plain')
 const broken = look('broken')
 const missing = { key: 'gone', mesh_url: '/files/model3d/7/r1/gone.glb' }
-stage.setLooks([...looks, plain, broken, missing])
+give(stage, [...looks, plain, broken, missing])
 stage.want('plain')
 await settle()
 {
@@ -474,9 +633,179 @@ await settle()
 assert.deepEqual(told.states.at(-1), { shown: 'l1', fading: false, loading: false, failed: false })
 ok('K a file of any size and place is framed; L a file that cannot be read says so and can be tried again')
 
+// ---------------------------------------------------------------- Q: a head that carries its photo
+if (existsSync(path.join(GLB, 'photo.glb'))) {
+  const last = () => renderer.renders.at(-1)
+  const p1 = look('p1', 'photo')
+  assert.equal(p1.textured, true, 'photo.glb is expected to carry a picture')
+  stage.setLight({ direction: 30, height: 35, brightness: 1 })
+  // one rule for the whole model: with a look that carries its photo, every look is lit evenly, also one without
+  give(stage, [plain])
+  stage.want('plain')
+  await settle()
+  await step()
+  assert.deepEqual(shownIn(stage, last()), ['plain'])
+  litAs(last(), 'plain')
+  give(stage, [plain, p1])
+  await step()
+  assert.deepEqual(shownIn(stage, last()), ['plain'])
+  litAs(last(), 'photo')
+  // a fade to the head with the photo: two whole pictures under the same light
+  reduced = false
+  marks = renderer.marks.length
+  stage.want('p1')
+  await settle()
+  assert.equal(stage.fade?.to, 'p1')
+  let frames = 0
+  while (stage.fade && frames < 60) {
+    await step()
+    if (!stage.fade) break
+    frames += 1
+    const [old, fresh] = renderer.renders.slice(-2)
+    assert.deepEqual(shownIn(stage, old), ['plain'])
+    litAs(old, 'photo')
+    assert.deepEqual(shownIn(stage, fresh), ['p1'])
+    assert.equal(fresh.visible.length, 2, 'the head and the photo over it are drawn into one picture')
+    litAs(fresh, 'photo')
+  }
+  assert.ok(frames >= 19 && frames <= 21, `the fade took ${frames} frames`)
+  assert.equal(renderer.marks.length, marks + 1)
+  reduced = true
+  const e = stage.entryOf('p1')
+  checkPhoto(stage, e)
+  assert.equal(e.mesh.material, stage.skin, 'under the photo the head keeps its own colours')
+  assert.deepEqual(last().visible, [e.mesh, e.photo], 'the head first, then the photo over it')
+  // once the texture is on the graphics card, the decoded picture is closed (it holds as much memory again)
+  const { map } = e.photo.material
+  const bitmap = map.image
+  assert.ok(bitmap.width > 0 && bitmap.closed === true, 'the decoded picture is closed after it was sent')
+  assert.equal(map.onUpdate, null)
+  // Colour off: the bare shape, the photo hidden, the light of any bare shape
+  stage.setColour(false)
+  await step()
+  assert.deepEqual(last().visible, [e.mesh])
+  assert.equal(e.mesh.material, stage.clay)
+  litAs(last(), 'plain')
+  stage.setColour(true)
+  await step()
+  assert.deepEqual(last().visible, [e.mesh, e.photo])
+  litAs(last(), 'photo')
+  // Photo off: the head's own colours, at once and under the same light; a head loaded meanwhile has it hidden too
+  stage.setPhoto(false)
+  await step()
+  assert.deepEqual(last().visible, [e.mesh])
+  assert.equal(e.mesh.material, stage.skin)
+  litAs(last(), 'photo')
+  const p2 = look('p2', 'photo')
+  give(stage, [plain, p1, p2])
+  stage.want('p2')
+  await settle()
+  await step()
+  assert.equal(stage.shown, 'p2')
+  assert.deepEqual(last().visible, [stage.entryOf('p2').mesh])
+  stage.setColour(false)
+  stage.setColour(true)
+  assert.equal(stage.entryOf('p2').photo.visible, false, 'Colour back on does not bring back a photo that is switched off')
+  stage.setPhoto(true)
+  await step()
+  assert.deepEqual(last().visible, [stage.entryOf('p2').mesh, stage.entryOf('p2').photo])
+  stage.want('p1')
+  await settle()
+  await step()
+  // the brightness slider moves both lights of such a model too
+  stage.setLight({ direction: 30, height: 35, brightness: 1.4 })
+  await step()
+  litAs(last(), 'photo', 1.4)
+  stage.setLight({ direction: 30, height: 35, brightness: 1 })
+  await step()
+  // letting go: the layer's geometry, its material, its texture and the decoded picture
+  const gone = []
+  e.photo.geometry.addEventListener('dispose', () => gone.push('layer'))
+  e.photo.material.addEventListener('dispose', () => gone.push('material'))
+  map.addEventListener('dispose', () => gone.push('texture'))
+  e.mesh.geometry.addEventListener('dispose', () => gone.push('head'))
+  give(stage, [plain])
+  assert.deepEqual(gone.sort(), ['head', 'layer', 'material', 'texture'])
+  assert.deepEqual([...stage.entries.values()].map((x) => x.key), ['plain'], 'nothing of the heads with a photo is kept')
+  assert.equal(stage.scene.children.filter((c) => c.isMesh).length, 1)
+  stage.want('plain')
+  await settle()
+  await step()
+  litAs(last(), 'plain') // a model without photos again
+  // kept ready: of the heads that are not on screen, two with a photo at most
+  const some = Array.from({ length: 4 }, (_, i) => look(`s${i}`, 'photo'))
+  give(stage, [plain, ...some])
+  const let_go = []
+  for (const one of some) {
+    stage.want(one.key)
+    await settle()
+    stage.entryOf(one.key).photo.material.map.addEventListener('dispose', () => let_go.push(one.key))
+  }
+  assert.deepEqual([stage.shown, stage.entries.size], ['s3', 4], 'the head on screen, two more with a photo, and the one without')
+  assert.deepEqual(let_go, ['s0'])
+  stage.want('plain')
+  await settle()
+  assert.deepEqual([stage.shown, stage.entries.size, let_go.join()], ['plain', 3, 's0,s1'])
+  // heads the owner moved on from while they were on their way count at once
+  const quick = Array.from({ length: 4 }, (_, i) => look(`q${i}`, 'photo', 'r5'))
+  give(stage, [plain, ...quick])
+  assert.equal(stage.entries.size, 1)
+  for (const one of quick) stage.want(one.key)
+  await settle()
+  assert.equal(stage.shown, 'q3')
+  const waiting = [...stage.entries.values()].filter((x) => x.photo && x.key !== 'q3').map((x) => x.key)
+  assert.deepEqual(waiting.sort(), ['q1', 'q2'], 'two heads with a photo wait beside the one on screen: the ones asked for last')
+  await step()
+  assert.equal(bitmaps.filter((b) => !b.closed).length, 2, 'and only theirs are decoded pictures still open: they were never drawn')
+  // The browser takes the graphics memory away: the heads with a photo are let go at once (their pictures were
+  // closed, so they could not go back to the card). When it gives the memory back, the wanted one is fetched again.
+  const lostBefore = fetches
+  const kept = stage.entryOf('plain')
+  canvas.fire('webglcontextlost', { preventDefault() {} })
+  assert.deepEqual([...stage.entries.values()].map((x) => x.key), ['plain'], 'a head without a photo stays: it goes back to the card from the page')
+  assert.deepEqual(told.states.at(-1), { shown: null, fading: false, loading: false, failed: false })
+  assert.equal(fetches, lostBefore, 'nothing is fetched while the context is gone')
+  renderer.restore()
+  canvas.fire('webglcontextrestored', {})
+  assert.deepEqual(told.states.at(-1), { shown: null, fading: false, loading: true, failed: false })
+  assert.equal(fetches, lostBefore + 1, 'the head that was on screen is fetched again; the others when they are wanted')
+  assert.equal(stage.entryOf('plain'), kept)
+  await settle()
+  await step()
+  assert.equal(stage.shown, 'q3')
+  assert.deepEqual(last().visible, [stage.entryOf('q3').mesh, stage.entryOf('q3').photo])
+  assert.equal(renderer.sentClosed, 0, 'no texture was ever sent from a closed picture')
+  assert.equal(renderer.staleLetGo, 0, 'and none was taken off a card that had lost it already')
+  // a photo that cannot be decoded: the head shows with its own colours, without the layer
+  const real = globalThis.createImageBitmap
+  const say = console.error
+  globalThis.createImageBitmap = async () => {
+    throw new Error('cannot decode')
+  }
+  console.error = () => {} // three.js says that the texture did not load; that is what this step is about
+  const dull = look('dull', 'photo', 'r10')
+  give(stage, [plain, dull])
+  stage.want('dull')
+  await settle()
+  globalThis.createImageBitmap = real
+  console.error = say
+  assert.deepEqual(told.states.at(-1), { shown: 'dull', fading: false, loading: false, failed: false })
+  assert.equal(stage.entryOf('dull').photo, null)
+  assert.equal(stage.entryOf('dull').mesh.material, stage.skin)
+  await step()
+  assert.equal(last().visible.length, 1, 'never a white sheet in place of the photo')
+  litAs(last(), 'photo') // the model's light: the look is listed as one with a photo
+  give(stage, [plain])
+  assert.ok(bitmaps.every((b) => b.closed), 'every decoded picture was closed')
+  give(stage, [...looks, plain])
+  stage.want('l1')
+  await settle()
+  ok('Q a head with its photo: one picture, the model lit evenly, Colour and Photo off, two kept, let go whole, fetched again after a lost context')
+}
+
 // ---------------------------------------------------------------- M: letting meshes go
 const many = Array.from({ length: 9 }, (_, i) => look(`m${i}`, `l${(i % 3) + 1}`))
-stage.setLooks(many)
+give(stage, many)
 assert.equal(stage.entries.size, 0, 'looks that are no longer listed are let go')
 assert.equal(stage.shown, null)
 const disposed = []
@@ -486,17 +815,36 @@ for (const m of many) {
   stage.entryOf(m.key).mesh.geometry.addEventListener('dispose', () => disposed.push(m.key))
 }
 assert.equal(stage.shown, 'm8')
-assert.equal(stage.entries.size, 5, 'the one on screen and four more')
-assert.deepEqual(disposed, ['m0', 'm1', 'm2', 'm3'])
-assert.equal(stage.scene.children.filter((c) => c.isMesh).length, 5)
+// The rule, each time a head comes on screen: of the others, latest first, four stay, two at most with a photo.
+const alive = []
+const expected = []
+for (const m of many) {
+  let kept = 0
+  let photos = 0
+  for (const x of [...alive].reverse()) {
+    if (kept >= 4 || (x.textured && photos >= 2)) {
+      alive.splice(alive.indexOf(x), 1)
+      expected.push(x.key)
+      continue
+    }
+    kept += 1
+    if (x.textured) photos += 1
+  }
+  alive.push(m)
+}
+assert.deepEqual(disposed, expected)
+if (!many.some((m) => m.textured)) assert.deepEqual(disposed, ['m0', 'm1', 'm2', 'm3'], 'the one on screen and four more')
+if (many.every((m) => m.textured)) assert.deepEqual(disposed, ['m0', 'm1', 'm2', 'm3', 'm4', 'm5'], 'the one on screen and two more')
+assert.deepEqual([...stage.entries.values()].map((x) => x.key).sort(), alive.map((m) => m.key).sort())
+assert.equal(stage.scene.children.filter((c) => c.isMesh).length, alive.length)
 stage.want('m0') // gone: fetched again
 await settle()
 assert.equal(stage.shown, 'm0')
-ok('M at most five meshes are kept; the least recently shown goes first')
+ok(`M the head on screen and ${alive.length - 1} more are kept (four at most, two with a photo); older ones go first`)
 
 // ---------------------------------------------------------------- N: a new model, same keys
 const again = [look('m0', 'l2', 'r2'), look('m1', 'l3', 'r2')]
-stage.setLooks(again)
+give(stage, again)
 assert.equal(stage.shown, null)
 assert.equal(told.states.at(-1).loading, true, 'the wanted key is fetched from the new model')
 await settle()
@@ -508,9 +856,15 @@ ok('N a new model with the same keys replaces the meshes')
 let prevented = 0
 canvas.fire('webglcontextlost', { preventDefault: () => (prevented += 1) })
 assert.deepEqual([told.lost.at(-1), prevented], [true, 1])
+renderer.restore()
 canvas.fire('webglcontextrestored', {})
 assert.equal(told.lost.at(-1), false)
+await settle()
 await step()
+assert.equal(stage.shown, 'm0', 'the head is on screen again')
+assert.deepEqual(shownIn(stage, renderer.renders.at(-1)), ['m0'])
+assert.deepEqual(renderer.clear, ['efefeb', 1], 'on the background of the page, not on black')
+assert.deepEqual([renderer.sentClosed, renderer.staleLetGo], [0, 0])
 
 // a resize draws at once and keeps the view
 host.clientWidth = 300
@@ -625,6 +979,28 @@ const L = (key, age, band, hair, hairLabel, facial, facialLabel, photos = 3) => 
   assert.deepEqual(model.lookAxes([]).map((a) => a.stops.length), [0, 0, 0])
 }
 ok('look sliders: stops in order, every look reachable, the nearest look on the other axes wins')
+
+// the options of a model, complete: one made before an option existed does not say it (or says null)
+const D = { max_looks: 6, detail: 2, framing: 2.6, smoothing: 2, texture: 2, relief: 1 }
+assert.deepEqual(model.MODEL3D_DEFAULTS, D)
+assert.deepEqual(model.completeOptions({ max_looks: 4, detail: 3, framing: 2.2 }), { ...D, max_looks: 4, detail: 3, framing: 2.2 })
+assert.deepEqual(model.completeOptions({ max_looks: 4, detail: 3, framing: 2.2, smoothing: null, texture: null, relief: null }), { ...D, max_looks: 4, detail: 3, framing: 2.2 })
+assert.deepEqual(model.completeOptions(null), D)
+assert.deepEqual(model.completeOptions({ smoothing: 0, texture: 3, relief: 0, framing: 2.6000000000000005 }), { ...D, smoothing: 0, texture: 3, relief: 0 })
+assert.deepEqual(model.completeOptions({ smoothing: 9, texture: -1, detail: 'fine', max_looks: 2.4, relief: 5 }), { ...D, max_looks: 2, smoothing: 3, texture: 0 })
+assert.deepEqual(Object.keys(model.MODEL3D_LIMITS), Object.keys(D), 'every option has its range')
+// a model from before heads carried their photo: no look has one and the options do not say `texture`
+{
+  const one = L('l1', 30, '25 to 34', 0.4, 'short hair', 0.2, 'little or no facial hair')
+  const old = { max_looks: 6, detail: 2, framing: 2.6 }
+  assert.equal(model.beforePhotoTextures({ looks: [one], options: old }), true)
+  assert.equal(model.beforePhotoTextures({ looks: [one], options: { ...old, smoothing: null, texture: null } }), true)
+  assert.equal(model.beforePhotoTextures({ looks: [one], options: null }), true)
+  assert.equal(model.beforePhotoTextures({ looks: [one], options: { ...old, texture: 0 } }), false, 'made since, with the photo switched off')
+  assert.equal(model.beforePhotoTextures({ looks: [one], options: { ...old, texture: 2 } }), false, 'made since; this photo did not line up')
+  assert.equal(model.beforePhotoTextures({ looks: [one, { ...one, key: 'l2', textured: true }], options: old }), false)
+  assert.equal(model.beforePhotoTextures({ looks: [], options: null }), false, 'no model at all')
+}
 
 for (const r of results) console.log('ok  ', r)
 console.log(`${results.length} groups passed`)
