@@ -4,7 +4,10 @@
 // (basis "trait") carries no clothes or time-window keys and shows no percentage: its score is not calibrated, so
 // it reads "strong match". A guess of recognition trained on one person (basis "face", section 10) reads "By face"
 // with its probability as the percentage and one line: "Looks like Priya's photos, 0.61, and the same clothes".
-import type { GuessBasis, GuessOut, PersonRef, TraitAgainst, TraitEvidence, TraitKind } from '../../lib/types'
+// Position (section 35) adds its own reason ("In the same spot as Priya 8 s earlier"); a guess from the position
+// alone (basis "place") carries no clothes keys either, and its score is the measured share of right answers for
+// that gap, so it shows a percentage.
+import type { GuessBasis, GuessOut, PersonRef, PlaceEvidence, TraitAgainst, TraitEvidence, TraitKind } from '../../lib/types'
 import { formatDate, formatPercent, personName } from '../../lib/format'
 
 type Ev = Pick<GuessOut, 'evidence'>
@@ -33,11 +36,70 @@ export function safeHex(v: unknown): string | undefined {
   return typeof v === 'string' && /^#[0-9a-fA-F]{6}$/.test(v) ? v : undefined
 }
 
-/** What the guess rests on: clothes (no basis in the evidence, as before traits), traits alone, both, or
- *  recognition trained on the person. */
+/** What the guess rests on: clothes (no basis in the evidence, as before traits), traits alone, the position alone,
+ *  clothes with one of them, or recognition trained on the person. */
 export function guessBasis(guess: Ev): GuessBasis {
   const b = guess.evidence?.basis
-  return b === 'trait' || b === 'clothes+trait' || b === 'face' ? b : 'clothes'
+  return b === 'trait' || b === 'clothes+trait' || b === 'face' || b === 'place' || b === 'clothes+place' ? b : 'clothes'
+}
+
+/** The position part of the evidence (section 35): the box the person was followed from. Null when there is none. */
+export function guessPlace(guess: Ev): PlaceEvidence | null {
+  const raw = guess.evidence?.place
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
+  const o = raw as Record<string, unknown>
+  return {
+    ref_item_uid: str(o.ref_item_uid),
+    ref_face_id: num(o.ref_face_id) ?? undefined,
+    ref_body_id: num(o.ref_body_id) ?? undefined,
+    seconds_apart: num(o.seconds_apart) ?? undefined,
+    ref_before: typeof o.ref_before === 'boolean' ? o.ref_before : undefined,
+    hops: num(o.hops) ?? undefined,
+    offset: num(o.offset) ?? undefined,
+    kind: str(o.kind),
+    others: num(o.others) ?? undefined,
+    clothes: num(o.clothes) ?? undefined,
+    llr: num(o.llr) ?? undefined,
+    ref_crop_url: path(o.ref_crop_url),
+  }
+}
+
+/** How far apart two photos of one sequence were, from the reference's side: "8 s earlier", "2 min later",
+ *  "in the same second". Empty when the gap is unknown. */
+export function gapPhrase(seconds: number | null | undefined, before?: boolean | null): string {
+  if (seconds === null || seconds === undefined || !Number.isFinite(seconds)) return ''
+  const s = Math.abs(seconds)
+  if (s < 1) return 'in the same second'
+  const gap = s < 90 ? `${Math.round(s)} s` : `${Math.round(s / 60)} min`
+  if (before === true) return `${gap} earlier`
+  if (before === false) return `${gap} later`
+  return `${gap} apart`
+}
+
+export interface PlaceReason {
+  /** The reason as a sentence without a full stop. */
+  text: string
+  /** The reference box's crop and the photo it is in. */
+  refCropUrl?: string
+  refItemUid?: string
+  /** "8 s earlier", for the reference crop's caption. */
+  when: string
+}
+
+/** The position reason of a guess: "In the same spot as Priya 8 s earlier, and 2 other people stayed in place". */
+export function placeReason(guess: Ev & { person?: PersonRef | null }): PlaceReason | null {
+  const p = guessPlace(guess)
+  if (!p) return null
+  const who = guess.person?.name ? personName(guess.person) : 'this person'
+  const when = gapPhrase(p.seconds_apart, p.ref_before)
+  const hops = p.hops ? Math.round(p.hops) : 1
+  let text =
+    hops > 1
+      ? `Followed across ${hops} photos to ${who}${when ? `, ${when}` : ''}`
+      : `In the same spot as ${who}${when ? ` ${when}` : ''}`
+  const others = p.others ? Math.round(p.others) : 0
+  if (others > 0) text += others === 1 ? ', and 1 other person stayed in place' : `, and ${others} other people stayed in place`
+  return { text, refCropUrl: p.ref_crop_url, refItemUid: p.ref_item_uid, when }
 }
 
 /** The positive trait entries of the evidence, strongest first as the server sorted them; malformed ones dropped. */
@@ -210,31 +272,40 @@ function joinWords(words: string[]): string {
   return `${words.slice(0, -1).join(', ')} and ${words[words.length - 1]}`
 }
 
-/** "Face", "By clothes", "By tattoo", "By mehndi and nails", "By clothes and tattoo", "By face". */
+/** "Face", "By clothes", "By tattoo", "By mehndi and nails", "By clothes and tattoo", "By face", "By position",
+ *  "By clothes and position". */
 export function guessLabel(kind: 'face' | 'body', guess: Ev): string {
   const basis = guessBasis(guess)
   if (basis === 'face') return 'By face'
   const kinds = traitKinds(guess)
-  if (basis === 'trait' && kinds.length) return `By ${joinWords(kinds)}`
-  if (basis === 'clothes+trait' && kinds.length) return `By ${joinWords(['clothes', ...kinds])}`
+  const place = guessPlace(guess) ? ['position'] : []
+  if (basis === 'place') return 'By position'
+  if (basis === 'clothes+place') return 'By clothes and position'
+  if (basis === 'trait' && kinds.length) return `By ${joinWords([...kinds, ...place])}`
+  if (basis === 'clothes+trait' && kinds.length) return `By ${joinWords(['clothes', ...kinds, ...place])}`
   if (basis === 'trait') return 'By tattoo'
   return kind === 'face' ? 'Face' : 'By clothes'
 }
 
-/** The icons that go with the label: clothes, a tattoo, a hand (mehndi or nails), a face (trained recognition). */
-export function guessIcons(kind: 'face' | 'body', guess: Ev): Array<'clothes' | 'tattoo' | 'hand' | 'face'> {
+export type GuessIcon = 'clothes' | 'tattoo' | 'hand' | 'face' | 'place'
+
+/** The icons that go with the label: clothes, a tattoo, a hand (mehndi or nails), a face (trained recognition),
+ *  footprints (position). */
+export function guessIcons(kind: 'face' | 'body', guess: Ev): GuessIcon[] {
   const basis = guessBasis(guess)
   if (basis === 'face') return alsoClothes(guess) ? ['face', 'clothes'] : ['face']
   const kinds = traitKinds(guess)
-  const out: Array<'clothes' | 'tattoo' | 'hand' | 'face'> = []
-  if (basis !== 'trait' && (kind === 'body' || basis === 'clothes+trait')) out.push('clothes')
+  const out: GuessIcon[] = []
+  if (basis === 'clothes' ? kind === 'body' : basis === 'clothes+trait' || basis === 'clothes+place') out.push('clothes')
   if (kinds.includes('tattoo')) out.push('tattoo')
   else if (kinds.length) out.push('hand')
+  if (guessPlace(guess)) out.push('place')
   return out
 }
 
-/** "85% sure" for a clothes guess (its score is learned) and for trained recognition (its probability, checked on
- *  photos it was not trained on); "strong match" for traits alone (no percentage). */
+/** "85% sure" for a clothes guess (its score is learned), for trained recognition (its probability, checked on
+ *  photos it was not trained on) and for a guess from the position alone (its score is the measured share of right
+ *  answers for that gap); "strong match" for traits alone (no percentage). */
 export function guessSure(guess: Pick<GuessOut, 'evidence' | 'score'>): string {
   return guessBasis(guess) === 'trait' ? 'strong match' : `${formatPercent(guess.score)} sure`
 }
@@ -256,10 +327,10 @@ export function faceLine(guess: Ev & { person?: PersonRef | null }): string {
 }
 
 /** The line under a guess. Clothes: time window, scene, place, clothes, face (and the trained recognition when it
- *  agrees). Trained recognition: faceLine. Empty for a guess from traits alone. */
+ *  agrees). Trained recognition: faceLine. Empty for a guess from traits alone or from the position alone. */
 export function clothesLine(guess: Ev & { person?: PersonRef | null }): string {
   const basis = guessBasis(guess)
-  if (basis === 'trait') return ''
+  if (basis === 'trait' || basis === 'place') return ''
   if (basis === 'face') return faceLine(guess)
   const e = guess.evidence ?? {}
   const parts: string[] = []
@@ -290,10 +361,16 @@ function traitPhrases(guess: Ev): string[] {
   })
 }
 
-/** The whole evidence as one line: trait phrases first, then the clothes parts (never for traits alone) or the
- *  trained recognition's line. */
+/** The whole evidence as one line: trait phrases first, then the position ("same spot 8 s earlier"), then the
+ *  clothes parts (never for traits alone or the position alone) or the trained recognition's line. */
 export function evidenceLine(guess: Ev & { person?: PersonRef | null }): string {
   const parts = traitPhrases(guess)
+  const place = guessPlace(guess)
+  if (place) {
+    const when = gapPhrase(place.seconds_apart, place.ref_before)
+    const hops = place.hops ? Math.round(place.hops) : 1
+    parts.push(`${hops > 1 ? `followed across ${hops} photos` : 'same spot'}${when ? ` ${when}` : ''}`)
+  }
   const clothes = clothesLine(guess)
   if (clothes) parts.push(clothes)
   return parts.join(', ')

@@ -978,6 +978,18 @@ def soft_delete(conn: sqlite3.Connection, item_id: int) -> None:
             dedup.regroup(conn, members)
         _sync_companion(conn, item_id)
         bump_search_version(conn)
+    _reguess_followed(conn, item_id)
+
+
+def _reguess_followed(conn: sqlite3.Connection, item_id: int) -> None:
+    """Section 35: guesses in the photos lined up with this one may rest on it (a person followed from it, or
+    through it). They are made again when it goes to the trash or comes back."""
+    try:
+        from app.analysis import place, place_match
+
+        place.requeue_around(conn, [item_id], hops=place_match.HOPS)
+    except Exception:  # noqa: BLE001 - the trash never waits for a guess
+        log.exception("ingest: could not queue the photos lined up with item %s for a fresh guess", item_id)
 
 
 def _sync_companion(conn: sqlite3.Connection, still_id: int) -> None:
@@ -1011,6 +1023,7 @@ def restore(conn: sqlite3.Connection, item_id: int) -> None:
         if row["kind"] != "video":
             statuses["preview_status"] = "none"
         _enqueue_followups(conn, item_id, int(row["version"]), row["kind"], statuses)
+    _reguess_followed(conn, item_id)
 
 
 def _item_files(uid: str) -> tuple[list[Path], list[Path]]:
@@ -1287,7 +1300,7 @@ def recover_on_startup(conn: sqlite3.Connection) -> None:
     text or streaming copy is pending has its job; queue a reparse of the automatic 'other' documents a
     newer detection rule set now types (kv doc_rules_version, section 30); apply a changed guessing window
     (guess.apply_window_change) and changed body trait settings (trait_match.apply_settings_change), and
-    start the body traits runner (traits.start); when kv probe_version is below probe.PROBE_VERSION, probe again on a
+    start the body traits runner (traits.start) and the place runner (place.start, section 35); when kv probe_version is below probe.PROBE_VERSION, probe again on a
     background thread the plain files whose bytes claim a media type (reprobe_plain); bring stored faces
     up to the current face analysis (app.analysis.face_upkeep.start: analysed videos re-tracked once,
     photo faces measured for clarity); wipe data_dir/tmp."""
@@ -1348,6 +1361,12 @@ def recover_on_startup(conn: sqlite3.Connection) -> None:
         traits.start(conn)
     except Exception:
         log.exception("startup: could not start the body traits runner")
+    try:
+        from app.analysis import place  # section 35: photos taken together are lined up on its own thread
+
+        place.start(conn)
+    except Exception:
+        log.exception("startup: could not start the place runner")
     try:
         from app.media.probe import PROBE_VERSION
 

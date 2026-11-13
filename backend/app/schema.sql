@@ -594,3 +594,25 @@ CREATE TABLE IF NOT EXISTS trait_requeue (
   item_id   INTEGER PRIMARY KEY REFERENCES items(id) ON DELETE CASCADE,
   queued_at TEXT NOT NULL
 );
+-- Photos taken together, lined up (section 35, app.analysis.place): derived data, not journalled. One row per pair of
+-- a photo (a, the earlier one) and one of its next photos (b); kind is checked in code.
+CREATE TABLE IF NOT EXISTS place_links (
+  a_item      INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+  b_item      INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+  rev         TEXT NOT NULL,                          -- app.analysis.place.PLACE_REV at measurement
+  kind        TEXT NOT NULL,                          -- still | moved | burst | none (did not line up)
+  m           TEXT NOT NULL DEFAULT '',               -- JSON, 6 numbers: a -> b in normalised coordinates
+  inliers     INTEGER NOT NULL DEFAULT 0,
+  spread      REAL NOT NULL DEFAULT 0,
+  dt_s        REAL NOT NULL DEFAULT 0,                -- seconds between the two photos
+  computed_at TEXT NOT NULL,
+  PRIMARY KEY (a_item, b_item)
+);
+CREATE INDEX IF NOT EXISTS place_links_b ON place_links(b_item);
+-- One row per photo whose pairs with its next photos are stored; sig is the ids of those next photos.
+CREATE TABLE IF NOT EXISTS place_scans (
+  item_id    INTEGER PRIMARY KEY REFERENCES items(id) ON DELETE CASCADE,
+  rev        TEXT NOT NULL,
+  sig        TEXT NOT NULL DEFAULT '',
+  scanned_at TEXT NOT NULL
+);

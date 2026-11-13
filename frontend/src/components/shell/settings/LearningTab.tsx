@@ -8,7 +8,7 @@
 import { useState, type ReactNode } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import clsx from 'clsx'
-import { EyeOff, FileText, Forward, GraduationCap, ImageOff, PenTool, RotateCcw, ScanSearch, Shapes, Tags, UsersRound, Wand2 } from 'lucide-react'
+import { EyeOff, FileText, Footprints, Forward, GraduationCap, ImageOff, PenTool, RotateCcw, ScanSearch, Shapes, Tags, UsersRound, Wand2 } from 'lucide-react'
 import { api } from '../../../lib/api'
 import { formatCount, formatDate, formatRelative } from '../../../lib/format'
 import { useRefreshLibrary } from '../../../lib/hooks'
@@ -163,11 +163,14 @@ function LearnerCard({
   icon,
   title,
   learned,
+  labels = ['Learned', 'Not yet'],
   children,
 }: {
   icon: ReactNode
   title: string
   learned: boolean
+  /** The badge when `learned` holds and when it does not. */
+  labels?: [string, string]
   children: ReactNode
 }) {
   return (
@@ -178,7 +181,7 @@ function LearnerCard({
       <div className="min-w-0 flex-1">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <h3 className="text-sm font-semibold">{title}</h3>
-          {learned ? <Badge tone="ok">Learned</Badge> : <Badge>Not yet</Badge>}
+          {learned ? <Badge tone="ok">{labels[0]}</Badge> : <Badge>{labels[1]}</Badge>}
         </div>
         <div className="mt-1 text-sm text-ink-soft">{children}</div>
       </div>
@@ -277,11 +280,38 @@ function VaultCard({ s, onSensitivity, savingSensitivity }: { s: LearningStatus 
   )
 }
 
-/** Reading tattoos and nails is still going: the status is worth asking again. */
+/** Reading tattoos and nails, or lining photos up, is still going: the status is worth asking again. */
 function traitsScanning(s: LearningStatus | undefined): boolean {
+  const place = s?.learners.place?.scan
+  if (place && place.enabled !== false && !place.ready && place.scanned < place.eligible) return true
   const scan = s?.learners.traits?.scan
   if (!scan || scan.enabled === false || scan.ready || scan.paused?.length) return false
   return !(scan.eligible > 0 && scan.scanned >= scan.eligible)
+}
+
+/** Section 35: photos taken together are lined up in the background, so people can be followed between them. */
+function PlaceCard({ scan }: { scan: NonNullable<NonNullable<LearningStatus['learners']['place']>['scan']> }) {
+  const off = scan.enabled === false
+  const lining = !off && !scan.ready && scan.scanned < scan.eligible
+  return (
+    <LearnerCard icon={<Footprints className="size-5" />} title="Position" learned={!off && scan.ready} labels={['Ready', off ? 'Off' : 'Working']}>
+      <p>
+        {off
+          ? 'Following people from one photo to the next is turned off.'
+          : 'A person who stands in the same spot in photos taken moments apart is followed from one to the next. Nothing is learned here: it counts as a reason for a guess, with clothes.'}
+      </p>
+      {lining && (
+        <p className="mt-1" role="status">
+          Lining up photos taken together: {scan.scanned.toLocaleString()} of {scan.eligible.toLocaleString()}.
+        </p>
+      )}
+      {!off && scan.last_error && (
+        <p className="mt-1 text-danger" role="status">
+          Stopped on an error: {scan.last_error}. It tries again later.
+        </p>
+      )}
+    </LearnerCard>
+  )
 }
 
 function TraitsCard({ traits }: { traits: NonNullable<LearningStatus['learners']['traits']> }) {
@@ -419,6 +449,8 @@ function Learners({ s, ...sensitivity }: { s: LearningStatus } & SensitivityProp
       <ForwardsCard forwards={forwards} />
 
       {s.learners.traits && <TraitsCard traits={s.learners.traits} />}
+
+      {s.learners.place?.scan && <PlaceCard scan={s.learners.place.scan} />}
     </div>
   )
 }

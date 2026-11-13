@@ -367,7 +367,33 @@ def guess_out(conn: sqlite3.Connection, row: sqlite3.Row, refs: dict[int, Person
     if ref is None:
         return None
     evidence = json_loads(row["guess_evidence"], {}) or {}
-    return GuessOut(person=ref, score=float(row["guess_score"] or 0), evidence=_with_trait_urls(evidence))
+    return GuessOut(person=ref, score=float(row["guess_score"] or 0),
+                    evidence=_with_place_urls(_with_trait_urls(evidence), conn))
+
+
+def _with_place_urls(evidence: Any, conn: sqlite3.Connection | None = None) -> Any:
+    """The evidence with ref_crop_url on its `place` fragment (section 35): the crop of the box the person was
+    followed from. With a connection, one query checks that box: when it is gone, or its photo is in the trash
+    or the vault, the fragment gets no crop and no ref_item_uid (the card says "Photo changed" and opens
+    nothing) until the photo is guessed again."""
+    if not isinstance(evidence, dict) or not isinstance(evidence.get("place"), dict):
+        return evidence
+    frag = dict(evidence["place"])
+    face_id, body_id = frag.get("ref_face_id"), frag.get("ref_body_id")
+    if isinstance(body_id, int) and not isinstance(body_id, bool):
+        table, box_id, url = "bodies", body_id, body_url(body_id)
+    elif isinstance(face_id, int) and not isinstance(face_id, bool):
+        table, box_id, url = "faces", face_id, face_url(face_id)
+    else:
+        return {**evidence, "place": frag}
+    if conn is not None:
+        row = conn.execute(f"SELECT i.deleted_at, i.nsfw FROM {table} x JOIN items i ON i.id = x.item_id "
+                           "WHERE x.id = ?", (box_id,)).fetchone()
+        if row is None or row["deleted_at"] is not None or row["nsfw"]:
+            frag["ref_item_uid"] = None
+            return {**evidence, "place": frag}
+    frag["ref_crop_url"] = url
+    return {**evidence, "place": frag}
 
 
 def _with_trait_urls(evidence: Any) -> Any:

@@ -146,6 +146,11 @@ class Settings:
     mehndi_max_days: int       # mehndi is compared within this many days
     trait_propagate_max: int   # items a person's tagging queues for a trait re-guess
 
+    # position (section 35): people followed from one photo to the next at the same place
+    place_enabled: bool        # line photos up (the runner in app.analysis.place) and use positions in guesses
+    place_only_guesses: bool   # a guess from the position alone, under the admission rule of section 35
+    place_threads: int         # OpenCV threads while a photo is lined up: 1 keeps the work on the low-priority thread
+
     # video
     video_sample_interval_s: float
     video_face_interval_s: float   # faces are followed this densely (section 10)
@@ -296,6 +301,9 @@ def _load(**overrides) -> Settings:
         nails_max_days=_int("NAILS_MAX_DAYS", 14),
         mehndi_max_days=_int("MEHNDI_MAX_DAYS", 21),
         trait_propagate_max=_int("TRAIT_PROPAGATE_MAX", 400),
+        place_enabled=_bool("PLACE_ENABLED", True),
+        place_only_guesses=_bool("PLACE_ONLY_GUESSES", True),
+        place_threads=max(1, _int("PLACE_THREADS", 1)),
         video_sample_interval_s=_float("VIDEO_SAMPLE_INTERVAL_S", 1.0),
         video_face_interval_s=_float("VIDEO_FACE_INTERVAL_S", 0.2),
         video_face_max_frames=_int("VIDEO_FACE_MAX_FRAMES", 1500),

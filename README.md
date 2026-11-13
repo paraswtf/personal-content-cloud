@@ -25,6 +25,9 @@ What it does with each file:
   seen in their other photos at any date (checked point by point, not just by look), and helped by the
   same nail polish or mehndi a few days apart. Each guess says why and shows the two crops side by side;
   "Not a tattoo" and "Not this person's" correct it, and a person's page lists their tattoos.
+- **Following people between photos.** Photos taken moments apart at one place are lined up by their
+  background, so someone who stays in the same spot is followed from one photo to the next, also when the
+  camera moved or they turned away. It counts as a reason for a guess, along with clothes.
 - **Documents.** Text is extracted (text layer or OCR, in English, Hindi and Marathi) and searchable.
   Traffic challans and parking receipts are read into their own cards: a challan shows its number,
   vehicle, violations, amount and printed payment status with a button that opens the right portal to pay
@@ -144,6 +147,8 @@ Environment variables (all optional):
 | `TRAIT_ONLY_GUESSES`, `TRAIT_ONLY_MEHNDI` | `true`, `false` | Allow a guess from a tattoo alone (under strict rules); the same from mehndi alone. |
 | `TRAITS_MEHNDI` | `false` | Read mehndi on hands and forearms. Off by default: the detector mistook plain hands for mehndi. |
 | `TRAITS_THREADS` | `2` | CPU threads per traits model. |
+| `PLACE_ENABLED`, `PLACE_ONLY_GUESSES` | `true`, `true` | Line up photos taken moments apart and use where people stood in guesses, and allow a guess from the position alone. |
+| `PLACE_THREADS` | `1` | OpenCV threads while photos are lined up. 1 keeps that work at low priority on one core; more is faster and competes with the rest. |
 | `TRAIT_MIN_BODY_PX`, `TRAIT_MIN_LIMB_PX`, `NAIL_MIN_HAND_PX` | `200`, `64`, `96` | Smallest people box, limb and hand (pixels) that is read. |
 | `TATTOO_GATE_P`, `TATTOO_MIN_INLIERS`, `MEHNDI_MIN_INLIERS` | `0.80`, `12`, `30` | How sure the tattoo check must be, and how many matching points a tattoo or mehndi pair needs. |
 | `TRAIT_MARGIN_LLR`, `TRAIT_PRIOR_PEOPLE`, `TRAIT_MIN_P` | `2.0`, `20`, `0.90` | The lead a guess from a tattoo alone needs over the next person, the prior used for its sort score, and the floor of the tightening from your answers. |

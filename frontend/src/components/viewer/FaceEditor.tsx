@@ -15,7 +15,7 @@ import { boxOrigin, mergeOrigins } from '../../lib/origin'
 import OriginIcon from '../people/OriginIcon'
 import PersonPicker, { choiceBody, type PersonChoice } from '../people/PersonPicker'
 import TraitCompare from '../people/TraitCompare'
-import { clothesLine, guessSure, safeHex, traitReasons } from '../people/evidence'
+import { clothesLine, guessSure, placeReason, safeHex, traitReasons } from '../people/evidence'
 import { notTraitLabel, traitActionKey, useTraitActions } from '../people/useTraitActions'
 import { useToast } from '../Toast'
 import { Button } from '../ui'
@@ -189,6 +189,7 @@ export default function FaceEditor({ uid, target, anchor, onClose, onDone, track
   const error = assign.error ?? remove.error ?? nameGroup.error ?? guessAct.error ?? correct.error
   const guess = !box.person ? box.guess : null
   const guessReasons = guess ? traitReasons(guess) : []
+  const guessPlace = guess ? placeReason(guess) : null
   // any open guess among the boxes edited (a whole-video group may hold guessed and plain tracks): a pick corrects
   // those guesses (learned as wrong) instead of overwriting them
   const anyGuess = scopeTargets.some((t) => !t.box.person && !!t.box.guess)
@@ -236,6 +237,7 @@ export default function FaceEditor({ uid, target, anchor, onClose, onDone, track
             Looks like <span className="font-semibold">{personName(guess.person)}</span>, {guessSure(guess)}.
           </p>
           {clothesLine(guess) && <p className="mt-0.5 text-xs text-ink-soft">{clothesLine(guess)}</p>}
+          {guessPlace && <p className="mt-0.5 text-xs text-ink-soft">{guessPlace.text}</p>}
           {guessReasons.map((r, i) => (
             <p key={i} className="mt-0.5 text-xs text-ink-soft">
               {r.text}

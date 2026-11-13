@@ -120,6 +120,7 @@ def status(conn: sqlite3.Connection) -> dict[str, Any]:
             "forwards": forwards.status(),
             "not_faces": not_faces.status(),
             "traits": _traits_status(conn),
+            "place": _place_status(conn),
         },
         "events": _event_counts(conn),
         "errors": st.get("errors") or {},
@@ -138,6 +139,17 @@ def _traits_status(conn: sqlite3.Connection) -> dict[str, Any]:
         log.warning("learning: traits progress unavailable: %s", e)
         out["scan"] = None
     return out
+
+
+def _place_status(conn: sqlite3.Connection) -> dict[str, Any]:
+    """How far the photos taken together are lined up (section 35). Nothing is learned here: only the progress."""
+    try:
+        from app.analysis import place
+
+        return {"scan": place.progress(conn)}
+    except Exception as e:  # noqa: BLE001 - the status page never fails on this line
+        log.warning("learning: place progress unavailable: %s", e)
+        return {"scan": None}
 
 
 def vault_sensitivity(conn: sqlite3.Connection) -> str:

@@ -7,7 +7,7 @@ import clsx from 'clsx'
 import { formatDate } from '../../lib/format'
 import { partWords, traitNoun, type TraitReason } from './evidence'
 
-function Crop({ src, alt, dark }: { src?: string; alt: string; dark: boolean }) {
+export function Crop({ src, alt, dark }: { src?: string; alt: string; dark: boolean }) {
   const [failed, setFailed] = useState(false)
   const box = clsx(
     'block size-14 shrink-0 overflow-hidden rounded-lg sm:size-[72px]',  // block: inside the reference button too

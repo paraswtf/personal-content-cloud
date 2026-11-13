@@ -31,6 +31,9 @@ CONTRACT.
   into that group whenever its guess goes without the owner's answer for it: turned down (reject), cleared by
   guess_item (the model stops naming it, the person is in the photo now, the photo went to the vault), not
   confirmable (confirm), or withdrawn with the guess window (person_scan.regroup).
+- Position (section 35, app.analysis.place_match): when a photo is lined up with a neighbour taken within minutes,
+  each box's result is also fused with where people stood (basis 'clothes+place', or 'place' for a guess from the
+  position alone). A 'place' guess has its own time limits and is kept by apply_window_change.
 
 Scoring for an open box D in item I against a reference box F (face or body of a person with
 assigned_by user or auto) in item J:
@@ -367,8 +370,9 @@ def score_box(box: Box, refs: list[Box], scene: dict[int, tuple[float, float | N
 def _compute(conn: sqlite3.Connection, item: sqlite3.Row, boxes: list[Box],
              cache: dict[str, Any] | None = None) -> dict[tuple[str, int], Candidate | None]:
     """The clothes path, or the clothes path fused with body traits (section 34) when the library's traits are
-    ready and a box of this photo has some. Without traits the result is exactly the clothes path's."""
-    tctx = None
+    ready and a box of this photo has some, and with position (section 35) when the photo is lined up with a
+    neighbour. Without traits and without links the result is exactly the clothes path's."""
+    tctx = pctx = None
     if boxes and item["kind"] == "image" and item["taken_at"]:
         try:
             from app.analysis import trait_match
@@ -377,12 +381,19 @@ def _compute(conn: sqlite3.Connection, item: sqlite3.Row, boxes: list[Box],
         except Exception:  # noqa: BLE001 - traits never block guessing
             log.exception("guess: trait matching failed for item %s; clothes only", item["id"])
             tctx = None
-    if tctx is None:
+        try:
+            from app.analysis import place_match
+
+            pctx = place_match.context(conn, item, boxes, cache)
+        except Exception:  # noqa: BLE001 - position never blocks guessing
+            log.exception("guess: position matching failed for item %s; without it", item["id"])
+            pctx = None
+    if tctx is None and pctx is None:
         return _compute_clothes(conn, item, boxes, cache)
     try:
-        return _compute_fused(conn, item, boxes, cache, tctx)
-    except Exception:  # noqa: BLE001 - traits never block guessing
-        log.exception("guess: trait matching failed for item %s; clothes only", item["id"])
+        return _compute_fused(conn, item, boxes, cache, tctx, pctx)
+    except Exception:  # noqa: BLE001 - traits and position never block guessing
+        log.exception("guess: trait or position matching failed for item %s; clothes only", item["id"])
         return _compute_clothes(conn, item, boxes, cache)
 
 
@@ -391,36 +402,10 @@ def _compute_clothes(conn: sqlite3.Connection, item: sqlite3.Row, boxes: list[Bo
     results: dict[tuple[str, int], Candidate | None] = {(b.kind, b.id): None for b in boxes}
     if not boxes or not item["taken_at"]:
         return results
-    window = window_items(conn, item)
-    if not window:
+    inputs = _clothes_inputs(conn, item, cache)
+    if inputs is None:
         return results
-    present = _present_people(conn, int(item["id"]))
-    embs = _scene_embeddings(conn, [int(item["id"]), *[int(r["id"]) for r in window]], cache)
-    e0 = embs.get(int(item["id"]))
-    day0 = local_date(item["taken_at"], settings.local_timezone)
-    t0 = parse_iso(item["taken_at"])
-    scene: dict[int, tuple[float, float | None, float | None, bool, int | None]] = {}
-    for r in window:
-        jid = int(r["id"])
-        cos = float(np.dot(e0, embs[jid])) if e0 is not None and jid in embs and embs[jid].shape == e0.shape else None
-        gps_m = None
-        if None not in (item["gps_lat"], item["gps_lon"], r["gps_lat"], r["gps_lon"]):
-            gps_m = haversine_m(float(item["gps_lat"]), float(item["gps_lon"]), float(r["gps_lat"]), float(r["gps_lon"]))
-        scene_ok = cos is not None and cos >= settings.guess_scene_sim
-        gps_ok = gps_m is not None and gps_m <= settings.guess_gps_m
-        if not (scene_ok or gps_ok):
-            continue
-        term = cos if scene_ok else max(float(cos or 0.0), float(settings.guess_scene_sim))
-        same_day = local_date(r["taken_at"], settings.local_timezone) == day0
-        t = parse_iso(r["taken_at"])
-        minutes = int(round(abs((t - t0).total_seconds()) / 60.0)) if t is not None and t0 is not None else None
-        scene[jid] = (float(term), cos, gps_m, bool(same_day), minutes)
-    if not scene:
-        return results
-    refs = _reference_boxes(conn, list(scene), present, cache)
-    if not refs:
-        return results
-    uids = {int(r["id"]): r["uid"] for r in window}
+    refs, scene, uids = inputs
     rejected = _rejections(conn, boxes)
     fscores = _face_scores(conn, boxes)
 
@@ -449,7 +434,8 @@ def _compute_clothes(conn: sqlite3.Connection, item: sqlite3.Row, boxes: list[Bo
 
 
 def _clothes_inputs(conn: sqlite3.Connection, item: sqlite3.Row, cache: dict[str, Any] | None):
-    """What score_box needs (refs, scene, uids), or None where _compute_clothes would return early."""
+    """What score_box needs (refs, scene, uids), or None when the clothes path has nothing to go on: no photo in
+    the window, none in the same scene or place, or no reference box there."""
     window = window_items(conn, item)
     if not window:
         return None
@@ -483,16 +469,18 @@ def _clothes_inputs(conn: sqlite3.Connection, item: sqlite3.Row, cache: dict[str
 
 
 def _compute_fused(conn: sqlite3.Connection, item: sqlite3.Row, boxes: list[Box], cache: dict[str, Any] | None,
-                   tctx: Any) -> dict[tuple[str, int], Candidate | None]:
-    """The clothes path with body traits (section 34): the same inputs and the same greedy one-person-per-photo
-    loop; each box's clothes result goes through trait_match.fuse with that box's trait result. Photos only."""
-    from app.analysis import trait_match
+                   tctx: Any, pctx: Any = None) -> dict[tuple[str, int], Candidate | None]:
+    """The clothes path with body traits (section 34) and position (section 35): the same inputs and the same
+    greedy one-person-per-photo loop; each box's clothes result goes through trait_match.fuse with that box's trait
+    result, then through place_match.fuse with its position result. Photos only."""
+    from app.analysis import place_match, trait_match
 
     results: dict[tuple[str, int], Candidate | None] = {(b.kind, b.id): None for b in boxes}
     clothes = _clothes_inputs(conn, item, cache)
     rejected = _rejections(conn, boxes)
     fscores = _face_scores(conn, boxes)
-    per_box = tctx.score_all(fscores, rejected)
+    per_box = tctx.score_all(fscores, rejected) if tctx is not None else {}
+    place_box = pctx.score_all(fscores, rejected) if pctx is not None else {}
 
     def score(b: Box, taken: set[int]) -> Candidate | None:
         rej = rejected.get((b.kind, b.id), set()) | taken
@@ -502,7 +490,21 @@ def _compute_fused(conn: sqlite3.Connection, item: sqlite3.Row, boxes: list[Box]
         else:
             c_win, c_ranked = None, []
         t = per_box.get((b.kind, b.id))
-        return c_win if t is None else trait_match.fuse(c_win, c_ranked, t.without(rej), tctx.params)
+        gone: set[int] = set()
+        if t is None:
+            win = c_win
+        else:
+            t = t.without(rej)
+            win = trait_match.fuse(c_win, c_ranked, t, tctx.params)
+            if win is None and c_win is not None:
+                return None  # the traits withdrew the clothes winner: position never brings a guess back
+            # people the traits rule out for this box (a tattoo of theirs is absent): not for position either
+            gone = {q for q, terms in t.terms.items()
+                    if float((terms or {}).get("absence", 0.0)) <= trait_match.NEG_CAP + 1e-9}
+        p = place_box.get((b.kind, b.id))
+        if p is None:
+            return win
+        return place_match.fuse(win, [c for c in c_ranked if c.person_id not in gone], p.without(rej | gone))
 
     pending = list(boxes)
     taken: set[int] = set()
@@ -735,8 +737,10 @@ def apply_window_change(conn: sqlite3.Connection) -> int:
                     ev = json_loads(r["guess_evidence"]) or {}
                 except Exception:
                     ev = {}
-                if isinstance(ev, dict) and ev.get("basis") in ("trait", "face"):
-                    continue  # a guess from traits alone (section 34) or from a trained model has no time window
+                if isinstance(ev, dict) and ev.get("basis") in ("trait", "face", "place"):
+                    # traits alone (section 34) and a trained model (section 10) have no time window; position
+                    # has its own (section 35)
+                    continue
                 ref_uid = ev.get("ref_item_uid") if isinstance(ev, dict) else None
                 ref = conn.execute("SELECT taken_at FROM items WHERE uid = ?", (ref_uid,)).fetchone() if ref_uid else None
                 t0 = parse_iso(r["taken_at"])
@@ -806,6 +810,13 @@ def record_outcome(conn: sqlite3.Connection, row: sqlite3.Row, person_id: int, l
             features = {"basis": "face", "p": ev.get("p"), "face": ev.get("face"), "score": ev.get("score")}
             events.record(conn, "guess", label, features, item_id=int(row["item_id"]), person_id=int(person_id))
             return
+        if basis == "place":
+            # A guess from the position alone (section 35): its own terms; the people learner leaves these out.
+            from app.analysis import place_match
+
+            features = {"basis": "place", **place_match.outcome_terms(ev), "score": ev.get("score")}
+            events.record(conn, "guess", label, features, item_id=int(row["item_id"]), person_id=int(person_id))
+            return
         scene_term = ev.get("scene_term")
         if scene_term is None:
             scene_term = ev.get("scene") if ev.get("scene") is not None else float(settings.guess_scene_sim)
@@ -815,6 +826,8 @@ def record_outcome(conn: sqlite3.Connection, row: sqlite3.Row, person_id: int, l
         if basis:
             features["basis"] = basis
             features["trait_llr"] = ev.get("trait_llr")
+            if ev.get("place_llr") is not None:
+                features["place_llr"] = ev.get("place_llr")
         events.record(conn, "guess", label, features, item_id=int(row["item_id"]), person_id=int(person_id))
     except Exception:  # noqa: BLE001 - learning never blocks a confirmation
         log.exception("learning: could not record a guess outcome")

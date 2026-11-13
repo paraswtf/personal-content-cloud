@@ -262,7 +262,7 @@ def test_settings_change_requeues_and_withdraws_only_when_switched_off(conn, mon
 def test_outcomes_of_trait_guesses_and_the_people_learner(conn):
     from app.learning import events, people
 
-    assert people.RULES_REV >= 3  # 3: trait outcomes left out; later revisions keep that
+    assert people.RULES_REV >= 4  # 3: trait outcomes left out; 4: trained-face and position outcomes too
     p, _, _, q_item, q_body = _trait_guess(conn)
     rng = np.random.default_rng(0)
     for i in range(40):

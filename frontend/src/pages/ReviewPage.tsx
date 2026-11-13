@@ -332,12 +332,13 @@ function DuplicatesTab() {
   )
 }
 
-type Basis = 'all' | 'clothes' | 'trait' | 'face'
+type Basis = 'all' | 'clothes' | 'trait' | 'face' | 'place'
 const BASES: { value: Basis; label: string }[] = [
   { value: 'all', label: 'All' },
   { value: 'clothes', label: 'Clothes' },
   { value: 'trait', label: 'Tattoos and nails' },
   { value: 'face', label: 'Trained face' },
+  { value: 'place', label: 'Position' },
 ]
 
 function GuessesTab() {
@@ -418,8 +419,9 @@ function GuessesTab() {
   return (
     <div>
       <p className="mb-3 text-sm text-ink-soft">
-        People guessed from someone tagged within an hour in the same scene and clothes, from the same tattoo in a photo
-        taken at any time, or by recognition trained on one person. Confirming tags them; rejecting stops that guess.
+        People guessed from someone tagged within an hour in the same scene and clothes, from standing in the same spot in
+        a photo taken moments apart, from the same tattoo in a photo taken at any time, or by recognition trained on one
+        person. Confirming tags them; rejecting stops that guess.
       </p>
       <p className="mb-3 hidden text-sm text-ink-soft pointer-fine:block">
         Keys: <Kbd>Enter</Kbd> says yes to the selected guess, <Kbd>Space</Kbd> opens the name box for someone else,{' '}
@@ -462,8 +464,9 @@ function GuessesTab() {
         </ul>
       ) : list.items.length === 0 ? (
         <EmptyState icon={<Sparkles className="size-8" aria-hidden />} title={basis === 'all' ? 'No guesses to review' : 'No guesses of this kind'}>
-          Tag someone in a photo: other photos within an hour with the same clothes, and photos taken at any time with the same
-          tattoo, get a guess. Recognition trained on one person (on their page) adds the faces it finds.
+          Tag someone in a photo: other photos within an hour with the same clothes, photos taken moments apart where someone
+          stands in the same spot, and photos taken at any time with the same tattoo, get a guess. Recognition trained on one
+          person (on their page) adds the faces it finds.
         </EmptyState>
       ) : (
         <ul ref={listRef} className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">

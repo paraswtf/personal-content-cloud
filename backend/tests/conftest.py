@@ -109,6 +109,16 @@ def data_dir(tmp_path):
             traits._state.update(last_error=None, calib_tried=None, abort_item=None)
     except Exception:
         pass
+    try:
+        # item ids restart at 1 in every database: the picture features cached by (item id, version) must not
+        # carry over between tests (section 35)
+        from app.analysis import place, place_align
+
+        place_align.reset()
+        with place._state_lock:
+            place._state.update(last_error=None, fails={})
+    except Exception:
+        pass
     yield d
     reload_settings()
 
