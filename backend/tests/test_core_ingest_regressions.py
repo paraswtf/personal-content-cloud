@@ -439,9 +439,10 @@ def test_c24_recovery_enqueues_in_one_transaction_without_duplicates(conn):
     finally:
         conn.set_trace_callback(None)
     # requeue_running, the enqueue batch and (first start only) the guess window record of section 10, the
-    # probe version of section 7, the nested face twins pass of section 10, and the body traits rules hash and
-    # ready mark of section 34 (an empty library is measured): never one per item
-    assert first <= 7 and second <= 2
+    # probe version of section 7, the nested face twins pass of section 10, the body traits rules hash and
+    # ready mark of section 34 (an empty library is measured), and the same two for position (section 35):
+    # never one per item
+    assert first <= 9 and second <= 2
     assert conn.execute("SELECT COUNT(*) FROM jobs WHERE type = 'analyze'").fetchone()[0] == 300
     assert conn.execute("SELECT COUNT(DISTINCT payload) FROM jobs").fetchone()[0] == 300
     plan = " ".join(str(r[-1]) for r in conn.execute("EXPLAIN QUERY PLAN " + jobs._dup_sql("analyze"), ("a", "b")))
