@@ -1,5 +1,10 @@
 """TripoSR (Stability AI and Tripo AI, MIT licence): one picture in, a mesh with a colour per vertex out.
 
+The mesh comes back in the model's own frame, turned to +Y up and +Z towards the viewer but not moved or scaled,
+with the camera the model renders its input view from (tsr/system.py `render`, view 0 of `get_spherical_cameras`:
+distance 1.9, elevation 0, vertical field of view 40 degrees, the picture's right along the turned +X). The model
+has no camera input and only guesses that camera for a given picture, so the finishing fits it (Camera.fit).
+
 Layout (scripts/setup_3d.sh makes it): WEIGHTS/TripoSR/{config.yaml, model.ckpt}, WEIGHTS/u2net/u2net.onnx,
 WEIGHTS/hf (the cached config of the image encoder) and WEIGHTS/../src/TripoSR (the pinned checkout with the `tsr`
 package). Nothing is downloaded at run time. Measured on an RTX 2080: about 6 s a head at detail 2, 2.4 GB of GPU
@@ -16,6 +21,7 @@ RESOLUTION = {1: 192, 2: 256, 3: 320}   # marching cubes grid per detail level
 INPUT_SIDE = 512
 GREY = 0.5                              # the background the model was trained on
 CHUNK = 8192
+CAMERA_DISTANCE, CAMERA_FOV_Y = 1.9, 40.0   # tsr.system.TSR.render's defaults
 
 
 class TripoSR:
@@ -77,7 +83,7 @@ class TripoSR:
         import torch
         from PIL import Image
 
-        from gen3d.backends import Mesh
+        from gen3d.backends import Camera, Mesh
 
         rgba = np.asarray(image.convert("RGBA")).astype(np.float32) / 255.0
         rgb = rgba[..., :3] * rgba[..., 3:4] + (1.0 - rgba[..., 3:4]) * GREY
@@ -91,10 +97,16 @@ class TripoSR:
         c = np.asarray(mesh.visual.vertex_colors)[:, :3].astype(np.uint8)
         # TripoSR's object looks along +x with z up: turn it to +y up, +z towards the viewer
         v = np.ascontiguousarray(np.stack([v[:, 1], v[:, 2], v[:, 0]], axis=1))
-        return Mesh(vertices=v, faces=f, colors=c)
+        return Mesh(vertices=v, faces=f, colors=c, camera=Camera(CAMERA_DISTANCE, CAMERA_FOV_Y, fit=True))
 
     def close(self) -> None:
+        """Let the model go and hand its memory back: the job finishes its heads after this, and the app's memory
+        limit is shared with it. Collected first: a tensor still held in a reference cycle keeps its block of the
+        graphics card's memory, and emptying the cache before that frees nothing."""
+        import gc
+
         self.model = None
+        gc.collect()
         try:
             import torch
 

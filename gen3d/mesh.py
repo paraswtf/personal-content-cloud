@@ -1,8 +1,13 @@
-"""The mesh a backend returns and what every mesh gets before it is written (numpy only).
+"""The mesh a backend returns, the head that is written, and what every mesh gets on the way (numpy only).
 
 Axes, for every backend: +Y up, +Z towards the viewer (the face looks along +Z), right-handed, triangles wound
-counter-clockwise seen from outside. `finish` does not turn a mesh: a backend that works in other axes converts
-before it returns.
+counter-clockwise seen from outside. Nothing here turns a mesh: a backend that works in other axes converts before
+it returns.
+
+A backend that knows where its picture was taken from names that camera on the mesh and leaves the mesh in its own
+frame, not centred and not scaled: gen3d.finishing needs the two to line up to lay the photo over the front. The
+centring and scaling into the unit box happen once, at the very end (`normalise`). `finish` is the short way for a
+mesh without a photo: clean, normalise, normals.
 """
 from __future__ import annotations
 
@@ -13,12 +18,48 @@ import numpy as np
 LOOSE_SHARE = 0.02  # a loose part with fewer triangles than this share of the largest part is dropped
 
 
+@dataclass(frozen=True)
+class Camera:
+    """Where the picture is assumed to come from, in the mesh's frame: at (0, 0, distance), looking down -z, x to
+    the right and y up. A point (x, y, z) lands in a square picture of side S at
+    u = S/2 + f x / (distance - z), v = S/2 - f y / (distance - z), f = 0.5 S / tan(fov_y / 2), pixel centres at
+    +0.5. `fit`: the backend only guesses the camera, so the finishing searches the scale and shift that make the
+    mesh's outline cover the person's outline in the picture."""
+    distance: float = 1.9
+    fov_y_deg: float = 40.0
+    fit: bool = True
+
+
 @dataclass
 class Mesh:
     vertices: np.ndarray               # (n, 3) float32
     faces: np.ndarray                  # (m, 3) uint32
     colors: np.ndarray | None = None   # (n, 3) uint8 per vertex, sRGB as in the picture (gen3d.glb stores them linear)
     normals: np.ndarray | None = None  # (n, 3) float32, unit length; set by finish
+    camera: Camera | None = None       # the picture's camera, when the backend knows it (the mesh is in its frame)
+
+
+@dataclass
+class Layer:
+    """The photo laid over the front of a head: some of the base's triangles again, with a place in the texture
+    for every corner and how much of the photo shows there (0 none, 1 all of it)."""
+    vertex_ids: np.ndarray             # (k,) which of the base's vertices these are
+    faces: np.ndarray                  # (t, 3) uint32, indices into vertex_ids
+    uv: np.ndarray                     # (k, 2) float32, (0, 0) the texture's top left corner
+    alpha: np.ndarray                  # (k,) float32 in 0..1
+
+
+@dataclass
+class Head:
+    """What is written for a look: the whole surface with a colour per vertex, and, when the photo lined up, the
+    photo as a texture on a layer over the front."""
+    base: Mesh
+    photo: Layer | None = None
+    texture: bytes | None = None                    # the JPEG the layer shows
+    texture_size: tuple[int, int] | None = None     # (width, height)
+    overlap: float | None = None                    # how well the mesh's outline covered the person's (0..1)
+    overlap_head: float | None = None               # the same over the head alone, the upper part of the person
+    note: str | None = None                         # why there is no photo layer, when one was asked for
 
 
 class BadMesh(ValueError):
@@ -45,7 +86,7 @@ def _checked(mesh: Mesh) -> Mesh:
         if c.dtype != np.uint8:  # floats in 0..1 are taken as such
             c = np.clip(np.asarray(c, dtype=np.float32) * (255.0 if float(c.max(initial=0.0)) <= 1.0 else 1.0), 0, 255)
         c = np.ascontiguousarray(c[:, :3]).astype(np.uint8)
-    return Mesh(vertices=v, faces=f, colors=c)
+    return Mesh(vertices=v, faces=f, colors=c, camera=mesh.camera)
 
 
 def components(faces: np.ndarray, n_vertices: int) -> np.ndarray:
@@ -79,7 +120,7 @@ def drop_loose(mesh: Mesh, share: float = LOOSE_SHARE) -> Mesh:
     remap = np.full(mesh.vertices.shape[0], -1, dtype=np.int64)
     remap[used] = np.arange(int(used.sum()))
     return Mesh(vertices=mesh.vertices[used], faces=remap[faces],
-                colors=None if mesh.colors is None else mesh.colors[used])
+                colors=None if mesh.colors is None else mesh.colors[used], camera=mesh.camera)
 
 
 def signed_volume(vertices: np.ndarray, faces: np.ndarray) -> float:
@@ -99,18 +140,37 @@ def vertex_normals(vertices: np.ndarray, faces: np.ndarray) -> np.ndarray:
     return out.astype(np.float32)
 
 
-def finish(mesh: Mesh) -> Mesh:
-    """Check the mesh, drop loose bits, centre it, scale it into a unit box, turn inside-out triangles the right
-    way round and compute the normals. The axes stay as the backend gave them."""
-    m = drop_loose(_checked(mesh))
-    v = m.vertices.astype(np.float64)
+def box(vertices: np.ndarray) -> tuple[np.ndarray, float]:
+    """(the middle of the vertices' box, its longest side). BadMesh when the mesh is flat."""
+    v = np.asarray(vertices, dtype=np.float64)
     lo, hi = v.min(axis=0), v.max(axis=0)
     extent = float((hi - lo).max())
     if extent <= 0:
         raise BadMesh("the mesh is flat")
-    v = (v - (lo + hi) / 2.0) / extent
+    return (lo + hi) / 2.0, extent
+
+
+def clean(mesh: Mesh) -> Mesh:
+    """Check the mesh, drop loose bits and turn inside-out triangles the right way round. The mesh stays where it
+    is (its frame is the camera's): vertices as float64, faces as int64, no normals yet."""
+    m = drop_loose(_checked(mesh))
+    v = m.vertices.astype(np.float64)
+    middle, extent = box(v)
     faces = m.faces
-    if signed_volume(v, faces) < 0:
+    if signed_volume((v - middle) / extent, faces) < 0:
         faces = faces[:, [0, 2, 1]]
-    v32 = v.astype(np.float32)
-    return Mesh(vertices=v32, faces=faces.astype(np.uint32), colors=m.colors, normals=vertex_normals(v32, faces))
+    return Mesh(vertices=v, faces=faces, colors=m.colors, camera=m.camera)
+
+
+def normalise(vertices: np.ndarray) -> np.ndarray:
+    """The vertices centred and scaled into a unit box, as float32."""
+    middle, extent = box(vertices)
+    return ((np.asarray(vertices, dtype=np.float64) - middle) / extent).astype(np.float32)
+
+
+def finish(mesh: Mesh) -> Mesh:
+    """Check the mesh, drop loose bits, centre it, scale it into a unit box, turn inside-out triangles the right
+    way round and compute the normals. The axes stay as the backend gave them."""
+    m = clean(mesh)
+    v32 = normalise(m.vertices)
+    return Mesh(vertices=v32, faces=m.faces.astype(np.uint32), colors=m.colors, normals=vertex_normals(v32, m.faces))
