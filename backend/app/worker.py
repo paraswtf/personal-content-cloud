@@ -361,6 +361,12 @@ def _housekeeping(conn: sqlite3.Connection) -> dict[str, int]:
     except Exception:  # noqa: BLE001 - tidying never blocks housekeeping
         log.exception("housekeeping: tidying derived files failed")
     try:
+        from app.analysis import model3d
+
+        out["model3d"] = model3d.sweep(conn)
+    except Exception:  # noqa: BLE001 - the 3D heads never block housekeeping
+        log.exception("housekeeping: sweeping the 3D heads failed")
+    try:
         from app.analysis import traits
 
         out["trait_descriptors"] = traits.prune(conn)

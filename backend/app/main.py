@@ -86,6 +86,7 @@ ROUTERS: tuple[tuple[str, str], ...] = (
     ("app.api.shares", "/api/shares"),
     ("app.api.share", ""),  # public share routes carry their own /api/s and /files/s paths (section 26)
     ("app.api.actions", ""),  # undo (section 33)
+    ("app.api.model3d", ""),  # 3D heads carry their own /api/people/{id}/model3d and /files/model3d paths (section 36)
 )
 
 

@@ -1,5 +1,5 @@
 // Small shared UI primitives. Pages build on these so the look stays consistent.
-import { useEffect, useRef, type ButtonHTMLAttributes, type ReactNode } from 'react'
+import { useEffect, useId, useRef, type ButtonHTMLAttributes, type CSSProperties, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import clsx from 'clsx'
 import { Loader2, X } from 'lucide-react'
@@ -336,4 +336,122 @@ export function ConfirmModal({
 /** A key name in running text ("Keys: Enter yes ..."). */
 export function Kbd({ children }: { children: ReactNode }) {
   return <kbd className="rounded border border-line bg-surface-2 px-1 font-sans text-xs text-ink">{children}</kbd>
+}
+
+/** An on/off switch. `label` names it for screen readers; put the visible label beside it. */
+export function Switch({
+  checked,
+  onChange,
+  disabled,
+  label,
+}: {
+  checked: boolean
+  onChange: (next: boolean) => void
+  disabled?: boolean
+  label: string
+}) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      aria-label={label}
+      disabled={disabled}
+      onClick={() => onChange(!checked)}
+      className="inline-flex h-10 shrink-0 items-center gap-3 rounded-full pl-1 pr-1 text-sm font-medium disabled:cursor-not-allowed disabled:opacity-60"
+    >
+      <span className="hidden sm:inline">{checked ? 'On' : 'Off'}</span>
+      <span
+        aria-hidden
+        className={clsx(
+          'relative inline-flex h-7 w-12 items-center rounded-full transition-colors',
+          checked ? 'bg-brand' : 'bg-ink/20',
+        )}
+      >
+        <span
+          className={clsx(
+            'inline-block size-5 rounded-full bg-white shadow transition-transform',
+            checked ? 'translate-x-6' : 'translate-x-1',
+          )}
+        />
+      </span>
+    </button>
+  )
+}
+
+/** Width of the slider thumb in px: index.css draws it, the tick marks here line up with its centre. */
+const SLIDER_THUMB = 20
+
+/**
+ * A labelled range slider: the native input (keyboard, touch and screen readers for free), styled once in
+ * index.css with a 44 px tall touch target. `valueText` is the value in words, shown beside the label and read
+ * out; `ticks` are values marked under the track; `fill` colours the track up to the thumb (turn it off for a
+ * scale whose zero is in the middle, or whose stops are choices and not amounts).
+ */
+export function Slider({
+  label,
+  value,
+  min,
+  max,
+  step = 1,
+  onChange,
+  valueText,
+  ticks,
+  fill = true,
+  disabled,
+  className,
+}: {
+  label: string
+  value: number
+  min: number
+  max: number
+  step?: number
+  onChange: (next: number) => void
+  valueText?: string
+  ticks?: number[]
+  fill?: boolean
+  disabled?: boolean
+  className?: string
+}) {
+  const id = useId()
+  const span = max - min
+  const share = (v: number) => (span > 0 ? Math.min(1, Math.max(0, (v - min) / span)) : 0)
+  return (
+    <div className={clsx('min-w-0', className)}>
+      <div className="flex items-baseline justify-between gap-3 text-sm">
+        <label htmlFor={id} className={clsx('shrink-0 font-medium', disabled ? 'text-ink-soft' : 'text-ink')}>
+          {label}
+        </label>
+        {valueText !== undefined && <span className="min-w-0 truncate text-right text-ink-soft tabular-nums">{valueText}</span>}
+      </div>
+      <div className="relative">
+        <input
+          id={id}
+          type="range"
+          min={min}
+          max={max}
+          step={step}
+          value={value}
+          disabled={disabled}
+          aria-valuetext={valueText}
+          onChange={(e) => onChange(Number(e.target.value))}
+          style={{ '--fill': fill ? `${share(value) * 100}%` : '0%' } as CSSProperties}
+        />
+        {ticks && ticks.length > 0 && (
+          <div aria-hidden className="pointer-events-none absolute inset-x-0 top-1/2 h-0">
+            {ticks.map((t) => {
+              const f = share(t)
+              return (
+                <span
+                  key={t}
+                  className="absolute top-3 h-1.5 w-0.5 -translate-x-1/2 rounded-full bg-ink-faint"
+                  style={{ left: `calc(${f * 100}% + ${(0.5 - f) * SLIDER_THUMB}px)` }}
+                />
+              )
+            })}
+          </div>
+        )}
+      </div>
+    </div>
+  )
 }

@@ -101,6 +101,7 @@ backend/
   tests/               pytest (section 16)
   pyproject.toml, uv.lock
 frontend/              Vite app (section 14)
+gen3d/                 the 3D head generator: a separate program with its own Python environment (section 36)
 scripts/
   run.sh               sync env, download models, build frontend, start
   download_models.py   all model downloads, pinned and checksummed
@@ -134,6 +135,7 @@ makes; `ORIGINALS_DIR` (unset by default, then the same folder) holds the bytes 
 | `staging/<uid>.part` | uploads in progress (under `ORIGINALS_DIR`) |
 | `failed/<uid>.part` | uploads whose ingest failed for good (under `ORIGINALS_DIR`); deleted after `TRASH_DAYS`; Settings > System > Retry failed uploads queues them again |
 | `learned/` | the learned models (section 18) |
+| `people3d/<person id>/` | a person's 3D heads (section 36): `current` names the folder in use, `<stamp>/model.json`, `<key>.glb` and `<key>.jpg` per look; `work/` while one is made, `error.json` after a failed run |
 | `wallet/` | `cert.pem`, `key.pem`, `wwdr.pem` placed by the owner (never written by the app) |
 | `tmp/` | wiped at startup |
 | `site/` | copy of the frontend build taken at startup, the site that is served (section 14) |
@@ -154,7 +156,8 @@ previews of its own, since the library never shows it; `/files/thumb`, `/files/p
 `/files/preview-small` of a companion serve its still's pictures and the upload list shows the still's
 thumb. Purge removes face, body and pet crops. `ingest.tidy_derivatives` removes what an earlier version
 stored (companion pictures, small previews that repeat the large one) once per `ingest.TIDY_VERSION` (kv
-`derivatives_tidy`), from housekeeping.
+`derivatives_tidy`), from housekeeping. The 3D heads in `people3d/` are not part of the orphan sweep: housekeeping
+calls `model3d.sweep`, which removes the folders of people who no longer exist (section 36).
 
 ## 4. Authentication and sessions
 
@@ -1343,6 +1346,20 @@ keep, running, progress, last, snapshots[], next_run_at, free_bytes, total_bytes
 `{started, running}` (a snapshot now, section 31); `GET throughput?range=hour|day|week` -> `ThroughputOut` (finished
 jobs per bucket by type, section 32; 422 for another range).
 
+3D heads (section 36; schemas in `api/model3d.py`): `GET people/{id}/model3d` -> `Model3dOut {available, reason,
+generator, usable_photos, state: 'none' | 'running' | 'done' | 'error', busy, stopping, progress {step, done, total}
+| null, error, generated_at, options {max_looks, detail, framing} | null, looks: Look3dOut[]}` with `Look3dOut =
+{key, label, age, age_band, hair, hair_label, facial_hair, facial_hair_label, photos, taken_at, item_uid,
+picture_url, mesh_url, bytes, vertices}` (reading it starts nothing; `available` false comes with a plain `reason`;
+`busy` means another person's job is running; `stopping` means Stop or Delete was pressed and the job is on its way
+out; 404 for a pet); `POST people/{id}/model3d {max_looks 1..12 = 6, detail 1..3 = 2, framing 1.8..3.2 = 2.6}` ->
+202 `{started}` (409 `busy`, 409 `generator_missing`, 422 `not_enough_photos`); `POST people/{id}/model3d/stop` ->
+`{stopped}` (the model in use stays); `DELETE people/{id}/model3d` (removes the model, stopping the person's job
+first); `GET /files/model3d/{person_id}/{rev}/{name}` serves a look's mesh (`model/gltf-binary`) or its picture
+(`image/jpeg`) for the model in use and a look that is still listed, cached with `private, max-age=31536000,
+immutable` because the rev is in the path. These writes are not owner edits of the library, so they are not undoable
+actions (section 33).
+
 Timeline, albums, map and places, share links, video encoders and device uploads: sections 23 to 28.
 
 ## 14. Frontend
@@ -1635,6 +1652,39 @@ Body traits (section 34; `people/evidence.ts`, `TraitCompare.tsx`, `TraitsTab.ts
   ("Reading people boxes: N of M"), "Reading tattoos and nails is turned off." when `TRAITS_ENABLED` is off, and
   "Paused: a model is missing (...)" when a model file is missing.
 
+3D heads (section 36; `lib/model3d.ts`, `people/Model3dTab.tsx`, `people/Head3dViewer.tsx`):
+- A person (not a pet) has a "3D" tab (`?tab=3d`), a lazy chunk. Query key `['model3d', id]`, outside
+  `LIBRARY_KEYS`, read again every 2 s while the person's job runs and every 5 s while another person's job is in
+  the way.
+- Before a model exists: what it does, how many face photos can be used, the options as sliders (Looks, Detail,
+  Framing) and "Generate"; when nothing can be made, the server's reason and a disabled button. While the server
+  works: the step, a bar and "Stop" (an older model stays below it); after Stop or Delete the card reads
+  "Stopping" until the job is gone, which takes about a second. After a failed or shortened run: its reason.
+- With a model: the head, a line that says which photo it came from and when, with a link to the photo, the looks
+  as a row of their pictures, and the controls. Look: sliders Age, Hair and Facial hair. Their stops are the values
+  that exist among the looks (age bands; hair and facial hair labels in the order of their levels), each with a
+  tick and its value in words. Moving one decides that axis first; among the looks at the new stop, the one nearest
+  to the head on screen on the other axes is shown and the other sliders follow it. So the three sliders always
+  describe the head on screen and every stop leads to a look (`lookAxes`, `pickLook`). An axis with one stop is
+  shown disabled with its value; one that was not read is left out. View: Turn, Tilt and Zoom (also drag, wheel and
+  pinch). Light: direction, height and brightness. Switches "Colour" (off shows the bare shape) and "Spin slowly";
+  "Reset view"; "Generate again" (the options, starting from the model's own) and "Delete this model" (confirmed).
+- `Head3dViewer` holds all the three.js code and is a lazy chunk of its own, loaded only when a model exists (three
+  0.187, MIT; 657 kB, 166 kB gzipped; the tab itself is 15 kB). Its `HeadStage` draws only when something changed,
+  fetches a look's mesh when it is first wanted and keeps the one on screen and four more, caps the pixel ratio at
+  2, takes its background from the theme, and lets go of everything on unmount, the WebGL context included.
+  (`useTheme` hands React the choice and the theme in effect as one value, so a system switch under "System"
+  re-renders its users: with the choice alone it did not, and the 3D background kept the old colour.) From one look
+  to the next it cross-fades two whole pictures over 300 ms (the old look is drawn and copied to a plain canvas on
+  top, the new one is drawn underneath, the copy fades out), at once under `prefers-reduced-motion`. The view
+  belongs to the viewer, because the owner also drags it: it reports it (`onView`, at most every 60 ms) and takes
+  changes as commands (`Head3dHandle.setView`), so a slider never fights a drag. The lamp hangs on the camera and
+  keeps its place for the viewer while the head turns. Without WebGL the tab says so and shows the look's photo, and
+  the look sliders still work. The wrapper carries `data-ready`, `data-look` and `data-fade` for checks.
+- `components/ui.tsx` gains `Slider` (the native range input, styled once in `index.css`: a 44 px tall touch
+  target, a thin track coloured up to the thumb through `--fill`, tick marks, the value in words as
+  `aria-valuetext`) and `Switch` (moved from `LearningTab`).
+
 ## 15. Configuration (env)
 
 | Variable | Default | Meaning |
@@ -1684,6 +1734,11 @@ Body traits (section 34; `people/evidence.ts`, `TraitCompare.tsx`, `TraitsTab.ts
 | `TRAIT_MARGIN_LLR`, `TRAIT_PRIOR_PEOPLE`, `TRAIT_MIN_P` | 2.0, 20, 0.90 | lead over the runner-up (log likelihood ratio) for a trait-only guess; prior odds 1:N for its stored score; floor of the owner-outcome tightening |
 | `NAILS_MAX_DAYS`, `MEHNDI_MAX_DAYS` | 14, 21 | nails and mehndi are compared within this many days |
 | `TRAIT_PROPAGATE_MAX` | 400 | photos one tagging queues for a trait re-guess |
+| `GEN3D_DIR`, `GEN3D_PYTHON` | `MODELS_DIR/gen3d`, `GEN3D_DIR/venv/bin/python` | the 3D head generator's own environment (`venv/`, `weights/`, `src/`) and its Python (section 36) |
+| `GEN3D_GENERATOR` | `auto` | `auto` (the first installed backend), a backend's name, or `fake` (the stand-in: it needs no model and runs with the server's own Python) |
+| `GEN3D_SANDBOX` | `auto` | run the generator inside `bwrap`, where it sees only the system's libraries, its own environment and the job's work folder (section 36): `auto` (the real generator, when `bwrap` is installed), `on` (always, and nothing is generated without it), `off` |
+| `GEN3D_MAX_RSS_MB`, `GEN3D_LOOK_TIMEOUT_S` | 5000, 600 | the generator is stopped above this much resident memory (its whole process tree), or when one head takes longer than this |
+| `GEN3D_FAKE` | false | use the stand-in generator with the server's own Python (tests, or a look at the tab before the model is installed) |
 
 ## 16. Testing
 
@@ -1737,6 +1792,35 @@ checks that the script refuses a live data folder from a worktree too. `scripts/
 path on a snapshot of a library (never the live one): the lining up with its timings, the kinds of link by gap,
 and a leave-one-out by mode (position, clothes, both), kind of box, gap and photos walked, also with the person
 taken off the photos around (`--around`).
+
+3D heads (section 36) are tested without PyTorch. `test_gen3d.py`: the mesh clean-up, the GLB writer read back
+(linear 16-bit colours that return to the same sRGB bytes), the stand-in backend, a backend module that offers
+`create()`, `python -m gen3d` end to end with its exit codes and a clean stop on SIGTERM, the check with and
+without `--device` (a stand-in `torch` on the path shows that the plain check never imports it), and the viewer
+check below. `test_looks.py`: the square around a face, another face inside it, the head's turn from five points,
+the faults, ages from the birth year, a day sharing its levels, the bins and the choice of looks, the sample over
+the years and its limit (also for someone who is a child in every photo), the reading's reports before the models
+load and after every photo, and the plan and the picture on hand-made rows with no models. `test_model3d.py`: the
+job end to end with the stand-in generator; one job at a time; Stop and Delete in the child's step and while looks
+are found; a person deleted during either; a child that fails, that cannot start, that passes its memory limit or
+its time limit; heads that were finished before a limit or a crash; a look that fails among others; looks whose
+photo left the library or whose face is no longer the person's; the sweep, also of what an interrupted run left;
+the check asked once, renewed in the background and given a folder of its own; the child's environment; the
+routes and the files route. Three tests need `bwrap` and skip without it. One runs the stand-in job through the
+sandbox and then asks from inside it, with the app's own Python: the work folder can be written and nothing else
+can, a file and a listening unix socket outside it are not there, `/run` is empty, a TCP connection fails, a
+variable of the server's environment is absent, and of the home folder and the repository only the way to what
+is shown exists.
+
+`frontend/scripts/check-head3d.mjs` checks the viewer without a browser. It bundles the real `HeadStage` and the
+look sliders' logic with esbuild, gives them three.js with a stand-in renderer and a stand-in page, and lets
+GLTFLoader read files that the Python writer has just written: the first look and its colours, the cross-fade (two
+draws and one copy a frame), a change of mind during a fade, reduced motion, the camera for Turn, Tilt and Zoom,
+the directions of drag and wheel, the spin, the lamp, a file of any size and place, a file that cannot be read,
+which meshes are kept, a new model with the same keys, a lost context, the theme's value under a system switch,
+dispose and a browser without WebGL.
+`test_gen3d.py` runs it and skips when node or the frontend's packages are missing. What the pictures look like is
+not something it can tell: that takes a browser.
 
 ## 17. Build notes
 
@@ -3437,3 +3521,221 @@ With the clothes floor of 0.80: 0.991, 0.987, 0.991, 0.984 and 0.941. With the b
 - Mirrored pairs (a front camera's photo saved as its mirror image) are not tried.
 - The runner inside the running server (the timings are from the script), and how much the process-wide thread
   count slows other OpenCV work while photos are lined up.
+
+## 36. 3D heads of a person, one per look (`gen3d/`, `app/analysis/looks.py`, `app/analysis/model3d.py`, `app/api/model3d.py`)
+
+A person's page has a "3D" tab. Its "Generate" button builds one 3D head for each look found in that person's
+photos, on the server, with a local model. A look is how someone looked for a while: an age band, a hair length and
+an amount of facial hair. The viewer shows one head at a time; sliders pick the look (Age, Hair, Facial hair), turn
+and tilt the head, zoom, and move the light. Nothing is read, loaded or generated before the button is used:
+`GET people/{id}/model3d` only reads what is stored, and the generator's Python and its model are never inside the
+server's process.
+
+### Two programs
+
+- The app finds the looks with the models it already has (SigLIP, the face detector, FairFace ages, DWPose; numpy and
+  onnxruntime only), cuts a head-and-shoulders picture for each, runs the generator, stores what it made and serves
+  it.
+- The generator is the `gen3d` package at the repo root: a separate program with its own Python environment, started
+  as `python -m gen3d --job JOB.json` for the length of one job. The app never imports it. PyTorch and the model's
+  code live in that environment only: `GEN3D_DIR` (default `MODELS_DIR/gen3d`) holds `venv/` (its Python), `weights/`
+  (the model files, with `weights/hf` as `HF_HOME` and `weights/u2net` as `U2NET_HOME`) and `src/` (the model's
+  code); `scripts/setup_3d.sh` makes it. So the server's memory and the GPU are free the rest of the time, and a
+  generator that crashes or runs out of memory cannot take the server with it.
+
+`gen3d/`: `__main__.py` (the job runner and `--check`), `backends/__init__.py` (the interface and the registry
+`{"fake", "triposr"}`; `ORDER = ("triposr",)` is what "auto" tries), `backends/fake.py` (a stand-in that needs no
+model: an egg-shaped head on a neck, 1,900 triangles, coloured from the picture, numpy and Pillow only),
+`backends/triposr.py` and `prep.py` (the real backend and its background cut), `mesh.py` and `glb.py`.
+
+### The contract between them
+
+Job file: `{"out_dir", "weights_dir", "generator": "auto" | a backend's name, "device": "auto", "options":
+{"detail": 1..3, "seed": 0}, "looks": [{"key", "image"}]}`; `image` is a square picture of the head and shoulders
+with the face in the middle. Output: `OUT/<key>.glb` for every look that worked and `OUT/result.json` `{"generator":
+{"name", "version"}, "looks": [{"key", "ok", "mesh", "vertices", "faces", "seconds", "error"}]}`; on stdout, one
+line per event and flushed at once, `progress: N/M` and `look: <key> ok|error <seconds>`. A look that fails does not
+stop the others. Exit codes: 0 when at least one head was built, 3 when none was, 2 for a bad job file, 4 when the
+backend cannot load, 5 when it was told to stop (SIGTERM) or its parent went away (`PR_SET_PDEATHSIG` and a watch
+on the parent's pid). The last line on stderr is the reason, and the owner reads it in the tab. `python -m gen3d
+--check --weights-dir DIR` prints one JSON line `{"backends": {name: installed}, "auto", "device", "torch"}`. It
+only looks at files: `device` and `torch` are null unless `--device` is added, which imports PyTorch and takes
+seconds.
+
+A backend's module offers `BACKEND`, or a `create()` that returns it, and must be cheap to import (no PyTorch at
+import time). The backend exposes `name`, `version`, `available(weights_dir)` (cheap as well: the check runs for
+status reads), `load(weights_dir, device, options)`, `generate(image, options) -> Mesh` and `close()`. `generate`
+gets an RGB picture, or RGBA with the background cut out when `gen3d.prep.prepare(image, options)` ran first (it runs
+for every backend but the stand-in, when that module is there); `options` are the job's plus `out_dir` and the look's
+`key`.
+The mesh must have +Y up and +Z towards the viewer, at any scale; its colours, when it has any, are one sRGB byte
+triple per vertex. `mesh.finish` then checks it, drops loose parts with fewer than 2 percent of the largest part's
+triangles, centres it, scales it into a box one unit across, turns an inside-out mesh the right way round and
+computes the normals. `glb.write` stores binary glTF 2.0: positions and normals as float32, `COLOR_0` as four
+normalised 16-bit values in linear light (glTF vertex colours are linear, and 8 linear bits would band in dark hair),
+uint32 indices and one rough, double-sided material. Any glTF viewer shows the file as the app does.
+
+### The sandbox, and why
+
+The generator runs model code written by others on the owner's face photos. So the real generator runs inside
+`bwrap`, in a system made of exactly these parts (`model3d.sandbox_prefix`):
+
+- read-only: `/usr` and the loader's files from `/etc` (`ld.so.cache`, `ld.so.conf`, `ld.so.conf.d`,
+  `alternatives`), with `/bin`, `/lib` and their like as the links or folders they are on the host; `/sys`; the
+  Python environment that runs it, under the name it has and where it really is, and the installation its
+  interpreter comes from, under every name on the link's way (uv links an environment to an installation named by
+  its minor version, and that name is a link to the exact one); `GEN3D_DIR` (weights and model code), as named and
+  where it really is; this repository's `gen3d` package;
+- its own `/proc`, a new `/dev` (null, zero, random, a terminal, shared memory) with the machine's NVIDIA device
+  nodes added, an empty `/tmp` and an empty `/run`;
+- read and write: the job's work folder, and nothing else that lasts. `/tmp` and `/dev/shm` are memory and go with
+  it; the folders that only lead to the parts above are read-only too;
+- namespaces of its own for users, process ids, IPC, the host name and the network, where nothing but its own
+  loopback exists; it dies with its parent;
+- an environment of its own (`--clearenv`): `PATH`, `HOME=/tmp`, `LANG`, `PYTHONUNBUFFERED`, the cache folders
+  under `/tmp`, `HF_HOME`, `U2NET_HOME`, `HF_HUB_OFFLINE=1`, `TRANSFORMERS_OFFLINE=1`, and from the server only
+  `CUDA_VISIBLE_DEVICES`, `NVIDIA_VISIBLE_DEVICES`, `LD_LIBRARY_PATH` and `GEN3D_THREADS`, when they are set.
+
+What that hides: the home folder with its credentials, `DATA_DIR` and `ORIGINALS_DIR` (the library, the vault, the
+database), the rest of the repository and its `.env`, every other model, the rest of `/etc`, the server's
+environment, the network, the other processes, and every socket of the machine. The rootless Docker socket and the
+session bus live in `/run` and in the home folder, and a read-only view of them is not enough, because connecting
+to a socket is not a write. The first version of this sandbox showed the whole machine read-only and passed the
+server's environment on; a review connected to the Docker socket from inside it, which would have let that code
+start a container with a network and the home folder. What it does not hide: the system's programs and libraries
+(read-only), what `/proc` and `/sys` say about the machine (processor, memory, kernel, devices), the GPU through
+its device nodes (the driver is a large surface, and the card is shared with the server's own models), the
+generator's own weights and code, and the pictures of this one job's looks, which are the point. It is no limit on
+processor time or memory: those are the watch below. A flaw in the kernel or in the GPU driver is outside what it
+can stop.
+
+`GEN3D_SANDBOX`: `auto` (the default: the sandbox for the real generator when `bwrap` is installed; the stand-in is
+this repository's own code and runs without it), `on` (always; without `bwrap` nothing is generated and the tab says
+why) or `off`. The check that asks what is installed runs the generator's Python too, so it runs the same way, with
+an empty folder of its own as the only place to write. Whatever the setting: the child never gets the server's
+environment (the same short list, with its home and caches inside the work folder when there is no sandbox, since
+a machine's `/tmp` may be shared); it is its own process group with `oom_score_adj` 1000, so a memory limit takes it
+and not the server; once a second the resident memory of its whole process tree is added up, and the child is
+stopped above `GEN3D_MAX_RSS_MB` (5000), when one head takes longer than `GEN3D_LOOK_TIMEOUT_S` (600), on Stop or
+Delete, when its person is deleted or merged away, and when the server exits. One job runs at a time for the whole
+app, as there is one GPU.
+
+### Finding the looks (`looks.py`)
+
+Source faces: the person's faces with a weight of 0.6 or more (section 10) and 120 px or more on the shorter side,
+on items that are in the library (not in the trash, not in the vault). At most 240 are read per plan, whoever
+the person is, spread over the years: every year keeps at least 12, and a year's child-band faces are a group of
+their own beside that year's other faces, so that childhood prints photographed again in a busy year are not
+crowded out. For each face:
+
+- from a square 2.6 face sizes wide around it in the 2048 px preview, which is what the generator will see: the hair
+  as a level from 0 to 1 (zero-shot with SigLIP over a ladder of prompts from "a bald head" to "hair below the
+  shoulders"; the reading is the probability-weighted level), a covered head and a hand or an object at the face the
+  same way, and the head's turn, nod and tilt from the face detector's five points on that crop;
+- from the stored face crop, where the tight view shows it better: the facial hair as a level (a ladder from
+  "clean-shaven" to "a long beard"), sunglasses, and the light on the face;
+- from the pose of the person box around the face (DWPose, section 34): a wrist at the face, or a wrist or an elbow
+  up beside the head;
+- the age: FairFace's expected age, and for photos with a camera time that are not forwards the year minus the
+  person's birth year, which is the median of (year minus expected age) over at least 10 such adult faces. A face
+  read as 13 or younger keeps its read age, since a print photographed again carries today's date.
+
+A photo counts against itself as an input (its `faults`) when another face of the photo is inside the square
+(`other_face`), the square leaves the picture by more than 15 percent (`cut_off`), the head is turned or tilted far
+(`turned`), a hand or an object is at the face (`covered_face`), an arm is up by the head (`raised_hand`), the eyes
+are behind sunglasses, the head is covered, or the light on the face is coloured or very dark (`odd_light`). Looks
+are made from photos without a fault, because a turned head or a second person in the crop also bends the hair and
+facial hair readings. The photos of one day share that day's median levels, since hair does not change within a day.
+
+The bins are (age band, facial hair, hair). Age bands: under 10, 10 to 17, 18 to 24, 25 to 34, 35 to 44, 45 to 59,
+60 and over. Facial hair: "little or no facial hair" under 0.44, "stubble or a short beard" under 0.53, "a beard"
+above. Hair: "shaved or very short hair" under 0.30, "short hair" under 0.52, "medium hair" under 0.76, "long hair"
+above. A bin is a look when it holds 3 photos without a fault (1 in the youngest band, where photos are few). The
+fullest bin of every age band is taken first, then the fullest of the rest, up to the "Looks" option (1 to 12,
+default 6). When no bin has enough such photos, the one fullest bin of all the photos that can be placed gives a
+single look, so a person with few photos still gets a head. A look's input is its best photo (face weight, size,
+sharpness, how frontal it is, shoulders in view, light), with three runners-up in case its pixels cannot be read.
+The picture is cut from the original at 1024 px: a square "Framing" face sizes wide (1.8 to 3.2, default 2.6).
+Without SigLIP the hair and facial hair are unknown and the bins are age bands only.
+
+### The job (`model3d.py`)
+
+`start` refuses when a job is running (`Busy`), when the generator is not installed (`GeneratorMissing`) and when
+the person has fewer than 3 source faces (`NotEnoughPhotos`). The job then runs in a background thread: "Finding
+looks" (the plan), "Preparing photos" (the pictures, into `people3d/<id>/work/`), "Building heads" (the child; its
+`progress:` lines move the bar) and "Saving". The result goes to `DATA_DIR/people3d/<person id>/<stamp>/`:
+`model.json` (the manifest: generator, options, birth year, and per look its key, label, age, levels and labels,
+photo count, source face with its box and item, faults, file names, bytes, vertices and faces), `<key>.glb`, and
+`<key>.jpg` (the input picture at 512 px). Writing `current` with the new stamp makes it the model in use; the
+older folders are removed after that.
+
+How a job ends early. Stop and Delete take effect within about a second in every step: between two photos while
+looks are found (the reading reports before the models load and after every photo, and the job looks there),
+between two looks while the pictures are cut, and in the child's watch. Until the job is gone the status says
+`stopping`. Stop keeps the model in use and leaves nothing new. Delete takes the model out of use at once (it is not
+listed or served from that moment), and its folder goes when the job has ended. A person who is deleted or merged
+into someone else takes their job along: no route can reach a job whose person is gone, so the job looks for its
+person itself, once a second and before a head is built or saved, and stops. A run that fails leaves `error.json`
+and the older model as it was. A child that was stopped by the memory or the time limit, or that broke part of the
+way, may have finished some heads: those become the new model (a mesh is written whole before it is reported), and
+`error.json` says why the rest is missing.
+
+`status` reports `none`, `running` (with the step and its counts), `done` or `error`, whether a model can be made
+and why not, and the looks. A look is neither listed nor served once its source photo is deleted, in the trash or
+in the vault, or once its source face is no longer this person's: moved to someone else, unassigned or removed. A
+photo that was processed again has new face rows; its look stays when one of this person's faces there overlaps
+the look's face by half or more. Whether the generator is installed is asked from it with `--check`, which only
+looks at files: measured with the real environment inside the sandbox, 0.4 s the first time and 0.13 s after. The
+answer is remembered for 5 minutes (30 seconds while it is missing). A status read waits for it once; after that an
+old answer is given at once and renewed in the background, and `start` asks again itself. The stand-in generator
+runs with the server's own Python however it is asked for (`GEN3D_FAKE`, `GEN3D_GENERATOR=fake`).
+
+A deleted or merged person's model stops being served at once, because every route asks for the person first, and
+`model3d.sweep` (housekeeping) removes the folder later; that delay also leaves the model in place for an undone
+delete. While no job runs, the sweep also removes what an interrupted run left behind for everyone else: a work
+folder (a server that stops in the middle of a job never gets to remove it) and model folders that `current` does
+not name.
+
+### Measured (2026-11-13, a snapshot of the owner's library, one person)
+
+- 3,907 source faces over five years. 237 were read in 196 s on a CPU (about 0.8 s a face: two SigLIP passes, a
+  face detection and, for 234 of them, a pose), with a peak of 1.5 GB.
+- Faults among the 237: another face in the square 65, the square leaving the picture 57, a turned head 50,
+  something at the face 48, odd light 37, a raised hand 22, sunglasses 4. 38 had none.
+- Three looks came out, all in one age band: short hair with a beard (3 photos), medium hair with stubble (27) and
+  long hair with stubble (4). The chosen photos, looked at by eye, are frontal, evenly lit and have nothing at the
+  face.
+- Against 320 clear faces of 185 other people: the facial hair ladder on the face crop puts 87 percent of them under
+  that bearded person's 10th percentile (70 percent on the head crop, 53 to 75 percent for two-way and three-way
+  prompt sets). Short noun prompts ("a hat", "sunglasses") separate where sentences did not: the first covered-head
+  set flagged 52 of 397 bare-headed photos, the final one none of them and 17 of the 320 others, all with a hat, cap,
+  turban, helmet or hood. The zero-shot "at the face" flag misses raised arms and a hand under the chin, which is
+  what the pose check is for.
+- The generator's picture, on 60 source faces (46 JPEG, 7 HEIC, 6 DNG, 1 PNG): every original was read, the square
+  cut from it showed the same thing as the square cut from the preview (correlation of 64 px greys 0.997 or more),
+  and it was 1,229 to 5,024 source pixels wide (median 2,484), so the 1024 px picture never enlarges anything.
+- The generator (TripoSR on an RTX 2080, four runs on private test pictures, each the backend and the background
+  cut alone, before the sandbox was rebuilt): 3 to 6 s a head at detail 2 with 2.4 GB of GPU memory, 3.1 GB at
+  detail 3, 9 to 13 s to load, the background cut about 1 s on the CPU, at most 3.7 GB resident.
+
+### Limits
+
+- One head per look, each from one photo: it is the model's reading of that photo, not a scan. The back of the head
+  is a guess, and the expression is the photo's.
+- Hair and facial hair levels are zero-shot readings and can be wrong; the cuts between the bins were set on one
+  person against 185 others. Ages are estimates.
+- The person boxes are used to frame the picture and for the raised-arm check only: no body is built.
+- On a CPU the looks of a person with many photos take about three minutes to find. The generator's speed without a
+  GPU was not measured.
+
+### Not verified
+
+- The viewer in a real browser: the pictures themselves, the copy of the WebGL canvas that the cross-fade uses, and
+  touch gestures. Its logic, and three.js reading the written files, are checked in node (section 16).
+- The cuts for sunglasses, a covered head and odd light on libraries other than the owner's.
+- A whole generation by the real generator started by the app. Checked one by one: the backend and the cut on real
+  pictures (above), the app's job with the stand-in through the same command line and sandbox (the tests), the
+  mesh finishing and the writer on a mesh of the real size (136,000 triangles: 0.1 s, a 3.7 MB file), and, inside
+  the rebuilt sandbox, the plain check and a probe (PyTorch sees the card and computes on it; no home folder, no
+  Docker socket, no network; only the work folder takes a write). The first Generate on a server is the first run
+  of all of it together; a failure shows as the error in the 3D tab.
