@@ -51,7 +51,7 @@ export class WebGLRenderer {
 )
 
 const STUBS = {
-  react: 'export const useEffect=()=>{}, useImperativeHandle=()=>{}, useRef=(v)=>({current:v}), useState=(v)=>[v,()=>{}], useSyncExternalStore=(s,g)=>g()',
+  react: 'export const useEffect=()=>{}, useLayoutEffect=()=>{}, useImperativeHandle=()=>{}, useRef=(v)=>({current:v}), useState=(v)=>[v,()=>{}], useSyncExternalStore=(s,g)=>g()',
   'react/jsx-runtime': 'export const jsx=()=>null, jsxs=()=>null, Fragment=null',
   ui: 'export const Button=()=>null, Spinner=()=>null',
   hooks: 'export const useStableCallback=(f)=>f',

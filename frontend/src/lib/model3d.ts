@@ -65,7 +65,8 @@ export const MODEL3D_LIMITS = {
 } as const
 export const MODEL3D_POLL_MS = 2000
 
-/** Not one of LIBRARY_KEYS: tagging elsewhere does not refetch it. */
+/** Not one of LIBRARY_KEYS: tagging elsewhere does not refetch it. The 3D tab reads it again each time it is
+ *  shown, and when a head or a look's picture does not load. */
 export const model3dKey = (id: number) => ['model3d', id] as const
 
 export const model3dApi = {

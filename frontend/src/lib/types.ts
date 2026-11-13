@@ -175,7 +175,9 @@ export interface GuessOut {
   /** Read through components/people/evidence.ts. Body traits (section 34) add `basis`, `trait_llr`, `traits` and
    *  `against` (see TraitEvidence and GuessBasis); position (section 35) adds `place` (PlaceEvidence). A guess of
    *  recognition trained on one person (section 10) has basis 'face', `p` (its probability, also the score), `face`
-   *  (the usual similarity) and `also` when clothes or traits name the same person. */
+   *  (the usual similarity) and `also` when another source names the same person: that source's basis ('clothes',
+   *  'trait', 'place', 'clothes+trait', 'clothes+place'), with its `place` part kept. A guess of any other basis
+   *  that the trained recognition agrees with carries `p` too. */
   evidence: Record<string, unknown>
 }
 // body traits (section 34): tattoos, nails and mehndi read from people boxes

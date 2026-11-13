@@ -7,6 +7,11 @@
 // Position (section 35) adds its own reason ("In the same spot as Priya 8 s earlier"); a guess from the position
 // alone (basis "place") carries no clothes keys either, and its score is the measured share of right answers for
 // that gap, so it shows a percentage.
+//
+// The sources meet in two ways. A trained-recognition guess that another source agrees with names that source in
+// `also` (its basis: clothes, trait, place and their combinations) and keeps the position part (`place`) when
+// there is one, so the position reason, its two crops and the footprints show as on a position guess. And a guess
+// of any other basis that the trained recognition agrees with carries `p`, shown as "trained face 92%".
 import type { GuessBasis, GuessOut, PersonRef, PlaceEvidence, TraitAgainst, TraitEvidence, TraitKind } from '../../lib/types'
 import { formatDate, formatPercent, personName } from '../../lib/format'
 
@@ -293,7 +298,13 @@ export type GuessIcon = 'clothes' | 'tattoo' | 'hand' | 'face' | 'place'
  *  footprints (position). */
 export function guessIcons(kind: 'face' | 'body', guess: Ev): GuessIcon[] {
   const basis = guessBasis(guess)
-  if (basis === 'face') return alsoClothes(guess) ? ['face', 'clothes'] : ['face']
+  if (basis === 'face') {
+    const also = alsoParts(guess)
+    const icons: GuessIcon[] = ['face']
+    if (also.clothes) icons.push('clothes')
+    if (also.place || guessPlace(guess)) icons.push('place')
+    return icons
+  }
   const kinds = traitKinds(guess)
   const out: GuessIcon[] = []
   if (basis === 'clothes' ? kind === 'body' : basis === 'clothes+trait' || basis === 'clothes+place') out.push('clothes')
@@ -310,27 +321,59 @@ export function guessSure(guess: Pick<GuessOut, 'evidence' | 'score'>): string {
   return guessBasis(guess) === 'trait' ? 'strong match' : `${formatPercent(guess.score)} sure`
 }
 
-function alsoClothes(guess: Ev): boolean {
+/** What else names the person of a trained-recognition guess: `also` holds the basis of the guess that agreed
+ *  ('clothes', 'trait', 'place', 'clothes+trait', 'clothes+place'), read here part by part. */
+function alsoParts(guess: Ev): { clothes: boolean; trait: boolean; place: boolean } {
   const also = guess.evidence?.also
-  return also === 'clothes' || also === 'clothes+trait'
+  const parts = typeof also === 'string' ? also.split('+') : []
+  return { clothes: parts.includes('clothes'), trait: parts.includes('trait'), place: parts.includes('place') }
 }
 
-/** A guess of recognition trained on the person: "Looks like Priya's photos, 0.61" and what else names them. */
-export function faceLine(guess: Ev & { person?: PersonRef | null }): string {
+/** The two things a short position phrase is made of: the photos followed through, and the gap ("8 s earlier"). */
+function placeWords(place: PlaceEvidence): { hops: number; when: string } {
+  return { hops: place.hops ? Math.round(place.hops) : 1, when: gapPhrase(place.seconds_apart, place.ref_before) }
+}
+
+/** The position in a few words, for a one-line summary: "same spot 8 s earlier", "followed across 3 photos". */
+function placePhrase(place: PlaceEvidence): string {
+  const { hops, when } = placeWords(place)
+  return `${hops > 1 ? `followed across ${hops} photos` : 'same spot'}${when ? ` ${when}` : ''}`
+}
+
+/** A guess of recognition trained on the person: "Looks like Priya's photos, 0.61" and what else names them (the
+ *  clothes, a tattoo or the nails, the position). When the evidence carries the position part, the position has a
+ *  reason of its own (placeReason, with the two crops), so it is left out here unless `withPlace` asks for the
+ *  whole sentence: "..., and the same clothes and spot 8 s earlier". */
+export function faceLine(guess: Ev & { person?: PersonRef | null }, withPlace = false): string {
   const e = guess.evidence ?? {}
   const face = num(e.face)
+  const also = alsoParts(guess)
+  const place = guessPlace(guess)
+  const same: string[] = []
+  if (also.clothes) same.push('clothes')
+  if (also.trait) same.push('tattoo or nails')
+  let followed = ''
+  if (!place) {
+    if (also.place) same.push('spot') // the position agreed, and its details were not stored
+  } else if (withPlace) {
+    const { hops, when } = placeWords(place)
+    if (hops > 1) followed = `, ${placePhrase(place)}`
+    else same.push(`spot${when ? ` ${when}` : ''}`)
+  }
   let text = `Looks like ${whose(guess.person)} photos${face !== null ? `, ${face.toFixed(2)}` : ''}`
-  if (e.also === 'clothes') text += ', and the same clothes'
-  else if (e.also === 'trait') text += ', and the same tattoo or nails'
-  else if (e.also === 'clothes+trait') text += ', and the same clothes and tattoo or nails'
-  return text
+  if (same.length) text += `, and the same ${joinWords(same)}`
+  return text + followed
 }
 
 /** The line under a guess. Clothes: time window, scene, place, clothes, face (and the trained recognition when it
- *  agrees). Trained recognition: faceLine. Empty for a guess from traits alone or from the position alone. */
+ *  agrees). Trained recognition: faceLine. A guess from traits alone or from the position alone has no clothes or
+ *  time-window words: its line is empty, or "trained face 92%" when the trained recognition agrees. */
 export function clothesLine(guess: Ev & { person?: PersonRef | null }): string {
   const basis = guessBasis(guess)
-  if (basis === 'trait' || basis === 'place') return ''
+  if (basis === 'trait' || basis === 'place') {
+    const agrees = num(guess.evidence?.p)
+    return agrees !== null ? `trained face ${formatPercent(agrees)}` : ''
+  }
   if (basis === 'face') return faceLine(guess)
   const e = guess.evidence ?? {}
   const parts: string[] = []
@@ -362,15 +405,17 @@ function traitPhrases(guess: Ev): string[] {
 }
 
 /** The whole evidence as one line: trait phrases first, then the position ("same spot 8 s earlier"), then the
- *  clothes parts (never for traits alone or the position alone) or the trained recognition's line. */
+ *  clothes parts (for traits alone or the position alone: only the trained recognition, when it agrees). A
+ *  trained-recognition guess is one sentence that ends with the position: "Looks like Priya's photos, 0.61, and
+ *  the same clothes and spot 8 s earlier". */
 export function evidenceLine(guess: Ev & { person?: PersonRef | null }): string {
   const parts = traitPhrases(guess)
-  const place = guessPlace(guess)
-  if (place) {
-    const when = gapPhrase(place.seconds_apart, place.ref_before)
-    const hops = place.hops ? Math.round(place.hops) : 1
-    parts.push(`${hops > 1 ? `followed across ${hops} photos` : 'same spot'}${when ? ` ${when}` : ''}`)
+  if (guessBasis(guess) === 'face') {
+    parts.push(faceLine(guess, true))
+    return parts.join(', ')
   }
+  const place = guessPlace(guess)
+  if (place) parts.push(placePhrase(place))
   const clothes = clothesLine(guess)
   if (clothes) parts.push(clothes)
   return parts.join(', ')

@@ -3,6 +3,10 @@
 // generated before that button is used. While the server works it shows the step and "Stop". With a model it
 // shows the head (Head3dViewer, a lazy chunk with all the three.js code) and the sliders that pick the look,
 // turn the head and move the light.
+//
+// The status is read again each time the tab is shown, and when a head or a look's picture does not load: the
+// server stops listing a look once its photo is in the trash or the vault or its face left the person, and that
+// look then drops out here instead of staying on screen from the cache.
 import { Suspense, lazy, useMemo, useRef, useState, type ReactNode } from 'react'
 import { Link } from 'react-router'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
@@ -40,6 +44,8 @@ const Head3dViewer = lazy(() => import('./Head3dViewer'))
 
 /** How often to look again while someone else's model is being generated. */
 const BUSY_POLL_MS = 5000
+/** Files of one model that fail to load within this time ask for the status once. */
+const LOAD_ERROR_ASK_MS = 1000
 const DETAIL_WORDS = ['coarse', 'normal', 'fine']
 
 function startError(e: unknown): string {
@@ -144,7 +150,7 @@ function blocked(status: Model3dStatus): string | null {
   return null
 }
 
-function ModelView({ looks }: { looks: Look3d[] }) {
+function ModelView({ looks, onLoadError, checking }: { looks: Look3d[]; onLoadError: () => void; checking: boolean }) {
   const viewer = useRef<Head3dHandle>(null)
   const [lookKey, setLookKey] = useState<string | null>(null)
   const [view, setView] = useState<HeadView>(HEAD_VIEW)
@@ -190,6 +196,8 @@ function ModelView({ looks }: { looks: Look3d[] }) {
               colour={colour}
               spin={spin}
               onSupport={setCan3d}
+              onLoadError={onLoadError}
+              checking={checking}
             />
           </Suspense>
           <p className="mt-3 text-sm text-ink-soft">
@@ -218,7 +226,13 @@ function ModelView({ looks }: { looks: Look3d[] }) {
                   on ? 'bg-accent-soft ring-2 ring-accent' : 'hover:bg-surface-2',
                 )}
               >
-                <img src={look.picture_url} alt="" loading="lazy" className="aspect-square w-full rounded-lg bg-surface-2 object-cover" />
+                <img
+                  src={look.picture_url}
+                  alt=""
+                  loading="lazy"
+                  onError={onLoadError}
+                  className="aspect-square w-full rounded-lg bg-surface-2 object-cover"
+                />
                 <span className="mt-1 block truncate text-xs font-medium text-ink">{first}</span>
                 <span className="block truncate text-xs text-ink-soft">{rest || '\u00a0'}</span>
               </button>
@@ -342,6 +356,9 @@ export default function Model3dTab({ id, name }: { id: number; name: string | nu
   const q = useQuery({
     queryKey: key,
     queryFn: ({ signal }) => model3dApi.status(id, signal),
+    // not refreshed by library changes (model3dKey), so every showing of the tab reads it again; what is cached
+    // shows meanwhile
+    refetchOnMount: 'always',
     refetchInterval: (query) => {
       const data = query.state.data
       return data?.state === 'running' ? MODEL3D_POLL_MS : data?.busy ? BUSY_POLL_MS : false
@@ -351,6 +368,17 @@ export default function Model3dTab({ id, name }: { id: number; name: string | nu
   const [again, setAgain] = useState(false)
   const [deleteOpen, setDeleteOpen] = useState(false)
   const refetch = () => qc.invalidateQueries({ queryKey: key })
+  // A head or a picture that does not load may belong to a look the server stopped listing: read the status again,
+  // so that look drops out. Files failing together (every picture of a model deleted elsewhere) ask once.
+  const [checking, setChecking] = useState(false)
+  const askedAt = useRef(0)
+  const onLoadError = () => {
+    const now = Date.now()
+    if (now - askedAt.current < LOAD_ERROR_ASK_MS) return
+    askedAt.current = now
+    setChecking(true)
+    void refetch().finally(() => setChecking(false))
+  }
 
   const generate = useMutation({
     mutationFn: () => model3dApi.generate(id, options),
@@ -473,7 +501,7 @@ export default function Model3dTab({ id, name }: { id: number; name: string | nu
       {hasModel && (
         <>
           {failure}
-          <ModelView key={status.generated_at ?? ''} looks={status.looks} />
+          <ModelView key={status.generated_at ?? ''} looks={status.looks} onLoadError={onLoadError} checking={checking} />
           <Card className="flex flex-col gap-4">
             <div className="flex flex-wrap items-center justify-between gap-3">
               <p className="text-sm text-ink-soft">
