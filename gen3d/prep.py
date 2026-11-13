@@ -15,6 +15,7 @@ NET_SIDE = 320
 MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
 STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
 MIN_SUBJECT = 0.02   # of the picture: less than this is no subject
+CENTRE = (0.35, 0.25, 0.65, 0.6)   # left, top, right, bottom of the window the face is cut into, as shares
 _session = None
 
 
@@ -49,20 +50,27 @@ def matte(image: Image.Image) -> np.ndarray:
     return np.asarray(Image.fromarray((pred * 255).astype(np.uint8)).resize(rgb.size, Image.LANCZOS))
 
 
-def _largest_part(alpha: np.ndarray) -> np.ndarray:
+def _subject_part(alpha: np.ndarray) -> np.ndarray:
+    """Of the separate blobs of the mask, the one the look's face sits in. The picture is cut with the face in the
+    middle, a little above centre (app.analysis.looks), so the subject is the blob holding the most of a window
+    there; a larger blob elsewhere (another person at the edge, a lamp) is dropped. Without any blob in the window,
+    the largest one."""
     import cv2
 
     mask = (alpha > 127).astype(np.uint8)
     n, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
     if n <= 2:
         return alpha
-    keep = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
+    h, w = mask.shape
+    window = labels[int(h * CENTRE[1]):int(h * CENTRE[3]), int(w * CENTRE[0]):int(w * CENTRE[2])]
+    inside = np.bincount(window.ravel(), minlength=n)[1:]
+    keep = 1 + int(np.argmax(inside)) if int(inside.max()) > 0 else 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
     return np.where(labels == keep, alpha, 0).astype(np.uint8)
 
 
 def prepare(image: Image.Image, options: dict) -> Image.Image:
     rgb = np.asarray(image.convert("RGB"))
-    alpha = _largest_part(matte(image))
+    alpha = _subject_part(matte(image))
     ys, xs = np.nonzero(alpha > 127)
     if ys.size < MIN_SUBJECT * alpha.size:
         raise ValueError("no person found in the picture")

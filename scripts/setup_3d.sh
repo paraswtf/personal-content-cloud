@@ -3,7 +3,7 @@
 # environment (PyTorch), the pinned TripoSR code and the model files: about 8.5 GB in all. The app itself never
 # imports any of it; it starts the generator only while a person's 3D heads are being built.
 #
-#   scripts/setup_3d.sh            install into models/gen3d, or into $GEN3D_DIR when that is set
+#   scripts/setup_3d.sh            install into MODELS_DIR/gen3d (models/gen3d), or into $GEN3D_DIR when that is set
 #   scripts/setup_3d.sh --check    say what is installed and stop
 #
 # Safe to run again: finished steps are skipped, and every downloaded file is checked against its checksum.
@@ -17,7 +17,7 @@ if [ -f "$ROOT/.env" ]; then
   . "$ROOT/.env"
   set +a
 fi
-DIR="${GEN3D_DIR:-$ROOT/models/gen3d}"
+DIR="${GEN3D_DIR:-${MODELS_DIR:-$ROOT/models}/gen3d}"
 VENV="$DIR/venv"
 WEIGHTS="$DIR/weights"
 SRC="$DIR/src"
@@ -41,7 +41,7 @@ say() { echo "[3d] $*"; }
 
 check() {
   if [ -x "$VENV/bin/python" ]; then
-    (cd "$ROOT" && "$VENV/bin/python" -m gen3d --check --weights-dir "$WEIGHTS")
+    (cd "$ROOT" && "$VENV/bin/python" -m gen3d --check --device --weights-dir "$WEIGHTS")
   else
     say "not installed: $VENV has no Python"
     return 1

@@ -41,6 +41,11 @@ class TripoSR:
                 and (Path(weights_dir) / "u2net" / "u2net.onnx").is_file())
 
     def load(self, weights_dir: Path, device: str, options: dict) -> None:
+        import os
+
+        # never ask the hub for a newer file than the installer pinned, whoever started this process
+        os.environ.setdefault("HF_HUB_OFFLINE", "1")
+        os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
         import torch
 
         shims = str(Path(__file__).resolve().parent.parent / "_shims")

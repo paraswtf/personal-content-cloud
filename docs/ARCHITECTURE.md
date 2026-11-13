@@ -3160,7 +3160,9 @@ not name.
 - The generator's picture, on 60 source faces (46 JPEG, 7 HEIC, 6 DNG, 1 PNG): every original was read, the square
   cut from it showed the same thing as the square cut from the preview (correlation of 64 px greys 0.997 or more),
   and it was 1,229 to 5,024 source pixels wide (median 2,484), so the 1024 px picture never enlarges anything.
-- The generator (TripoSR on the GPU): about 6 s a head, 2.4 GB of GPU memory, 3.2 GB resident.
+- The generator (TripoSR on an RTX 2080, four runs on private test pictures, each the backend and the background
+  cut alone, before the sandbox was rebuilt): 3 to 6 s a head at detail 2 with 2.4 GB of GPU memory, 3.1 GB at
+  detail 3, 9 to 13 s to load, the background cut about 1 s on the CPU, at most 3.7 GB resident.
 
 ### Limits
 
@@ -3177,5 +3179,9 @@ not name.
 - The viewer in a real browser: the pictures themselves, the copy of the WebGL canvas that the cross-fade uses, and
   touch gestures. Its logic, and three.js reading the written files, are checked in node (section 16).
 - The cuts for sunglasses, a covered head and odd light on libraries other than the owner's.
-- The real generator on the GPU inside the rebuilt sandbox. The tests run the stand-in through it, and the plain
-  check ran in it with the real environment; PyTorch and the card were not tried there.
+- A whole generation by the real generator started by the app. Checked one by one: the backend and the cut on real
+  pictures (above), the app's job with the stand-in through the same command line and sandbox (the tests), the
+  mesh finishing and the writer on a mesh of the real size (136,000 triangles: 0.1 s, a 3.7 MB file), and, inside
+  the rebuilt sandbox, the plain check and a probe (PyTorch sees the card and computes on it; no home folder, no
+  Docker socket, no network; only the work folder takes a write). The first Generate on a server is the first run
+  of all of it together; a failure shows as the error in the 3D tab.

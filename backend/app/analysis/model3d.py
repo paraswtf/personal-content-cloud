@@ -202,6 +202,8 @@ def _child_env(home: str | Path = SANDBOX_HOME) -> dict[str, str]:
     weights = _weights_dir()
     env = {
         "PATH": "/usr/bin:/bin", "HOME": home, "LANG": "C.UTF-8", "PYTHONUNBUFFERED": "1",
+        # the sandbox has no /etc/passwd: a library that asks who is running it (getpass.getuser) reads these
+        "USER": "gen3d", "LOGNAME": "gen3d",
         "XDG_CACHE_HOME": f"{home}/cache", "MPLCONFIGDIR": f"{home}/mpl", "NUMBA_CACHE_DIR": f"{home}/numba",
         "HF_HOME": str(weights / "hf"), "U2NET_HOME": str(weights / "u2net"),
         "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1",

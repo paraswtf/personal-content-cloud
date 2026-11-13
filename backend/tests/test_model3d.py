@@ -76,7 +76,7 @@ def sleeper(*_args, **_kw) -> list[str]:
 
 ENV_NAMES = {"PATH", "HOME", "LANG", "PYTHONUNBUFFERED", "XDG_CACHE_HOME", "MPLCONFIGDIR", "NUMBA_CACHE_DIR", "HF_HOME",
              "U2NET_HOME", "HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE", "CUDA_VISIBLE_DEVICES", "NVIDIA_VISIBLE_DEVICES",
-             "LD_LIBRARY_PATH", "GEN3D_THREADS"}
+             "LD_LIBRARY_PATH", "GEN3D_THREADS", "USER", "LOGNAME"}
 
 
 def one_look_then(end: str):

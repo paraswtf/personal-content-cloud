@@ -210,12 +210,14 @@ It installs PyTorch and a few libraries into their own environment (about 6 GB),
 a pinned commit and downloads three files, each checked against its checksum: the TripoSR weights (1.7 GB, MIT
 licence, Tripo AI and Stability AI), the U2-Net background cutter (176 MB, Apache 2.0) and one small settings
 file of the image encoder (facebook/dino-vitb16, Apache 2.0). About 8.5 GB in all; to keep it on another disk,
-make `models/gen3d` a link to a folder there first. On an RTX 2080 a head takes about 4 seconds and 2.4 GB of
+make `models/gen3d` a link to a folder there first. On an RTX 2080 a head takes 3 to 6 seconds and 2.4 GB of
 GPU memory. `scripts/setup_3d.sh --check` says what is installed.
 
 It lives in `MODELS_DIR/gen3d` (`GEN3D_DIR`). The generator runs only while a model is being made, inside a
-sandbox (`bwrap`) with no network and a read-only filesystem apart from its work folder, because it runs
-model code written by others on your face photos. `GEN3D_SANDBOX=off` turns the sandbox off;
+sandbox (`bwrap`), because it runs model code written by others on your face photos. Inside it the
+generator sees the system's libraries, its own files, the GPU and the pictures of the job in hand, and
+nothing else: no network, no home folder, no library, none of the server's settings.
+`GEN3D_SANDBOX=off` turns the sandbox off;
 `docs/ARCHITECTURE.md` section 36 has the details.
 
 ## Data, backups and disk
