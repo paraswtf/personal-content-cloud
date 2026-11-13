@@ -40,6 +40,7 @@ Output: OUT/<key>.glb for every look that worked; OUT/result.json
   null when nothing was fitted) and `overlap_head` the same over the head alone: the photo is used when both reach
   0.92; `relief`: the face was shaped from the photo by the depth models; `note`: why a head that was asked for a
   photo layer has none, or else why its face was not shaped although that was asked for and the models are there.
+  A look whose picture cannot be read again in the second pass is written as the model made it, and says so.
   `seconds`: the look's share of both passes.
   On stdout, one line per event, flushed at once: "progress: N/M", "made: <key> ok|error <seconds>" and
   "look: <key> ok|error <seconds>". "progress: 0/M" comes at the start. In the first pass every look gets a
@@ -97,6 +98,16 @@ def fail(reason: str, code: int) -> int:
     return code
 
 
+def _number(value: Any) -> bool:
+    """A finite number that is not a yes or no, and not a whole number too large to be one in floating point."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
+
+
 def read_job(path: str) -> dict[str, Any]:
     try:
         job = json.loads(Path(path).read_text(encoding="utf-8"))
@@ -107,6 +118,9 @@ def read_job(path: str) -> dict[str, Any]:
     out = job.get("out_dir")
     if not isinstance(out, str) or not Path(out).is_absolute():
         raise BadJob("out_dir must be an absolute path")
+    weights = job.get("weights_dir")
+    if weights is not None and not isinstance(weights, str):
+        raise BadJob("weights_dir must be a path")
     looks = job.get("looks")
     if not isinstance(looks, list) or not looks:
         raise BadJob("the job has no looks")
@@ -119,15 +133,14 @@ def read_job(path: str) -> dict[str, Any]:
         if not isinstance(look.get("image"), str) or not Path(look["image"]).is_absolute():
             raise BadJob(f"look {key}: image must be an absolute path")
         inside = look.get("inside")
-        if inside is not None and not (isinstance(inside, list) and len(inside) == 4 and all(
-                isinstance(t, (int, float)) and not isinstance(t, bool) and math.isfinite(t) for t in inside)):
+        if inside is not None and not (isinstance(inside, list) and len(inside) == 4 and all(_number(t) for t in inside)):
             raise BadJob(f"look {key}: inside must be [left, top, right, bottom] in pixels of the picture")
     options = job.get("options") or {}
     if not isinstance(options, dict):
         raise BadJob("options must be an object")
     try:
         detail = int(options.get("detail", 2))
-    except (TypeError, ValueError) as e:
+    except (TypeError, ValueError, OverflowError) as e:
         raise BadJob("detail must be 1, 2 or 3") from e
     if detail not in (1, 2, 3):
         raise BadJob("detail must be 1, 2 or 3")
@@ -135,7 +148,7 @@ def read_job(path: str) -> dict[str, Any]:
     for name in ("smoothing", "texture"):
         try:
             level = int(options.get(name, 2))
-        except (TypeError, ValueError) as e:
+        except (TypeError, ValueError, OverflowError) as e:
             raise BadJob(f"{name} must be 0, 1, 2 or 3") from e
         if level not in (0, 1, 2, 3) or isinstance(options.get(name, 2), bool):
             raise BadJob(f"{name} must be 0, 1, 2 or 3")
@@ -145,18 +158,16 @@ def read_job(path: str) -> dict[str, Any]:
         raise BadJob("relief must be 0 or 1")
     options["relief"] = int(relief)
     framing = options.get("framing", FRAMING)
-    if (isinstance(framing, bool) or not isinstance(framing, (int, float)) or not math.isfinite(framing)
-            or not FRAMING_LOW <= framing <= FRAMING_HIGH):
+    if not _number(framing) or not FRAMING_LOW <= framing <= FRAMING_HIGH:
         raise BadJob("framing must be a number from 1 to 6: how many face sizes wide the pictures are")
     options["framing"] = float(framing)
     limit = job.get("max_rss_mb")
-    if limit is not None and (isinstance(limit, bool) or not isinstance(limit, (int, float)) or not math.isfinite(limit)
-                              or limit <= 0):
+    if limit is not None and (not _number(limit) or limit <= 0):
         raise BadJob("max_rss_mb must be a positive number")
     generator = job.get("generator") or "auto"
-    if generator != "auto" and generator not in backends.REGISTRY:
-        raise BadJob(f"unknown generator: {generator}")
-    return {"out_dir": Path(out), "weights_dir": Path(job.get("weights_dir") or out), "generator": generator,
+    if not isinstance(generator, str) or (generator != "auto" and generator not in backends.REGISTRY):
+        raise BadJob(f"unknown generator: {str(generator)[:80]}")
+    return {"out_dir": Path(out), "weights_dir": Path(weights or out), "generator": generator,
             "device": str(job.get("device") or "auto"), "options": options, "looks": looks,
             "max_rss_mb": None if limit is None else float(limit)}
 
@@ -307,6 +318,7 @@ def run(job: dict[str, Any]) -> int:
         name = backends.pick(job["weights_dir"])
         if name is None:
             return fail("no generator is installed (run scripts/setup_3d.sh)", EXIT_NO_BACKEND)
+    backend = None
     try:
         backend = backends.get(name)
         if not backend.available(job["weights_dir"]):
@@ -314,29 +326,37 @@ def run(job: dict[str, Any]) -> int:
         prepare = _prepare(name)
         backend.load(job["weights_dir"], job["device"], dict(job["options"]))
     except Stopped:
+        try:  # told to stop while the model was loading: what did load is let go
+            if backend is not None:
+                backend.close()
+        except Exception:  # noqa: BLE001 - closing never hides the stop
+            pass
         return fail("stopped", EXIT_STOPPED)
     except Exception as e:  # noqa: BLE001 - missing library, missing weights, no memory
         return fail(f"the {name} generator could not start: {e}", EXIT_NO_BACKEND)
-    # The relief needs the person's cut-out, so a backend that takes the picture as it is (the stand-in) never
-    # gets it; nor does a job that turned it off, or an installation without the two model files (the app is told
-    # that by --check and says it once, so no look carries a note about it)
-    relief_on = False
-    if prepare is not None and job["options"].get("relief", 1):
-        from gen3d import relief  # noqa: PLC0415
-
-        relief_on = relief.available(job["weights_dir"])
 
     results: list[dict[str, Any]] = []
     memory: dict[str, int | None] = {"peak": None, "with_model": None, "released": None}
     made: list[dict[str, Any]] = []   # per look, from the first pass: its mesh and picture record, or its error
     stopped = released = False
-    say(f"progress: 0/{len(looks)}")
+    # From here on the model is loaded: whatever happens, also an order to stop, the backend is closed once and
+    # the result file says what was built
     try:
-        # the first pass: the cut-out and the model. Nothing is reported from here
+        # The relief needs the person's cut-out, so a backend that takes the picture as it is (the stand-in)
+        # never gets it; nor does a job that turned it off, or an installation without the two model files (the
+        # app is told that by --check and says it once, so no look carries a note about it)
+        relief_on = False
+        if prepare is not None and job["options"].get("relief", 1):
+            from gen3d import relief  # noqa: PLC0415
+
+            relief_on = relief.available(job["weights_dir"])
+        say(f"progress: 0/{len(looks)}")
+        # the first pass: the cut-out and the model. No head is finished here
         for look in looks:
             started = time.monotonic()
             options = {**job["options"], "out_dir": str(out_dir), "key": look["key"], "inside": look.get("inside")}
             kept: dict[str, Any] = {"options": options, "mesh": None, "prepared": None, "error": None}
+            picture = prepared = given = None
             try:
                 with Image.open(look["image"]) as im:
                     picture = im.convert("RGB")
@@ -345,17 +365,19 @@ def run(job: dict[str, Any]) -> int:
                     given = prepared.rgba
                 else:
                     prepared, given = whole(picture, options), picture
-                del picture
+                picture = None
                 kept["mesh"] = backend.generate(given, options)
                 # the picture itself is read from its file again when the look is finished: up to 28 MB a look
                 # that need not wait in memory beside the model
                 prepared.source = None
                 kept["prepared"] = prepared
-                del prepared, given
             except Stopped:
                 raise
             except Exception as e:  # noqa: BLE001 - this look failed; the others still run
                 kept.update(mesh=None, prepared=None, error=f"{type(e).__name__}: {e}"[:500])
+            # nothing of this look stays behind in these names, whether it worked or not: a picture left here
+            # would sit in memory through the second pass
+            picture = prepared = given = None
             kept["seconds"] = time.monotonic() - started
             made.append(kept)
             say(f"made: {look['key']} {'ok' if kept['error'] is None else 'error'} {round(kept['seconds'], 2)}")
@@ -373,8 +395,19 @@ def run(job: dict[str, Any]) -> int:
             if kept["error"] is None:
                 try:
                     mesh, prepared = kept.pop("mesh"), kept.pop("prepared")
-                    with Image.open(look["image"]) as im:
-                        prepared.source = source_of(im)
+                    lost = None
+                    try:
+                        with Image.open(look["image"]) as im:
+                            source = source_of(im)
+                        if source.shape[:2] != prepared.alpha.shape[:2]:
+                            raise ValueError("it is not the picture the cut-out was made from")
+                        prepared.source = source
+                        del source
+                    except Stopped:
+                        raise
+                    except Exception as e:  # noqa: BLE001 - the model's head is still written, with its own colours
+                        lost = f"the look's picture could not be read again ({type(e).__name__}: {e})"[:300]
+                        prepared = None
                     said: dict[str, Any] = {}
                     stage = (_relief_stage(kept["options"], job["weights_dir"], job.get("max_rss_mb"), said)
                              if relief_on else None)
@@ -386,7 +419,7 @@ def run(job: dict[str, Any]) -> int:
                                texture=None if head.photo is None or head.texture_size is None else list(head.texture_size),
                                overlap=None if head.overlap is None else round(float(head.overlap), 4),
                                overlap_head=None if head.overlap_head is None else round(float(head.overlap_head), 4),
-                               relief=bool(head.reshaped), note=_note(head, stage is not None, said))
+                               relief=bool(head.reshaped), note=lost or _note(head, stage is not None, said))
                     del head
                 except Stopped:
                     raise

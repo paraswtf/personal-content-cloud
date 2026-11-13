@@ -796,7 +796,8 @@ def finish_head(mesh: Mesh, prepared: Any | None, options: dict[str, Any] | None
         except NoPhoto as e:
             note, covered, covered_head = str(e), e.overlap, e.overlap_head
         except Exception as e:  # noqa: BLE001 - the head is still written, with its colours and no photo
-            note = f"the photo could not be laid over the head ({type(e).__name__}: {e})"[:300]
+            # said as the camera's failure: it is also the reason a stage did not run, photo or no photo
+            note = f"the picture's camera could not be found ({type(e).__name__}: {e})"[:300]
         clock.mark("camera")
     if reshape is not None and view is None:
         # without the camera the stage has nothing to go by. The reason is the photo's, when there is one

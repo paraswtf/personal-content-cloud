@@ -867,6 +867,17 @@ def test_without_the_camera_the_stage_does_not_run_and_the_head_says_why():
     # a backend that names no camera, a look without a picture
     m = clean(mesh)
     picture = _picture(m.vertices, m.faces, View(GUESS, Fit(), SQUARE), size=512)
+    # the camera step itself breaks: said as the camera's failure, which is the stage's reason with or without a photo
+    with pytest.MonkeyPatch.context() as patch:
+        def broken(*_a, **_k):
+            raise RuntimeError("boom")
+
+        patch.setattr(F, "map_agrees", broken)
+        head = F.finish_head(mesh, picture, {"texture": 2}, reshape=stage)
+        assert head.note == "the picture's camera could not be found (RuntimeError: boom)" and head.reshape_note == head.note
+        head = F.finish_head(mesh, picture, {"texture": 0}, reshape=stage)
+        assert head.note is None and head.reshape_note == "the picture's camera could not be found (RuntimeError: boom)"
+        assert head.photo is None and not called
     for texture in (0, 2):
         head = F.finish_head(_bust(40, 48, camera=None), picture, {"texture": texture}, reshape=stage)
         assert head.reshape_note == "the backend names no camera" and head.note is None

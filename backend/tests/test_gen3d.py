@@ -258,6 +258,12 @@ def test_job_options_for_the_finishing(tmp_path):
                 {"options": {"relief": "on"}}, {"options": {"framing": 0.5}}, {"options": {"framing": 7}},
                 {"options": {"framing": "wide"}}, {"options": {"framing": True}}, {"max_rss_mb": 0},
                 {"max_rss_mb": "all of it"}, {"max_rss_mb": True},
+                # numbers no number can be, and things that are not what they should be: a bad job, never a crash
+                {"options": {"detail": float("inf")}}, {"options": {"texture": float("inf")}},
+                {"options": {"smoothing": float("nan")}}, {"options": {"framing": 10 ** 400}},
+                {"options": {"relief": float("inf")}}, {"max_rss_mb": 10 ** 400}, {"max_rss_mb": float("inf")},
+                {"weights_dir": 5}, {"generator": {"a": 1}}, {"generator": ["fake"]},
+                {"looks": [{"key": "l1", "image": picture, "inside": [0, 0, 10 ** 400, 80]}]},
                 {"looks": [{"key": "l1", "image": picture, "inside": [0, 0, 128]}]},
                 {"looks": [{"key": "l1", "image": picture, "inside": "all"}]},
                 {"looks": [{"key": "l1", "image": picture, "inside": [0, 0, True, 80]}]}):
@@ -397,6 +403,13 @@ BACKEND = B()
 """
 
 
+def _never_left_behind(proc: subprocess.Popen) -> None:
+    """A child this test started is gone when the test ends, also when one of its own assertions failed first."""
+    if proc.poll() is None:
+        proc.kill()
+        proc.wait(10)
+
+
 def _logging_job(tmp_path: Path, keys: list[str], patch: str) -> tuple[list[str], Path, Path]:
     """A job on a backend that writes down what it is asked, started through a small script that first applies
     `patch` (Python source). Returns (the command, the job's out folder, the backend's log)."""
@@ -428,14 +441,17 @@ def test_a_job_runs_in_two_passes_and_reports_a_look_when_its_file_is_there(tmp_
         "glb.write = slow"))
     proc = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     lines, seen = [], {}
-    for line in proc.stdout:
-        line = line.strip()
-        lines.append(line)
-        if line.startswith("look: "):
-            key, state = line.split()[1:3]
-            seen[key] = {"state": state, "file": (out / f"{key}.glb").exists(),
-                         "events": log.read_text().split("\n")[:-1], "result": (out / "result.json").exists()}
-    _, err = proc.communicate(timeout=60)
+    try:
+        for line in proc.stdout:
+            line = line.strip()
+            lines.append(line)
+            if line.startswith("look: "):
+                key, state = line.split()[1:3]
+                seen[key] = {"state": state, "file": (out / f"{key}.glb").exists(),
+                             "events": log.read_text().split("\n")[:-1], "result": (out / "result.json").exists()}
+        _, err = proc.communicate(timeout=60)
+    finally:
+        _never_left_behind(proc)
     assert proc.returncode == 0, err
     # the first pass says a line per look when the model is done with it (l4's mesh is only found bad later); then
     # every look is finished in the job's order, each with its count
@@ -481,14 +497,17 @@ def test_sigterm_in_the_second_pass_keeps_what_was_reported(tmp_path):
         "    return real(mesh, prepared, options, reshape=reshape)\n"
         "job.finish_head = slow"))
     proc = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    while True:
-        line = proc.stdout.readline()
-        assert line, "the job ended before its first look"
-        if line.startswith("look: l1 ok"):
-            break
-    assert proc.stdout.readline().strip() == "progress: 1/3"
-    proc.send_signal(signal.SIGTERM)                                      # while the second head is being finished
-    rest, err = proc.communicate(timeout=20)
+    try:
+        while True:
+            line = proc.stdout.readline()
+            assert line, "the job ended before its first look"
+            if line.startswith("look: l1 ok"):
+                break
+        assert proc.stdout.readline().strip() == "progress: 1/3"
+        proc.send_signal(signal.SIGTERM)                                  # while the second head is being finished
+        rest, err = proc.communicate(timeout=20)
+    finally:
+        _never_left_behind(proc)
     assert proc.returncode == 5 and err.strip().splitlines()[-1] == "stopped" and "look:" not in rest
     result = json.loads((out / "result.json").read_text())
     assert [(r["key"], r["ok"]) for r in result["looks"]] == [("l1", True)]   # what was reported stays

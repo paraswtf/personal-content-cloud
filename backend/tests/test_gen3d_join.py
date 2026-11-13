@@ -7,8 +7,10 @@ with a nose on it, so the stage has something to add; the stand-in normal model 
 deep the relief is comes from the plain fit of the reading to the mesh."""
 from __future__ import annotations
 
+import gc
 import json
 import sys
+import weakref
 from pathlib import Path
 
 import numpy as np
@@ -217,11 +219,17 @@ def test_what_a_look_says_about_its_photo_and_its_relief():
 
 # ------------------------------------------------------------------ the job
 class _CutOutBackend:
-    """A backend that, unlike the stand-in, is given a cut-out: it returns the bust for every picture."""
+    """A backend that, unlike the stand-in, is given a cut-out: it returns the bust for every picture. It writes
+    down what it is asked, fails the looks named in `failing`, and when it is closed it notes how many depth model
+    calls there had been by then and runs `on_close`."""
     name, version = "bust", "1"
 
-    def __init__(self) -> None:
+    def __init__(self, calls: list, failing: tuple[str, ...] = (), on_close=None) -> None:
         self.events: list[str] = []
+        self.calls = calls
+        self.failing = failing
+        self.on_close = on_close
+        self.calls_at_close: int | None = None
 
     def available(self, weights_dir) -> bool:
         return True
@@ -231,22 +239,32 @@ class _CutOutBackend:
 
     def generate(self, image, options) -> Mesh:
         self.events.append(f"generate {options['key']}")
+        if options["key"] in self.failing:
+            raise RuntimeError("the model failed")
         return _bust(60, 64, camera=SURE)
 
     def close(self) -> None:
         self.events.append("close")
+        self.calls_at_close = len(self.calls)
+        if self.on_close is not None:
+            self.on_close()
 
 
-def _run_job(tmp_path: Path, monkeypatch, capsys, scene, options: dict, **extra) -> tuple[int, list[dict], list[str], _CutOutBackend]:
-    """One job of two looks through gen3d.__main__.run, on the bust backend with a made-up cut-out."""
-    backend = _CutOutBackend()
+def _run_job(tmp_path: Path, monkeypatch, capsys, scene, options: dict, failing: tuple[str, ...] = (), on_close=None,
+             records: list | None = None, **extra) -> tuple[int, list[dict], list[str], _CutOutBackend]:
+    """One job of two looks through gen3d.__main__.run, on the bust backend with a made-up cut-out. `records`
+    collects a weak reference to every picture record the cut-out makes."""
+    backend = _CutOutBackend(scene["calls"], failing, on_close)
     monkeypatch.setattr(backends, "get", lambda name: backend)
     picture = scene["picture"]
     square = Image.fromarray(np.dstack([picture.source, picture.alpha]), "RGBA").resize((SQUARE, SQUARE), Image.NEAREST)
 
     def prepare(image, opts):
-        return Prepared(rgba=square, source=np.asarray(image.convert("RGB")), alpha=picture.alpha, side=SQUARE, x0=0.0,
+        made = Prepared(rgba=square, source=np.asarray(image.convert("RGB")), alpha=picture.alpha, side=SQUARE, x0=0.0,
                         y0=0.0, sx=SQUARE / SIZE, sy=SQUARE / SIZE, ox=0.0, oy=0.0, inside=opts.get("inside"))
+        if records is not None:
+            records.append((opts["key"], weakref.ref(made)))
+        return made
 
     monkeypatch.setattr(job_runner, "_prepare", lambda name: prepare)
     looks = []
@@ -271,6 +289,7 @@ def test_a_job_shapes_every_face_in_its_second_pass(tmp_path, monkeypatch, capsy
         ("l1", True, True, True, None), ("l2", True, True, True, None)]
     # the model was closed before the first depth model ran: the two never share the memory
     assert backend.events == ["load", "generate l1", "generate l2", "close"]
+    assert backend.calls_at_close == 0
     assert [c[0] for c in scene["calls"]] == ["depth", "normals"] * 2
     assert [ln.split()[0] for ln in lines] == ["progress:", "made:", "made:", "look:", "progress:", "look:", "progress:"]
     assert [ln.split()[:3] for ln in lines[1:3]] == [["made:", "l1", "ok"], ["made:", "l2", "ok"]]
@@ -315,3 +334,53 @@ def test_the_stand_in_never_runs_the_relief(tmp_path, monkeypatch, capsys, scene
     row = json.loads((tmp_path / "out" / "result.json").read_text())["looks"][0]
     assert scene["calls"] == [] and row["ok"] and row["textured"] is True
     assert row["relief"] is False and row["note"] is None
+
+
+def test_a_look_the_model_failed_keeps_nothing_in_memory_for_the_second_pass(tmp_path, monkeypatch, capsys, scene):
+    """Its picture record (the full-size picture, up to 28 MB, and the cut-out) is let go when the look fails, not
+    when the job ends: by the time the model is closed, before any head is finished, it is gone."""
+    records: list = []
+    alive_at_close: list = []
+
+    def at_close():
+        gc.collect()
+        alive_at_close.extend(key for key, ref in records if ref() is not None)
+
+    code, rows, lines, backend = _run_job(tmp_path, monkeypatch, capsys, scene, {"relief": 1}, failing=("l2",),
+                                          on_close=at_close, records=records)
+    assert [key for key, _ in records] == ["l1", "l2"]
+    assert alive_at_close == ["l1"]                                   # the look that worked waits for its second pass
+    assert code == 0 and [(r["key"], r["ok"]) for r in rows] == [("l1", True), ("l2", False)]
+    assert rows[1]["error"] == "RuntimeError: the model failed" and rows[0]["relief"] is True
+    assert [ln.split()[:3] for ln in lines[1:3]] == [["made:", "l1", "ok"], ["made:", "l2", "error"]]
+    gc.collect()
+    assert all(ref() is None for _, ref in records)                  # and nothing is left once the job has ended
+
+
+def test_a_stop_right_after_the_model_loaded_still_closes_it_and_leaves_a_result(tmp_path, monkeypatch, capsys, scene):
+    def stop(weights):
+        raise job_runner.Stopped()
+
+    monkeypatch.setattr(relief, "available", stop)                    # the first thing after the load
+    code, rows, lines, backend = _run_job(tmp_path, monkeypatch, capsys, scene, {"relief": 1})
+    assert code == job_runner.EXIT_STOPPED and rows == [] and lines == []
+    assert backend.events == ["load", "close"]                        # closed once, and no look was asked for
+    doc = json.loads((tmp_path / "out" / "result.json").read_text())
+    assert doc["generator"] == {"name": "bust", "version": "1"} and doc["looks"] == []
+
+
+def test_a_picture_that_cannot_be_read_again_costs_the_photo_not_the_head(tmp_path, monkeypatch, capsys, scene):
+    """The second pass reads each picture from its file again. When that fails, or the file is no longer the picture
+    the cut-out was made from, the head the model made is still written, with its own colours, and says why."""
+    def spoil():
+        (tmp_path / "l1.png").unlink()
+        Image.new("RGB", (SIZE // 2, SIZE // 2), (10, 20, 30)).save(tmp_path / "l2.png")
+
+    code, rows, _lines, _backend = _run_job(tmp_path, monkeypatch, capsys, scene, {"relief": 1}, on_close=spoil)
+    assert code == 0 and scene["calls"] == []                         # no depth model ran without its picture
+    assert [(r["ok"], r["textured"], r["relief"], r["error"]) for r in rows] == [(True, False, False, None)] * 2
+    assert rows[0]["note"].startswith("the look's picture could not be read again (FileNotFoundError")
+    assert rows[1]["note"] == ("the look's picture could not be read again (ValueError: it is not the picture the "
+                               "cut-out was made from)")
+    for key in ("l1", "l2"):
+        assert (tmp_path / "out" / f"{key}.glb").read_bytes()[:4] == b"glTF"
