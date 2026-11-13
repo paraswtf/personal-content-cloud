@@ -233,12 +233,13 @@ A head is built in two steps. The image-to-3D model makes a rough shape: on an R
 head and 2.4 GB of GPU memory. Then the shape is finished on the processor, in about 10 seconds a head: it
 is smoothed, a depth model shapes the nose, lips and chin from the photo, and the photo itself is laid
 over the front as the head's texture. Generate has options for this: Smoothing, Photo texture (off, or the
-photo at up to 1024 px, up to 2048 px or at its own size; it is never enlarged) and Face relief. In the
-viewer, the Photo switch shows the plain colours under the photo.
+photo at up to 1024 px, up to 2048 px or at its own size) and Face relief. In the viewer, the Photo switch
+shows the plain colours under the photo.
 
 A head comes from one photo. From the front and up to about 40 degrees to either side it is that photo;
-further round, the sides and the back are filled in from its colours, without detail. Glasses, or a hand
-in front of the face, are painted onto the surface. Heads made before this version keep showing, with a
+further round, the sides and the back are filled in from its colours, without detail. A photo with the
+head turned or bowed gives a head that carries the photo on that side only. Glasses, or a hand in front of
+the face, are painted onto the surface. Heads made before this version keep showing, with a
 line that says so: press "Generate again" on the person's 3D tab to get new ones.
 
 A head file holds the photo's own pixels. It is served only to a signed-in browser, which asks the server

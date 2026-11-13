@@ -1945,10 +1945,10 @@ file that cannot be read, which meshes are kept, a new model with the same keys,
 under a system switch, dispose and a browser without WebGL: 17 groups. A head file has one part or two, and every one
 of them holds for both. When the folder also holds a `photo.glb`, a head that is known to carry its photo, an 18th
 group checks the photo layer itself: how it is drawn, the light of a model with such a head, Colour off and Photo off,
-what is kept and let go, and what happens when the browser takes the graphics memory away. `test_gen3d.py` runs the
-script on plain heads of the stand-in (17 groups) and skips when node or the frontend's packages are missing; it
-writes no `photo.glb`, so the 18th group runs only when the script is given one by hand. What the pictures look like
-is not something it can tell: that takes a browser.
+what is kept and let go, what the stage says about a look whose picture cannot be decoded, and what happens when the
+browser takes the graphics memory away. `test_gen3d.py` runs the script on plain heads of the stand-in and on one
+`photo.glb` that the finishing itself wrote (all 18 groups), and skips when node or the frontend's packages are
+missing. What the pictures look like is not something it can tell: that takes a browser.
 
 ## 17. Build notes
 
@@ -3698,7 +3698,8 @@ that is the photo itself, right and bottom being the first pixels past it. Where
 app filled the picture by repeating the photo's edge, and nothing is read or laid on the head from there. `smoothing`,
 `texture` and `relief` belong to the finishing (below; 2, 2 and 1 when left out). `framing` says how many face sizes
 wide the pictures are (1 to 6; 2.6 when left out): the relief finds the face by it. `max_rss_mb` may be left out: it
-is the resident memory above which the app stops the child. A value outside its range is a bad job file.
+is the resident memory above which the app stops the child. A value outside its range or of the wrong kind (a number
+that is no number, a folder that is no path) is a bad job file, never a crash.
 
 A job runs in two passes, because the memory the child may hold is shared with the app and the finishing must not sit
 on top of the model. First every look goes through the background cut and the model, and only its raw mesh and its
@@ -3722,7 +3723,11 @@ ok|error <seconds>`. `progress: 0/M` comes at the start. In the first pass a loo
 is done with it. Nothing is finished by then: the line says how far the pass is and that the job is alive. In the
 second pass a look gets its `look:` line and the next `progress:` line when it is done, in the job's order, and a look
 that worked has its file in place before its line is printed. A look that fails does not stop the others, and no look
-fails because of its photo or its relief: it is written without. Exit codes: 0 when at least one head was built, 3
+fails because of its photo or its relief: it is written without. That holds for its picture too: when the file
+cannot be read again in the second pass, or is no longer the picture the cut-out was made from, the head is written
+as the model made it and its note says so. A look that failed in the first pass keeps nothing in memory for the
+second. Once the model is loaded, an order to stop at any point still closes the backend once and leaves a result
+file. Exit codes: 0 when at least one head was built, 3
 when none was, 2 for a bad job file, 4 when the backend cannot load, 5 when it was told to stop (SIGTERM) or its
 parent went away (`PR_SET_PDEATHSIG` and a watch on the parent's pid). The last line on stderr is the reason, and the
 owner reads it in the tab. `python -m gen3d --check --weights-dir DIR` prints one JSON line `{"backends": {name:
@@ -3828,7 +3833,9 @@ mesh. `finish_head(mesh, prepared, options, reshape)` does this, in order:
 
 Nothing in this stage fails a look. When the picture cannot be used, or a step of the photo raises, the head is
 written with its colours and without the layer, and its `note` says why in plain words, for example "the photo did not
-line up with the head (outlines overlap 0.89, over the head 0.85)". Only the job's own order to stop passes through.
+line up with the head (outlines overlap 0.89, over the head 0.85)". A camera step that breaks is said as the camera's
+failure ("the picture's camera could not be found"), since it is also why the relief did not run, with or without a
+photo. Only the job's own order to stop passes through.
 
 ### The face's relief (`relief.py`)
 
@@ -3998,6 +4005,13 @@ about its finishing: `textured`, `texture`, `overlap`, `overlap_head`, `relief` 
 process that runs model code written by others, so it is checked before it is kept: a note is cut to one printable
 line of 200 characters, an overlap must be a share between 0 and 1, a texture size two whole numbers, only a plain
 `true` counts for `relief`, and whether a head is textured is read from the file itself when its row does not say.
+The rest of the result file is read the same way. A value of the wrong kind (a number of four hundred digits, looks
+that are no list, a key that is no text) is read past and does not cost the heads that were built; the vertex and
+triangle counts are then taken from the file itself, the generator's name and version are two short lines of text,
+and the reason no head could be built is one short printable line. The child's output is read with the same care:
+the watch takes at most 4096 bytes of a line and skips the rest, passes on only the three kinds of line the contract
+has, and lets the child wait at its pipe when it is a thousand lines ahead, so nothing the model code prints can
+pile up in the server.
 `peak_rss_mb` is the most the server saw the child's process tree hold, sampled once a second; `generator_memory_mb`
 is the generator's own count (the `memory_mb` of its result). They are kept to judge a run by, like the overlaps,
 because the generator's result file goes with the work folder. A manifest written before the finishing existed has
@@ -4083,7 +4097,9 @@ comes back to it. A layer's geometry, material and texture are let go with its h
 The tab (section 14) says what the owner is looking at. Under a head that carries its photo: "From the front this is
 the photo; past about 50 degrees the sides and back are filled in." Under one whose face was shaped: a line that says
 so. Under one the generator left a note on: the note. A "Photo" switch beside "Colour" shows the colours under the
-photo, and waits while Colour is off. The generate panel has the sliders Smoothing (off, light, normal, strong) and
+photo, and waits while Colour is off. The viewer says for each look whether a photo is really drawn over it: a look the
+server lists with its photo, but whose picture this browser could not decode, gets neither the switch nor the
+sentence about the photo. The generate panel has the sliders Smoothing (off, light, normal, strong) and
 Photo texture (off, standard, fine, full) and the switch Face relief, with a line when the server says that the depth
 model is not installed. A model made before heads carried their photo shows as it did, with a line above the head that
 says so and offers "Generate again"; the panel then opens with that model's own options and the defaults for the three
@@ -4130,6 +4146,9 @@ it does not have.
   photo; past about 50 degrees the sides and the back are filled-in colours without detail, and the back of the head
   is the model's guess. Where the photo ends, the filled-in colours can differ in tone from the photo beside them (a
   shirt can look two-toned from the side). The expression is the photo's.
+- The photo shows what its camera saw. A look whose best photo has the head turned or bowed carries the photo on that
+  side of the face only: turned the other way in the viewer, part of the face is already filled-in colour at 20
+  degrees (seen on one of the three heads, whose look had three photos to choose from).
 - What stands in front of the face in the photo (glasses, a strand of hair, a hand) is painted on the surface and
   smears when the head is turned. A ridge can show along a glasses rim, where the depth model reads the frame.
 - The relief adds the face's relief (nose, lips, chin, brow) to the model's shape. It does not rescale a head that is
