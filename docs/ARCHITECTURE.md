@@ -1946,9 +1946,11 @@ under a system switch, dispose and a browser without WebGL: 17 groups. A head fi
 of them holds for both. When the folder also holds a `photo.glb`, a head that is known to carry its photo, an 18th
 group checks the photo layer itself: how it is drawn, the light of a model with such a head, Colour off and Photo off,
 what is kept and let go, what the stage says about a look whose picture cannot be decoded, and what happens when the
-browser takes the graphics memory away. `test_gen3d.py` runs the script on plain heads of the stand-in and on one
-`photo.glb` that the finishing itself wrote (all 18 groups), and skips when node or the frontend's packages are
-missing. What the pictures look like is not something it can tell: that takes a browser.
+browser takes the graphics memory away. `test_gen3d.py` runs the script on plain heads of the stand-in, on one
+`photo.glb` that the finishing itself wrote, and on `outside.glb`, the same head with its picture named by an address
+in place of the bytes in the file: a 19th group checks that the page never asks for that address. All 19 groups run
+in the suite; the test skips when node or the frontend's packages are missing. What the pictures look like is not
+something it can tell: that takes a browser.
 
 ## 17. Build notes
 
@@ -4011,7 +4013,19 @@ triangle counts are then taken from the file itself, the generator's name and ve
 and the reason no head could be built is one short printable line. The child's output is read with the same care:
 the watch takes at most 4096 bytes of a line and skips the rest, passes on only the three kinds of line the contract
 has, and lets the child wait at its pipe when it is a thousand lines ahead, so nothing the model code prints can
-pile up in the server.
+pile up in the server; the thread that reads ends with the watch, also behind a full queue. Of the child's error
+output only the last 8 kB are read for the reason it gave, as one printable line, and a result file over 4 MB is
+not read at all.
+
+A head file is taken into a model only when it is whole in itself: its description reads, and nothing in it names an
+address (a `uri`, anywhere) for a buffer or a picture. Every file the generator's writer makes is like that. The
+reason is the sandbox's promise. The model code has no network, but the owner's browser has one, and a viewer follows
+an address that a file's description names: a head that named one would have the tab fetch it, and such a request
+could carry a picture out. So the server leaves such a file out of the model, and the viewer has a second lock: its
+loader follows no address but the ones it makes itself for the bytes inside the file (`blob:` and `data:`). A look
+whose picture in the work folder no longer reads when the model is saved is left out too, and costs the heads beside
+it nothing. The heads are derived files: a backup snapshot (section 31) does not hold them, and after a restore
+"Generate" builds them again.
 `peak_rss_mb` is the most the server saw the child's process tree hold, sampled once a second; `generator_memory_mb`
 is the generator's own count (the `memory_mb` of its result). They are kept to judge a run by, like the overlaps,
 because the generator's result file goes with the work folder. A manifest written before the finishing existed has

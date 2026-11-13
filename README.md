@@ -269,7 +269,8 @@ now" button. Deleted items stay in the trash for `TRASH_DAYS` days.
 
 To restore, stop the server, copy `cloud.db`, `secret.key`, `learned/` and `wallet/` from a snapshot into
 `DATA_DIR` (delete a stale `cloud.db-wal` and `cloud.db-shm` first) and `originals/` into `ORIGINALS_DIR`,
-then start it; previews that are missing are rebuilt when you choose "Process again" on an item.
+then start it; previews that are missing are rebuilt when you choose "Process again" on an item. 3D heads
+are not in a snapshot either: "Generate" on a person's 3D tab builds them again.
 
 ## Development
 
