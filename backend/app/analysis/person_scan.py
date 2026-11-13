@@ -267,6 +267,7 @@ def scan(conn: sqlite3.Connection, person_id: int, progress: Progress | None = N
     _settle(conn, touched)
     # the safety net of _would_stand: a face taken out whose guess did not stand after all goes back
     _restore_unsettled(conn, pid, grouped)
+    _reguess_followed(conn, {pk.item_id for pk in grouped if pk.face_id in taken_out})
     standing = _standing(conn, pid)
     detached = sum(1 for r in standing if int(r["id"]) in taken_out)
     elsewhere.sort(key=lambda e: (-e["p"], e["face_id"]))
@@ -302,6 +303,20 @@ def _would_stand(conn: sqlite3.Connection, person_id: int, pk: _Pick) -> bool:
         log.exception("person scan: could not try the guess of face %s", pk.face_id)
         return False
     return got is not None and got.person_id == int(person_id) and got.evidence.get("basis") == BASIS
+
+
+def _reguess_followed(conn: sqlite3.Connection, item_ids: set[int]) -> None:
+    """Section 35: a position guess in a photo taken moments apart may rest on a face of these items that just
+    left an unnamed group or went back into one (the face it was followed from). The photos lined up with them
+    get a fresh guess, on the runner that makes those."""
+    if not item_ids:
+        return
+    try:
+        from app.analysis import place, place_match
+
+        place.requeue_around(conn, item_ids, hops=place_match.HOPS)
+    except Exception:  # noqa: BLE001 - the faces already moved; the next guess of those photos reads them anyway
+        log.exception("person scan: could not queue the photos lined up with %d item(s) for a fresh guess", len(item_ids))
 
 
 def _settle(conn: sqlite3.Connection, item_ids: set[int]) -> None:
@@ -541,6 +556,8 @@ def regroup(conn: sqlite3.Connection, faces: list[tuple[int, int]], *, clear_gue
     except Exception:  # noqa: BLE001 - the guess already went; the face stays loose
         log.exception("person scan: could not put %d faces back into their groups", len(faces))
         return 0
+    if done:
+        _reguess_followed(conn, items)
     return done
 
 
@@ -550,8 +567,14 @@ def take_back(conn: sqlite3.Connection, person_id: int) -> int:
     pid = int(person_id)
     rows = _standing(conn, pid, hidden=True)
     shown = {int(r["id"]) for r in _standing(conn, pid)}
+    # a guess of other evidence (clothes, a tattoo, position) for the person that the model agreed with carries
+    # its probability (`p`, merge_item): those stay, and guess_item writes them again without it
+    agreed = {int(r[0]) for r in conn.execute(
+        "SELECT item_id FROM faces WHERE guess_person_id = ? AND person_id IS NULL AND assigned_by = 'guess' "
+        "AND (CASE WHEN json_valid(guess_evidence) THEN json_extract(guess_evidence, '$.p') END) IS NOT NULL "
+        f"AND {BASIS_SQL.format(col='guess_evidence')} IS NOT ?", (pid, BASIS))}
     cleared = _clear(conn, pid, [int(r["id"]) for r in rows])
-    _settle(conn, _items_of(rows))  # a guess of other evidence that the model's had replaced comes back
+    _settle(conn, _items_of(rows) | agreed)  # a guess of other evidence that the model's had replaced comes back
     return len(shown.intersection(cleared))
 
 
@@ -663,7 +686,14 @@ def merge_item(conn: sqlite3.Connection, item: sqlite3.Row, boxes: list[Any],
             out[key] = m
         elif c.person_id == m.person_id:
             if m.score >= c.score:
-                out[key] = guess.Candidate(m.person_id, m.score, {**m.evidence, "also": c.evidence.get("basis") or "clothes"})
+                ev = {**m.evidence, "also": c.evidence.get("basis") or "clothes"}
+                # position that agrees stays on the guess: the Review filter, the card's two crops and the sweep
+                # for changed position rules (place.start) all read the fragment, whatever the basis
+                if isinstance(c.evidence.get("place"), dict):
+                    ev["place"] = c.evidence["place"]
+                    if c.evidence.get("place_llr") is not None:
+                        ev["place_llr"] = c.evidence["place_llr"]
+                out[key] = guess.Candidate(m.person_id, m.score, ev)
             else:
                 out[key] = guess.Candidate(c.person_id, c.score, {**c.evidence, "p": m.evidence.get("p")})
         else:

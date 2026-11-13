@@ -1068,9 +1068,12 @@ faces count as negatives). A logistic regression on the 512 values, trained with
   of them under the old 0.7555 cut), 2 faces on other people listed; a second scan writes nothing, and taking the
   guesses back leaves every face as it was before the look.
 - The guess: `assigned_by 'guess'`, `guess_score` the probability, `guess_evidence {"basis": "face", "score", "face"
-  (the top-3), "p", "model": {"rev", "trained_at"}, "was_person_id"?, "also"?}`. `guess.guess_item` calls
-  `person_scan.merge_item` after the clothes and trait paths: the same person by both keeps the higher score and notes
-  the other (`also` on a model guess, `p` on a clothes guess); a different person: the higher score wins, except that
+  (the top-3), "p", "model": {"rev", "trained_at"}, "was_person_id"?, "also"?, "place"?, "place_llr"?}`.
+  `guess.guess_item` calls `person_scan.merge_item` after the clothes, trait and position paths: the same person by
+  both keeps the higher score and notes the other (`also` on a model guess, which also keeps the position part of
+  the guess it agrees with, `place` and `place_llr`, so the Position filter, the two crops and the sweep for changed
+  position rules still find it; `p` on a clothes, tattoo or position guess); a different person: the higher score
+  wins, except that
   a candidate for an unnamed person never displaces the model's; then one person per photo again. So the guess is
   recomputed on every run, and a new photo gets one when it is analysed. Without a model the result is the same
   object, untouched. A guess whose model has no say any more (paused, forgotten, learning off) stays until the owner
@@ -1080,7 +1083,11 @@ faces count as negatives). A logistic regression on the 512 values, trained with
   Turning down records the rejection. `withdraw` clears the model's open guesses (those in the trash and the vault
   too, so none comes back with its photo), pauses the model (`persons.recognition_paused_at`, so the undo of the
   action un-pauses it and a redo pauses it again) until the next look or training, and has `guess_item` run again on
-  those photos so guesses of other evidence come back.
+  those photos so guesses of other evidence come back. The photos where a guess of other evidence carried the
+  model's `p` are run again as well, so no card goes on saying "trained face NN%" for a model that is paused or gone.
+- A face that leaves an unnamed group in a look, or goes back into one, may be the face a position guess in a photo
+  taken moments apart was followed from (section 35): the photos lined up with its photo are queued for a fresh
+  guess (`place.requeue_around` over the full chain length).
 - Back into the group (`person_scan.regroup`): a face that a scan took out of an unnamed group sits in that group
   again whenever its guess goes without the owner's answer for that face. Every path that clears such a guess asks
   first which faces remember a group (`left_groups`) and regroups them in the same transaction: turning down
