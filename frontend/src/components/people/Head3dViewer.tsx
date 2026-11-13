@@ -7,6 +7,18 @@
 // top, the new look is drawn underneath, and the copy fades out. Both pictures are opaque, so nothing shows
 // through anything else and no triangle has to be sorted.
 //
+// A head file has one or two parts. The first is the head itself, a colour at every vertex. The second, in files
+// made since heads carry the photo, is that photo as a texture over the front: the same surface again, its
+// vertex colours' alpha saying how much of the photo shows at each corner, so the photo fades into the colours
+// underneath instead of ending at a line. It is drawn after the head, a hair in front of it, without writing
+// depth; a head's picture is still one opaque picture when it is done. The layer hangs on the head's mesh, so it
+// is placed, sized, shown and hidden with it; Colour off and Photo off hide it. A layer whose picture could not
+// be read is left out. Each layer has a material and a texture of its own, let go with its head; of the heads
+// that are not on screen, at most KEEP_PHOTOS keep one.
+//
+// A photo has its own light in it, so a model with such heads is lit more evenly (PHOTO_LAMP, PHOTO_SOFT,
+// PHOTO_GROUND): all of its looks, also one without the photo, so the light never changes from look to look.
+//
 // A head whose file does not load is reported (onLoadError): its look may be gone on the server, and the tab then
 // reads the model's status again before "Try again" is offered.
 //
@@ -17,7 +29,9 @@ import {
   Color,
   DirectionalLight,
   DoubleSide,
+  FrontSide,
   HemisphereLight,
+  LoadingManager,
   Mesh,
   MeshStandardMaterial,
   PerspectiveCamera,
@@ -27,6 +41,7 @@ import {
   type BufferGeometry,
   type Material,
   type Object3D,
+  type Texture,
 } from 'three'
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js'
@@ -39,16 +54,30 @@ const FOV = 30
 /** Half of what has to fit in the picture at zoom 1. A head is scaled into a box one unit across. */
 const FIT_HALF = 0.62
 const FADE_MS = 300
+/** A fade waits for the graphics card to have drawn its first picture, but not longer than this. */
+const SENT_MS = 1500
 const SPIN_DEGREES_A_SECOND = 14
 /** The sliders hear about a drag or the spin at most this often. */
 const REPORT_MS = 60
 /** Meshes kept ready besides the ones on screen. */
 const KEEP_MESHES = 4
+/** ... and how many of those may carry a photo: a photo is tens of megabytes of graphics memory, a head without
+ *  one a few. A head that was let go is fetched again when the owner comes back to it (the browser has the file). */
+const KEEP_PHOTOS = 2
 const MAX_PIXEL_RATIO = 2
 /** The lamp and the soft light, as shares of full light, at brightness 1: a surface that faces the lamp comes
  *  out close to its own colour, one turned away keeps about half of it. */
 const LAMP = 0.62
 const SOFT = 0.5
+/** The same for a model whose heads carry the photo. The photo has its own light and shade in it, so the lamp
+ *  only adds a little shape and the soft light carries the rest, from below nearly as much as from above (its
+ *  ground is light, where a model without photos has a dark one): with the lamp where it starts, a surface that
+ *  faces the viewer comes out at the photo's own colours (0.25 * 0.71 from the lamp, 0.9 * 0.92 from the soft
+ *  light), one turned away from the lamp about a sixth darker. With the dark ground the same two numbers draw
+ *  the face an eighth darker than the photo. */
+const PHOTO_LAMP = 0.25
+const PHOTO_SOFT = 0.9
+const PHOTO_GROUND = 0xebebeb
 const CLAY = 0xcfccc6
 const GROUND = 0x77736d
 const BACKGROUND = 0x808080
@@ -81,12 +110,23 @@ interface StageState {
   failed: boolean
 }
 
+interface Fade {
+  from: string
+  to: string
+  /** When the fade began to move: null until the graphics card has drawn its first picture. */
+  start: number | null
+  /** The mark put behind that first picture, and when. */
+  mark: { sync: WebGLSync | null; at: number } | null
+}
+
 interface Entry {
   key: string
   url: string
   state: 'loading' | 'ready' | 'error'
   mesh: Mesh | null
   hasColour: boolean
+  /** The photo over the front of the head, a child of `mesh`; null in a file without one. */
+  photo: Mesh | null
   abort: AbortController
   /** When it was last on screen (a counter): the least recent goes first. */
   used: number
@@ -96,6 +136,10 @@ interface StageEvents {
   onView: (view: HeadView) => void
   onState: (state: StageState) => void
   onLost: (lost: boolean) => void
+  /** A look's head was read: whether it has a photo over it that can be drawn. The server may list a look as
+   *  carrying its photo when the picture inside the file cannot be decoded here; the head then shows its own
+   *  colours, and whoever offers a "Photo" switch should know. */
+  onPhoto?: (key: string, drawn: boolean) => void
 }
 
 class HeadStage {
@@ -110,15 +154,19 @@ class HeadStage {
   private readonly soft = new HemisphereLight(0xffffff, GROUND, 1)
   private readonly skin = new MeshStandardMaterial({ vertexColors: true, roughness: 0.9, metalness: 0, side: DoubleSide })
   private readonly clay = new MeshStandardMaterial({ color: CLAY, roughness: 0.9, metalness: 0, side: DoubleSide })
-  private readonly loader = new GLTFLoader()
+  private readonly loader = new GLTFLoader(keptInside())
   private readonly observer: ResizeObserver
   private readonly entries = new Map<string, Entry>() // by mesh URL
   private urls = new Map<string, string>() // look key -> mesh URL
   private wanted: string | null = null
   private shown: string | null = null
-  private fade: { from: string; to: string; start: number } | null = null
+  private fade: Fade | null = null
   private view: HeadView
+  private brightness = 1
   private colour = true
+  private photo = true
+  /** A look of the model carries its photo: the whole model gets the even light. */
+  private photoModel = false
   private spin = false
   private dragging = false
   private placing = false
@@ -169,6 +217,7 @@ class HeadStage {
     this.observer = new ResizeObserver(this.resize)
     this.observer.observe(host)
     window.addEventListener('resize', this.resize) // a zoomed page changes the pixel ratio, not the box
+    this.relight()
     this.setBackground()
     this.resize()
   }
@@ -176,13 +225,12 @@ class HeadStage {
   // ---------------------------------------------------------------- what the component sets
   setLooks(looks: Look3d[]): void {
     this.urls = new Map(looks.map((l) => [l.key, l.mesh_url]))
+    this.photoModel = looks.some((l) => l.textured === true)
+    this.relight()
     const live = new Set(this.urls.values())
     for (const entry of [...this.entries.values()]) {
-      if (live.has(entry.url)) continue
       // a look of an older model, or one that is no longer listed
-      if (this.fade && (this.fade.from === entry.key || this.fade.to === entry.key)) this.stopFade()
-      if (this.shown === entry.key) this.shown = null
-      this.drop(entry)
+      if (!live.has(entry.url)) this.forget(entry)
     }
     this.advance()
     this.requestFrame()
@@ -212,14 +260,26 @@ class HeadStage {
     const h = rad(light.height)
     // in the camera's own space: +X is the viewer's right, +Y up, +Z towards the viewer
     this.lamp.position.set(Math.sin(a) * Math.cos(h), Math.sin(h), Math.cos(a) * Math.cos(h))
-    this.lamp.intensity = Math.PI * LAMP * light.brightness
-    this.soft.intensity = Math.PI * SOFT * light.brightness
+    this.brightness = light.brightness
+    this.relight()
     this.requestFrame()
   }
 
+  /** Off shows the bare shape: no colours and no photo. */
   setColour(on: boolean): void {
     this.colour = on
-    for (const entry of this.entries.values()) if (entry.mesh) entry.mesh.material = this.materialFor(entry)
+    for (const entry of this.entries.values()) {
+      if (entry.mesh) entry.mesh.material = this.materialFor(entry)
+      if (entry.photo) entry.photo.visible = this.colour && this.photo
+    }
+    this.relight()
+    this.requestFrame()
+  }
+
+  /** Off hides the photo over the heads at once: what shows is the head's own colours underneath. */
+  setPhoto(on: boolean): void {
+    this.photo = on
+    for (const entry of this.entries.values()) if (entry.photo) entry.photo.visible = this.colour && this.photo
     this.requestFrame()
   }
 
@@ -242,6 +302,7 @@ class HeadStage {
 
   dispose(): void {
     this.disposed = true
+    this.stopFade()
     cancelAnimationFrame(this.frameId)
     window.clearTimeout(this.reportTimer)
     this.observer.disconnect()
@@ -271,6 +332,23 @@ class HeadStage {
     return this.colour && entry.hasColour ? this.skin : this.clay
   }
 
+  /** How strong the two lights are. One rule for the whole model, so the light is the same for every look and on
+   *  both sides of a fade: a model with a head that carries its photo is lit evenly, one without as before. The
+   *  bare shape (Colour off) has no light of its own in it and is always lit as before. */
+  private relight(): void {
+    const even = this.photoModel && this.colour
+    this.lamp.intensity = Math.PI * (even ? PHOTO_LAMP : LAMP) * this.brightness
+    this.soft.intensity = Math.PI * (even ? PHOTO_SOFT : SOFT) * this.brightness
+    this.soft.groundColor.setHex(even ? PHOTO_GROUND : GROUND)
+  }
+
+  /** Let a head go that may be on screen: the picture goes with it. */
+  private forget(entry: Entry): void {
+    if (this.fade && (this.fade.from === entry.key || this.fade.to === entry.key)) this.stopFade()
+    if (this.shown === entry.key) this.shown = null
+    this.drop(entry)
+  }
+
   /** Move towards showing the wanted look: fetch it (also while a fade runs), then, once no fade is running,
    *  show it at once or start the fade to it. */
   private advance(): void {
@@ -281,7 +359,7 @@ class HeadStage {
       const entry = this.entries.get(url) ?? this.load(key, url)
       if (!this.fade && entry.state === 'ready') {
         const from = this.entryOf(this.shown)
-        if (from?.mesh && this.fadeMs() > 0) this.fade = { from: from.key, to: key, start: performance.now() }
+        if (from?.mesh && this.fadeMs() > 0) this.fade = { from: from.key, to: key, start: null, mark: null }
         else this.show(key)
         this.requestFrame()
       }
@@ -297,6 +375,7 @@ class HeadStage {
   }
 
   private stopFade(): void {
+    if (this.fade?.mark?.sync) this.gl().deleteSync(this.fade.mark.sync)
     this.fade = null
     this.copy.style.opacity = '0'
   }
@@ -307,7 +386,9 @@ class HeadStage {
   }
 
   private load(key: string, url: string): Entry {
-    const entry: Entry = { key, url, state: 'loading', mesh: null, hasColour: false, abort: new AbortController(), used: 0 }
+    const entry: Entry = {
+      key, url, state: 'loading', mesh: null, hasColour: false, photo: null, abort: new AbortController(), used: 0,
+    }
     this.entries.set(url, entry)
     void (async () => {
       try {
@@ -318,16 +399,19 @@ class HeadStage {
           release(gltf.scene)
           return
         }
-        const geometry = takeGeometry(gltf.scene)
-        entry.hasColour = geometry.hasAttribute('color')
-        entry.mesh = this.meshOf(geometry, this.materialFor(entry))
+        const parts = takeParts(gltf.scene)
+        entry.hasColour = parts.head.hasAttribute('color')
+        entry.mesh = this.meshOf(parts.head, this.materialFor(entry))
+        if (parts.photo) entry.photo = this.photoOf(parts.photo.geometry, parts.photo.map, entry.mesh)
         entry.state = 'ready'
         this.scene.add(entry.mesh)
+        this.events.onPhoto?.(key, entry.photo !== null)
       } catch {
         if (this.disposed || this.entries.get(url) !== entry) return
         entry.state = 'error'
       }
       this.advance()
+      this.tidy() // a head the owner has moved on from meanwhile counts among the kept ones at once
     })()
     return entry
   }
@@ -347,8 +431,50 @@ class HeadStage {
     return mesh
   }
 
+  /** The photo over the front of a head: the head's own surface again, so it hangs on the head's mesh (the same
+   *  place and size, from the head's own box, and hidden with it). Its vertex colours carry how much of the photo
+   *  shows (alpha); it is blended over the head, a hair in front of it so the two never fight for a pixel, and
+   *  writes no depth. The texture is the file's own, as the loader set it up (its colours, its way up). */
+  private photoOf(geometry: BufferGeometry, map: Texture, head: Mesh): Mesh {
+    if (!geometry.hasAttribute('normal')) geometry.computeVertexNormals()
+    map.anisotropy = this.renderer.capabilities.getMaxAnisotropy() // sharp when the surface turns away
+    map.needsUpdate = true
+    // Once the picture is on the graphics card the decoded copy is not needed: closing it gives its memory back
+    // (as much again as the texture). It cannot be put there a second time, so when the browser takes the
+    // graphics memory away such a head is let go and fetched again (onContextLost).
+    map.onUpdate = () => {
+      map.onUpdate = null
+      closePicture(map)
+    }
+    const material = new MeshStandardMaterial({
+      map,
+      vertexColors: geometry.hasAttribute('color'),
+      roughness: 0.9,
+      metalness: 0,
+      side: FrontSide,
+      transparent: true,
+      depthWrite: false,
+      polygonOffset: true,
+      polygonOffsetFactor: -1,
+      polygonOffsetUnits: -2,
+    })
+    const mesh = new Mesh(geometry, material)
+    mesh.renderOrder = 1
+    mesh.visible = this.colour && this.photo
+    head.add(mesh)
+    return mesh
+  }
+
   private drop(entry: Entry): void {
     entry.abort.abort()
+    if (entry.photo) {
+      const material = entry.photo.material as MeshStandardMaterial
+      entry.photo.removeFromParent()
+      entry.photo.geometry.dispose()
+      freeTexture(material.map) // the material does not let go of its texture by itself
+      material.dispose()
+      entry.photo = null
+    }
     if (entry.mesh) {
       this.scene.remove(entry.mesh)
       entry.mesh.geometry.dispose()
@@ -357,11 +483,24 @@ class HeadStage {
     if (this.entries.get(entry.url) === entry) this.entries.delete(entry.url)
   }
 
-  /** Let go of the meshes that were on screen longest ago. */
+  /** Let go of the heads that are not on screen, but for the KEEP_MESHES that were there last, at most KEEP_PHOTOS
+   *  of them with a photo. Of heads that were never on screen, the ones fetched last count as the latest. */
   private tidy(): void {
     const busy = new Set([this.shown, this.wanted, this.fade?.from, this.fade?.to])
-    const idle = [...this.entries.values()].filter((e) => e.state === 'ready' && !busy.has(e.key)).sort((a, b) => a.used - b.used)
-    for (const entry of idle.slice(0, Math.max(0, idle.length - KEEP_MESHES))) this.drop(entry)
+    const idle = [...this.entries.values()]
+      .reverse()
+      .filter((e) => e.state === 'ready' && !busy.has(e.key))
+      .sort((a, b) => b.used - a.used)
+    let kept = 0
+    let photos = 0
+    for (const entry of idle) {
+      if (kept >= KEEP_MESHES || (entry.photo && photos >= KEEP_PHOTOS)) {
+        this.drop(entry)
+        continue
+      }
+      kept += 1
+      if (entry.photo) photos += 1
+    }
   }
 
   private tell(): void {
@@ -480,15 +619,25 @@ class HeadStage {
 
   private draw(now: number): void {
     if (this.fade) {
-      const t = (now - this.fade.start) / FADE_MS
+      const fade = this.fade
+      // The fade begins to move once the graphics card has drawn its first picture. A look's shapes and its photo
+      // go there when the look is first drawn, which takes a moment on a phone, and drawing does not wait for
+      // it: that moment passes under the old look, still whole on top, and not as a jump in the middle of the
+      // fade.
+      if (fade.start === null && fade.mark && this.reached(fade.mark, now)) {
+        fade.start = now
+        fade.mark = null
+      }
+      const t = fade.start === null ? 0 : (now - fade.start) / FADE_MS
       if (t < 1) {
         // the old look, copied on top; then the new look underneath; the copy fades out
-        this.only(this.fade.from)
+        this.only(fade.from)
         this.renderer.render(this.scene, this.camera)
         this.copyContext?.drawImage(this.canvas, 0, 0, this.copy.width, this.copy.height)
         this.copy.style.opacity = String(1 - smooth(Math.max(0, t)))
-        this.only(this.fade.to)
+        this.only(fade.to)
         this.renderer.render(this.scene, this.camera)
+        if (fade.start === null && !fade.mark) fade.mark = this.markNow(now)
         return
       }
       const to = this.fade.to
@@ -500,43 +649,111 @@ class HeadStage {
     this.renderer.render(this.scene, this.camera)
   }
 
+  /** Make this look the one that is drawn (the photo over a head hangs on it and goes with it). */
   private only(key: string | null): void {
     for (const entry of this.entries.values()) if (entry.mesh) entry.mesh.visible = entry.key === key
   }
 
+  private gl(): WebGL2RenderingContext {
+    return this.renderer.getContext() as WebGL2RenderingContext // three.js draws with WebGL 2 only
+  }
+
+  /** Put a mark behind everything the graphics card was sent so far. */
+  private markNow(now: number): NonNullable<Fade['mark']> {
+    const gl = this.gl()
+    const sync = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0)
+    gl.flush()
+    return { sync, at: now }
+  }
+
+  /** Whether the graphics card has come to the mark (asked once a frame, without waiting), or will not say:
+   *  no mark could be made, the context is gone, or it took too long. */
+  private reached(mark: NonNullable<Fade['mark']>, now: number): boolean {
+    const gl = this.gl()
+    const done =
+      !mark.sync || now - mark.at > SENT_MS || gl.isContextLost() || gl.getSyncParameter(mark.sync, gl.SYNC_STATUS) === gl.SIGNALED
+    if (done && mark.sync) gl.deleteSync(mark.sync)
+    return done
+  }
+
   private readonly onContextLost = (event: Event): void => {
     event.preventDefault() // so the browser may give the context back
+    // When it comes back, the shapes go to the graphics card again from what the page holds. A photo cannot: its
+    // picture was closed once it was there (photoOf). So the heads that carry one are let go now, while nothing
+    // is on the card to be taken off it, and the wanted one is fetched again when the context is back.
+    for (const entry of [...this.entries.values()]) if (entry.photo) this.forget(entry)
     this.events.onLost(true)
+    this.tell()
   }
 
   private readonly onContextRestored = (): void => {
+    this.setBackground() // three.js starts over with a black one
     this.events.onLost(false)
+    this.advance()
     this.requestFrame()
   }
 }
 
-/** The first mesh's geometry of a loaded file; its other parts are let go. */
-function takeGeometry(root: Object3D): BufferGeometry {
-  let found: Mesh | null = null
+/** A head file is whole in itself: its picture sits inside it, and the loader reads that through a blob: address
+ *  of its own making. So a loader for heads follows no other address. A file whose description named one (for a
+ *  buffer or a picture) would otherwise have this page fetch it, with whatever the address carries, and the files
+ *  come from a generator that runs other people's model code without a network of its own. The server refuses
+ *  such a file as well; this is the second lock. */
+function keptInside(): LoadingManager {
+  const manager = new LoadingManager()
+  manager.setURLModifier((url) => (/^(blob|data):/i.test(url) ? url : 'data:,'))
+  return manager
+}
+
+/** The parts of a loaded file. The head is the first mesh without a texture (the first mesh when all have one).
+ *  The photo is the first other mesh that has both a texture and the coordinates to place it: a layer whose
+ *  texture could not be read is left out, and the head then shows its own colours there. The rest is let go. */
+function takeParts(root: Object3D): { head: BufferGeometry; photo: { geometry: BufferGeometry; map: Texture } | null } {
+  const meshes: Mesh[] = []
   root.traverse((node) => {
-    if (found === null && (node as Mesh).isMesh && (node as Mesh).geometry.hasAttribute('position')) found = node as Mesh
+    const mesh = node as Mesh
+    if (mesh.isMesh && mesh.geometry.hasAttribute('position')) meshes.push(mesh)
   })
-  const mesh = found as Mesh | null
-  if (mesh === null) {
+  const head = meshes.find((m) => !mapOf(m)) ?? meshes[0]
+  if (!head) {
     release(root)
     throw new Error('no mesh in the file')
   }
-  const geometry = mesh.geometry
-  release(root, geometry)
-  return geometry
+  const layer = meshes.find((m) => m !== head && mapOf(m) && m.geometry.hasAttribute('uv'))
+  const map = layer ? mapOf(layer) : null
+  const photo = layer && map ? { geometry: layer.geometry, map } : null
+  release(root, photo ? [head.geometry, photo.geometry] : [head.geometry], photo?.map)
+  return { head: head.geometry, photo }
 }
 
-function release(root: Object3D, keep?: BufferGeometry): void {
+function mapOf(mesh: Mesh): Texture | null {
+  const material = Array.isArray(mesh.material) ? mesh.material[0] : mesh.material
+  return (material as MeshStandardMaterial | undefined)?.map ?? null
+}
+
+/** Close a texture's decoded picture: it holds its pixels until then. Closing twice does nothing. */
+function closePicture(map: Texture): void {
+  ;(map.image as { close?: () => void } | null)?.close?.()
+}
+
+/** Let a texture go, with its picture (but not a picture that the kept texture shows too). */
+function freeTexture(map: Texture | null | undefined, keep?: Texture): void {
+  if (!map) return
+  map.dispose()
+  if (map.image !== keep?.image) closePicture(map)
+}
+
+/** Let go of everything a loaded file holds, but for the geometries and the texture that are kept. */
+function release(root: Object3D, keep: BufferGeometry[] = [], keepMap?: Texture): void {
   root.traverse((node) => {
     const mesh = node as Mesh
     if (!mesh.isMesh) return
-    if (mesh.geometry !== keep) mesh.geometry.dispose()
-    for (const material of Array.isArray(mesh.material) ? mesh.material : [mesh.material]) material.dispose()
+    if (!keep.includes(mesh.geometry)) mesh.geometry.dispose()
+    for (const material of Array.isArray(mesh.material) ? mesh.material : [mesh.material]) {
+      const map = (material as MeshStandardMaterial).map
+      if (map && map !== keepMap) freeTexture(map, keepMap)
+      material.dispose()
+    }
   })
 }
 
@@ -548,9 +765,11 @@ export default function Head3dViewer({
   onView,
   light,
   colour,
+  photo = true,
   spin,
   onSupport,
   onLoadError,
+  onPhoto,
   checking = false,
 }: {
   ref?: Ref<Head3dHandle>
@@ -564,6 +783,8 @@ export default function Head3dViewer({
   light: HeadLight
   /** Off shows the bare shape. */
   colour: boolean
+  /** Off hides the photo over a head that carries one, and shows the colours underneath. */
+  photo?: boolean
   spin: boolean
   /** Told once: whether this browser can draw 3D at all. */
   onSupport?: (ok: boolean) => void
@@ -571,6 +792,9 @@ export default function Head3dViewer({
    *  look (its photo went to the trash or the vault, or the face left the person): the model's status is worth
    *  reading again. */
   onLoadError?: () => void
+  /** A look's head was read: whether a photo is drawn over it. False for a look listed with its photo means the
+   *  picture in its file could not be decoded here. */
+  onPhoto?: (key: string, drawn: boolean) => void
   /** That reading is going on: a head that failed waits for the answer before "Try again" is offered, because a
    *  look that is gone drops out of `looks` instead. */
   checking?: boolean
@@ -588,6 +812,7 @@ export default function Head3dViewer({
   })
   const tellSupport = useStableCallback((ok: boolean) => onSupport?.(ok))
   const tellLoadError = useStableCallback(() => onLoadError?.())
+  const tellPhoto = useStableCallback((key: string, drawn: boolean) => onPhoto?.(key, drawn))
   const active = looks.find((l) => l.key === lookKey) ?? looks[0]
 
   useEffect(() => {
@@ -595,7 +820,7 @@ export default function Head3dViewer({
     if (!el) return
     let made: HeadStage
     try {
-      made = new HeadStage(el, startView.current, { onView: tellView, onState: setState, onLost: setLost })
+      made = new HeadStage(el, startView.current, { onView: tellView, onState: setState, onLost: setLost, onPhoto: tellPhoto })
     } catch {
       setSupported(false)
       tellSupport(false)
@@ -607,7 +832,7 @@ export default function Head3dViewer({
       stage.current = null
       made.dispose()
     }
-  }, [tellView, tellSupport])
+  }, [tellView, tellSupport, tellPhoto])
 
   // These run after the stage is made (effects run in order), and again whenever their value changes.
   useEffect(() => {
@@ -622,6 +847,9 @@ export default function Head3dViewer({
   useEffect(() => {
     stage.current?.setColour(colour)
   }, [colour])
+  useEffect(() => {
+    stage.current?.setPhoto(photo)
+  }, [photo])
   useEffect(() => {
     stage.current?.setSpin(spin)
   }, [spin])

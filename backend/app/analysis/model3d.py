@@ -1,16 +1,36 @@
 """3D heads of a person, one per look (docs/ARCHITECTURE.md section 36): the job, its state and the stored model.
 
 Nothing here runs until the owner presses Generate (start()). The job plans the looks (app.analysis.looks), writes a
-head-and-shoulders picture per look, and starts the generator: a separate program with its own Python environment
-(the gen3d package at the repo root, settings GEN3D_*), as a child process that lives only while the job runs, so
-PyTorch stays out of the server and the GPU and the memory are free the rest of the time.
+head-and-shoulders picture per look at the photo's own resolution (1024 to 3072 px a side), and starts the
+generator: a separate program with its own Python environment (the gen3d package at the repo root, settings
+GEN3D_*), as a child process that lives only while the job runs, so PyTorch stays out of the server and the GPU and
+the memory are free the rest of the time.
+
+Options (OPTION_KEYS, clean_options): max_looks, detail, framing, and for the generator's finishing of a head
+`smoothing` (0 off, 1 light, 2 normal, 3 strong), `texture` (0 colours only; 1 and 2 the photo laid over the
+front as a texture of at most 1024 and 2048 px; 3 the photo at its own size, which is the picture's: at most
+3072 px) and `relief` (1: the face's shape corrected from a depth model when its files are installed; 0: not).
+The last three are the generator's to act on: the server passes them on in the job file, with `framing` (the
+relief finds the face by it) and the memory the child may hold (`max_rss_mb`).
 
 Files, under DATA_DIR/people3d/<person id>/:
   current              the name of the folder in use (a time stamp)
   <stamp>/model.json   the manifest: {rev, person_id, generated_at, seconds, generator{name, version}, options,
-                       birth_year, scanned, usable, looks: [{key, label, age, age_band, hair, hair_label, facial_hair,
-                       facial_hair_label, photos, face_id, item_id, item_uid, taken_at, faults, mesh, picture, bytes,
-                       vertices, faces}]}
+                       birth_year, scanned, usable, peak_rss_mb, generator_memory_mb{peak, with_model, released},
+                       looks: [{key, label, age, age_band, hair, hair_label,
+                       facial_hair, facial_hair_label, photos, face_id, item_id, item_uid, taken_at, faults, mesh,
+                       picture, bytes, vertices, faces, textured, texture, overlap, overlap_head, relief,
+                       note}]}. `textured`: the head carries the photo as a texture; `texture` its [width,
+                       height]; `overlap` how well the head's outline covered the person's in the picture, and
+                       `overlap_head` the same over the head alone (kept here to judge a run by: the generator's
+                       own result file goes with the work folder); `relief`: the face's shape was corrected
+                       from the depth model; `note` the generator's remark on the look (why a photo was not
+                       used, or why the face was not shaped). A manifest written before the finishing existed
+                       has none of the six, nor the three newer options: it reads as not textured and without
+                       relief, and the status leaves the three options out. `peak_rss_mb` is what the server saw
+                       the child's process tree hold at most; `generator_memory_mb` is the generator's own
+                       count: its peak, what it held with the model loaded, and what it held once the model was
+                       let go and before the heads were finished (kept to judge a run by, like the overlaps).
   <stamp>/<key>.glb    a look's mesh;  <stamp>/<key>.jpg  the picture it was made from (512 px)
   work/                the job's scratch folder (pictures, job.json, out/), removed when the job ends
   error.json           why the last run failed, until the next start
@@ -31,18 +51,30 @@ One job at a time for the whole app (one GPU). A look is neither listed nor serv
 in the trash or in the vault, or once its source face is no longer this person's. Folders of people who no longer
 exist, and what an interrupted run left behind, are removed by sweep() (housekeeping); a deleted person's model
 stops being served at once, as its routes ask for the person first.
+
+A head holds the photo's own pixels as its texture, so its files follow the photo:
+- the files are served with "private, no-cache" and an ETag (app.api.model3d), so a browser asks before every use
+  and a look that stopped being listed is not shown again from its cache;
+- sweep() removes the mesh and the picture of a look whose photo is gone for good (its item row no longer exists:
+  the trash was emptied, or the photo was deleted outright) and takes the look out of model.json; when no look is
+  left the model goes;
+- a look whose photo is in the trash or the vault, or whose face is no longer this person's, keeps its files on
+  disk, unlisted and unserved, because the photo or the face can come back; they go with the next generation, with
+  Delete, with the person, or when the photo is gone for good.
 """
 from __future__ import annotations
 
 import atexit
 import json
 import logging
+import math
 import os
 import queue
 import re
 import shutil
 import signal
 import sqlite3
+import stat
 import struct
 import subprocess
 import sys
@@ -74,12 +106,24 @@ LOOK_FACE_IOU = 0.5        # how much one of the person's faces must overlap a l
 STOP_WAIT_S = 5.0
 EXIT_WAIT_S = 30.0         # after its last line the child has this long to exit by itself
 DETAIL_MIN, DETAIL_MAX, DETAIL_DEFAULT = 1, 3, 2
+SMOOTHING_MIN, SMOOTHING_MAX, SMOOTHING_DEFAULT = 0, 3, 2   # the finishing's smoothing: off, light, normal, strong
+TEXTURE_MIN, TEXTURE_MAX, TEXTURE_DEFAULT = 0, 3, 2         # colours only; the photo to 1024, to 2048, at its own size
+RELIEF_MIN, RELIEF_MAX, RELIEF_DEFAULT = 0, 1, 1            # the face's shape from a depth model: off, on
+NOTE_MAX = 200             # characters of a look's note that are kept
 SANDBOX_BIN = "bwrap"
-OPTION_KEYS = ("max_looks", "detail", "framing")
+OPTION_KEYS = ("max_looks", "detail", "framing", "smoothing", "texture", "relief")
+FIRST_OPTIONS = ("max_looks", "detail", "framing")   # every model has these; the rest came with the finishing
+JOB_ONLY = ("inside",)     # keys of a look's row that go into the job file and not into model.json
 
 STEP_LOOKS = "Finding looks"
 STEP_PHOTOS = "Preparing photos"
-STEP_BUILD = "Building heads"
+CHILD_SAYS = ("progress:", "made:", "look:")   # the lines of the child's output the watch reads (gen3d/__main__.py)
+CHILD_LINE_MAX = 4096      # bytes of one line of the child's output that are read; the rest of a longer line is skipped
+CHILD_LINES = 1000         # lines the watch may be behind before the child waits
+TAIL_BYTES = 8192          # of the child's error output, from its end, that are read for the reason it gave
+RESULT_MAX_BYTES = 4_000_000   # a result file larger than this is not read (a job of 12 looks writes about 4 kB)
+STEP_BUILD = "Building heads"       # the child's first pass: the model makes every look's raw head
+STEP_FINISH = "Finishing heads"     # its second: each head is smoothed, shaped, given its photo and written
 STEP_SAVE = "Saving"
 
 
@@ -106,6 +150,7 @@ class _Failed(Exception):
 _lock = threading.Lock()
 _state: dict[str, Any] | None = None       # the running job, or None
 _proc: subprocess.Popen[bytes] | None = None
+_peak_mb = 0.0                             # the most memory the last child's process tree was seen to hold
 _check: tuple[float, tuple[Any, ...], dict[str, Any]] | None = None
 _checking = False
 _atexit_done = False
@@ -152,7 +197,8 @@ def file_url(person_id: int, rev: str, name: str) -> str:
 
 # ------------------------------------------------------------------ the generator and its sandbox
 def _python(fake: bool = False) -> Path:
-    """The Python that runs the generator. The stand-in needs only numpy and Pillow, so it runs with the server's
+    """The Python that runs the generator. The stand-in and the finishing of its heads need only what the server
+    has itself (numpy, Pillow, OpenCV), so it runs with the server's
     own Python however it was asked for (GEN3D_FAKE, GEN3D_GENERATOR=fake, or the job's own option); the real
     generator runs with GEN3D_PYTHON, or GEN3D_DIR/venv/bin/python."""
     if fake or settings.gen3d_fake or settings.gen3d_generator == "fake":
@@ -320,17 +366,19 @@ def _command(args: list[str], work: Path, fake: bool) -> list[str]:
 
 
 def generator(refresh: bool = False) -> dict[str, Any]:
-    """{"installed", "name", "device", "reason"}: what a Generate would run with. The real generator is asked with
-    `python -m gen3d --check`, which only looks at files, and the answer is remembered for CHECK_TTL_S
-    (CHECK_RETRY_S while it is missing). A status read waits for that at most once: after the first answer an old
-    one is given at once and a new one is fetched in the background. start() asks again itself (`refresh`)."""
+    """{"installed", "name", "device", "reason", "relief"}: what a Generate would run with. `relief`: the two depth
+    model files the face relief needs are installed (None when the generator does not say: the stand-in, an
+    older generator, a failed check). The real generator is asked with `python -m gen3d --check`, which only looks
+    at files, and the answer is remembered for CHECK_TTL_S (CHECK_RETRY_S while it is missing). A status read waits
+    for that at most once: after the first answer an old one is given at once and a new one is fetched in the
+    background. start() asks again itself (`refresh`)."""
     fake = bool(settings.gen3d_fake) or settings.gen3d_generator == "fake"
     if fake:
         try:
             sandbox_wanted(True)
         except GeneratorMissing as e:
-            return {"installed": False, "name": None, "device": None, "reason": str(e)}
-        return {"installed": True, "name": "fake", "device": "cpu", "reason": None}
+            return {"installed": False, "name": None, "device": None, "reason": str(e), "relief": None}
+        return {"installed": True, "name": "fake", "device": "cpu", "reason": None, "relief": None}
     python = _python()
     key = (str(python), str(_weights_dir()), settings.gen3d_generator, settings.gen3d_sandbox)
     with _lock:
@@ -377,7 +425,7 @@ MISSING = "The 3D generator is not installed. Run scripts/setup_3d.sh once on th
 def _ask_generator(python: Path) -> dict[str, Any]:
     """Ask the generator's own Python what is installed. The check runs as a job does: inside the sandbox when that
     is wanted, with an empty folder of its own as the only place it may write (never the models' folder)."""
-    missing = {"installed": False, "name": None, "device": None, "reason": MISSING}
+    missing = {"installed": False, "name": None, "device": None, "reason": MISSING, "relief": None}
     if not python.is_file():
         return missing
     scratch = storage.tmp_path(".gen3d-check")
@@ -391,7 +439,7 @@ def _ask_generator(python: Path) -> dict[str, Any]:
         info = json.loads(lines[-1]) if lines else None
         if not isinstance(info, dict):
             log.warning("3D heads: the generator's check said nothing (exit %s): %s", done.returncode,
-                        done.stderr.decode("utf-8", "replace")[-300:])
+                        _plain(done.stderr[-TAIL_BYTES:].decode("utf-8", "replace"))[-300:])
     except GeneratorMissing as e:
         return {**missing, "reason": str(e)}
     except (OSError, ValueError, subprocess.TimeoutExpired) as e:
@@ -406,7 +454,9 @@ def _ask_generator(python: Path) -> dict[str, Any]:
     name = info.get("auto") if wanted == "auto" else (wanted if found.get(wanted) else None)
     if not name:
         return missing
-    return {"installed": True, "name": str(name), "device": info.get("device"), "reason": None}
+    relief = info.get("relief")
+    return {"installed": True, "name": str(name), "device": info.get("device"), "reason": None,
+            "relief": relief if isinstance(relief, bool) else None}
 
 
 # ------------------------------------------------------------------ status
@@ -484,16 +534,24 @@ def status(conn: sqlite3.Connection, person_id: int) -> dict[str, Any]:
     rev = doc.get("rev") if doc else None
     out_looks = []
     for lk in shown:
-        out_looks.append({
+        row = {
             **{k: lk.get(k) for k in ("key", "label", "age", "age_band", "hair", "hair_label", "facial_hair",
                                       "facial_hair_label", "photos", "taken_at", "item_uid", "bytes", "vertices")},
             "picture_url": file_url(person_id, rev, lk["picture"]),
             "mesh_url": file_url(person_id, rev, lk["mesh"]),
-        })
+            "textured": lk.get("textured") is True,  # a head made before the finishing existed has no such key
+            "relief": lk.get("relief") is True,
+        }
+        note = _note(lk.get("note"))
+        if note:
+            row["note"] = note
+        out_looks.append(row)
     return {
         "available": reason is None,
         "reason": reason,
         "generator": gen["name"],
+        # the depth model files of the face relief are there: false tells the owner why no head gets one
+        "relief_installed": gen.get("relief"),
         "usable_photos": photos,
         "state": "running" if mine else "done" if out_looks else "error" if error else "none",
         "busy": job is not None and not mine,
@@ -501,19 +559,54 @@ def status(conn: sqlite3.Connection, person_id: int) -> dict[str, Any]:
         "progress": {"step": job["step"], "done": job["done"], "total": job["total"]} if mine else None,
         "error": error,
         "generated_at": doc.get("generated_at") if doc and out_looks else None,
-        "options": (doc.get("options") or None) if doc and out_looks else None,
+        "options": shown_options(doc.get("options")) if doc and out_looks else None,
         "looks": out_looks,
     }
 
 
+def shown_options(stored: Any) -> dict[str, Any] | None:
+    """The options a model was made with, as the status gives them: every option the manifest has, inside its
+    range. A model made before the finishing existed has no `smoothing`, `texture` or `relief`, and they are left
+    out here, not filled in: that is how the tab can tell that these heads predate the finishing (it fills its
+    sliders with the defaults for what is missing). None when the manifest holds no usable options."""
+    if not isinstance(stored, dict) or not all(k in stored for k in FIRST_OPTIONS):
+        return None
+    cleaned = clean_options(stored)
+    return {k: cleaned[k] for k in OPTION_KEYS if k in stored}
+
+
 # ------------------------------------------------------------------ start, cancel, remove
+def _number(value: Any, lo: float, hi: float, default: float, whole: bool) -> float:
+    """An option inside its range: a value outside is moved to the nearest end, and a value that is no number at
+    all (None, a word, a truth value, a list, not-a-number, infinity) gives the default. A whole option drops a
+    fraction (2.9 is 2), and a number written as text counts as that number."""
+    if isinstance(value, bool) or value is None:
+        return default
+    try:
+        number = float(int(value)) if whole else float(value)
+    except (TypeError, ValueError, OverflowError):
+        return default
+    if number != number or number in (float("inf"), float("-inf")):
+        return default
+    return max(lo, min(hi, number))
+
+
 def clean_options(options: dict[str, Any] | None) -> dict[str, Any]:
-    o = options or {}
+    """The options of a job, each inside its range (OPTION_KEYS; see _number for what a bad value becomes), and
+    `generator: "fake"` when the stand-in was asked for. Other keys are dropped."""
+    o = options if isinstance(options, dict) else {}
+
+    def whole(key: str, lo: int, hi: int, default: int) -> int:
+        return int(_number(o.get(key, default), lo, hi, default, True))
+
     out: dict[str, Any] = {
-        "max_looks": max(looks_mod.LOOKS_MIN, min(looks_mod.LOOKS_MAX, int(o.get("max_looks", looks_mod.LOOKS_DEFAULT)))),
-        "detail": max(DETAIL_MIN, min(DETAIL_MAX, int(o.get("detail", DETAIL_DEFAULT)))),
-        "framing": round(max(looks_mod.FRAMING_MIN, min(looks_mod.FRAMING_MAX,
-                                                         float(o.get("framing", looks_mod.FRAMING_DEFAULT)))), 2),
+        "max_looks": whole("max_looks", looks_mod.LOOKS_MIN, looks_mod.LOOKS_MAX, looks_mod.LOOKS_DEFAULT),
+        "detail": whole("detail", DETAIL_MIN, DETAIL_MAX, DETAIL_DEFAULT),
+        "framing": round(_number(o.get("framing", looks_mod.FRAMING_DEFAULT), looks_mod.FRAMING_MIN,
+                                 looks_mod.FRAMING_MAX, looks_mod.FRAMING_DEFAULT, False), 2),
+        "smoothing": whole("smoothing", SMOOTHING_MIN, SMOOTHING_MAX, SMOOTHING_DEFAULT),
+        "texture": whole("texture", TEXTURE_MIN, TEXTURE_MAX, TEXTURE_DEFAULT),
+        "relief": whole("relief", RELIEF_MIN, RELIEF_MAX, RELIEF_DEFAULT),
     }
     if o.get("generator") == "fake":
         out["generator"] = "fake"
@@ -576,11 +669,57 @@ def remove(conn: sqlite3.Connection, person_id: int) -> None:  # noqa: ARG001 - 
         storage.remove_tree(person_dir(person_id))
 
 
+def _drop_gone_looks(conn: sqlite3.Connection, person_id: int) -> int:
+    """Take the looks whose photo is gone for good out of the person's model: the item row no longer exists (the
+    trash was emptied, or the photo was deleted outright; an item id is never given out twice, and the uid is
+    compared as well). The manifest is rewritten without them first, then their mesh and picture are removed, and
+    so is any mesh or picture in the folder that the manifest does not name (what a run of this that was cut
+    short left). With no look left the model itself goes, and the person's folder with it unless that still holds
+    an error.json. A photo that is only in the trash or the vault still has its row, so its look stays as it is:
+    not listed, not served, its files kept. A manifest that does not read decides nothing. Returns how many looks
+    went. Call with _lock held and no job running."""
+    rev = current_rev(person_id)
+    doc = manifest(person_id)
+    if rev is None or doc is None:
+        return 0
+    folder = person_dir(person_id) / rev
+    looks = [lk for lk in doc["looks"] if isinstance(lk, dict)]
+    ids = sorted({int(lk.get("item_id") or 0) for lk in looks})
+    there: dict[int, str] = {}
+    for start in range(0, len(ids), 400):
+        part = ids[start:start + 400]
+        for row in conn.execute(f"SELECT id, uid FROM items WHERE id IN ({','.join('?' * len(part))})", part):
+            there[int(row["id"])] = str(row["uid"])
+    kept = [lk for lk in looks
+            if there.get(int(lk.get("item_id") or 0)) is not None
+            and (lk.get("item_uid") is None or there[int(lk.get("item_id") or 0)] == str(lk.get("item_uid")))]
+    gone = len(looks) - len(kept)
+    if gone and not kept:
+        storage.safe_unlink(person_dir(person_id) / "current")  # not listed from this moment
+        storage.remove_tree(folder)
+        try:
+            person_dir(person_id).rmdir()  # the person's folder too, unless it still holds an error.json
+        except OSError:
+            pass
+        return gone
+    if gone:
+        _write_json(folder / "model.json", {**doc, "looks": kept})
+    named = {str(lk.get(k)) for lk in kept for k in ("mesh", "picture")}
+    try:
+        entries = list(folder.iterdir())
+    except OSError:
+        return gone
+    for entry in entries:
+        if entry.is_file() and NAME_RE.fullmatch(entry.name) and entry.name not in named:
+            storage.safe_unlink(entry)
+    return gone
+
+
 def sweep(conn: sqlite3.Connection) -> int:
     """Housekeeping. Removes the model folders of people who no longer exist and, while no job runs, what an
     interrupted run left behind for everyone else: a work folder (a server that stopped in the middle of a job
-    never got to remove it) and model folders that `current` does not name. Returns how many people's folders
-    went."""
+    never got to remove it) and model folders that `current` does not name; and, of the models in use, the looks
+    whose photo is gone for good with their files (_drop_gone_looks). Returns how many people's folders went."""
     base = root()
     if not base.is_dir():
         return 0
@@ -597,6 +736,7 @@ def sweep(conn: sqlite3.Connection) -> int:
             storage.remove_tree(entry)
             gone += 1
     left = 0
+    looks_gone = 0
     with _lock:  # held, so no job can start and make a work folder while the leftovers go
         if _state is None:
             for entry in base.iterdir():
@@ -607,8 +747,14 @@ def sweep(conn: sqlite3.Connection) -> int:
                     if sub.is_dir() and (sub.name == "work" or (STAMP_RE.fullmatch(sub.name) and sub.name != keep)):
                         storage.remove_tree(sub)
                         left += 1
+                try:
+                    looks_gone += _drop_gone_looks(conn, int(entry.name))
+                except (OSError, sqlite3.Error, ValueError, TypeError):
+                    log.exception("3D heads: could not check the looks of person %s against their photos", entry.name)
     if left:
         log.info("3D heads: removed %d folders that interrupted runs left behind", left)
+    if looks_gone:
+        log.info("3D heads: removed %d looks whose photo is gone for good", looks_gone)
     return gone
 
 
@@ -711,12 +857,39 @@ def _cancelled() -> bool:
         return _state is None or bool(_state["cancel"])
 
 
-def _tail(path: Path, limit: int = 400) -> str:
+ESCAPES = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b[@-_]")   # what a terminal would act on: colours, cursor moves
+
+
+def _plain(text: str) -> str:
+    """Text from the child as one line of printable characters: a terminal's escape sequences are taken out
+    whole, any other character that is not printable becomes a space, and runs of spaces become one."""
+    return " ".join("".join(ch if ch.isprintable() else " " for ch in ESCAPES.sub("", text)).split())
+
+
+def _own_file(path: Path) -> bool:
+    """Whether `path` is a plain file of its own: there, regular, and not a link. Everything the server reads from
+    a job's work folder once the child is gone is asked this first. The child can write in that folder, and a
+    named pipe in a file's place would hold the job for ever, a link would have the server read another file
+    (its last line into the tab, its bytes into a model)."""
     try:
-        text = path.read_text(encoding="utf-8", errors="replace").strip()
+        return stat.S_ISREG(os.lstat(path).st_mode)
+    except OSError:
+        return False
+
+
+def _tail(path: Path, limit: int = 400) -> str:
+    """The last line of the child's error output, as plain printable text. Only the file's last TAIL_BYTES are
+    read: the child runs model code written by others, and its log may be of any size and hold anything."""
+    if not _own_file(path):
+        return ""
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            f.seek(max(0, f.tell() - TAIL_BYTES))
+            text = f.read().decode("utf-8", errors="replace")
     except OSError:
         return ""
-    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    lines = [ln for ln in (_plain(ln) for ln in text.splitlines()) if ln]
     return lines[-1][-limit:] if lines else ""
 
 
@@ -726,8 +899,10 @@ def _run_child(work: Path, job_path: Path, total: int, fake: bool,
     finished, why it ended badly or None): a child that was stopped at a limit, or that broke, may have finished
     some heads first. _Failed when it cannot be started, _Cancelled when `stopped` (Stop, Delete, the person gone)
     says so."""
-    global _proc, _atexit_done
+    global _proc, _atexit_done, _peak_mb
     stopped = stopped or _cancelled
+    with _lock:
+        _peak_mb = 0.0
     cmd = _command(["--job", str(job_path)], work, fake)
     err_path = work / "stderr.log"
     with open(err_path, "wb") as err:
@@ -741,13 +916,41 @@ def _run_child(work: Path, job_path: Path, total: int, fake: bool,
         if not _atexit_done:
             atexit.register(shutdown)
             _atexit_done = True
-    lines: queue.Queue[str | None] = queue.Queue()
+    lines: queue.Queue[str | None] = queue.Queue(maxsize=CHILD_LINES)
 
     def pump() -> None:
+        """The child's lines, as far as the watch reads them. The child runs model code written by others on the
+        same output, so nothing it prints may pile up here: a line is read up to CHILD_LINE_MAX bytes and the
+        rest of a longer one is skipped, only the three kinds of line the contract has are passed on, and when
+        the watch is behind by CHILD_LINES of them the child waits at its pipe."""
         assert proc.stdout is not None
-        for raw in proc.stdout:
-            lines.put(raw.decode("utf-8", "replace").strip())
-        lines.put(None)
+        out = proc.stdout
+        while True:
+            raw = out.readline(CHILD_LINE_MAX)
+            if not raw:
+                break
+            if not raw.endswith(b"\n"):         # longer than a line of the contract can be: skip to its end
+                while raw and not raw.endswith(b"\n"):
+                    raw = out.readline(CHILD_LINE_MAX)
+                continue
+            line = raw.decode("utf-8", "replace").strip()
+            if line.startswith(CHILD_SAYS) and not hand(line):
+                return                          # the watch has ended: nobody reads any more
+        hand(None)
+
+    watching = threading.Event()
+    watching.set()
+
+    def hand(line: str | None) -> bool:
+        """Put a line where the watch reads it, waiting while it is CHILD_LINES behind; False once the watch has
+        ended, so that this thread and the child's pipe never stay behind a full queue."""
+        while watching.is_set():
+            try:
+                lines.put(line, timeout=0.5)
+                return True
+            except queue.Full:
+                continue
+        return False
 
     threading.Thread(target=pump, name="pcc-model3d-out", daemon=True).start()
     limit_mb = float(settings.gen3d_max_rss_mb)
@@ -755,7 +958,14 @@ def _run_child(work: Path, job_path: Path, total: int, fake: bool,
     last_look = time.monotonic()
     reason: str | None = None
     finished: set[str] = set()
+    made = 0
     ended = False
+
+    def done_look(line: str) -> None:
+        words = line.split()
+        if len(words) >= 3 and words[2] == "ok":
+            finished.add(words[1])
+
     try:
         while not ended:
             try:
@@ -767,32 +977,52 @@ def _run_child(work: Path, job_path: Path, total: int, fake: bool,
             elif line.startswith("progress:"):
                 try:
                     done = int(line.split(":", 1)[1].split("/")[0])
-                    _set(step=STEP_BUILD, done=done, total=total)
                 except ValueError:
-                    pass
+                    done = 0
+                if done > 0:    # heads finished so far; the "0/M" at the start says nothing new
+                    _set(step=STEP_FINISH, done=min(done, total), total=total)
+            elif line.startswith("made:"):
+                # the first pass: the model is done with one more look. Nothing is finished by that, but the job
+                # is alive and that far, so the bar moves and the look's time starts again
+                made += 1
+                last_look = time.monotonic()
+                _set(step=STEP_BUILD, done=min(made, total), total=total)
             elif line.startswith("look:"):
                 last_look = time.monotonic()
-                words = line.split()
-                if len(words) >= 3 and words[2] == "ok":
-                    finished.add(words[1])
+                done_look(line)
             if ended:
                 break
             if stopped():
                 raise _Cancelled()
             used = tree_rss_mb(proc.pid)
+            if used > _peak_mb:
+                with _lock:
+                    _peak_mb = used
             if used > limit_mb:
                 reason = (f"The generator needed more memory than it may use ({int(used)} MB of {int(limit_mb)} MB) "
                           "and was stopped.")
                 break
             if time.monotonic() - last_look > timeout:
-                reason = f"A head took longer than {int(timeout // 60) or 1} minutes and the generator was stopped."
+                limit = f"{int(timeout // 60)} minutes" if timeout >= 120 else f"{int(timeout)} seconds"
+                reason = f"A head took longer than {limit} and the generator was stopped."
                 break
+        if reason is not None:
+            # Stopped at a limit. The watch reads one line a pass, so lines the child had already said may still
+            # wait in the queue: a head whose line is among them is finished and whole, and is kept like the rest
+            while True:
+                try:
+                    line = lines.get_nowait()
+                except queue.Empty:
+                    break
+                if line and line.startswith("look:"):
+                    done_look(line)
         if ended:  # it closed its output: let it exit by itself, so its exit code is its own
             try:
                 proc.wait(EXIT_WAIT_S)
             except subprocess.TimeoutExpired:
                 reason = "The generator did not exit and was stopped."
     finally:
+        watching.clear()
         _stop_child(proc)
         with _lock:
             _proc = None
@@ -801,7 +1031,16 @@ def _run_child(work: Path, job_path: Path, total: int, fake: bool,
     if reason is None and proc.returncode not in (0, 3):
         said = _tail(err_path)
         reason = f"The generator stopped with an error{': ' + said if said else f' (exit {proc.returncode})'}."
+    log.info("3D heads: the generator's memory was at most %d MB (sampled once a second; the limit is %d MB)",
+             int(_peak_mb), int(limit_mb))
     return finished, reason
+
+
+def peak_rss_mb() -> int:
+    """The most memory the last child's whole process tree was seen to hold, in MB (sampled once a second, so a
+    short spike can be missed). It goes into model.json, where it says how near the job came to GEN3D_MAX_RSS_MB."""
+    with _lock:
+        return int(round(_peak_mb))
 
 
 # ------------------------------------------------------------------ the job
@@ -814,17 +1053,25 @@ def _write_json(path: Path, doc: dict[str, Any]) -> None:
 
 
 def _prepare(conn: sqlite3.Connection, plan: looks_mod.Plan, work: Path, framing: float) -> list[dict[str, Any]]:
-    """Write each look's picture (the look's best photo, else a runner-up whose pixels read) and return the looks
-    that have one, as manifest rows."""
+    """Write each look's picture (the look's best photo, else a runner-up whose pixels read), at the photo's own
+    resolution (looks.picture_side: 1024 to 3072 px a side; at 3072 that is 28 MB of pixels, a file of about 15 MB
+    for a photo and 28 MB at worst, written in about a second and a half), and return the looks that have one, as
+    manifest rows. The files live in the work folder, which goes when the job ends. Each row also carries
+    `inside`, for the job file only (JOB_ONLY): the part of the written picture that shows the photo itself
+    (looks.inside), or None when that is not known."""
     rows: list[dict[str, Any]] = []
     for n, look in enumerate(plan.looks, start=1):
         if _cancelled():
             raise _Cancelled()
         by_id = {r.face_id: r for r in plan.readings}
         chosen = None
+        inside = None
         for face_id in [look.face_id, *look.runners_up]:
-            if looks_mod.write_picture(conn, face_id, work / f"{look.key}.png", framing):
+            written = looks_mod.write_picture(conn, face_id, work / f"{look.key}.png", framing)
+            if written:
                 chosen = by_id.get(face_id)
+                if isinstance(written, tuple) and len(written) == 4:
+                    inside = [int(v) for v in written]
                 break
         _set(step=STEP_PHOTOS, done=n, total=len(plan.looks))
         if chosen is None:
@@ -834,39 +1081,216 @@ def _prepare(conn: sqlite3.Connection, plan: looks_mod.Plan, work: Path, framing
             "hair_label": look.hair_label, "facial_hair": look.facial_hair, "facial_hair_label": look.facial_hair_label,
             "photos": look.photos, "face_id": chosen.face_id, "item_id": chosen.item_id, "item_uid": chosen.item_uid,
             "taken_at": chosen.taken_at, "faults": list(chosen.faults), "box": [round(float(v), 5) for v in chosen.box],
+            "inside": inside,
         })
     return rows
 
 
-def _glb_counts(path: Path) -> tuple[int, int]:
-    """(vertices, triangles) as a .glb says them in its own description; (0, 0) when that cannot be read."""
+def _job_look(row: dict[str, Any], work: Path) -> dict[str, Any]:
+    """A look as the job file gives it to the generator: its key, its picture and, when it is known, `inside`:
+    [left, top, right, bottom] in pixels of that picture, the part that is the photo itself. Where the square of
+    the picture left the photo, the rest is the photo's edge repeated (up to looks.CUT_OFF_SHARE of the square);
+    the generator lays the photo on the head only inside this rectangle."""
+    look: dict[str, Any] = {"key": row["key"], "image": str(work / f"{row['key']}.png")}
+    if row.get("inside"):
+        look["inside"] = list(row["inside"])
+    return look
+
+
+def _glb_doc(path: Path) -> dict[str, Any] | None:
+    """A .glb's own description (its JSON part), or None when it cannot be read."""
     try:
         with open(path, "rb") as f:
             magic, _version, _total, n_json, kind = struct.unpack("<IIIII", f.read(20))
             if magic != 0x46546C67 or kind != 0x4E4F534A or n_json > 4_000_000:
-                return 0, 0
+                return None
             doc = json.loads(f.read(n_json).decode("utf-8"))
+        return doc if isinstance(doc, dict) else None
+    except (OSError, ValueError, struct.error, RecursionError):
+        return None
+
+
+def _glb_one_description(path: Path) -> dict[str, Any] | None:
+    """A .glb's description when the file is laid out as the generator's writer lays one out, else None: a plain
+    file of its own, the header's length the file's own, the description as the first chunk and no second one, and
+    the chunks ending exactly where the file ends. three.js keeps the last description of a file that has several,
+    so a check of the first alone could be led past with a second one behind the data."""
+    if not _own_file(path):
+        return None
+    try:
+        size = os.lstat(path).st_size
+        with open(path, "rb") as f:
+            magic, _version, total = struct.unpack("<III", f.read(12))
+            if magic != 0x46546C67 or total != size:
+                return None
+            at, doc = 12, None
+            while at < size:
+                f.seek(at)
+                length, kind = struct.unpack("<II", f.read(8))
+                if (at == 12) != (kind == 0x4E4F534A):       # the description first, and only once
+                    return None
+                if at == 12:
+                    if length > 4_000_000:
+                        return None
+                    doc = json.loads(f.read(length).decode("utf-8"))
+                at += 8 + length
+        return doc if at == size and isinstance(doc, dict) else None
+    except (OSError, ValueError, struct.error, RecursionError):
+        return None
+
+
+def _names_a_place(value: Any, depth: int = 0) -> bool:
+    """Whether a .glb's description names anything outside the file: a `uri` anywhere in it."""
+    if depth > 40:
+        return True                     # nothing the writer makes is this deep: not looked at further, not trusted
+    if isinstance(value, dict):
+        return "uri" in value or any(_names_a_place(v, depth + 1) for v in value.values())
+    if isinstance(value, list):
+        return any(_names_a_place(v, depth + 1) for v in value)
+    return False
+
+
+def _glb_keeps_to_itself(path: Path) -> bool:
+    """Whether a head file is whole in itself, as every file the generator's writer makes is: a description that
+    reads, and nothing in it that sends a viewer elsewhere for a buffer or a picture (a `uri`). The file comes out
+    of the sandbox, where model code written by others runs without a network. The owner's browser has one: a
+    head whose description named an address would have the viewer fetch it, and could carry a picture out in that
+    request. Such a file is never taken into a model. The description that is checked is the only one the file
+    has (_glb_one_description): a viewer that meets two reads the last."""
+    doc = _glb_one_description(path)
+    return doc is not None and not _names_a_place(doc)
+
+
+def _glb_counts(path: Path) -> tuple[int, int]:
+    """(vertices, triangles) of a .glb's first part (the whole surface; a photo layer lies over a share of it), as
+    the file says them in its own description; (0, 0) when that cannot be read."""
+    doc = _glb_doc(path)
+    if doc is None:
+        return 0, 0
+    try:
         prim = doc["meshes"][0]["primitives"][0]
         return (int(doc["accessors"][prim["attributes"]["POSITION"]]["count"]),
                 int(doc["accessors"][prim["indices"]]["count"]) // 3)
-    except (OSError, ValueError, KeyError, IndexError, TypeError, struct.error):
+    except (ValueError, KeyError, IndexError, TypeError, OverflowError):
         return 0, 0
 
 
+def _glb_textured(path: Path) -> bool:
+    """Whether a .glb carries a picture as a texture: it holds an image, and a part's material uses one."""
+    doc = _glb_doc(path)
+    if doc is None:
+        return False
+    try:
+        if not doc.get("images") or not doc.get("textures"):
+            return False
+        materials = doc.get("materials") or []
+        for mesh in doc.get("meshes") or []:
+            for prim in mesh.get("primitives") or []:
+                index = prim.get("material")
+                if isinstance(index, int) and 0 <= index < len(materials):
+                    if "baseColorTexture" in (materials[index].get("pbrMetallicRoughness") or {}):
+                        return True
+        return False
+    except (AttributeError, TypeError):
+        return False
+
+
+def _note(value: Any) -> str | None:
+    """A look's note as one short line of plain text, or None. The text comes from the generator, which runs model
+    code written by others: nothing but a short printable line is kept."""
+    if not isinstance(value, str):
+        return None
+    return _plain(value)[:NOTE_MAX] or None
+
+
+def _finite(value: Any) -> bool:
+    """A finite number that is not a yes or no. A whole number too large for floating point is not one: the
+    child's result file is read as it comes, and Python reads a number of any length from JSON."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
+
+
+def _count(value: Any) -> int:
+    """How many vertices or triangles the generator says a head has, or 0 when that is no such number."""
+    return int(value) if _finite(value) and 0 <= value < 2**31 else 0
+
+
+def _generator_said(value: Any) -> dict[str, str]:
+    """The generator's name and version as the result file gives them: two short lines of plain text."""
+    if not isinstance(value, dict):
+        return {}
+    return {key: text[:40] for key in ("name", "version") if (text := _note(value.get(key)))}
+
+
+def _generator_memory(value: Any) -> dict[str, int | None] | None:
+    """The generator's own memory numbers (its result file's `memory_mb`), checked: {"peak", "with_model",
+    "released"} in MB, each a whole number or None; None when the generator said nothing of the kind."""
+    if not isinstance(value, dict):
+        return None
+    out: dict[str, int | None] = {}
+    for key in ("peak", "with_model", "released"):
+        mb = value.get(key)
+        out[key] = int(mb) if _finite(mb) and 0 <= mb < 10_000_000 else None
+    return out if any(v is not None for v in out.values()) else None
+
+
+def _share(value: Any) -> float | None:
+    """A share between 0 and 1 as the generator gave it, to four places; None for anything else."""
+    if not _finite(value) or not 0.0 <= value <= 1.0:
+        return None
+    return round(float(value), 4)
+
+
+def _finishing(made: dict[str, Any], mesh: Path) -> dict[str, Any]:
+    """What the generator said about a look's finishing (the keys of its result row), checked: `textured` (read
+    from the file itself when the row does not say: a head that was finished before the generator was stopped has
+    no row, and the generator before the finishing wrote no such key), `texture` as [width, height] and only with
+    a texture, `overlap` and `overlap_head` as shares between 0 and 1, `relief` (the face's shape was corrected
+    from the depth model; only a plain true counts), `note` as one short line."""
+    said = made.get("textured")
+    textured = said if isinstance(said, bool) else _glb_textured(mesh)
+    size = made.get("texture")
+    texture = None
+    if (textured and isinstance(size, (list, tuple)) and len(size) == 2
+            and all(isinstance(v, int) and not isinstance(v, bool) and 0 < v <= 16384 for v in size)):
+        texture = [int(size[0]), int(size[1])]
+    return {"textured": bool(textured), "texture": texture, "overlap": _share(made.get("overlap")),
+            "overlap_head": _share(made.get("overlap_head")), "relief": made.get("relief") is True,
+            "note": _note(made.get("note"))}
+
+
 def _collect(person_id: int, work: Path, rows: list[dict[str, Any]], plan: looks_mod.Plan, options: dict[str, Any],
-             seconds: float, finished: set[str] | None = None) -> int:
+             seconds: float, finished: set[str] | None = None, peak_mb: int | None = None) -> int:
     """Move the meshes and pictures of the looks that worked into a new folder and make it the model in use.
     Returns how many looks it holds. `finished` is given when the child did not end by itself: then the looks it
-    reported as finished count (a mesh is written whole before it is reported), with or without a result file."""
+    reported as finished count (a mesh is written whole before it is reported), with or without a result file.
+    `peak_mb` is the most memory the child was seen to hold."""
     from PIL import Image
 
+    # The result file is read as whatever it turns out to be: the child runs model code written by others, and a
+    # value of the wrong kind in it must not cost the heads that were built
     try:
-        result = json.loads((work / "out" / "result.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError) as e:
+        path = work / "out" / "result.json"
+        if not _own_file(path):
+            raise ValueError("there is no result file, or it is not a file of its own")
+        if path.stat().st_size > RESULT_MAX_BYTES:
+            raise ValueError("the result file is too large to be one")
+        result = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, RecursionError) as e:
         if finished is None:
             raise _Failed("The generator left no result.") from e
         result = {}
-    built = {r.get("key"): r for r in result.get("looks") or [] if isinstance(r, dict) and r.get("ok")}
+    if not isinstance(result, dict):
+        if finished is None:
+            raise _Failed("The generator left no result.")
+        result = {}
+    said = result.get("looks")
+    said = [r for r in said if isinstance(r, dict) and isinstance(r.get("key"), str)] if isinstance(said, list) else []
+    built = {r["key"]: r for r in said if r.get("ok")}
     if finished is not None:
         built = {key: built.get(key) or {} for key in finished}
     rev = _stamp()
@@ -879,26 +1303,44 @@ def _collect(person_id: int, work: Path, rows: list[dict[str, Any]], plan: looks
     for row in rows:
         made = built.get(row["key"])
         mesh = work / "out" / f"{row['key']}.glb"
-        if made is None or not mesh.is_file():
+        if made is None or not _own_file(mesh):
             continue
-        vertices, faces = int(made.get("vertices") or 0), int(made.get("faces") or 0)
+        if not _glb_keeps_to_itself(mesh):
+            log.warning("3D heads: person %s: the head of look %s is not a file of the kind the generator writes; "
+                        "it is left out", person_id, row["key"])
+            continue
+        vertices, faces = _count(made.get("vertices")), _count(made.get("faces"))
         if not vertices:
             vertices, faces = _glb_counts(mesh)
+        finishing = _finishing(made, mesh)
+        # the look's small picture first: the child can write in the work folder, and a picture that no longer
+        # reads costs this look only, not the heads beside it
+        try:
+            if not _own_file(work / f"{row['key']}.png"):
+                raise OSError("not a file of its own")
+            with Image.open(work / f"{row['key']}.png") as im:
+                im.convert("RGB").resize((PICTURE_SIDE, PICTURE_SIDE), Image.Resampling.LANCZOS).save(
+                    dest / f"{row['key']}.jpg", "JPEG", quality=PICTURE_QUALITY)
+        except (OSError, ValueError, SyntaxError, Image.DecompressionBombError) as e:
+            log.warning("3D heads: person %s: the picture of look %s could not be read (%s); the look is left out",
+                        person_id, row["key"], type(e).__name__)
+            storage.safe_unlink(dest / f"{row['key']}.jpg")
+            continue
         target = dest / f"{row['key']}.glb"
         storage.move_into_place(mesh, target)
-        with Image.open(work / f"{row['key']}.png") as im:
-            im.convert("RGB").resize((PICTURE_SIDE, PICTURE_SIDE), Image.Resampling.LANCZOS).save(
-                dest / f"{row['key']}.jpg", "JPEG", quality=PICTURE_QUALITY)
-        looks.append({**row, "mesh": target.name, "picture": f"{row['key']}.jpg", "bytes": target.stat().st_size,
-                      "vertices": vertices, "faces": faces})
+        kept = {k: v for k, v in row.items() if k not in JOB_ONLY}
+        looks.append({**kept, "mesh": target.name, "picture": f"{row['key']}.jpg", "bytes": target.stat().st_size,
+                      "vertices": vertices, "faces": faces, **finishing})
     if not looks:
         storage.remove_tree(dest)
-        failed = [r.get("error") for r in result.get("looks") or [] if isinstance(r, dict) and r.get("error")]
+        failed = [text for text in (_note(r.get("error")) for r in said) if text]
         raise _Failed("No head could be built" + (f": {failed[-1]}" if failed else "") + ".")
     _write_json(dest / "model.json", {
         "rev": rev, "person_id": int(person_id), "generated_at": now_iso(), "seconds": round(seconds, 1),
-        "generator": result.get("generator") or {}, "options": {k: options[k] for k in OPTION_KEYS},
-        "birth_year": plan.birth_year, "scanned": plan.scanned, "usable": plan.usable, "looks": looks,
+        "generator": _generator_said(result.get("generator")), "options": {k: options[k] for k in OPTION_KEYS},
+        "birth_year": plan.birth_year, "scanned": plan.scanned, "usable": plan.usable,
+        "peak_rss_mb": int(peak_mb) if peak_mb else None,
+        "generator_memory_mb": _generator_memory(result.get("memory_mb")), "looks": looks,
     })
     storage.write_bytes_atomic(base / "current", rev.encode("ascii"))
     for entry in base.iterdir():  # the older models
@@ -969,8 +1411,14 @@ def _run(person_id: int, options: dict[str, Any], fake: bool) -> None:
         job = {
             "out_dir": str(work / "out"), "weights_dir": str(_weights_dir()),
             "generator": "fake" if fake else settings.gen3d_generator, "device": "auto",
-            "options": {"detail": options["detail"], "seed": 0},
-            "looks": [{"key": r["key"], "image": str(work / f"{r['key']}.png")} for r in rows],
+            # what the watch below allows the child: a look whose depth models would not fit under it is finished
+            # without the relief by the generator itself, which is better than the whole job being stopped here
+            "max_rss_mb": int(settings.gen3d_max_rss_mb),
+            # `framing` goes along because the face relief finds the face by it: the picture is that many face
+            # sizes wide (looks.square_for)
+            "options": {"detail": options["detail"], "framing": options["framing"], "smoothing": options["smoothing"],
+                        "texture": options["texture"], "relief": options["relief"], "seed": 0},
+            "looks": [_job_look(r, work) for r in rows],
         }
         _write_json(work / "job.json", job)
         _set(step=STEP_BUILD, done=0, total=len(rows))
@@ -982,7 +1430,7 @@ def _run(person_id: int, options: dict[str, Any], fake: bool) -> None:
         _set(step=STEP_SAVE, done=len(rows), total=len(rows))
         try:
             kept = _collect(person_id, work, rows, plan, options, time.monotonic() - started,
-                            finished if reason is not None else None)
+                            finished if reason is not None else None, peak_rss_mb())
         except _Failed:
             if reason is not None:
                 raise _Failed(reason) from None

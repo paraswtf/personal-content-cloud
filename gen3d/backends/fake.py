@@ -1,7 +1,12 @@
 """A stand-in backend that needs no model: an egg-shaped head on a short neck, coloured from the picture.
 
-It exists so the whole path (job file, child process, mesh clean-up, the GLB, the viewer) can be tested and shown
-without PyTorch. It is deterministic: the same picture gives the same mesh, byte for byte.
+It exists so the whole path (job file, child process, the finishing with its photo layer, the GLB, the viewer) can
+be tested and shown without PyTorch. It is deterministic: the same picture gives the same mesh, byte for byte.
+
+The egg stands in the frame of a camera at (0, 0, 1.9) with a vertical field of view of 40 degrees, the one a real
+backend names, so the picture can be laid over its front: seen from there the egg covers the middle of the picture
+(about 55 percent of its width). The picture has no cut-out and the egg is where it is by construction, so there is
+nothing to fit (Camera.fit is off).
 """
 from __future__ import annotations
 
@@ -10,7 +15,7 @@ from typing import Any
 
 import numpy as np
 
-from gen3d.mesh import Mesh
+from gen3d.mesh import Camera, Mesh
 
 LAT, LON = 24, 40          # the head: 2 * LON * (LAT - 1) = 1,840 triangles
 NECK_SIDES = 20            # the neck: 2 * NECK_SIDES side triangles and NECK_SIDES at the bottom
@@ -90,7 +95,7 @@ class FakeBackend:
         vertices = np.vstack([head, neck]).astype(np.float32)
         faces = np.vstack([head_faces, neck_faces + head.shape[0]]).astype(np.uint32)
         colours = np.clip(np.vstack([head_colours, neck_colours]), 0, 255).astype(np.uint8)
-        return Mesh(vertices=vertices, faces=faces, colors=colours)
+        return Mesh(vertices=vertices, faces=faces, colors=colours, camera=Camera(1.9, 40.0, fit=False))
 
     def close(self) -> None:
         return None

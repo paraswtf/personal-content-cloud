@@ -12,6 +12,13 @@ from app.db import kv_set, tx
 from tests.helpers import make_body, make_face, make_item, make_person
 
 
+@pytest.fixture(autouse=True)
+def _no_models(monkeypatch):
+    """The faces here are rows with made-up pictures. With the installed models reading them the plans come out
+    empty, so every test runs as the module says: without any model, also in a checkout that has them."""
+    monkeypatch.setenv("PCC_NO_MODELS", "1")
+
+
 def reading(face_id: int, *, age: float = 30.0, hair: float | None = 0.6, facial: float | None = 0.5,
             faults: tuple[str, ...] = (), day: str = "2024-05-01", size: int = 400, yaw: float | None = 0.0,
             weight: float = 1.0, child: bool = False, year: float | None = 2024.3, expected: float | None = None,
@@ -75,6 +82,36 @@ def test_cut_repeats_the_edge_where_the_square_leaves_the_picture():
     past = looks.cut(rgb, (-50.0, -50.0, 100.0), 40)
     assert tuple(past[2, 2]) == (255, 0, 0) and tuple(past[38, 38]) == (255, 0, 0)  # padded with the edge colour
     assert looks.cut(rgb, (500.0, 500.0, 50.0), 16).shape == (16, 16, 3)            # wholly outside: black
+
+
+def test_inside_is_the_part_of_the_cut_that_is_the_photo():
+    """Where the square leaves the photo, cut() repeats the edge; inside() says where the photo itself is, as
+    (left, top, right, bottom) in the cut picture's pixels."""
+    # wholly in the photo: all of the picture, at any size
+    assert looks.inside((50.0, 0.0, 100.0), 200, 100, 50) == (0, 0, 50, 50)
+    assert looks.inside((50.0, 0.0, 100.0), 200, 100, 400) == (0, 0, 400, 400)
+    # past the top left corner by half the square
+    assert looks.inside((-50.0, -50.0, 100.0), 200, 100, 40) == (20, 20, 40, 40)
+    # past the right edge by half and past the bottom by two fifths
+    assert looks.inside((150.0, 40.0, 100.0), 200, 100, 100) == (0, 0, 50, 60)
+    # larger than the photo on every side
+    assert looks.inside((-100.0, -100.0, 400.0), 200, 100, 400) == (100, 100, 300, 200)
+    # rounded inwards when the sizes do not divide: 10 px of 300 are 3.33 px of 100
+    assert looks.inside((-10.0, 0.0, 300.0), 200, 1000, 100) == (4, 0, 70, 100)
+    # the square misses the photo
+    assert looks.inside((500.0, 500.0, 50.0), 200, 100, 16) == (0, 0, 0, 0)
+    assert looks.inside((-300.0, 0.0, 100.0), 200, 100, 16) == (0, 0, 0, 0)
+
+    # and cut() agrees: past the rectangle the picture is the photo's last column and last row again
+    rgb = np.zeros((100, 200, 3), dtype=np.uint8)
+    rgb[..., 0] = np.arange(200, dtype=np.uint8)[None, :]              # every column its own red
+    rgb[..., 1] = np.arange(100, dtype=np.uint8)[:, None]              # every row its own green
+    square = (150.0, 40.0, 100.0)
+    out = looks.cut(rgb, square, 100)
+    _left, _top, right, bottom = looks.inside(square, 200, 100, 100)
+    assert (out[:, right:, 0] == 199).all() and (out[bottom:, :, 1] == 99).all()
+    assert out[0, right - 1, 0] == 199 and out[0, right - 2, 0] == 198   # the photo's own last columns
+    assert out[bottom - 1, 0, 1] == 99 and out[bottom - 2, 0, 1] == 98   # and rows
 
 
 # ------------------------------------------------------------------ bins, ages, the choice
@@ -357,6 +394,109 @@ def test_the_generators_picture_is_cut_from_the_original(conn, tmp_path):
         conn.execute("UPDATE items SET nsfw = 1 WHERE id = ?", (item["id"],))
     assert looks.picture(conn, face) is None and not looks.write_picture(conn, face, tmp_path / "x.png")
     assert looks.picture(conn, 99999) is None
+
+
+def test_the_picture_s_side_follows_the_photo_between_its_two_ends():
+    assert (looks.PICTURE_SIDE, looks.PICTURE_SIDE_MAX) == (1024, 3072)
+    assert looks.picture_side(374.4) == 1024                        # a small face: enlarged to the least side
+    assert looks.picture_side(1024.0) == 1024 and looks.picture_side(1024.6) == 1025
+    assert looks.picture_side(1785.4) == 1785 and looks.picture_side(2719.5) == 2720
+    assert looks.picture_side(3072.4) == 3072 and looks.picture_side(4160.0) == 3072
+    assert looks.picture_side(0.0) == 1024 and looks.picture_side(-5.0) == 1024
+    assert looks.picture_side(float("nan")) == 1024 and looks.picture_side(float("inf")) == 1024
+
+
+def _gradient(width: int, height: int, tint: int) -> bytes:
+    """A smooth made-up photo: red grows to the right, green downwards, so a wrong cut or size shows."""
+    from tests.helpers import jpeg_bytes
+    from PIL import Image
+
+    x = np.linspace(0, 255, width, dtype=np.float32)[None, :].repeat(height, axis=0)
+    y = np.linspace(0, 255, height, dtype=np.float32)[:, None].repeat(width, axis=1)
+    rgb = np.stack([x, y, np.full_like(x, tint)], axis=2).astype(np.uint8)
+    return jpeg_bytes(Image.fromarray(rgb, "RGB"), quality=92)
+
+
+def test_the_picture_keeps_the_photo_s_own_resolution(conn, tmp_path):
+    """A small face is enlarged to 1024 as before, a middle one keeps exactly the pixels the photo has, and a
+    very large one stops at 3072. All three are the same cut, only at another size."""
+    import cv2
+    from PIL import Image
+
+    person = make_person(conn, "Asha")
+    cases = [  # photo size, face box, the side the square has in the photo at framing 2.6, the side written
+        ((640, 480), (0.4, 0.3, 0.2, 0.3), 2.6 * 144, 1024),          # face 128 x 144 px
+        ((2400, 1800), (0.35, 0.3, 0.25, 0.3), 2.6 * 600, 1560),      # face 600 x 540 px
+        ((4000, 3000), (0.3, 0.2, 0.4, 0.5), 2.6 * 1600, 3072),       # face 1,600 x 1,500 px
+    ]
+    for n, ((width, height), box, native, side) in enumerate(cases):
+        item = make_item(conn, width=width, height=height, data=_gradient(width, height, 40 * n))
+        face = make_face(conn, item["id"], person, box=box, size_px=int(box[2] * width))
+        assert looks.square_for(box, width, height, 2.6)[2] == pytest.approx(native)
+        own = looks.picture(conn, face, 2.6)
+        assert own.shape == (side, side, 3) and own.dtype == np.uint8, (width, height)
+        # asked for a side, it gives that side; shrunk to it, the full-size picture is the same picture
+        small = looks.picture(conn, face, 2.6, side=512)
+        assert small.shape == (512, 512, 3)
+        shrunk = cv2.resize(own, (512, 512), interpolation=cv2.INTER_AREA)
+        assert float(np.abs(shrunk.astype(np.int16) - small.astype(np.int16)).mean()) < 2.0
+        out = tmp_path / f"l{n}.png"
+        assert looks.write_picture(conn, face, out, 2.6)
+        with Image.open(out) as im:
+            assert im.size == (side, side) and im.mode == "RGB" and im.format == "PNG"
+        assert looks.write_picture(conn, face, out, 2.6, side=1024)
+        with Image.open(out) as im:
+            assert im.size == (1024, 1024)
+    # a wider framing takes more of the photo, so more pixels, up to the same end
+    assert looks.picture(conn, face, 3.2).shape == (3072, 3072, 3)
+    middle = make_face(conn, make_item(conn, width=2400, height=1800, data=_gradient(2400, 1800, 200))["id"], person,
+                       box=(0.35, 0.3, 0.25, 0.3), size_px=600)
+    assert looks.picture(conn, middle, 1.8).shape == (1080, 1080, 3)
+    assert looks.picture(conn, middle, 3.2).shape == (1920, 1920, 3)
+
+
+def test_the_picture_comes_with_the_part_of_it_that_is_the_photo(conn, tmp_path):
+    """A face near the photo's corner: the square leaves the photo on the right and at the bottom, and the
+    rectangle that comes with the picture ends where the photo does."""
+    person = make_person(conn, "Asha")
+    width, height = 2000, 1500
+    item = make_item(conn, width=width, height=height, data=_gradient(width, height, 60))
+    box = (0.7002, 0.5503, 0.25, 0.3)                                  # a face of 500 x 450 px
+    face = make_face(conn, item["id"], person, box=box, size_px=500)
+    # the square: 1,300 px, from 1,000.4 across and 504.45 down, so 300 px and 304 px of it are past the photo
+    assert looks.square_for(box, width, height, 2.6) == pytest.approx((1000.4, 504.45, 1300.0))
+    got = looks.picture_and_inside(conn, face, 2.6)
+    assert got is not None
+    rgb, rect = got
+    assert rgb.shape == (1300, 1300, 3) and rect == (0, 0, 1000, 996)
+    _left, _top, right, bottom = rect
+    # past the rectangle every column is the photo's last column, every row its last row; before it they differ
+    assert (rgb[:, right:] == rgb[:, right - 1:right]).all() and (rgb[bottom:] == rgb[bottom - 1:bottom]).all()
+    assert (rgb[:bottom, right - 1] != rgb[:bottom, right - 60]).any()
+    assert (rgb[bottom - 1, :right] != rgb[bottom - 60, :right]).any()
+    assert np.array_equal(looks.picture(conn, face, 2.6), rgb)
+    # written to a file, the same rectangle is handed back; at another size it is in that size's pixels
+    assert looks.write_picture(conn, face, tmp_path / "l1.png", 2.6) == rect
+    assert looks.write_picture(conn, face, tmp_path / "l1.png", 2.6, side=650) == (0, 0, 500, 498)
+    # a square that lies in the photo: all of the picture
+    whole = make_face(conn, item["id"], person, box=(0.4, 0.3, 0.1, 0.12), size_px=200)
+    assert looks.write_picture(conn, whole, tmp_path / "l2.png", 2.6) == (0, 0, 1024, 1024)
+
+
+def test_without_the_original_the_picture_has_the_preview_s_resolution(conn):
+    """When the original does not read, the cut comes from the analysis picture, and so does its size."""
+    from app import storage
+    from PIL import Image
+
+    person = make_person(conn, "Asha")
+    item = make_item(conn, width=4000, height=3000, data=_gradient(4000, 3000, 90))
+    face = make_face(conn, item["id"], person, box=(0.3, 0.2, 0.4, 0.5), size_px=1600)
+    assert looks.picture(conn, face, 2.6).shape == (3072, 3072, 3)
+    storage.original_path(item["uid"], 1, ".jpg").write_bytes(b"not a picture any more")
+    with Image.open(storage.preview_path(item["uid"], 1)) as im:
+        im.convert("RGB").resize((2048, 1536)).save(storage.preview_path(item["uid"], 1), "WEBP", quality=70)
+    # the face is 819 px wide in the 2,048 px preview: a square of 2,130 px
+    assert looks.picture(conn, face, 2.6).shape == (2130, 2130, 3)
 
 
 def test_reading_reports_before_the_models_load_and_after_every_photo(conn, monkeypatch):

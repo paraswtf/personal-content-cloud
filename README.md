@@ -35,9 +35,11 @@ What it does with each file:
   background, so someone who stays in the same spot is followed from one photo to the next, also when the
   camera moved or they turned away. It counts as a reason for a guess, along with clothes.
 - **3D heads.** A person's page can build a 3D head for each look found in their photos (an age, a hair
-  length, facial hair or none), with a model that runs on this machine, and only when you press Generate.
-  Sliders pick the look, turn the head and move the light. Each head is the model's reading of one photo,
-  not a scan.
+  length, facial hair or none), with models that run on this machine, and only when you press Generate.
+  The front of a head is the photo itself, laid over a smoothed shape whose nose, lips and chin are read
+  from the photo by a depth model. Sliders pick the look, turn the head and move the light. Each head
+  comes from one photo: past about 50 degrees the sides and the back are filled-in colours, so it is a
+  reading of that photo, not a scan.
 - **Documents.** Text is extracted (text layer or OCR, in English, Hindi and Marathi) and searchable.
   Traffic challans and parking receipts are read into their own cards: a challan shows its number,
   vehicle, violations, amount and printed payment status with a button that opens the right portal to pay
@@ -166,7 +168,7 @@ Environment variables (all optional):
 | `TRAIT_PROPAGATE_MAX` | `400` | Photos one tagging queues for a new look by tattoos. |
 | `GEN3D_DIR`, `GEN3D_GENERATOR` | `MODELS_DIR/gen3d`, `auto` | The 3D head generator's own environment (see Models, 3D heads) and which backend it uses. |
 | `GEN3D_SANDBOX` | `auto` | Run the generator in a sandbox with no network (`bwrap`): `auto` when it is installed, `on` to insist, `off`. |
-| `GEN3D_MAX_RSS_MB`, `GEN3D_LOOK_TIMEOUT_S` | `5000`, `600` | The generator is stopped above this much memory, or when one head takes longer than this many seconds. |
+| `GEN3D_MAX_RSS_MB`, `GEN3D_LOOK_TIMEOUT_S` | `5000`, `600` | The generator is stopped above this much memory (near it, a head is finished without Face relief instead), or when one head takes longer than this many seconds. |
 | `FORWARDS_ENABLED`, `FORWARD_MAX_SIDE`, `FORWARD_JPEG_QUALITY_MAX`, `FORWARD_MEME_MIN` | `true`, `1600`, `82`, `0.5` | Forwards: the longest side and JPEG quality that mark an image as received through an app, and the content score that sets it apart. |
 | `PETS_ENABLED`, `ANIMAL_DET_THRESHOLD` | `true`, `0.45` | Pet identities (section 22) and the animal detection cut. |
 | `PET_MATCH_THRESHOLD`, `PET_NEW_THRESHOLD` | `0.82`, `0.86` | Cosine cuts for matching a crop to a known pet and for pairing two crops into a new pet. |
@@ -217,15 +219,35 @@ changes. Set it up once:
 scripts/setup_3d.sh
 ```
 
-It installs PyTorch and a few libraries into their own environment (about 6 GB), fetches the TripoSR code at
-a pinned commit and downloads three files, each checked against its checksum: the TripoSR weights (1.7 GB, MIT
-licence, Tripo AI and Stability AI), the U2-Net background cutter (176 MB, Apache 2.0) and one small settings
-file of the image encoder (facebook/dino-vitb16, Apache 2.0). About 8.5 GB in all; to keep it on another disk,
-make `models/gen3d` a link to a folder there first. On an RTX 2080 a head takes 3 to 6 seconds and 2.4 GB of
-GPU memory. `scripts/setup_3d.sh --check` says what is installed.
+It installs PyTorch and a few libraries into their own environment (about 6 GB), fetches the TripoSR code
+at a pinned commit and downloads its files, each checked against its checksum: the TripoSR weights (1.7
+GB, MIT licence, Tripo AI and Stability AI), the U2-Net background cutter (176 MB, Apache 2.0), one small
+settings file of the image encoder (facebook/dino-vitb16, Apache 2.0), and the two DAViD depth models that
+shape the face (449 MB each, MIT licence, Microsoft). About 9.4 GB in all; to keep it on another disk,
+make `models/gen3d` a link to a folder there first. The depth models are optional: when their download
+fails the script says so and goes on, and heads are made without Face relief until you run it again. If
+you set the generator up before this version, run the script once more to fetch them; finished steps are
+skipped. `scripts/setup_3d.sh --check` says what is installed.
 
-It lives in `MODELS_DIR/gen3d` (`GEN3D_DIR`). The generator runs only while a model is being made, inside a
-sandbox (`bwrap`), because it runs model code written by others on your face photos. Inside it the
+A head is built in two steps. The image-to-3D model makes a rough shape: on an RTX 2080, 3 to 6 seconds a
+head and 2.4 GB of GPU memory. Then the shape is finished on the processor, in about 10 seconds a head: it
+is smoothed, a depth model shapes the nose, lips and chin from the photo, and the photo itself is laid
+over the front as the head's texture. Generate has options for this: Smoothing, Photo texture (off, or the
+photo at up to 1024 px, up to 2048 px or at its own size) and Face relief. In the viewer, the Photo switch
+shows the plain colours under the photo.
+
+A head comes from one photo. From the front and up to about 40 degrees to either side it is that photo;
+further round, the sides and the back are filled in from its colours, without detail. A photo with the
+head turned or bowed gives a head that carries the photo on that side only. Glasses, or a hand in front of
+the face, are painted onto the surface. Heads made before this version keep showing, with a
+line that says so: press "Generate again" on the person's 3D tab to get new ones.
+
+A head file holds the photo's own pixels. It is served only to a signed-in browser, which asks the server
+before every use, and it follows its photo: a head stops showing when its photo goes to the trash or the
+vault, and its file is removed once the photo is gone for good.
+
+The generator lives in `MODELS_DIR/gen3d` (`GEN3D_DIR`). It runs only while a model is being made, inside
+a sandbox (`bwrap`), because it runs model code written by others on your face photos. Inside it the
 generator sees the system's libraries, its own files, the GPU and the pictures of the job in hand, and
 nothing else: no network, no home folder, no library, none of the server's settings.
 `GEN3D_SANDBOX=off` turns the sandbox off;
@@ -247,7 +269,8 @@ now" button. Deleted items stay in the trash for `TRASH_DAYS` days.
 
 To restore, stop the server, copy `cloud.db`, `secret.key`, `learned/` and `wallet/` from a snapshot into
 `DATA_DIR` (delete a stale `cloud.db-wal` and `cloud.db-shm` first) and `originals/` into `ORIGINALS_DIR`,
-then start it; previews that are missing are rebuilt when you choose "Process again" on an item.
+then start it; previews that are missing are rebuilt when you choose "Process again" on an item. 3D heads
+are not in a snapshot either: "Generate" on a person's 3D tab builds them again.
 
 ## Development
 

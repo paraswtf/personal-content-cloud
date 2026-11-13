@@ -215,7 +215,10 @@ def make_item(conn: sqlite3.Connection, *, kind: str = "image", data: bytes | No
     """Insert an item row (and, by default, its original + a thumb/preview) without the pipeline."""
     uid = new_uid()
     if data is None and write_files:
-        data = jpeg_bytes(noise_image(width, height, seed=hash(uid) & 0xFFFF)) if kind == "image" else b"x" * 100
+        # 63 bits of the uid's hash, not 16: with 65,536 seeds two items of one test drew the same noise now and
+        # then, the same bytes gave the same sha256, and the insert below failed on the unique index
+        data = (jpeg_bytes(noise_image(width, height, seed=hash(uid) & 0x7FFFFFFFFFFFFFFF)) if kind == "image"
+                else b"x" * 100)
     sha = hashlib.sha256(data if data is not None else uid.encode()).hexdigest()
     now = now_iso()
     cols = dict(

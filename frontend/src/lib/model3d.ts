@@ -22,13 +22,31 @@ export interface Look3d {
   mesh_url: string
   bytes: number
   vertices: number
+  /** The head carries the photo as a texture over its front. Absent in a model made before heads had one. */
+  textured?: boolean
+  /** The face's shape (nose, lips, chin) was corrected from the photo by the depth model. */
+  relief?: boolean
+  /** What the generator has to say about this head, when it has something to say ("the photo did not line up, so
+   *  this head has colours only"). */
+  note?: string | null
 }
 
 export interface Model3dOptions {
   max_looks: number
   detail: number
   framing: number
+  /** How much the surface is evened out: 0 off, 1 light, 2 normal, 3 strong. */
+  smoothing: number
+  /** The photo laid over the front of the head: 0 off (colours only); 1 and 2 shrink a photo whose longest side is
+   *  over 1024 or 2048 pixels; 3 keeps the photo's own size. This step never enlarges the picture it is given. */
+  texture: number
+  /** 1: a depth model made for pictures of people shapes the nose, lips and chin, when the server has one. 0: off. */
+  relief: number
 }
+
+/** The options as a model's status carries them. A model made before an option existed does not say it, or says
+ *  null (completeOptions fills it in). */
+export type Model3dMade = { [K in keyof Model3dOptions]?: number | null }
 
 export interface Model3dProgress {
   step: string
@@ -43,6 +61,9 @@ export interface Model3dStatus {
   available: boolean
   reason: string | null
   generator: string | null
+  /** The depth model files that Face relief needs are on the server. False: no head gets its face corrected until
+   *  they are installed. Null or absent: the server does not say. */
+  relief_installed?: boolean | null
   usable_photos: number
   state: Model3dState
   /** Another person's model is being generated: one at a time. */
@@ -52,18 +73,43 @@ export interface Model3dStatus {
   progress: Model3dProgress | null
   error: string | null
   generated_at: string | null
-  options: Model3dOptions | null
+  /** As the model was made. */
+  options: Model3dMade | null
   looks: Look3d[]
 }
 
-export const MODEL3D_DEFAULTS: Model3dOptions = { max_looks: 6, detail: 2, framing: 2.6 }
+export const MODEL3D_DEFAULTS: Model3dOptions = { max_looks: 6, detail: 2, framing: 2.6, smoothing: 2, texture: 2, relief: 1 }
 /** The ranges the server accepts (app.api.model3d.Model3dIn). */
 export const MODEL3D_LIMITS = {
   max_looks: { min: 1, max: 12, step: 1 },
   detail: { min: 1, max: 3, step: 1 },
   framing: { min: 1.8, max: 3.2, step: 0.1 },
+  smoothing: { min: 0, max: 3, step: 1 },
+  texture: { min: 0, max: 3, step: 1 },
+  relief: { min: 0, max: 1, step: 1 },
 } as const
 export const MODEL3D_POLL_MS = 2000
+
+/** The options a model was made with, complete and inside the ranges. A model made before an option existed does
+ *  not say it: that option takes its default, and so does a value that is no number. */
+export function completeOptions(options: Model3dMade | null | undefined): Model3dOptions {
+  const out = { ...MODEL3D_DEFAULTS }
+  for (const key of Object.keys(MODEL3D_LIMITS) as (keyof Model3dOptions)[]) {
+    const value = options?.[key]
+    if (typeof value !== 'number' || !Number.isFinite(value)) continue
+    const { min, max, step } = MODEL3D_LIMITS[key]
+    const stepped = step >= 1 ? Math.round(value) : Math.round(value / step) * step
+    out[key] = Math.min(max, Math.max(min, Math.round(stepped * 1000) / 1000))
+  }
+  return out
+}
+
+/** The model is from before heads carried their photo: no look of it has one, and its options do not say whether
+ *  the photo was to be laid on (a model made since with the photo switched off says 0). Such heads only get the
+ *  photo when they are generated again. */
+export function beforePhotoTextures(status: Pick<Model3dStatus, 'looks' | 'options'>): boolean {
+  return status.looks.length > 0 && !status.looks.some((l) => l.textured) && typeof status.options?.texture !== 'number'
+}
 
 /** Not one of LIBRARY_KEYS: tagging elsewhere does not refetch it. The 3D tab reads it again each time it is
  *  shown, and when a head or a look's picture does not load. */

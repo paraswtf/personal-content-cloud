@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Install the 3D head generator (docs/ARCHITECTURE.md section 36). It is a separate program with its own Python
-# environment (PyTorch), the pinned TripoSR code and the model files: about 8.5 GB in all. The app itself never
-# imports any of it; it starts the generator only while a person's 3D heads are being built.
+# environment (PyTorch), the pinned TripoSR code and the model files: about 8.5 GB in all, and 0.9 GB more for the
+# two optional models that read the face's relief. The app itself never imports any of it; it starts the generator
+# only while a person's 3D heads are being built.
 #
 #   scripts/setup_3d.sh            install into MODELS_DIR/gen3d (models/gen3d), or into $GEN3D_DIR when that is set
 #   scripts/setup_3d.sh --check    say what is installed and stop
@@ -36,6 +37,14 @@ DINO_SHA="b87c0270b97db085fd82cf114a761fd0f62ae7914fbd407c752a2260646b689c"
 # U2-Net (Apache 2.0), the ONNX export the rembg project publishes: cuts the background out of a look's picture
 U2NET_URL="https://github.com/danielgatis/rembg/releases/download/v0.0.0/u2net.onnx"
 U2NET_SHA="8d10d2f3bb75ae3b6d527c77944fc5e7dcd94b29809d47a739a7a728a912b491"
+# DAViD (Microsoft, MIT licence), plain ONNX files, 449 MB each: depth and surface tilt of a person from a photo.
+# gen3d/relief.py corrects the face of a head with them. Optional: without the two files heads are built without
+# that stage, so a failed download does not stop this script.
+DAVID_BASE="https://facesyntheticspubwedata.z6.web.core.windows.net/iccv-2025/models"
+DAVID_DEPTH="depth-model-vitb16_384.onnx"
+DAVID_DEPTH_SHA="c8dc49821c95f7ab56a30150e58eba989b1d67ce988d11f083dc7350c54b883b"
+DAVID_NORMAL="normal-model-vitb16_384.onnx"
+DAVID_NORMAL_SHA="3d37ecc812b6b50a09c514f3c8c8ad95da5cd6ae9b68c425bc52f1c9cd78c344"
 
 say() { echo "[3d] $*"; }
 
@@ -56,6 +65,26 @@ fetch() {  # fetch URL FILE SHA256
   mkdir -p "$(dirname "$file")"
   say "downloading $(basename "$file")"
   curl --fail --location --silent --show-error --retry 3 --output "$file.part" "$url"
+  if ! echo "$sha  $file.part" | sha256sum --check --status; then
+    rm -f "$file.part"
+    say "checksum mismatch for $url"
+    return 1
+  fi
+  mv "$file.part" "$file"
+}
+
+fetch_optional() {  # fetch_optional URL FILE SHA256: as fetch, but a failure is said and the script goes on
+  local url="$1" file="$2" sha="$3"
+  if [ -f "$file" ] && echo "$sha  $file" | sha256sum --check --status; then
+    return 0
+  fi
+  mkdir -p "$(dirname "$file")"
+  say "downloading $(basename "$file") (optional)"
+  if ! curl --fail --location --silent --show-error --retry 3 --output "$file.part" "$url"; then
+    rm -f "$file.part"
+    say "could not download $url"
+    return 1
+  fi
   if ! echo "$sha  $file.part" | sha256sum --check --status; then
     rm -f "$file.part"
     say "checksum mismatch for $url"
@@ -103,6 +132,13 @@ HUB="$WEIGHTS/hf/hub/models--facebook--dino-vitb16"
 fetch "$DINO_URL" "$HUB/snapshots/$DINO_REV/config.json" "$DINO_SHA"
 mkdir -p "$HUB/refs"
 printf '%s' "$DINO_REV" > "$HUB/refs/main"
+
+relief=yes
+fetch_optional "$DAVID_BASE/$DAVID_DEPTH" "$WEIGHTS/david/$DAVID_DEPTH" "$DAVID_DEPTH_SHA" || relief=no
+fetch_optional "$DAVID_BASE/$DAVID_NORMAL" "$WEIGHTS/david/$DAVID_NORMAL" "$DAVID_NORMAL_SHA" || relief=no
+if [ "$relief" = no ]; then
+  say "the face relief models are not both there: heads are built without that stage (run this script again to retry)"
+fi
 
 say "done"
 check
