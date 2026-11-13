@@ -5,7 +5,8 @@ named; that takes seconds, and the app asks the plain check for status reads). T
 
 Job file:
     {"out_dir": "/abs/work", "weights_dir": "/abs/models/gen3d/weights", "generator": "auto", "device": "auto",
-     "options": {"detail": 2, "smoothing": 2, "texture": 2, "seed": 0},
+     "max_rss_mb": 5000,
+     "options": {"detail": 2, "framing": 2.6, "smoothing": 2, "texture": 2, "relief": 1, "seed": 0},
      "looks": [{"key": "l1", "image": "/abs/work/l1.png", "inside": [0, 0, 2400, 2210]}]}
   `image`: a square RGB picture of the head and shoulders, the face centred, at the photo's own resolution (1024
   to 3072 pixels wide): the model is given a smaller copy, and the picture itself becomes the head's texture.
@@ -14,8 +15,13 @@ Job file:
   picture by repeating the photo's edge, and no photo is laid on the head from there. Left out: all of the picture.
   `detail`: 1 to 3. `smoothing`: 0 to 3 (off, light, normal, strong; 2 when left out). `texture`: 0 for a colour
   per vertex only, 1 and 2 for the photo laid over the front with its longest side at most 1024 and 2048 pixels,
-  3 for the photo at its own size (2 when left out; the texture is never enlarged). `generator`: "auto" (the first
-  installed backend of gen3d.backends.ORDER), a backend's name, or "fake".
+  3 for the photo at its own size (2 when left out; the texture is never enlarged). `relief`: 1 to shape the face
+  from the photo with the depth models (gen3d.relief) when their two files are installed, 0 not to (1 when left
+  out). `framing`: how many face sizes wide the pictures are, the face centre 0.08 of the side above the middle
+  (1 to 6; 2.6 when left out): the relief finds the face by it. `max_rss_mb` (may be left out): the resident
+  memory above which the app stops this process; a look whose depth models would not fit under it is finished
+  without the relief instead. `generator`: "auto" (the first installed backend of gen3d.backends.ORDER), a
+  backend's name, or "fake". The stand-in takes a picture as it is, without a cut-out, and never runs the relief.
 
 A job runs in two passes, because the app's memory limit is shared with this process and the finishing must not
 sit on top of the model. First every look goes through the cut-out and the model, and only its raw mesh and its
@@ -25,20 +31,23 @@ written, one after the other, and reported as it is done.
 Output: OUT/<key>.glb for every look that worked; OUT/result.json
     {"generator": {"name", "version"}, "memory_mb": {"peak", "with_model", "released"},
      "looks": [{"key", "ok", "mesh", "vertices", "faces", "seconds", "error", "textured", "texture", "overlap",
-     "overlap_head", "note"}]}
+     "overlap_head", "relief", "note"}]}
   `memory_mb`: this process's resident memory by the kernel's own count: the most it held at any moment of the
   job, what it held at the end of the first pass with the model loaded, and what it held once the model was let
   go (each null where it could not be read or the job did not get there).
   `vertices` and `faces` count the whole surface. `textured`: the head has the photo layer; `texture`: its picture's
   [width, height], else null; `overlap`: how well the mesh's outline covered the person's in the picture (0 to 1,
   null when nothing was fitted) and `overlap_head` the same over the head alone: the photo is used when both reach
-  0.92; `note`: why a head that was asked for a photo layer has none.
+  0.92; `relief`: the face was shaped from the photo by the depth models; `note`: why a head that was asked for a
+  photo layer has none, or else why its face was not shaped although that was asked for and the models are there.
   `seconds`: the look's share of both passes.
-  On stdout, one line per event, flushed at once: "progress: N/M" and "look: <key> ok|error <seconds>".
-  "progress: 0/M" comes at the start and nothing during the first pass; in the second, every look gets its
-  "look:" line and the next "progress:" line when it is done, in the job's order, and a look that worked has its
-  file in place before its line is printed. A look that failed in the first pass is reported there too, in its
-  turn. A look that fails does not stop the others, and no look fails because of its photo: it is written without.
+  On stdout, one line per event, flushed at once: "progress: N/M", "made: <key> ok|error <seconds>" and
+  "look: <key> ok|error <seconds>". "progress: 0/M" comes at the start. In the first pass every look gets a
+  "made:" line when the model is done with it: nothing is finished by then, the line says how far the pass is and
+  that the job is alive. In the second, every look gets its "look:" line and the next "progress:" line when it is
+  done, in the job's order, and a look that worked has its file in place before its line is printed. A look that
+  failed in the first pass is reported there too, in its turn. A look that fails does not stop the others, and no
+  look fails because of its photo or its relief: it is written without.
 
 Exit: 0 when at least one look was built, 3 when none was, 2 for a bad job file, 4 when the backend cannot load
 (missing weights, not enough memory), 5 when it was told to stop (SIGTERM) or its parent went away. The reason is the
@@ -63,6 +72,8 @@ from gen3d import backends, glb
 from gen3d.finishing import finish_head
 
 EXIT_OK, EXIT_BAD_JOB, EXIT_NO_LOOK, EXIT_NO_BACKEND, EXIT_STOPPED = 0, 2, 3, 4, 5
+FRAMING, FRAMING_LOW, FRAMING_HIGH = 2.6, 1.0, 6.0   # face sizes across a look's picture: when left out, and the range
+RELIEF_NEEDS_MB = 1300   # the depth models hold 1.0 to 1.1 GB on top of the process while one runs (gen3d.relief)
 KEY_CHARS = frozenset("abcdefghijklmnopqrstuvwxyz0123456789_-")
 
 
@@ -129,11 +140,25 @@ def read_job(path: str) -> dict[str, Any]:
         if level not in (0, 1, 2, 3) or isinstance(options.get(name, 2), bool):
             raise BadJob(f"{name} must be 0, 1, 2 or 3")
         options[name] = level
+    relief = options.get("relief", 1)
+    if isinstance(relief, bool) or relief not in (0, 1):
+        raise BadJob("relief must be 0 or 1")
+    options["relief"] = int(relief)
+    framing = options.get("framing", FRAMING)
+    if (isinstance(framing, bool) or not isinstance(framing, (int, float)) or not math.isfinite(framing)
+            or not FRAMING_LOW <= framing <= FRAMING_HIGH):
+        raise BadJob("framing must be a number from 1 to 6: how many face sizes wide the pictures are")
+    options["framing"] = float(framing)
+    limit = job.get("max_rss_mb")
+    if limit is not None and (isinstance(limit, bool) or not isinstance(limit, (int, float)) or not math.isfinite(limit)
+                              or limit <= 0):
+        raise BadJob("max_rss_mb must be a positive number")
     generator = job.get("generator") or "auto"
     if generator != "auto" and generator not in backends.REGISTRY:
         raise BadJob(f"unknown generator: {generator}")
     return {"out_dir": Path(out), "weights_dir": Path(job.get("weights_dir") or out), "generator": generator,
-            "device": str(job.get("device") or "auto"), "options": options, "looks": looks}
+            "device": str(job.get("device") or "auto"), "options": options, "looks": looks,
+            "max_rss_mb": None if limit is None else float(limit)}
 
 
 def _torch() -> tuple[str | None, str]:
@@ -233,6 +258,42 @@ def _release(backend: Any) -> None:
         pass
 
 
+def _relief_stage(options: dict[str, Any], weights_dir: Path, limit_mb: float | None, said: dict[str, Any]):
+    """The stage that shapes a look's face from its photo (gen3d.relief.refine), as finish_head calls it once the
+    picture's camera is known. What it says about the look goes into `said`. The two depth models hold about a
+    gigabyte while one runs; when that would take this process over the memory the app allows it (`limit_mb`),
+    the stage leaves the head as it is and says so, because the app would stop the whole job otherwise."""
+    from gen3d import raster, relief  # noqa: PLC0415 - numpy at import; onnxruntime only when a model runs
+
+    def reshape(vertices: Any, faces: Any, view: Any, prepared: Any) -> Any:
+        held = _resident_mb()
+        if limit_mb is not None and held is not None and held + RELIEF_NEEDS_MB > limit_mb:
+            said.update(relief=False, note=f"too little memory was left for the depth models ({held} MB held, "
+                                           f"{int(limit_mb)} MB allowed)")
+            return None
+        moved, info = relief.refine(
+            vertices, faces, project=view.project, camera_position=view.place, focal=view.focal, side=view.side,
+            source_rgb=prepared.source, alpha=prepared.alpha, square_to_source=prepared.to_source,
+            framing=float(options.get("framing", FRAMING)), inside=prepared.inside, raster=raster.depth_buffer,
+            options={"relief": 1, "weights_dir": str(weights_dir)})
+        said.update(info)
+        return moved if info.get("relief") else None
+
+    return reshape
+
+
+def _note(head: Any, asked: bool, said: dict[str, Any]) -> str | None:
+    """A look's remark: why it has no photo layer; or else, when the relief was asked for and its models are
+    installed, why the face was not shaped (the finishing's reason when the stage could not run, the stage's own
+    when it ran and left the head as it was)."""
+    if head.note:
+        return head.note
+    if asked and not head.reshaped:
+        why = head.reshape_note or said.get("note") or ""
+        return "the face was not shaped from the photo" + (f": {why}" if why else "")
+    return None
+
+
 def run(job: dict[str, Any]) -> int:
     from PIL import Image  # noqa: PLC0415
 
@@ -256,6 +317,14 @@ def run(job: dict[str, Any]) -> int:
         return fail("stopped", EXIT_STOPPED)
     except Exception as e:  # noqa: BLE001 - missing library, missing weights, no memory
         return fail(f"the {name} generator could not start: {e}", EXIT_NO_BACKEND)
+    # The relief needs the person's cut-out, so a backend that takes the picture as it is (the stand-in) never
+    # gets it; nor does a job that turned it off, or an installation without the two model files (the app is told
+    # that by --check and says it once, so no look carries a note about it)
+    relief_on = False
+    if prepare is not None and job["options"].get("relief", 1):
+        from gen3d import relief  # noqa: PLC0415
+
+        relief_on = relief.available(job["weights_dir"])
 
     results: list[dict[str, Any]] = []
     memory: dict[str, int | None] = {"peak": None, "with_model": None, "released": None}
@@ -289,6 +358,7 @@ def run(job: dict[str, Any]) -> int:
                 kept.update(mesh=None, prepared=None, error=f"{type(e).__name__}: {e}"[:500])
             kept["seconds"] = time.monotonic() - started
             made.append(kept)
+            say(f"made: {look['key']} {'ok' if kept['error'] is None else 'error'} {round(kept['seconds'], 2)}")
         memory["with_model"] = _resident_mb()
         released = True
         _release(backend)
@@ -299,13 +369,16 @@ def run(job: dict[str, Any]) -> int:
             started = time.monotonic()
             row: dict[str, Any] = {"key": key, "ok": False, "mesh": None, "vertices": 0, "faces": 0, "seconds": 0.0,
                                    "error": kept["error"], "textured": False, "texture": None, "overlap": None,
-                                   "overlap_head": None, "note": None}
+                                   "overlap_head": None, "relief": False, "note": None}
             if kept["error"] is None:
                 try:
                     mesh, prepared = kept.pop("mesh"), kept.pop("prepared")
                     with Image.open(look["image"]) as im:
                         prepared.source = source_of(im)
-                    head = finish_head(mesh, prepared, kept["options"])
+                    said: dict[str, Any] = {}
+                    stage = (_relief_stage(kept["options"], job["weights_dir"], job.get("max_rss_mb"), said)
+                             if relief_on else None)
+                    head = finish_head(mesh, prepared, kept["options"], reshape=stage)
                     del mesh, prepared
                     glb.write(out_dir / f"{key}.glb", head)
                     row.update(ok=True, mesh=f"{key}.glb", vertices=int(head.base.vertices.shape[0]),
@@ -313,7 +386,7 @@ def run(job: dict[str, Any]) -> int:
                                texture=None if head.photo is None or head.texture_size is None else list(head.texture_size),
                                overlap=None if head.overlap is None else round(float(head.overlap), 4),
                                overlap_head=None if head.overlap_head is None else round(float(head.overlap_head), 4),
-                               note=head.note)
+                               relief=bool(head.reshaped), note=_note(head, stage is not None, said))
                     del head
                 except Stopped:
                     raise

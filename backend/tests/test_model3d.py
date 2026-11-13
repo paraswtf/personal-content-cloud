@@ -220,6 +220,11 @@ def test_the_finishing_options_reach_the_job_and_the_manifest(conn, fake, monkey
     assert model3d.manifest(person)["options"] == DEFAULTS
     model3d.start(conn, person, {"framing": 3.0})
     assert job["options"]["framing"] == 3.0
+    # and the job says how much memory the child may hold: the generator leaves the relief out near it
+    assert job["max_rss_mb"] == settings.gen3d_max_rss_mb == 5000
+    monkeypatch.setattr(settings, "gen3d_max_rss_mb", 3210)
+    model3d.start(conn, person, None)
+    assert job["max_rss_mb"] == 3210
 
 
 def test_a_look_s_picture_is_written_at_the_photo_s_own_size(conn, fake, monkeypatch):
@@ -449,6 +454,36 @@ def test_the_manifest_says_how_much_memory_the_child_held(conn, fake, monkeypatc
     monkeypatch.setattr(model3d, "tree_rss_mb", lambda pid: 0.0)           # a child that was gone at every look
     model3d.start(conn, person, {})
     assert model3d.manifest(person)["peak_rss_mb"] is None
+
+
+def test_the_manifest_keeps_the_generators_own_memory_numbers(conn, fake, monkeypatch):
+    person, _items = person_with_looks(conn)
+    model3d.start(conn, person, {})
+    own = model3d.manifest(person)["generator_memory_mb"]              # the stand-in child's real numbers
+    assert set(own) == {"peak", "with_model", "released"}
+    if sys.platform.startswith("linux"):
+        assert all(isinstance(v, int) and v > 10 for v in own.values())
+    real = model3d._run_child
+
+    def says(memory):
+        def run(work, job_path, total, fake_run, stopped=None):
+            out = real(work, job_path, total, fake_run, stopped)
+            path = work / "out" / "result.json"
+            doc = json.loads(path.read_text(encoding="utf-8"))
+            if memory is None:
+                doc.pop("memory_mb", None)
+            else:
+                doc["memory_mb"] = memory
+            path.write_text(json.dumps(doc), encoding="utf-8")
+            return out
+        return run
+
+    for said, kept in ((None, None), ("a lot", None), ({}, None), ({"peak": "x", "released": True}, None),
+                       ({"peak": 3712.6, "with_model": 3650, "released": None}, {"peak": 3712, "with_model": 3650, "released": None}),
+                       ({"peak": -5, "with_model": float("inf"), "released": 1480, "more": 1}, {"peak": None, "with_model": None, "released": 1480})):
+        monkeypatch.setattr(model3d, "_run_child", says(said))
+        model3d.start(conn, person, {})
+        assert model3d.manifest(person)["generator_memory_mb"] == kept, said
 
 
 def test_status_says_whether_the_relief_models_are_installed(conn, client, fake, monkeypatch):
@@ -732,6 +767,35 @@ def test_the_time_limit_stops_the_child(conn, fake, monkeypatch):
     monkeypatch.setattr(settings, "gen3d_look_timeout_s", 1.0)
     model3d.start(conn, person, {})
     assert "took longer" in model3d.status(conn, person)["error"]
+
+
+def test_the_first_pass_moves_the_bar_and_restarts_a_looks_time(conn, fake, monkeypatch):
+    """The child's first pass finishes no head, but says a line per look the model is done with. The bar moves by
+    them, and a look's time is counted from the last one: a job of many looks is not stopped for its first pass."""
+    person, _items = person_with_looks(conn)
+    steps = []
+    real = model3d._set
+    monkeypatch.setattr(model3d, "_set", lambda **kw: (steps.append((kw.get("step"), kw.get("done"), kw.get("total"))), real(**kw))[1])
+    # a line every 1.2 s with a limit of 2 s between lines: the whole run is longer than the limit, no gap is
+    code = ("import time\n"
+            "print('progress: 0/2', flush=True)\n"
+            "for line in ('made: l1 ok 1.2', 'made: l2 ok 1.2', 'made: l3 ok 1.2', 'look: l1 ok 2.4'):\n"
+            "    time.sleep(1.2); print(line, flush=True)\n"
+            "print('progress: 1/2', flush=True)\n"
+            "time.sleep(120)\n")
+    monkeypatch.setattr(model3d, "_command", lambda *_a, **_k: [sys.executable, "-c", code])
+    monkeypatch.setattr(settings, "gen3d_look_timeout_s", 2.0)
+    started = time.monotonic()
+    model3d.start(conn, person, {})
+    assert "took longer" in model3d.status(conn, person)["error"]          # stopped in the silence after the lines
+    assert time.monotonic() - started > 4.8 + 2.0
+    build = [s for s in steps if s[0] == model3d.STEP_BUILD]
+    assert build == [(model3d.STEP_BUILD, 0, 2), (model3d.STEP_BUILD, 1, 2), (model3d.STEP_BUILD, 2, 2),
+                     (model3d.STEP_BUILD, 2, 2)]                           # never past the job's own count
+    # the first finished head moves the job on to its second step, after every line of the first
+    assert model3d.STEP_FINISH == "Finishing heads" and (model3d.STEP_FINISH, 1, 2) in steps
+    assert steps.index((model3d.STEP_FINISH, 1, 2)) > max(n for n, s in enumerate(steps) if s[0] == model3d.STEP_BUILD)
+    assert "2 seconds" in model3d.status(conn, person)["error"]           # a short limit is said in seconds
 
 
 def test_tree_memory_counts_the_descendants():

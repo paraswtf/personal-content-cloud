@@ -247,8 +247,18 @@ def test_job_options_for_the_finishing(tmp_path):
     assert _run(["--job", str(job)]).returncode == 0
     row = json.loads((tmp_path / "out" / "result.json").read_text())["looks"][0]
     assert row["ok"] and row["textured"] is False and "nothing of the photo" in row["note"]
+    # the relief's options: the stand-in never runs it, whatever they say, and a memory limit is taken
+    job = _job(tmp_path, [{"key": "l1", "image": picture}], options={"detail": 2, "relief": 1, "framing": 3.2},
+               max_rss_mb=5000)
+    assert _run(["--job", str(job)]).returncode == 0
+    row = json.loads((tmp_path / "out" / "result.json").read_text())["looks"][0]
+    assert row["ok"] and row["textured"] is True and row["relief"] is False and row["note"] is None
     for bad in ({"options": {"smoothing": 4}}, {"options": {"texture": -1}}, {"options": {"texture": "fine"}},
-                {"options": {"smoothing": True}}, {"looks": [{"key": "l1", "image": picture, "inside": [0, 0, 128]}]},
+                {"options": {"smoothing": True}}, {"options": {"relief": 2}}, {"options": {"relief": True}},
+                {"options": {"relief": "on"}}, {"options": {"framing": 0.5}}, {"options": {"framing": 7}},
+                {"options": {"framing": "wide"}}, {"options": {"framing": True}}, {"max_rss_mb": 0},
+                {"max_rss_mb": "all of it"}, {"max_rss_mb": True},
+                {"looks": [{"key": "l1", "image": picture, "inside": [0, 0, 128]}]},
                 {"looks": [{"key": "l1", "image": picture, "inside": "all"}]},
                 {"looks": [{"key": "l1", "image": picture, "inside": [0, 0, True, 80]}]}):
         job = _job(tmp_path, bad.pop("looks", [{"key": "l1", "image": picture}]), **bad)
@@ -427,8 +437,13 @@ def test_a_job_runs_in_two_passes_and_reports_a_look_when_its_file_is_there(tmp_
                          "events": log.read_text().split("\n")[:-1], "result": (out / "result.json").exists()}
     _, err = proc.communicate(timeout=60)
     assert proc.returncode == 0, err
-    # nothing but the start is said during the first pass; then every look in the job's order, each with its count
-    assert lines[0] == "progress: 0/5" and [ln.split()[0] for ln in lines[1:]] == ["look:", "progress:"] * 5
+    # the first pass says a line per look when the model is done with it (l4's mesh is only found bad later); then
+    # every look is finished in the job's order, each with its count
+    assert lines[0] == "progress: 0/5"
+    assert [ln.split()[:3] for ln in lines[1:6]] == [["made:", "l1", "ok"], ["made:", "l2", "error"],
+                                                     ["made:", "l3", "error"], ["made:", "l4", "ok"], ["made:", "l5", "ok"]]
+    assert all(float(ln.split()[3]) >= 0 for ln in lines[1:6])
+    assert [ln.split()[0] for ln in lines[6:]] == ["look:", "progress:"] * 5
     assert [ln for ln in lines if ln.startswith("progress")] == [f"progress: {n}/5" for n in range(6)]
     assert [(key, got["state"]) for key, got in seen.items()] == [
         ("l1", "ok"), ("l2", "error"), ("l3", "error"), ("l4", "error"), ("l5", "ok")]
@@ -459,11 +474,11 @@ def test_sigterm_in_the_second_pass_keeps_what_was_reported(tmp_path):
 
     command, out, log = _logging_job(tmp_path, ["l1", "l5", "l6"], patch=(
         "real, calls = job.finish_head, []\n"
-        "def slow(mesh, prepared, options):\n"
+        "def slow(mesh, prepared, options, reshape=None):\n"
         "    calls.append(1)\n"
         "    if len(calls) == 2:\n"
         "        time.sleep(60)\n"
-        "    return real(mesh, prepared, options)\n"
+        "    return real(mesh, prepared, options, reshape=reshape)\n"
         "job.finish_head = slow"))
     proc = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     while True:

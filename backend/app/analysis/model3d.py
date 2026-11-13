@@ -15,7 +15,8 @@ The server only passes the last three on.
 Files, under DATA_DIR/people3d/<person id>/:
   current              the name of the folder in use (a time stamp)
   <stamp>/model.json   the manifest: {rev, person_id, generated_at, seconds, generator{name, version}, options,
-                       birth_year, scanned, usable, peak_rss_mb, looks: [{key, label, age, age_band, hair, hair_label,
+                       birth_year, scanned, usable, peak_rss_mb, generator_memory_mb{peak, with_model, released},
+                       looks: [{key, label, age, age_band, hair, hair_label,
                        facial_hair, facial_hair_label, photos, face_id, item_id, item_uid, taken_at, faults, mesh,
                        picture, bytes, vertices, faces, textured, texture, overlap, overlap_head, relief,
                        note}]}. `textured`: the head carries the photo as a texture; `texture` its [width,
@@ -23,9 +24,12 @@ Files, under DATA_DIR/people3d/<person id>/:
                        `overlap_head` the same over the head alone (kept here to judge a run by: the generator's
                        own result file goes with the work folder); `relief`: the face's shape was corrected
                        from the depth model; `note` the generator's remark on the look (why a photo was not
-                       used). A manifest written before the finishing existed has none of the six, nor the three
-                       newer options: it reads as not textured and without relief, and the status leaves the
-                       three options out.
+                       used, or why the face was not shaped). A manifest written before the finishing existed
+                       has none of the six, nor the three newer options: it reads as not textured and without
+                       relief, and the status leaves the three options out. `peak_rss_mb` is what the server saw
+                       the child's process tree hold at most; `generator_memory_mb` is the generator's own
+                       count: its peak, what it held with the model loaded, and what it held once the model was
+                       let go and before the heads were finished (kept to judge a run by, like the overlaps).
   <stamp>/<key>.glb    a look's mesh;  <stamp>/<key>.jpg  the picture it was made from (512 px)
   work/                the job's scratch folder (pictures, job.json, out/), removed when the job ends
   error.json           why the last run failed, until the next start
@@ -62,6 +66,7 @@ from __future__ import annotations
 import atexit
 import json
 import logging
+import math
 import os
 import queue
 import re
@@ -110,7 +115,8 @@ JOB_ONLY = ("inside",)     # keys of a look's row that go into the job file and 
 
 STEP_LOOKS = "Finding looks"
 STEP_PHOTOS = "Preparing photos"
-STEP_BUILD = "Building heads"
+STEP_BUILD = "Building heads"       # the child's first pass: the model makes every look's raw head
+STEP_FINISH = "Finishing heads"     # its second: each head is smoothed, shaped, given its photo and written
 STEP_SAVE = "Saving"
 
 
@@ -889,6 +895,7 @@ def _run_child(work: Path, job_path: Path, total: int, fake: bool,
     last_look = time.monotonic()
     reason: str | None = None
     finished: set[str] = set()
+    made = 0
     ended = False
     try:
         while not ended:
@@ -901,9 +908,16 @@ def _run_child(work: Path, job_path: Path, total: int, fake: bool,
             elif line.startswith("progress:"):
                 try:
                     done = int(line.split(":", 1)[1].split("/")[0])
-                    _set(step=STEP_BUILD, done=done, total=total)
                 except ValueError:
-                    pass
+                    done = 0
+                if done > 0:    # heads finished so far; the "0/M" at the start says nothing new
+                    _set(step=STEP_FINISH, done=min(done, total), total=total)
+            elif line.startswith("made:"):
+                # the first pass: the model is done with one more look. Nothing is finished by that, but the job
+                # is alive and that far, so the bar moves and the look's time starts again
+                made += 1
+                last_look = time.monotonic()
+                _set(step=STEP_BUILD, done=min(made, total), total=total)
             elif line.startswith("look:"):
                 last_look = time.monotonic()
                 words = line.split()
@@ -922,7 +936,8 @@ def _run_child(work: Path, job_path: Path, total: int, fake: bool,
                           "and was stopped.")
                 break
             if time.monotonic() - last_look > timeout:
-                reason = f"A head took longer than {int(timeout // 60) or 1} minutes and the generator was stopped."
+                limit = f"{int(timeout // 60)} minutes" if timeout >= 120 else f"{int(timeout)} seconds"
+                reason = f"A head took longer than {limit} and the generator was stopped."
                 break
         if ended:  # it closed its output: let it exit by itself, so its exit code is its own
             try:
@@ -1060,6 +1075,19 @@ def _note(value: Any) -> str | None:
     return text[:NOTE_MAX] or None
 
 
+def _generator_memory(value: Any) -> dict[str, int | None] | None:
+    """The generator's own memory numbers (its result file's `memory_mb`), checked: {"peak", "with_model",
+    "released"} in MB, each a whole number or None; None when the generator said nothing of the kind."""
+    if not isinstance(value, dict):
+        return None
+    out: dict[str, int | None] = {}
+    for key in ("peak", "with_model", "released"):
+        mb = value.get(key)
+        ok = isinstance(mb, (int, float)) and not isinstance(mb, bool) and math.isfinite(mb) and 0 <= mb < 10_000_000
+        out[key] = int(mb) if ok else None
+    return out if any(v is not None for v in out.values()) else None
+
+
 def _share(value: Any) -> float | None:
     """A share between 0 and 1 as the generator gave it, to four places; None for anything else."""
     if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0.0 <= float(value) <= 1.0:
@@ -1134,7 +1162,8 @@ def _collect(person_id: int, work: Path, rows: list[dict[str, Any]], plan: looks
         "rev": rev, "person_id": int(person_id), "generated_at": now_iso(), "seconds": round(seconds, 1),
         "generator": result.get("generator") or {}, "options": {k: options[k] for k in OPTION_KEYS},
         "birth_year": plan.birth_year, "scanned": plan.scanned, "usable": plan.usable,
-        "peak_rss_mb": int(peak_mb) if peak_mb else None, "looks": looks,
+        "peak_rss_mb": int(peak_mb) if peak_mb else None,
+        "generator_memory_mb": _generator_memory(result.get("memory_mb")), "looks": looks,
     })
     storage.write_bytes_atomic(base / "current", rev.encode("ascii"))
     for entry in base.iterdir():  # the older models
@@ -1205,6 +1234,9 @@ def _run(person_id: int, options: dict[str, Any], fake: bool) -> None:
         job = {
             "out_dir": str(work / "out"), "weights_dir": str(_weights_dir()),
             "generator": "fake" if fake else settings.gen3d_generator, "device": "auto",
+            # what the watch below allows the child: a look whose depth models would not fit under it is finished
+            # without the relief by the generator itself, which is better than the whole job being stopped here
+            "max_rss_mb": int(settings.gen3d_max_rss_mb),
             # `framing` goes along because the face relief finds the face by it: the picture is that many face
             # sizes wide (looks.square_for)
             "options": {"detail": options["detail"], "framing": options["framing"], "smoothing": options["smoothing"],
