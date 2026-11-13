@@ -370,6 +370,16 @@ def sample(image: np.ndarray, xy: np.ndarray) -> np.ndarray:
     return np.where(inside, top * (1.0 - fy) + bottom * fy, 0.0)
 
 
+def visible(pix: np.ndarray, depth: np.ndarray, near: np.ndarray, slack: float) -> np.ndarray:
+    """Which points the camera sees: those no further than `slack` behind the nearest surface around their pixel.
+    pix (n, 2): their places (x, y) on the grid `near` is drawn on; a point off the grid is judged by the pixel of
+    the grid's edge nearest to it."""
+    h, w = near.shape
+    col = np.clip(np.floor(pix[:, 0]), 0, w - 1).astype(np.int64)
+    row = np.clip(np.floor(pix[:, 1]), 0, h - 1).astype(np.int64)
+    return depth <= near[row, col] + slack
+
+
 def soften(shift: np.ndarray, limit: float) -> np.ndarray:
     """The shift as it is laid on the vertices: blurred a little (BLUR_SIGMA pixels), and nowhere over `limit`."""
     import cv2
@@ -551,9 +561,7 @@ def _refine(v: np.ndarray, faces: np.ndarray, project: Callable, cam: np.ndarray
     placed = np.isfinite(uv).all(axis=1) & np.isfinite(depth) & (depth > 1e-9)
     where = np.where(placed[:, None], uv, -1.0)       # a vertex the camera cannot place is put outside: it stays
     pix = where * k
-    col = np.clip(np.floor(pix[:, 0]), 0, GRID - 1).astype(np.int64)
-    row = np.clip(np.floor(pix[:, 1]), 0, GRID - 1).astype(np.int64)
-    seen = placed & (depth <= near[row, col] + SEEN * box)
+    seen = placed & visible(pix, np.where(placed, depth, np.inf), near, SEEN * box)
     # a vertex whose place in the picture is not the photo stays, whatever the blur carried over the line
     at = np.asarray(square_to_source(where), dtype=np.float64)
     seen &= (at[:, 0] >= part[0]) & (at[:, 1] >= part[1]) & (at[:, 0] < part[2]) & (at[:, 1] < part[3])
