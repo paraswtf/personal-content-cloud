@@ -24,7 +24,9 @@ uv sync --frozen
 .venv/bin/python "$ROOT/scripts/download_models.py" || echo "[run] model download failed; stages without their model are skipped until it succeeds"
 
 cd "$ROOT/frontend"
-if [ ! -d node_modules ]; then
+# npm writes node_modules/.package-lock.json at every install: when package-lock.json is newer, a dependency was
+# added or changed since (a pull), and the build below would fail on the missing package.
+if [ ! -d node_modules ] || [ package-lock.json -nt node_modules/.package-lock.json ]; then
   echo "[run] installing frontend dependencies"
   npm ci --no-audit --no-fund
 fi
