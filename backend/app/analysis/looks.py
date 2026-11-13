@@ -4,7 +4,8 @@ A look is how someone looked for a while: an age band, how much facial hair and 
 person's good face photos (at most MAX_SCORED, spread over the years), puts them into bins of (age band, facial
 hair, hair), keeps the fullest bins (at most max_looks, every age band first) and picks the photo of each that makes
 the best input for the generator, with three runners-up. write_picture() cuts that photo's head and shoulders from
-the original at full quality.
+the original at full quality and at the photo's own resolution (PICTURE_SIDE to PICTURE_SIDE_MAX pixels a side): the
+generator shrinks it for its model and lays the full-size picture over the finished head as its texture.
 
 What is read per face:
 - from a square HEAD_CROP face sizes wide around it in the 2048 px preview (what the generator will see): the hair as
@@ -64,7 +65,8 @@ MIN_BIRTH_FACES = 10       # dated adult faces needed to tell the birth year
 CHILD_AGE = 13.0           # a face read this young keeps its read age (a re-shot print carries today's date)
 HEAD_CROP = 2.6            # the reading square, in face sizes
 READ_SIDE = 384            # and its side in pixels for the models
-PICTURE_SIDE = 1024        # the generator's input picture
+PICTURE_SIDE = 1024        # the generator's picture is at least this many pixels a side (a small face is enlarged)
+PICTURE_SIDE_MAX = 3072    # ... and at most this many; in between it keeps the photo's own resolution
 FRAMING_MIN, FRAMING_MAX, FRAMING_DEFAULT = 1.8, 3.2, 2.6
 FACE_ABOVE = 0.08          # the face centre sits this share of the square above its middle
 CUT_OFF_SHARE = 0.15       # the square may leave the picture by this share of its area
@@ -307,6 +309,27 @@ def cut(rgb: np.ndarray, square: tuple[float, float, float], out_side: int) -> n
         part = cv2.copyMakeBorder(part, pad[0], pad[1], pad[2], pad[3], cv2.BORDER_REPLICATE)
     interp = cv2.INTER_AREA if part.shape[0] > out_side else cv2.INTER_CUBIC
     return cv2.resize(part, (out_side, out_side), interpolation=interp)
+
+
+def inside(square: tuple[float, float, float], width: int, height: int, out_side: int) -> tuple[int, int, int, int]:
+    """(left, top, right, bottom) in pixels of the out_side x out_side picture cut() makes of this square of a
+    width x height photo: the part that shows the photo itself. Outside it cut() repeated the photo's edge row or
+    column, because the square left the photo there; laid on a head as a sharp texture those repeats would be
+    streaks, so the generator uses the photo only inside this rectangle. Rounded inwards; right and bottom are
+    the first pixels past it. (0, 0, 0, 0) when the square misses the photo."""
+    left, top, side = square
+    x0, y0 = int(math.floor(left)), int(math.floor(top))
+    s = max(2, int(round(side)))
+    k = float(out_side) / s
+    a = int(math.ceil(max(0, -x0) * k - 1e-9))
+    b = int(math.ceil(max(0, -y0) * k - 1e-9))
+    c = int(math.floor(min(s, int(width) - x0) * k + 1e-9))
+    d = int(math.floor(min(s, int(height) - y0) * k + 1e-9))
+    a, b = max(0, min(int(out_side), a)), max(0, min(int(out_side), b))
+    c, d = max(0, min(int(out_side), c)), max(0, min(int(out_side), d))
+    if c <= a or d <= b:
+        return 0, 0, 0, 0
+    return a, b, c, d
 
 
 # ------------------------------------------------------------------ bins and the choice (pure)
@@ -755,11 +778,21 @@ def plan(conn: sqlite3.Connection, person_id: int, max_looks: int = LOOKS_DEFAUL
 
 
 # ------------------------------------------------------------------ the generator's picture
-def picture(conn: sqlite3.Connection, face_id: int, framing: float = FRAMING_DEFAULT,
-            side: int = PICTURE_SIDE) -> np.ndarray | None:
-    """The head and shoulders of a face as the generator's input: a square `framing` face sizes wide cut from the
-    original at full quality (the analysis picture when the original does not read), RGB, side x side. None when the
-    face or its pixels are gone."""
+def picture_side(native: float) -> int:
+    """The side the generator's picture is written at, for a square that is `native` pixels wide in the photo: the
+    photo's own resolution, never under PICTURE_SIDE and never over PICTURE_SIDE_MAX."""
+    if not math.isfinite(native):
+        return PICTURE_SIDE
+    return int(min(PICTURE_SIDE_MAX, max(PICTURE_SIDE, round(native))))
+
+
+def picture_and_inside(conn: sqlite3.Connection, face_id: int, framing: float = FRAMING_DEFAULT,
+                       side: int | None = None) -> tuple[np.ndarray, tuple[int, int, int, int]] | None:
+    """The head and shoulders of a face as the generator's input, and the part of it that shows the photo itself
+    (inside()). The picture: a square `framing` face sizes wide cut from the original at full quality (the analysis
+    picture when the original does not read), RGB. Without `side` it keeps the photo's own resolution: as many
+    pixels a side as the square has in the photo, inside PICTURE_SIDE to PICTURE_SIDE_MAX (picture_side); with
+    `side` it is side x side. None when the face or its pixels are gone."""
     from app.analysis.trait_regions import load_original, load_preview
 
     row = conn.execute(
@@ -775,19 +808,32 @@ def picture(conn: sqlite3.Connection, face_id: int, framing: float = FRAMING_DEF
         return None
     framing = min(FRAMING_MAX, max(FRAMING_MIN, float(framing)))
     h, w = rgb.shape[:2]
-    return cut(rgb, square_for((row["x"], row["y"], row["w"], row["h"]), w, h, framing), side)
+    square = square_for((row["x"], row["y"], row["w"], row["h"]), w, h, framing)
+    out_side = picture_side(square[2]) if side is None else max(2, int(side))
+    return cut(rgb, square, out_side), inside(square, w, h, out_side)
 
 
-def write_picture(conn: sqlite3.Connection, face_id: int, path: Path, framing: float = FRAMING_DEFAULT) -> bool:
-    """Write picture() as a PNG. False when there is nothing to write."""
+def picture(conn: sqlite3.Connection, face_id: int, framing: float = FRAMING_DEFAULT,
+            side: int | None = None) -> np.ndarray | None:
+    """The picture of picture_and_inside() alone. None when the face or its pixels are gone."""
+    got = picture_and_inside(conn, face_id, framing, side)
+    return None if got is None else got[0]
+
+
+def write_picture(conn: sqlite3.Connection, face_id: int, path: Path, framing: float = FRAMING_DEFAULT,
+                  side: int | None = None) -> tuple[int, int, int, int] | None:
+    """Write picture() as a PNG (at the photo's own resolution unless `side` is given). Returns the part of the
+    written picture that shows the photo itself (inside(): left, top, right, bottom), or None when there is nothing
+    to write."""
     from PIL import Image
 
-    rgb = picture(conn, face_id, framing)
-    if rgb is None:
-        return False
+    got = picture_and_inside(conn, face_id, framing, side)
+    if got is None:
+        return None
+    rgb, rect = got
     path.parent.mkdir(parents=True, exist_ok=True)
     Image.fromarray(rgb).save(path, "PNG", compress_level=3)
-    return True
+    return rect
 
 
 def reading_dict(r: Reading) -> dict[str, Any]:

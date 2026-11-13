@@ -122,8 +122,9 @@ def test_job_end_to_end_with_the_stand_in_generator(conn, fake):
     base = model3d.person_dir(person)
     assert (base / "current").read_text() == rev and {p.name for p in base.iterdir()} == {"current", rev}
     assert doc["person_id"] == person and doc["generator"] == {"name": "fake", "version": "1"}
-    assert doc["options"] == {"max_looks": 6, "detail": 3, "framing": 2.2}
+    assert doc["options"] == {"max_looks": 6, "detail": 3, "framing": 2.2, "smoothing": 2, "texture": 2, "relief": 1}
     assert doc["scanned"] == 7 and doc["usable"] == 7 and doc["seconds"] >= 0
+    assert all(isinstance(lk["textured"], bool) for lk in doc["looks"]) and "note" in doc["looks"][0]
     assert [(lk["key"], lk["age_band"], lk["photos"], lk["label"]) for lk in doc["looks"]] == [
         ("l1", "25 to 34", 4, "About 25"), ("l2", "45 to 59", 3, "About 45")]
     for lk in doc["looks"]:
@@ -140,6 +141,8 @@ def test_job_end_to_end_with_the_stand_in_generator(conn, fake):
     assert [lk["mesh_url"] for lk in status["looks"]] == [
         f"/files/model3d/{person}/{rev}/l1.glb", f"/files/model3d/{person}/{rev}/l2.glb"]
     assert status["looks"][0]["picture_url"] == f"/files/model3d/{person}/{rev}/l1.jpg"
+    assert status["options"] == doc["options"]
+    assert [lk["textured"] for lk in status["looks"]] == [lk["textured"] for lk in doc["looks"]]
     assert model3d.file_path(person, rev, "l1.glb") == base / rev / "l1.glb"
     assert model3d.file_path(person, rev, "model.json") is None and model3d.file_path(person, "nope", "l1.glb") is None
     assert model3d.file_path(person, rev, "../current") is None
@@ -155,11 +158,290 @@ def test_job_end_to_end_with_the_stand_in_generator(conn, fake):
     assert not base.exists() and model3d.status(conn, person)["state"] == "none"
 
 
+DEFAULTS = {"max_looks": 6, "detail": 2, "framing": 2.6, "smoothing": 2, "texture": 2, "relief": 1}
+
+
 def test_options_are_kept_inside_their_ranges():
-    assert model3d.clean_options(None) == {"max_looks": 6, "detail": 2, "framing": 2.6}
-    assert model3d.clean_options({"max_looks": 99, "detail": 0, "framing": 9}) == {"max_looks": 12, "detail": 1, "framing": 3.2}
+    assert model3d.clean_options(None) == DEFAULTS and model3d.clean_options({}) == DEFAULTS
+    assert set(DEFAULTS) == set(model3d.OPTION_KEYS)
+    # outside the range: the nearest end
+    assert model3d.clean_options(
+        {"max_looks": 99, "detail": 0, "framing": 9, "smoothing": 9, "texture": -4, "relief": 5}) == {
+        "max_looks": 12, "detail": 1, "framing": 3.2, "smoothing": 3, "texture": 0, "relief": 1}
+    assert model3d.clean_options({"smoothing": 0, "texture": 3, "relief": 0}) == {
+        **DEFAULTS, "smoothing": 0, "texture": 3, "relief": 0}
+    assert model3d.clean_options({"relief": -1})["relief"] == 0
+    # no number at all: the default, for every option
+    for bad in (None, "strong", True, [2], {"a": 1}, float("nan"), float("inf")):
+        assert model3d.clean_options({k: bad for k in DEFAULTS}) == DEFAULTS, bad
+    assert model3d.clean_options("not a dict") == DEFAULTS  # type: ignore[arg-type]
+    # a number written as text or with a fraction is still taken, as before
+    assert model3d.clean_options({"smoothing": "1", "texture": 2.9, "detail": "3"}) == {
+        **DEFAULTS, "smoothing": 1, "texture": 2, "detail": 3}
     assert model3d.clean_options({"generator": "fake", "junk": 1})["generator"] == "fake"
     assert "generator" not in model3d.clean_options({"generator": "triposr"})
+    assert "junk" not in model3d.clean_options({"junk": 1})
+
+
+def _spy_on_the_job(monkeypatch) -> dict:
+    """The job file the child is started with, read just before the real child runs."""
+    seen: dict = {}
+    real = model3d._run_child
+
+    def run(work, job_path, total, fake_run, stopped=None):
+        seen.update(json.loads(Path(job_path).read_text(encoding="utf-8")))
+        seen["pictures"] = {}
+        for look in seen["looks"]:
+            with Image.open(look["image"]) as im:
+                seen["pictures"][look["key"]] = (im.size, im.mode, im.format)
+        return real(work, job_path, total, fake_run, stopped)
+
+    monkeypatch.setattr(model3d, "_run_child", run)
+    return seen
+
+
+def test_the_finishing_options_reach_the_job_and_the_manifest(conn, fake, monkeypatch):
+    person, _items = person_with_looks(conn)
+    job = _spy_on_the_job(monkeypatch)
+    model3d.start(conn, person, {"smoothing": 3, "texture": 0, "relief": 0, "detail": 1})
+    assert job["options"] == {"detail": 1, "smoothing": 3, "texture": 0, "relief": 0, "seed": 0}
+    assert [look["key"] for look in job["looks"]] == ["l1", "l2"]
+    doc = model3d.manifest(person)
+    assert doc["options"] == {**DEFAULTS, "detail": 1, "smoothing": 3, "texture": 0, "relief": 0}
+    assert model3d.status(conn, person)["options"] == doc["options"]
+    # nothing said: the defaults go to the generator
+    model3d.start(conn, person, None)
+    assert job["options"] == {"detail": 2, "smoothing": 2, "texture": 2, "relief": 1, "seed": 0}
+    assert model3d.manifest(person)["options"] == DEFAULTS
+
+
+def test_a_look_s_picture_is_written_at_the_photo_s_own_size(conn, fake, monkeypatch):
+    """The child gets each look's picture as large as the photo has it, inside 1024 to 3072 px; the picture kept
+    with the model stays small."""
+    from tests.helpers import flat_image, jpeg_bytes
+
+    person = make_person(conn, "Asha")
+    # faces 1,000 px wide in 4,000 px photos: a square of 2,200 px at framing 2.2
+    for k in range(3):
+        photo = jpeg_bytes(flat_image(4000, 3000, (200 - 9 * k, 160, 120)))
+        item = make_item(conn, width=4000, height=3000, data=photo, taken_at=f"2024-03-{k + 1:02d}T10:00:00.000Z")
+        make_face(conn, item["id"], person, box=(0.35, 0.3, 0.25, 0.3), size_px=900, age_groups=groups(3))
+    job = _spy_on_the_job(monkeypatch)
+    model3d.start(conn, person, {"framing": 2.2})
+    assert job["pictures"] == {"l1": ((2200, 2200), "RGB", "PNG")}
+    assert job["looks"][0]["inside"] == [0, 0, 2200, 2200]             # the square lies wholly in the photo
+    doc = model3d.manifest(person)
+    with Image.open(model3d.person_dir(person) / doc["rev"] / doc["looks"][0]["picture"]) as im:
+        assert im.size == (model3d.PICTURE_SIDE, model3d.PICTURE_SIDE) == (512, 512)
+    assert not (model3d.person_dir(person) / "work").exists()
+
+
+def test_the_job_says_which_part_of_a_picture_is_the_photo(conn, fake, monkeypatch):
+    """Where a look's square leaves the photo, the picture repeats the photo's edge. The job file gives the part
+    that is the photo itself (`inside`: left, top, right, bottom in the picture's pixels), so the generator lays no
+    repeated edge on the head. The stored model does not keep it."""
+    from tests.helpers import flat_image, jpeg_bytes
+
+    person = make_person(conn, "Asha")
+    # faces 1,000 x 900 px near the right edge and the bottom of 4,000 x 3,000 px photos. At framing 2.2 the square
+    # is 2,200 px: it starts at 1,900.4 across and 936.6 down, so it ends 100 px right of the photo and 136 px below
+    box = (0.6251, 0.4702, 0.25, 0.3)
+    for k in range(3):
+        photo = jpeg_bytes(flat_image(4000, 3000, (200 - 9 * k, 160, 120)))
+        item = make_item(conn, width=4000, height=3000, data=photo, taken_at=f"2024-03-{k + 1:02d}T10:00:00.000Z")
+        make_face(conn, item["id"], person, box=box, size_px=900, age_groups=groups(3))
+    left, top, side = looks.square_for(box, 4000, 3000, 2.2)
+    assert (left, top, side) == pytest.approx((1900.4, 936.6, 2200.0))
+    assert looks.outside_share((left, top, side), 4000, 3000) < looks.CUT_OFF_SHARE     # not enough to be a fault
+    job = _spy_on_the_job(monkeypatch)
+    model3d.start(conn, person, {"framing": 2.2})
+    assert job["pictures"] == {"l1": ((2200, 2200), "RGB", "PNG")}
+    assert job["looks"] == [{"key": "l1", "image": job["looks"][0]["image"], "inside": [0, 0, 2100, 2064]}]
+    doc = model3d.manifest(person)
+    assert len(doc["looks"]) == 1 and "inside" not in doc["looks"][0]
+    assert "inside" not in model3d.status(conn, person)["looks"][0]
+
+    # a picture that came without its rectangle: the look says nothing, and the head is made all the same
+    real = looks.write_picture
+    monkeypatch.setattr(looks, "write_picture", lambda *a, **k: real(*a, **k) is not None)
+    model3d.start(conn, person, {"framing": 2.2})
+    assert set(job["looks"][0]) == {"key", "image"} and len(model3d.manifest(person)["looks"]) == 1
+
+
+FINISHING_KEYS = ("textured", "texture", "overlap", "overlap_head", "relief", "note")
+
+
+def _with_result_rows(monkeypatch, said: dict[str, dict], meshes: dict[str, bytes] | None = None) -> None:
+    """Let the real stand-in child run, then make its result rows say exactly `said` about the finishing (and
+    nothing where a look is not named), and swap in `meshes`, before the job collects them."""
+    real = model3d._run_child
+
+    def run(work, job_path, total, fake_run, stopped=None):
+        out = real(work, job_path, total, fake_run, stopped)
+        path = work / "out" / "result.json"
+        doc = json.loads(path.read_text(encoding="utf-8"))
+        for row in doc["looks"]:
+            for key in FINISHING_KEYS:
+                row.pop(key, None)
+            row.update(said.get(row["key"], {}))
+        path.write_text(json.dumps(doc), encoding="utf-8")
+        for key, data in (meshes or {}).items():
+            (work / "out" / f"{key}.glb").write_bytes(data)
+        return out
+
+    monkeypatch.setattr(model3d, "_run_child", run)
+
+
+def _glb(textured: bool, vertices: int = 600, triangles: int = 1100) -> bytes:
+    """The smallest file that reads as a .glb here: the header and a description, no data."""
+    material: dict = {"pbrMetallicRoughness": {"metallicFactor": 0.0}}
+    doc: dict = {
+        "asset": {"version": "2.0"},
+        "accessors": [{"count": vertices, "type": "VEC3"}, {"count": triangles * 3, "type": "SCALAR"}],
+        "meshes": [{"primitives": [{"attributes": {"POSITION": 0}, "indices": 1, "material": 0}]}],
+        "materials": [material],
+    }
+    if textured:
+        doc["images"] = [{"mimeType": "image/jpeg", "bufferView": 0}]
+        doc["textures"] = [{"source": 0}]
+        doc["materials"].append({"pbrMetallicRoughness": {"baseColorTexture": {"index": 0}}, "alphaMode": "BLEND"})
+        doc["meshes"][0]["primitives"].append(
+            {"attributes": {"POSITION": 0, "TEXCOORD_0": 0}, "indices": 1, "material": 1})
+    text = json.dumps(doc).encode("utf-8")
+    text += b" " * ((4 - len(text) % 4) % 4)
+    return (0x46546C67).to_bytes(4, "little") + (2).to_bytes(4, "little") + (20 + len(text)).to_bytes(4, "little") \
+        + len(text).to_bytes(4, "little") + (0x4E4F534A).to_bytes(4, "little") + text
+
+
+def test_what_the_generator_says_about_the_finishing_is_kept(client, conn, fake, monkeypatch):
+    person, _items = person_with_looks(conn)
+    _with_result_rows(monkeypatch, {
+        "l1": {"textured": True, "texture": [1536, 2048], "overlap": 0.9712345, "overlap_head": 0.93456,
+               "relief": True, "note": None},
+        "l2": {"textured": False, "texture": None, "overlap": 0.71, "overlap_head": 1.5, "relief": "yes",
+               "note": "The photo did not line up with the head,\n so the head keeps its own colours.\x07"},
+    })
+    model3d.start(conn, person, {})
+    l1, l2 = model3d.manifest(person)["looks"]
+    assert (l1["textured"], l1["texture"], l1["overlap"], l1["note"]) == (True, [1536, 2048], 0.9712, None)
+    assert (l2["textured"], l2["texture"], l2["overlap"]) == (False, None, 0.71)
+    assert (l1["overlap_head"], l2["overlap_head"]) == (0.9346, None)     # a share is between 0 and 1
+    assert (l1["relief"], l2["relief"]) == (True, False)                  # only a plain true counts
+    assert l2["note"] == "The photo did not line up with the head, so the head keeps its own colours."
+    s1, s2 = model3d.status(conn, person)["looks"]
+    assert s1["textured"] is True and "note" not in s1                 # a note is given only when there is one
+    assert s2["textured"] is False and s2["note"] == l2["note"]
+    assert (s1["relief"], s2["relief"]) == (True, False)
+    assert not {"texture", "overlap", "overlap_head"} & set(s1)        # those three stay in the manifest
+    body = client.get(f"/api/people/{person}/model3d").json()
+    assert [(lk["textured"], lk["relief"], lk["note"]) for lk in body["looks"]] == [
+        (True, True, None), (False, False, l2["note"])]
+
+
+def test_a_result_without_the_finishing_keys_reads_as_not_textured(conn, fake, monkeypatch):
+    """The generator before the finishing: its rows say nothing, and its files carry no picture."""
+    person, _items = person_with_looks(conn)
+    _with_result_rows(monkeypatch, {}, {"l1": _glb(False), "l2": _glb(False)})
+    model3d.start(conn, person, {})
+    for lk in model3d.manifest(person)["looks"]:
+        assert [lk[key] for key in FINISHING_KEYS] == [False, None, None, None, False, None]
+    assert all(lk["textured"] is False and lk["relief"] is False and "note" not in lk
+               for lk in model3d.status(conn, person)["looks"])
+
+
+def test_the_file_says_whether_it_is_textured_when_the_row_does_not(conn, fake, monkeypatch):
+    """A head finished before the generator was stopped has no result row: its file is asked. And what a row
+    says is only taken when it is of the right kind."""
+    assert model3d._glb_textured(Path(__file__)) is False              # not a .glb at all
+    person, _items = person_with_looks(conn)
+    _with_result_rows(monkeypatch, {
+        "l1": {},                                                                       # says nothing
+        "l2": {"textured": "yes", "texture": [0, -5], "overlap": 7, "note": 12},        # says nonsense
+    }, {"l1": _glb(True), "l2": _glb(False)})
+    model3d.start(conn, person, {})
+    l1, l2 = model3d.manifest(person)["looks"]
+    assert (l1["textured"], l1["texture"], l1["overlap"], l1["note"]) == (True, None, None, None)
+    assert (l2["textured"], l2["texture"], l2["overlap"], l2["note"]) == (False, None, None, None)
+    assert (l1["vertices"], l1["faces"]) != (0, 0)
+
+    # a size is kept only with a texture; a long note is cut; a note of blanks is none
+    _with_result_rows(monkeypatch, {
+        "l1": {"textured": False, "texture": [1024, 1024], "note": "x" * 500},
+        "l2": {"textured": True, "texture": [4096, 4096.0], "overlap": True, "note": " \n\t "},
+    })
+    model3d.start(conn, person, {})
+    l1, l2 = model3d.manifest(person)["looks"]
+    assert (l1["textured"], l1["texture"], l1["note"]) == (False, None, "x" * model3d.NOTE_MAX)
+    assert (l2["textured"], l2["texture"], l2["overlap"], l2["note"]) == (True, None, None, None)
+
+
+def test_a_model_made_before_the_finishing_still_shows(client, conn, fake):
+    """An older manifest has neither the three newer options nor anything about textures. The status gives the
+    options the model has and leaves the others out (not null, and not today's defaults: that is how the tab
+    tells that these heads predate the finishing), and says the heads are not textured."""
+    person, _items = person_with_looks(conn)
+    model3d.start(conn, person, {"max_looks": 6, "detail": 3, "framing": 2.2})
+    rev = model3d.current_rev(person)
+    path = model3d.person_dir(person) / rev / "model.json"
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    first = {"max_looks": 6, "detail": 3, "framing": 2.2}
+    doc["options"] = dict(first)
+    doc.pop("peak_rss_mb", None)
+    for lk in doc["looks"]:
+        for key in FINISHING_KEYS:
+            lk.pop(key, None)
+    path.write_text(json.dumps(doc), encoding="utf-8")
+    url = f"/api/people/{person}/model3d"
+
+    status = model3d.status(conn, person)
+    assert status["state"] == "done" and len(status["looks"]) == 2
+    assert status["options"] == first
+    assert all(lk["textured"] is False and lk["relief"] is False and "note" not in lk for lk in status["looks"])
+    body = client.get(url).json()
+    assert body["options"] == first                                    # the three newer keys are absent, not null
+    assert [(lk["textured"], lk["relief"], lk["note"]) for lk in body["looks"]] == [(False, False, None)] * 2
+    assert client.get(body["looks"][0]["mesh_url"]).status_code == 200
+
+    # a manifest with some of the newer options gives those, each inside its range
+    doc["options"] = {**first, "smoothing": 1, "texture": 9}
+    path.write_text(json.dumps(doc), encoding="utf-8")
+    assert model3d.status(conn, person)["options"] == {**first, "smoothing": 1, "texture": 3}
+    assert client.get(url).json()["options"] == {**first, "smoothing": 1, "texture": 3}
+
+    # a manifest whose options are missing or broken gives none, and the rest still shows
+    for broken in (None, {}, "fast", ["a"], {"detail": 2}, {"smoothing": 2, "texture": 2, "relief": 1}):
+        doc["options"] = broken
+        path.write_text(json.dumps(doc), encoding="utf-8")
+        assert model3d.status(conn, person)["options"] is None, broken
+        body = client.get(url).json()
+        assert body["options"] is None and len(body["looks"]) == 2, broken
+    # values that are no numbers read as the defaults; a key that is not there stays out
+    assert model3d.shown_options({"max_looks": "x", "detail": None, "framing": 99}) == {
+        "max_looks": 6, "detail": 2, "framing": 3.2}
+    assert model3d.shown_options(DEFAULTS) == DEFAULTS
+    assert model3d.shown_options({**DEFAULTS, "generator": "fake", "junk": 1}) == DEFAULTS
+
+
+@pytest.mark.filterwarnings("ignore:Duplicate Operation ID")   # the file routes answer GET and HEAD
+def test_the_api_description_names_the_options(client):
+    """Leaving the missing options out of the answer does not blur what the API says the answer holds."""
+    doc = client.get("/api/openapi.json").json()
+    schemas = doc["components"]["schemas"]
+    options = schemas["Model3dOptions"]
+    assert set(options["properties"]) == set(model3d.OPTION_KEYS)
+    assert set(options["required"]) == {"max_looks", "detail", "framing"}
+    assert {"textured", "relief", "note"} <= set(schemas["Look3dOut"]["properties"])
+    assert {"smoothing", "texture", "relief"} <= set(schemas["Model3dIn"]["properties"])
+
+
+def test_the_manifest_says_how_much_memory_the_child_held(conn, fake, monkeypatch):
+    person, _items = person_with_looks(conn)
+    monkeypatch.setattr(model3d, "tree_rss_mb", lambda pid: 321.4)
+    model3d.start(conn, person, {})
+    assert model3d.manifest(person)["peak_rss_mb"] == 321 and model3d.peak_rss_mb() == 321
+    monkeypatch.setattr(model3d, "tree_rss_mb", lambda pid: 0.0)           # a child that was gone at every look
+    model3d.start(conn, person, {})
+    assert model3d.manifest(person)["peak_rss_mb"] is None
 
 
 def test_status_says_why_nothing_can_be_made(conn, no_generator, monkeypatch):
@@ -657,6 +939,117 @@ def test_sweep_removes_what_an_interrupted_run_left_behind(conn, fake, monkeypat
     assert model3d.status(conn, person)["state"] == "done" and len(model3d.status(conn, person)["looks"]) == 2
 
 
+def _files(person: int) -> set[str]:
+    """The names in the folder of the person's model in use."""
+    rev = model3d.current_rev(person)
+    return {p.name for p in (model3d.person_dir(person) / rev).iterdir()} if rev else set()
+
+
+JOB_OF_SOMEONE = {"person_id": 999, "step": "Building heads", "done": 0, "total": 1, "started_at": "",
+                  "cancel": False, "remove": False}
+
+
+def test_sweep_takes_the_heads_of_photos_that_are_gone_for_good(client, conn, fake):
+    """A head holds its photo's own pixels, so its files do not outlive the photo. A photo that is only in the
+    trash or the vault can come back, and so can a face: such a head is hidden (not listed, not served) and its
+    files stay."""
+    from app import ingest
+
+    person, _items = person_with_looks(conn)
+    url = f"/api/people/{person}/model3d"
+    assert client.post(url, json={}).status_code == 202
+    l1, l2 = model3d.manifest(person)["looks"]
+    mesh_url = {lk["key"]: lk["mesh_url"] for lk in client.get(url).json()["looks"]}
+    everything = {"model.json", "l1.glb", "l1.jpg", "l2.glb", "l2.jpg"}
+    assert _files(person) == everything
+
+    with tx(conn):                                                     # one in the trash, the other in the vault
+        conn.execute("UPDATE items SET deleted_at = '2026-11-13T00:00:00.000Z' WHERE id = ?", (l1["item_id"],))
+        conn.execute("UPDATE items SET nsfw = 1 WHERE id = ?", (l2["item_id"],))
+    assert model3d.sweep(conn) == 0 and _files(person) == everything
+    assert client.get(url).json()["looks"] == [] and len(model3d.manifest(person)["looks"]) == 2
+    with tx(conn):                                                     # both back, and a face given to nobody
+        conn.execute("UPDATE items SET deleted_at = NULL, nsfw = 0 WHERE id IN (?, ?)", (l1["item_id"], l2["item_id"]))
+        conn.execute("UPDATE faces SET person_id = NULL WHERE id = ?", (l2["face_id"],))
+    assert model3d.sweep(conn) == 0 and _files(person) == everything
+    with tx(conn):
+        conn.execute("UPDATE faces SET person_id = ? WHERE id = ?", (person, l2["face_id"]))
+    assert [lk["key"] for lk in client.get(url).json()["looks"]] == ["l1", "l2"]    # all of it came back
+
+    # the photo of look 1 is deleted for good: not served from that moment, and the sweep takes its files
+    ingest.purge(conn, l1["item_id"])
+    assert client.get(mesh_url["l1"]).status_code == 404 and _files(person) == everything
+    assert model3d.sweep(conn) == 0                                    # it still counts people's folders only
+    assert _files(person) == {"model.json", "l2.glb", "l2.jpg"}
+    assert [lk["key"] for lk in model3d.manifest(person)["looks"]] == ["l2"]
+    body = client.get(url).json()
+    assert body["state"] == "done" and [lk["key"] for lk in body["looks"]] == ["l2"]
+    assert client.get(mesh_url["l2"]).status_code == 200 and client.get(mesh_url["l1"]).status_code == 404
+    assert model3d.sweep(conn) == 0 and _files(person) == {"model.json", "l2.glb", "l2.jpg"}   # nothing more to do
+
+    # the last photo goes as well: the model goes with it
+    ingest.purge(conn, l2["item_id"])
+    assert model3d.sweep(conn) == 0
+    assert model3d.manifest(person) is None and not model3d.person_dir(person).exists()
+    body = client.get(url).json()
+    assert body["state"] == "none" and body["looks"] == [] and client.get(mesh_url["l2"]).status_code == 404
+
+
+def test_a_photo_that_leaves_the_trash_takes_its_head_along(conn, fake):
+    """Housekeeping empties the old trash and then sweeps the heads, in one pass."""
+    from app import worker
+
+    person, _items = person_with_looks(conn)
+    model3d.start(conn, person, {})
+    l1, _l2 = model3d.manifest(person)["looks"]
+    with tx(conn):
+        conn.execute("UPDATE items SET deleted_at = '2020-01-01T00:00:00.000Z' WHERE id = ?", (l1["item_id"],))
+    done = worker.housekeeping(conn)
+    assert done["purged"] == 1 and done["model3d"] == 0
+    assert _files(person) == {"model.json", "l2.glb", "l2.jpg"}
+
+
+def test_sweep_removes_head_files_the_manifest_does_not_name(conn, fake):
+    """What a sweep that was cut short left behind goes; and a photo is named by its id and its uid together."""
+    person, _items = person_with_looks(conn)
+    model3d.start(conn, person, {})
+    folder = model3d.person_dir(person) / model3d.current_rev(person)
+    (folder / "l7.glb").write_bytes(b"a head whose look the manifest no longer has")
+    (folder / "l7.jpg").write_bytes(b"and its picture")
+    (folder / "notes.txt").write_text("not a head")
+    assert model3d.sweep(conn) == 0
+    assert _files(person) == {"model.json", "l1.glb", "l1.jpg", "l2.glb", "l2.jpg", "notes.txt"}
+
+    path = folder / "model.json"
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    doc["looks"][0]["item_uid"] = "another-photo"                      # the same id under another uid
+    path.write_text(json.dumps(doc), encoding="utf-8")
+    assert model3d.sweep(conn) == 0
+    assert _files(person) == {"model.json", "l2.glb", "l2.jpg", "notes.txt"}
+    kept = json.loads(path.read_text(encoding="utf-8"))
+    assert [lk["key"] for lk in kept["looks"]] == ["l2"] and kept["looks"][0] == doc["looks"][1]
+    assert {k: v for k, v in kept.items() if k != "looks"} == {k: v for k, v in doc.items() if k != "looks"}
+
+
+def test_sweep_leaves_the_heads_while_a_job_runs_or_the_manifest_does_not_read(conn, fake, monkeypatch):
+    from app import ingest
+
+    person, _items = person_with_looks(conn)
+    model3d.start(conn, person, {})
+    l1, _l2 = model3d.manifest(person)["looks"]
+    everything = _files(person)
+    path = model3d.person_dir(person) / model3d.current_rev(person) / "model.json"
+    ingest.purge(conn, l1["item_id"])
+    monkeypatch.setattr(model3d, "_state", dict(JOB_OF_SOMEONE))
+    assert model3d.sweep(conn) == 0 and _files(person) == everything   # while any job runs, nothing is touched
+    monkeypatch.setattr(model3d, "_state", None)
+    good = path.read_bytes()
+    path.write_text("{ not a manifest")
+    assert model3d.sweep(conn) == 0 and _files(person) == everything   # what cannot be read decides nothing
+    path.write_bytes(good)
+    assert model3d.sweep(conn) == 0 and _files(person) == {"model.json", "l2.glb", "l2.jpg"}
+
+
 def test_a_look_goes_when_its_face_is_no_longer_this_person_s(client, conn, fake):
     person, _items = person_with_looks(conn)
     other = make_person(conn, "Ravi")
@@ -863,22 +1256,40 @@ def test_routes(client, conn, fake):
     assert client.post(url, json={"max_looks": 99}).status_code == 422
     assert client.post(url, json={"detail": 0}).status_code == 422
     assert client.post(url, json={"framing": 9.0}).status_code == 422
+    # the finishing options: whole numbers 0 to 3, and nothing that only looks like one
+    for bad in ({"smoothing": 4}, {"smoothing": -1}, {"texture": 4}, {"texture": "2"}, {"smoothing": "2"},
+                {"texture": 2.5}, {"smoothing": True}, {"texture": None}, {"relief": 2}, {"relief": "1"},
+                {"relief": True}):
+        assert client.post(url, json=bad).status_code == 422, bad
+    assert client.get(url).json()["state"] == "none"                       # none of them started anything
     r = client.post(url, json={"max_looks": 2, "detail": 1, "framing": 2.0})
     assert r.status_code == 202 and r.json() == {"started": True}
     assert "x-action-id" not in r.headers                                  # not an undoable owner action
     body = client.get(url).json()
-    assert body["state"] == "done" and body["options"] == {"max_looks": 2, "detail": 1, "framing": 2.0}
+    assert body["state"] == "done"
+    assert body["options"] == {**DEFAULTS, "max_looks": 2, "detail": 1, "framing": 2.0}
+    for lk in body["looks"]:
+        assert lk["textured"] in (True, False) and lk["relief"] in (True, False) and "note" in lk
+    assert client.post(url, json={"max_looks": 2, "smoothing": 0, "texture": 3, "relief": 0}).status_code == 202
+    assert client.get(url).json()["options"] == {
+        "max_looks": 2, "detail": 2, "framing": 2.6, "smoothing": 0, "texture": 3, "relief": 0}
+    chosen = {"max_looks": 2, "detail": 1, "framing": 2.0, "smoothing": 3, "texture": 1, "relief": 1}
+    assert client.post(url, json=chosen).status_code == 202
+    body = client.get(url).json()
+    assert body["options"] == chosen
     assert [lk["key"] for lk in body["looks"]] == ["l1", "l2"] and body["looks"][0]["label"] == "About 25"
     assert body["generated_at"] and body["error"] is None and body["progress"] is None
 
     mesh = client.get(body["looks"][0]["mesh_url"])
     assert mesh.status_code == 200 and mesh.headers["content-type"] == "model/gltf-binary"
-    assert mesh.headers["cache-control"] == "private, max-age=31536000, immutable" and mesh.content[:4] == b"glTF"
-    assert mesh.headers["x-content-type-options"] == "nosniff"
+    assert mesh.content[:4] == b"glTF" and mesh.headers["x-content-type-options"] == "nosniff"
     picture = client.get(body["looks"][0]["picture_url"])
     assert picture.status_code == 200 and picture.headers["content-type"] == "image/jpeg"
     assert client.head(body["looks"][1]["mesh_url"]).status_code == 200
     rev = body["looks"][0]["mesh_url"].split("/")[4]
+    # a head holds the photo's own pixels: the browser may keep it, and asks before every use
+    assert mesh.headers["cache-control"] == "private, no-cache" and mesh.headers["etag"] == f'"{rev}-l1.glb"'
+    assert picture.headers["cache-control"] == "private, no-cache" and picture.headers["etag"] == f'"{rev}-l1.jpg"'
     for bad in (f"/files/model3d/{person}/{rev}/model.json", f"/files/model3d/{person}/{rev}/l9.glb",
                 f"/files/model3d/{person}/20200101T000000/l1.glb", f"/files/model3d/{person}/{rev}/L1.GLB",
                 f"/files/model3d/999/{rev}/l1.glb"):
@@ -897,6 +1308,56 @@ def test_routes(client, conn, fake):
     assert r.status_code == 200 and "x-action-id" not in r.headers
     assert client.get(url).json()["state"] == "none"
     assert client.get(body["looks"][1]["mesh_url"]).status_code == 404
+
+
+def test_a_head_the_browser_holds_is_asked_about_before_every_use(client, conn, fake):
+    """The files may be kept by the browser, which then asks with the tag it was given: 304 while the look is
+    listed, and 404 once it is not, whatever the browser holds."""
+    from fastapi.testclient import TestClient
+
+    person, _items = person_with_looks(conn)
+    url = f"/api/people/{person}/model3d"
+    assert client.post(url, json={}).status_code == 202
+    l1, l2 = client.get(url).json()["looks"]
+    first = client.get(l1["mesh_url"])
+    tag = first.headers["etag"]
+    assert first.status_code == 200 and first.headers["cache-control"] == "private, no-cache"
+    again = client.get(l1["mesh_url"], headers={"If-None-Match": tag})
+    assert again.status_code == 304 and again.content == b""
+    assert again.headers["etag"] == tag and again.headers["cache-control"] == "private, no-cache"
+    assert again.headers["x-content-type-options"] == "nosniff"
+    for sent in (f"W/{tag}", f'"something-else", {tag}', f'"a" , W/{tag} , "b"', "*"):   # the forms HTTP allows
+        assert client.get(l1["mesh_url"], headers={"If-None-Match": sent}).status_code == 304, sent
+    assert client.head(l1["mesh_url"], headers={"If-None-Match": tag}).status_code == 304
+    other = client.get(l2["mesh_url"]).headers["etag"]
+    for sent in (other, '"20200101T000000-l1.glb"', tag.strip('"')):   # another file's tag, an old model's, a bare one
+        r = client.get(l1["mesh_url"], headers={"If-None-Match": sent})
+        assert r.status_code == 200 and r.content == first.content, sent
+    picture = client.get(l1["picture_url"])
+    assert picture.headers["etag"] not in (tag, other)
+    assert client.get(l1["picture_url"], headers={"If-None-Match": picture.headers["etag"]}).status_code == 304
+    anon = TestClient(client.app)                                      # the same running app, no session
+    assert anon.get(l1["mesh_url"], headers={"If-None-Match": tag}).status_code == 401
+
+    # the photo of look 1 goes to the trash: what the browser holds is not confirmed any more
+    with tx(conn):
+        conn.execute("UPDATE items SET deleted_at = '2026-11-13T00:00:00.000Z' WHERE uid = ?", (l1["item_uid"],))
+    for sent in (tag, "*"):
+        assert client.get(l1["mesh_url"], headers={"If-None-Match": sent}).status_code == 404
+        assert client.get(l1["picture_url"], headers={"If-None-Match": sent}).status_code == 404
+    assert client.get(l2["mesh_url"], headers={"If-None-Match": other}).status_code == 304
+    with tx(conn):
+        conn.execute("UPDATE items SET deleted_at = NULL WHERE uid = ?", (l1["item_uid"],))
+    assert client.get(l1["mesh_url"], headers={"If-None-Match": tag}).status_code == 304   # restored: confirmed again
+
+    # a new model has new addresses and new tags; the old model's are refused
+    assert client.post(url, json={}).status_code == 202
+    new = client.get(url).json()["looks"][0]
+    assert new["mesh_url"] != l1["mesh_url"] and client.get(new["mesh_url"]).headers["etag"] != tag
+    assert client.get(l1["mesh_url"], headers={"If-None-Match": tag}).status_code == 404
+    assert client.get(new["mesh_url"], headers={"If-None-Match": tag}).status_code == 200
+    assert client.delete(url).status_code == 200
+    assert client.get(new["mesh_url"], headers={"If-None-Match": "*"}).status_code == 404
 
 
 def test_routes_refuse(client, conn, no_generator, monkeypatch):
