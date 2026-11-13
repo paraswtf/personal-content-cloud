@@ -7,8 +7,11 @@
 // top, the new look is drawn underneath, and the copy fades out. Both pictures are opaque, so nothing shows
 // through anything else and no triangle has to be sorted.
 //
+// A head whose file does not load is reported (onLoadError): its look may be gone on the server, and the tab then
+// reads the model's status again before "Try again" is offered.
+//
 // The wrapper carries data-ready, data-look and data-fade for checks.
-import { useEffect, useImperativeHandle, useRef, useState, type Ref } from 'react'
+import { useEffect, useImperativeHandle, useLayoutEffect, useRef, useState, type Ref } from 'react'
 import {
   Box3,
   Color,
@@ -547,6 +550,8 @@ export default function Head3dViewer({
   colour,
   spin,
   onSupport,
+  onLoadError,
+  checking = false,
 }: {
   ref?: Ref<Head3dHandle>
   looks: Look3d[]
@@ -562,6 +567,13 @@ export default function Head3dViewer({
   spin: boolean
   /** Told once: whether this browser can draw 3D at all. */
   onSupport?: (ok: boolean) => void
+  /** The shown look's head (or, without WebGL, its picture) did not load. The server may have stopped listing that
+   *  look (its photo went to the trash or the vault, or the face left the person): the model's status is worth
+   *  reading again. */
+  onLoadError?: () => void
+  /** That reading is going on: a head that failed waits for the answer before "Try again" is offered, because a
+   *  look that is gone drops out of `looks` instead. */
+  checking?: boolean
 }) {
   const host = useRef<HTMLDivElement>(null)
   const stage = useRef<HeadStage | null>(null)
@@ -575,6 +587,7 @@ export default function Head3dViewer({
     onView(view)
   })
   const tellSupport = useStableCallback((ok: boolean) => onSupport?.(ok))
+  const tellLoadError = useStableCallback(() => onLoadError?.())
   const active = looks.find((l) => l.key === lookKey) ?? looks[0]
 
   useEffect(() => {
@@ -615,6 +628,11 @@ export default function Head3dViewer({
   useEffect(() => {
     stage.current?.setBackground()
   }, [resolved])
+  // Each time the wanted head fails (the first time, and again after "Try again"). Before the paint, so the
+  // parent's `checking` is set by the time the failure would show.
+  useLayoutEffect(() => {
+    if (state.failed) tellLoadError()
+  }, [state.failed, tellLoadError])
 
   useImperativeHandle(
     ref,
@@ -634,7 +652,14 @@ export default function Head3dViewer({
           This browser cannot draw 3D here (WebGL is turned off or not available), so the head cannot be shown. This is the
           photo it was made from.
         </p>
-        {active && <img src={active.picture_url} alt={active.label} className="mt-3 aspect-square w-full rounded-card bg-surface-2 object-cover" />}
+        {active && (
+          <img
+            src={active.picture_url}
+            alt={active.label}
+            onError={tellLoadError}
+            className="mt-3 aspect-square w-full rounded-card bg-surface-2 object-cover"
+          />
+        )}
       </div>
     )
   }
@@ -656,6 +681,10 @@ export default function Head3dViewer({
           The 3D picture stopped because the browser took its graphics memory back. It returns by itself; if it does not,
           reload the page.
         </p>
+      ) : state.failed && checking ? (
+        <div className="absolute inset-0 flex items-center justify-center rounded-card bg-surface-2/90">
+          <Spinner label="Checking the model" />
+        </div>
       ) : state.failed ? (
         <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 rounded-card bg-surface-2/90 p-6 text-center">
           <p className="text-sm text-ink-soft">This head could not be loaded.</p>
