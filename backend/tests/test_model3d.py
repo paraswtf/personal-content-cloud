@@ -208,15 +208,18 @@ def test_the_finishing_options_reach_the_job_and_the_manifest(conn, fake, monkey
     person, _items = person_with_looks(conn)
     job = _spy_on_the_job(monkeypatch)
     model3d.start(conn, person, {"smoothing": 3, "texture": 0, "relief": 0, "detail": 1})
-    assert job["options"] == {"detail": 1, "smoothing": 3, "texture": 0, "relief": 0, "seed": 0}
+    # the framing goes along: the face relief finds the face in the picture by it
+    assert job["options"] == {"detail": 1, "framing": 2.6, "smoothing": 3, "texture": 0, "relief": 0, "seed": 0}
     assert [look["key"] for look in job["looks"]] == ["l1", "l2"]
     doc = model3d.manifest(person)
     assert doc["options"] == {**DEFAULTS, "detail": 1, "smoothing": 3, "texture": 0, "relief": 0}
     assert model3d.status(conn, person)["options"] == doc["options"]
     # nothing said: the defaults go to the generator
     model3d.start(conn, person, None)
-    assert job["options"] == {"detail": 2, "smoothing": 2, "texture": 2, "relief": 1, "seed": 0}
+    assert job["options"] == {"detail": 2, "framing": 2.6, "smoothing": 2, "texture": 2, "relief": 1, "seed": 0}
     assert model3d.manifest(person)["options"] == DEFAULTS
+    model3d.start(conn, person, {"framing": 3.0})
+    assert job["options"]["framing"] == 3.0
 
 
 def test_a_look_s_picture_is_written_at_the_photo_s_own_size(conn, fake, monkeypatch):
@@ -448,6 +451,22 @@ def test_the_manifest_says_how_much_memory_the_child_held(conn, fake, monkeypatc
     assert model3d.manifest(person)["peak_rss_mb"] is None
 
 
+def test_status_says_whether_the_relief_models_are_installed(conn, client, fake, monkeypatch):
+    person, _items = person_with_looks(conn)
+    url = f"/api/people/{person}/model3d"
+    assert model3d.status(conn, person)["relief_installed"] is None        # the stand-in does not say
+    assert client.get(url).json()["relief_installed"] is None
+    for said in (True, False, None):
+        monkeypatch.setattr(model3d, "generator", lambda refresh=False, said=said: {
+            "installed": True, "name": "triposr", "device": None, "reason": None, "relief": said})
+        assert model3d.status(conn, person)["relief_installed"] is said
+        assert client.get(url).json()["relief_installed"] is said
+    # an answer without the key at all
+    monkeypatch.setattr(model3d, "generator", lambda refresh=False: {
+        "installed": True, "name": "triposr", "device": None, "reason": None})
+    assert model3d.status(conn, person)["relief_installed"] is None
+
+
 def test_status_says_why_nothing_can_be_made(conn, no_generator, monkeypatch):
     person, _items = person_with_looks(conn)
     status = model3d.status(conn, person)
@@ -477,22 +496,28 @@ def test_the_real_generator_is_asked_once_and_remembered(conn, monkeypatch, tmp_
     asked = []
     works = []
 
-    def answer(installed: bool):
+    def answer(installed: bool, **more):
         def command(args, work, fake):
             asked.append(list(args))
             works.append((Path(work), Path(work).is_dir()))
             info = {"backends": {"fake": True, "triposr": installed}, "auto": "triposr" if installed else None,
-                    "device": "cuda", "torch": "2.15.0"}
+                    "device": "cuda", "torch": "2.15.0", **more}
             return [sys.executable, "-c", f"print('noise'); print({json.dumps(json.dumps(info))})"]
         return command
 
     monkeypatch.setattr(model3d, "_command", answer(True))
-    assert model3d.generator() == {"installed": True, "name": "triposr", "device": "cuda", "reason": None}
+    # a generator from before the face relief does not say whether its depth models are there
+    assert model3d.generator() == {"installed": True, "name": "triposr", "device": "cuda", "reason": None,
+                                   "relief": None}
     assert model3d.generator()["installed"] and len(asked) == 1               # remembered
     assert asked[0] == ["--check", "--weights-dir", str(tmp_path / "weights")]
     assert model3d.generator(refresh=True)["installed"] and len(asked) == 2
-    monkeypatch.setattr(model3d, "_command", answer(False))
-    assert model3d.generator(refresh=True) == {"installed": False, "name": None, "device": None, "reason": model3d.MISSING}
+    for said, read in ((True, True), (False, False), ("yes", None), (1, None)):   # only a plain yes or no counts
+        monkeypatch.setattr(model3d, "_command", answer(True, relief=said))
+        assert model3d.generator(refresh=True)["relief"] is read
+    monkeypatch.setattr(model3d, "_command", answer(False, relief=True))
+    assert model3d.generator(refresh=True) == {"installed": False, "name": None, "device": None,
+                                               "reason": model3d.MISSING, "relief": None}
     monkeypatch.setattr(settings, "gen3d_generator", "triposr")               # a named backend that is not there
     assert not model3d.generator()["installed"]
     # the check wrote, if at all, in an empty folder of its own that is gone again: never among the models
@@ -1165,7 +1190,8 @@ def test_the_check_runs_in_the_sandbox_with_a_folder_of_its_own(monkeypatch, tmp
         return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps(said).encode(), stderr=b"")
 
     monkeypatch.setattr(model3d.subprocess, "run", run)
-    assert model3d.generator() == {"installed": True, "name": "triposr", "device": None, "reason": None}
+    assert model3d.generator() == {"installed": True, "name": "triposr", "device": None, "reason": None,
+                                   "relief": None}
     assert seen["there"] and seen["bind"].parent == storage.root() / "tmp" and not seen["bind"].exists()
     assert "people3d" not in " ".join(seen["cmd"]) and "--device" not in seen["cmd"]   # no PyTorch for a status read
     assert seen["cmd"][-6:] == [str(python), "-m", "gen3d", "--check", "--weights-dir", str(tmp_path / "gen3d" / "weights")]

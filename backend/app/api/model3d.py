@@ -5,7 +5,10 @@ GET    /api/people/{id}/model3d   Model3dOut: whether a model can be made (`avai
                                   was made with, and its `looks` with their mesh and picture URLs. A look says
                                   whether its head carries the photo as a texture (`textured`) and whether its
                                   face was corrected from the depth model (`relief`), and may carry the
-                                  generator's `note` on it. A model made before `smoothing`, `texture` and
+                                  generator's `note` on it. `relief_installed`: the depth model files
+                                  the relief needs are on the server (false: no head gets one until
+                                  scripts/setup_3d.sh has fetched them; null: the generator does not say).
+                                  A model made before `smoothing`, `texture` and
                                   `relief` existed has none of the three in `options` (the keys are left out,
                                   not null) and both of those as false on every look. Reading it never starts
                                   anything. 404 for a pet.
@@ -111,6 +114,8 @@ class Model3dOut(BaseModel):
     available: bool
     reason: str | None = None
     generator: str | None = None
+    # the depth model files of the face relief are installed; null when the generator does not say
+    relief_installed: bool | None = None
     usable_photos: int
     state: str  # none | running | done | error
     busy: bool = False  # another person's model is being generated

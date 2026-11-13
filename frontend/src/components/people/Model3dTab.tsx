@@ -99,7 +99,18 @@ function Group({ title, children }: { title: string; children: ReactNode }) {
 }
 
 /** The choices of a generation, as sliders. */
-function OptionSliders({ value, onChange, disabled }: { value: Model3dOptions; onChange: (next: Model3dOptions) => void; disabled?: boolean }) {
+function OptionSliders({
+  value,
+  onChange,
+  disabled,
+  reliefInstalled,
+}: {
+  value: Model3dOptions
+  onChange: (next: Model3dOptions) => void
+  disabled?: boolean
+  /** False when the server says the depth models of Face relief are not installed. */
+  reliefInstalled?: boolean | null
+}) {
   return (
     <div>
       <div className="grid gap-x-6 gap-y-1 sm:grid-cols-3">
@@ -163,6 +174,12 @@ function OptionSliders({ value, onChange, disabled }: { value: Model3dOptions; o
         Face relief uses a depth model made for faces to shape the nose, lips and chin, when it is installed on the
         server.
       </p>
+      {reliefInstalled === false && value.relief > 0 && (
+        <p className="mt-1 text-xs text-ink-soft">
+          The depth model is not installed on this server, so heads are made without Face relief. Running
+          scripts/setup_3d.sh on the server once more fetches it (0.9 GB).
+        </p>
+      )}
       <p className="mt-1 text-xs text-ink-soft">
         {value.texture > 0
           ? "The photo is laid over the front of the head, and the sides and back, which one photo does not show, are filled in. The texture is the photo's own pixels and is never enlarged: full keeps them all, standard and fine shrink a large photo."
@@ -264,6 +281,9 @@ function ModelView({ looks, onLoadError, checking }: { looks: Look3d[]; onLoadEr
             <p className="mt-1 text-sm text-ink-soft">
               From the front this is the photo; past about 50 degrees the sides and back are filled in.
             </p>
+          )}
+          {active.relief && (
+            <p className="mt-1 text-sm text-ink-soft">The nose, lips and chin were shaped from the photo by a depth model.</p>
           )}
           {note && <p className="mt-1 text-xs text-ink-soft">{note}</p>}
         </div>
@@ -581,7 +601,7 @@ export default function Model3dTab({ id, name }: { id: number; name: string | nu
           </div>
           {failure}
           {why !== null && <p className="rounded-xl bg-surface-2 px-3 py-2 text-sm text-ink">{why}</p>}
-          <OptionSliders value={options} onChange={setOptions} disabled={!status.available} />
+          <OptionSliders value={options} onChange={setOptions} disabled={!status.available} reliefInstalled={status.relief_installed} />
           <div>{generateButton}</div>
         </Card>
       )}
@@ -636,7 +656,7 @@ export default function Model3dTab({ id, name }: { id: number; name: string | nu
                   The photos are read again and new heads are built. The new model takes this one's place when it is ready.
                 </p>
                 {why !== null && <p className="rounded-xl bg-surface-2 px-3 py-2 text-sm text-ink">{why}</p>}
-                <OptionSliders value={options} onChange={setOptions} disabled={!status.available} />
+                <OptionSliders value={options} onChange={setOptions} disabled={!status.available} reliefInstalled={status.relief_installed} />
                 <div className="flex flex-wrap gap-2">
                   {generateButton}
                   <Button variant="ghost" onClick={() => setAgain(false)}>

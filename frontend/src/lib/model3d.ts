@@ -24,6 +24,8 @@ export interface Look3d {
   vertices: number
   /** The head carries the photo as a texture over its front. Absent in a model made before heads had one. */
   textured?: boolean
+  /** The face's shape (nose, lips, chin) was corrected from the photo by the depth model. */
+  relief?: boolean
   /** What the generator has to say about this head, when it has something to say ("the photo did not line up, so
    *  this head has colours only"). */
   note?: string | null
@@ -59,6 +61,9 @@ export interface Model3dStatus {
   available: boolean
   reason: string | null
   generator: string | null
+  /** The depth model files that Face relief needs are on the server. False: no head gets its face corrected until
+   *  they are installed. Null or absent: the server does not say. */
+  relief_installed?: boolean | null
   usable_photos: number
   state: Model3dState
   /** Another person's model is being generated: one at a time. */

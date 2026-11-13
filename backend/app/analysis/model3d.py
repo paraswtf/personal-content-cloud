@@ -352,17 +352,19 @@ def _command(args: list[str], work: Path, fake: bool) -> list[str]:
 
 
 def generator(refresh: bool = False) -> dict[str, Any]:
-    """{"installed", "name", "device", "reason"}: what a Generate would run with. The real generator is asked with
-    `python -m gen3d --check`, which only looks at files, and the answer is remembered for CHECK_TTL_S
-    (CHECK_RETRY_S while it is missing). A status read waits for that at most once: after the first answer an old
-    one is given at once and a new one is fetched in the background. start() asks again itself (`refresh`)."""
+    """{"installed", "name", "device", "reason", "relief"}: what a Generate would run with. `relief`: the two depth
+    model files the face relief needs are installed (None when the generator does not say: the stand-in, an
+    older generator, a failed check). The real generator is asked with `python -m gen3d --check`, which only looks
+    at files, and the answer is remembered for CHECK_TTL_S (CHECK_RETRY_S while it is missing). A status read waits
+    for that at most once: after the first answer an old one is given at once and a new one is fetched in the
+    background. start() asks again itself (`refresh`)."""
     fake = bool(settings.gen3d_fake) or settings.gen3d_generator == "fake"
     if fake:
         try:
             sandbox_wanted(True)
         except GeneratorMissing as e:
-            return {"installed": False, "name": None, "device": None, "reason": str(e)}
-        return {"installed": True, "name": "fake", "device": "cpu", "reason": None}
+            return {"installed": False, "name": None, "device": None, "reason": str(e), "relief": None}
+        return {"installed": True, "name": "fake", "device": "cpu", "reason": None, "relief": None}
     python = _python()
     key = (str(python), str(_weights_dir()), settings.gen3d_generator, settings.gen3d_sandbox)
     with _lock:
@@ -409,7 +411,7 @@ MISSING = "The 3D generator is not installed. Run scripts/setup_3d.sh once on th
 def _ask_generator(python: Path) -> dict[str, Any]:
     """Ask the generator's own Python what is installed. The check runs as a job does: inside the sandbox when that
     is wanted, with an empty folder of its own as the only place it may write (never the models' folder)."""
-    missing = {"installed": False, "name": None, "device": None, "reason": MISSING}
+    missing = {"installed": False, "name": None, "device": None, "reason": MISSING, "relief": None}
     if not python.is_file():
         return missing
     scratch = storage.tmp_path(".gen3d-check")
@@ -438,7 +440,9 @@ def _ask_generator(python: Path) -> dict[str, Any]:
     name = info.get("auto") if wanted == "auto" else (wanted if found.get(wanted) else None)
     if not name:
         return missing
-    return {"installed": True, "name": str(name), "device": info.get("device"), "reason": None}
+    relief = info.get("relief")
+    return {"installed": True, "name": str(name), "device": info.get("device"), "reason": None,
+            "relief": relief if isinstance(relief, bool) else None}
 
 
 # ------------------------------------------------------------------ status
@@ -532,6 +536,8 @@ def status(conn: sqlite3.Connection, person_id: int) -> dict[str, Any]:
         "available": reason is None,
         "reason": reason,
         "generator": gen["name"],
+        # the depth model files of the face relief are there: false tells the owner why no head gets one
+        "relief_installed": gen.get("relief"),
         "usable_photos": photos,
         "state": "running" if mine else "done" if out_looks else "error" if error else "none",
         "busy": job is not None and not mine,
@@ -1199,8 +1205,10 @@ def _run(person_id: int, options: dict[str, Any], fake: bool) -> None:
         job = {
             "out_dir": str(work / "out"), "weights_dir": str(_weights_dir()),
             "generator": "fake" if fake else settings.gen3d_generator, "device": "auto",
-            "options": {"detail": options["detail"], "smoothing": options["smoothing"], "texture": options["texture"],
-                        "relief": options["relief"], "seed": 0},
+            # `framing` goes along because the face relief finds the face by it: the picture is that many face
+            # sizes wide (looks.square_for)
+            "options": {"detail": options["detail"], "framing": options["framing"], "smoothing": options["smoothing"],
+                        "texture": options["texture"], "relief": options["relief"], "seed": 0},
             "looks": [_job_look(r, work) for r in rows],
         }
         _write_json(work / "job.json", job)
