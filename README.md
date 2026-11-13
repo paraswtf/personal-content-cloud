@@ -25,6 +25,12 @@ What it does with each file:
   seen in their other photos at any date (checked point by point, not just by look), and helped by the
   same nail polish or mehndi a few days apart. Each guess says why and shows the two crops side by side;
   "Not a tattoo" and "Not this person's" correct it, and a person's page lists their tattoos.
+- **Recognition trained on one person.** Once you have gone through a person's faces, their page can
+  train a small model on that person alone: their faces as examples, the faces you took off them as
+  counterexamples. It then looks at every other face and offers the ones that look like them as guesses,
+  and a new photo of them is offered the same way instead of going to a look-alike. Nothing is tagged
+  until you confirm. The card says how the model did on days it was not trained on, and lists the faces
+  still on the person that look like ones you removed.
 - **Following people between photos.** Photos taken moments apart at one place are lined up by their
   background, so someone who stays in the same spot is followed from one photo to the next, also when the
   camera moved or they turned away. It counts as a reason for a guess, along with clothes.
