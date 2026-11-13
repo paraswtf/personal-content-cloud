@@ -10,7 +10,8 @@ Options (OPTION_KEYS, clean_options): max_looks, detail, framing, and for the ge
 `smoothing` (0 off, 1 light, 2 normal, 3 strong), `texture` (0 colours only; 1 and 2 the photo laid over the
 front as a texture of at most 1024 and 2048 px; 3 the photo at its own size, which is the picture's: at most
 3072 px) and `relief` (1: the face's shape corrected from a depth model when its files are installed; 0: not).
-The server only passes the last three on.
+The last three are the generator's to act on: the server passes them on in the job file, with `framing` (the
+relief finds the face by it) and the memory the child may hold (`max_rss_mb`).
 
 Files, under DATA_DIR/people3d/<person id>/:
   current              the name of the folder in use (a time stamp)
@@ -115,6 +116,9 @@ JOB_ONLY = ("inside",)     # keys of a look's row that go into the job file and 
 
 STEP_LOOKS = "Finding looks"
 STEP_PHOTOS = "Preparing photos"
+CHILD_SAYS = ("progress:", "made:", "look:")   # the lines of the child's output the watch reads (gen3d/__main__.py)
+CHILD_LINE_MAX = 4096      # bytes of one line of the child's output that are read; the rest of a longer line is skipped
+CHILD_LINES = 1000         # lines the watch may be behind before the child waits
 STEP_BUILD = "Building heads"       # the child's first pass: the model makes every look's raw head
 STEP_FINISH = "Finishing heads"     # its second: each head is smoothed, shaped, given its photo and written
 STEP_SAVE = "Saving"
@@ -190,7 +194,8 @@ def file_url(person_id: int, rev: str, name: str) -> str:
 
 # ------------------------------------------------------------------ the generator and its sandbox
 def _python(fake: bool = False) -> Path:
-    """The Python that runs the generator. The stand-in needs only numpy and Pillow, so it runs with the server's
+    """The Python that runs the generator. The stand-in and the finishing of its heads need only what the server
+    has itself (numpy, Pillow, OpenCV), so it runs with the server's
     own Python however it was asked for (GEN3D_FAKE, GEN3D_GENERATOR=fake, or the job's own option); the real
     generator runs with GEN3D_PYTHON, or GEN3D_DIR/venv/bin/python."""
     if fake or settings.gen3d_fake or settings.gen3d_generator == "fake":
@@ -881,12 +886,26 @@ def _run_child(work: Path, job_path: Path, total: int, fake: bool,
         if not _atexit_done:
             atexit.register(shutdown)
             _atexit_done = True
-    lines: queue.Queue[str | None] = queue.Queue()
+    lines: queue.Queue[str | None] = queue.Queue(maxsize=CHILD_LINES)
 
     def pump() -> None:
+        """The child's lines, as far as the watch reads them. The child runs model code written by others on the
+        same output, so nothing it prints may pile up here: a line is read up to CHILD_LINE_MAX bytes and the
+        rest of a longer one is skipped, only the three kinds of line the contract has are passed on, and when
+        the watch is behind by CHILD_LINES of them the child waits at its pipe."""
         assert proc.stdout is not None
-        for raw in proc.stdout:
-            lines.put(raw.decode("utf-8", "replace").strip())
+        out = proc.stdout
+        while True:
+            raw = out.readline(CHILD_LINE_MAX)
+            if not raw:
+                break
+            if not raw.endswith(b"\n"):         # longer than a line of the contract can be: skip to its end
+                while raw and not raw.endswith(b"\n"):
+                    raw = out.readline(CHILD_LINE_MAX)
+                continue
+            line = raw.decode("utf-8", "replace").strip()
+            if line.startswith(CHILD_SAYS):
+                lines.put(line)
         lines.put(None)
 
     threading.Thread(target=pump, name="pcc-model3d-out", daemon=True).start()
@@ -1028,7 +1047,7 @@ def _glb_doc(path: Path) -> dict[str, Any] | None:
                 return None
             doc = json.loads(f.read(n_json).decode("utf-8"))
         return doc if isinstance(doc, dict) else None
-    except (OSError, ValueError, struct.error):
+    except (OSError, ValueError, struct.error, RecursionError):
         return None
 
 
@@ -1042,7 +1061,7 @@ def _glb_counts(path: Path) -> tuple[int, int]:
         prim = doc["meshes"][0]["primitives"][0]
         return (int(doc["accessors"][prim["attributes"]["POSITION"]]["count"]),
                 int(doc["accessors"][prim["indices"]]["count"]) // 3)
-    except (ValueError, KeyError, IndexError, TypeError):
+    except (ValueError, KeyError, IndexError, TypeError, OverflowError):
         return 0, 0
 
 
@@ -1075,6 +1094,29 @@ def _note(value: Any) -> str | None:
     return text[:NOTE_MAX] or None
 
 
+def _finite(value: Any) -> bool:
+    """A finite number that is not a yes or no. A whole number too large for floating point is not one: the
+    child's result file is read as it comes, and Python reads a number of any length from JSON."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
+
+
+def _count(value: Any) -> int:
+    """How many vertices or triangles the generator says a head has, or 0 when that is no such number."""
+    return int(value) if _finite(value) and 0 <= value < 2**31 else 0
+
+
+def _generator_said(value: Any) -> dict[str, str]:
+    """The generator's name and version as the result file gives them: two short lines of plain text."""
+    if not isinstance(value, dict):
+        return {}
+    return {key: text[:40] for key in ("name", "version") if (text := _note(value.get(key)))}
+
+
 def _generator_memory(value: Any) -> dict[str, int | None] | None:
     """The generator's own memory numbers (its result file's `memory_mb`), checked: {"peak", "with_model",
     "released"} in MB, each a whole number or None; None when the generator said nothing of the kind."""
@@ -1083,14 +1125,13 @@ def _generator_memory(value: Any) -> dict[str, int | None] | None:
     out: dict[str, int | None] = {}
     for key in ("peak", "with_model", "released"):
         mb = value.get(key)
-        ok = isinstance(mb, (int, float)) and not isinstance(mb, bool) and math.isfinite(mb) and 0 <= mb < 10_000_000
-        out[key] = int(mb) if ok else None
+        out[key] = int(mb) if _finite(mb) and 0 <= mb < 10_000_000 else None
     return out if any(v is not None for v in out.values()) else None
 
 
 def _share(value: Any) -> float | None:
     """A share between 0 and 1 as the generator gave it, to four places; None for anything else."""
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0.0 <= float(value) <= 1.0:
+    if not _finite(value) or not 0.0 <= value <= 1.0:
         return None
     return round(float(value), 4)
 
@@ -1121,13 +1162,21 @@ def _collect(person_id: int, work: Path, rows: list[dict[str, Any]], plan: looks
     `peak_mb` is the most memory the child was seen to hold."""
     from PIL import Image
 
+    # The result file is read as whatever it turns out to be: the child runs model code written by others, and a
+    # value of the wrong kind in it must not cost the heads that were built
     try:
         result = json.loads((work / "out" / "result.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError) as e:
+    except (OSError, ValueError, RecursionError) as e:
         if finished is None:
             raise _Failed("The generator left no result.") from e
         result = {}
-    built = {r.get("key"): r for r in result.get("looks") or [] if isinstance(r, dict) and r.get("ok")}
+    if not isinstance(result, dict):
+        if finished is None:
+            raise _Failed("The generator left no result.")
+        result = {}
+    said = result.get("looks")
+    said = [r for r in said if isinstance(r, dict) and isinstance(r.get("key"), str)] if isinstance(said, list) else []
+    built = {r["key"]: r for r in said if r.get("ok")}
     if finished is not None:
         built = {key: built.get(key) or {} for key in finished}
     rev = _stamp()
@@ -1142,7 +1191,7 @@ def _collect(person_id: int, work: Path, rows: list[dict[str, Any]], plan: looks
         mesh = work / "out" / f"{row['key']}.glb"
         if made is None or not mesh.is_file():
             continue
-        vertices, faces = int(made.get("vertices") or 0), int(made.get("faces") or 0)
+        vertices, faces = _count(made.get("vertices")), _count(made.get("faces"))
         if not vertices:
             vertices, faces = _glb_counts(mesh)
         finishing = _finishing(made, mesh)
@@ -1156,11 +1205,11 @@ def _collect(person_id: int, work: Path, rows: list[dict[str, Any]], plan: looks
                       "vertices": vertices, "faces": faces, **finishing})
     if not looks:
         storage.remove_tree(dest)
-        failed = [r.get("error") for r in result.get("looks") or [] if isinstance(r, dict) and r.get("error")]
+        failed = [text for text in (_note(r.get("error")) for r in said) if text]
         raise _Failed("No head could be built" + (f": {failed[-1]}" if failed else "") + ".")
     _write_json(dest / "model.json", {
         "rev": rev, "person_id": int(person_id), "generated_at": now_iso(), "seconds": round(seconds, 1),
-        "generator": result.get("generator") or {}, "options": {k: options[k] for k in OPTION_KEYS},
+        "generator": _generator_said(result.get("generator")), "options": {k: options[k] for k in OPTION_KEYS},
         "birth_year": plan.birth_year, "scanned": plan.scanned, "usable": plan.usable,
         "peak_rss_mb": int(peak_mb) if peak_mb else None,
         "generator_memory_mb": _generator_memory(result.get("memory_mb")), "looks": looks,

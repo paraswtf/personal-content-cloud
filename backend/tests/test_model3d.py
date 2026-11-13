@@ -221,7 +221,7 @@ def test_the_finishing_options_reach_the_job_and_the_manifest(conn, fake, monkey
     model3d.start(conn, person, {"framing": 3.0})
     assert job["options"]["framing"] == 3.0
     # and the job says how much memory the child may hold: the generator leaves the relief out near it
-    assert job["max_rss_mb"] == settings.gen3d_max_rss_mb == 5000
+    assert job["max_rss_mb"] == settings.gen3d_max_rss_mb > 0           # whatever this machine's setting is
     monkeypatch.setattr(settings, "gen3d_max_rss_mb", 3210)
     model3d.start(conn, person, None)
     assert job["max_rss_mb"] == 3210
@@ -776,7 +776,8 @@ def test_the_first_pass_moves_the_bar_and_restarts_a_looks_time(conn, fake, monk
     steps = []
     real = model3d._set
     monkeypatch.setattr(model3d, "_set", lambda **kw: (steps.append((kw.get("step"), kw.get("done"), kw.get("total"))), real(**kw))[1])
-    # a line every 1.2 s with a limit of 2 s between lines: the whole run is longer than the limit, no gap is
+    # a line every 1.2 s with a limit of 3 s between lines (room for a busy machine and the child's own start):
+    # the whole run is longer than the limit, no gap is
     code = ("import time\n"
             "print('progress: 0/2', flush=True)\n"
             "for line in ('made: l1 ok 1.2', 'made: l2 ok 1.2', 'made: l3 ok 1.2', 'look: l1 ok 2.4'):\n"
@@ -784,18 +785,121 @@ def test_the_first_pass_moves_the_bar_and_restarts_a_looks_time(conn, fake, monk
             "print('progress: 1/2', flush=True)\n"
             "time.sleep(120)\n")
     monkeypatch.setattr(model3d, "_command", lambda *_a, **_k: [sys.executable, "-c", code])
-    monkeypatch.setattr(settings, "gen3d_look_timeout_s", 2.0)
+    monkeypatch.setattr(settings, "gen3d_look_timeout_s", 3.0)
     started = time.monotonic()
     model3d.start(conn, person, {})
     assert "took longer" in model3d.status(conn, person)["error"]          # stopped in the silence after the lines
-    assert time.monotonic() - started > 4.8 + 2.0
+    assert time.monotonic() - started > 4.8 + 3.0
     build = [s for s in steps if s[0] == model3d.STEP_BUILD]
     assert build == [(model3d.STEP_BUILD, 0, 2), (model3d.STEP_BUILD, 1, 2), (model3d.STEP_BUILD, 2, 2),
                      (model3d.STEP_BUILD, 2, 2)]                           # never past the job's own count
     # the first finished head moves the job on to its second step, after every line of the first
     assert model3d.STEP_FINISH == "Finishing heads" and (model3d.STEP_FINISH, 1, 2) in steps
     assert steps.index((model3d.STEP_FINISH, 1, 2)) > max(n for n, s in enumerate(steps) if s[0] == model3d.STEP_BUILD)
-    assert "2 seconds" in model3d.status(conn, person)["error"]           # a short limit is said in seconds
+    assert "3 seconds" in model3d.status(conn, person)["error"]           # a short limit is said in seconds
+
+
+def test_what_the_child_prints_beside_its_lines_does_not_pile_up_in_the_server(conn, fake, monkeypatch):
+    """The child runs model code written by others on the same output. A line without an end, megabytes long, and
+    a flood of lines the contract does not have are read past: the watch still gets the lines it needs, and the
+    job ends as it would have."""
+    person, _items = person_with_looks(conn)
+    real = model3d._command
+    flood = ("import os, sys\n"
+             "out = os.fdopen(1, 'wb', closefd=False)\n"
+             "out.write(b'x' * (3 * 1024 * 1024))\n"                    # 3 MB with no end of line ...
+             "out.write(b'\\rprogress: 99/2\\n')\n"                     # ... whose tail looks like a line of the contract
+             "out.write(b'look: nobody ok 0.0 ' + b'y' * 8000 + b'\\n')\n"   # a line of the contract, far too long
+             "for n in range(20000):\n"
+             "    out.write(b'noise %d\\n' % n)\n"
+             "out.flush()\n")
+    queued: list[str] = []
+    put = model3d.queue.Queue.put
+
+    def spy(self, item, *a, **k):
+        if isinstance(item, str):
+            queued.append(item)
+        return put(self, item, *a, **k)
+
+    monkeypatch.setattr(model3d.queue.Queue, "put", spy)
+
+    def command(args, work, fake_run):
+        # the flood first, then the real stand-in job on the same output
+        inner = real(args, work, fake_run)
+        return [sys.executable, "-c", f"import subprocess, sys\nexec({flood!r})\nsys.exit(subprocess.call({inner!r}))"]
+
+    monkeypatch.setattr(model3d, "_command", command)
+    model3d.start(conn, person, {})
+    status = model3d.status(conn, person)
+    assert status["state"] == "done" and [lk["key"] for lk in status["looks"]] == ["l1", "l2"], status["error"]
+    # nothing but the contract's lines reached the watch, none of them long, and nothing of the flood
+    assert queued and all(line.startswith(model3d.CHILD_SAYS) and len(line) < 200 for line in queued)
+    assert not any("nobody" in line or "99/2" in line for line in queued)
+    assert [line.split()[0] for line in queued].count("look:") == 2
+
+
+def test_a_result_file_that_lies_does_not_cost_the_heads(conn, fake, monkeypatch):
+    """The result file is written by the child, which runs model code written by others: values of the wrong kind
+    in it are read past, and the heads that were built are kept."""
+    person, _items = person_with_looks(conn)
+    real = model3d._run_child
+
+    def rewriting(change):
+        def run(work, job_path, total, fake_run, stopped=None):
+            out = real(work, job_path, total, fake_run, stopped)
+            path = work / "out" / "result.json"
+            doc = json.loads(path.read_text(encoding="utf-8"))
+            path.write_text(json.dumps(change(doc)), encoding="utf-8")
+            return out
+        return run
+
+    def odd(doc):
+        for row in doc["looks"]:
+            row.update(vertices=10 ** 400, faces=float("inf"), overlap=10 ** 400, overlap_head=float("nan"),
+                       texture=[10 ** 400, 5], note=["not", "text"], relief=1)
+        doc["looks"] += [7, {"key": ["l9"], "ok": True}, {"ok": True}, {"key": "l9", "ok": True}]
+        doc["generator"] = {"name": "x" * 500 + "\x07", "version": {"a": 1}, "more": "y" * 10_000}
+        doc["memory_mb"] = {"peak": 10 ** 400, "with_model": "many", "released": 12}
+        return doc
+
+    monkeypatch.setattr(model3d, "_run_child", rewriting(odd))
+    model3d.start(conn, person, {})
+    doc = model3d.manifest(person)
+    assert [lk["key"] for lk in doc["looks"]] == ["l1", "l2"]          # the heads that are there, and no l9
+    for lk in doc["looks"]:
+        assert lk["vertices"] > 500 and lk["faces"] > 500                # counted from the file itself
+        assert lk["overlap"] is None and lk["overlap_head"] is None and lk["note"] is None and lk["relief"] is False
+        assert lk["textured"] is True and lk["texture"] is None
+    assert doc["generator"] == {"name": "x" * 40}                       # two short lines of text at most
+    assert doc["generator_memory_mb"] == {"peak": None, "with_model": None, "released": 12}
+    # a result that is no object at all, or whose looks are no list: as if there were none. The run fails with a
+    # plain sentence and the model in use stays
+    for change, sentence in ((lambda doc: [1, 2, 3], "The generator left no result."),
+                             (lambda doc: {**doc, "looks": 5}, "No head could be built.")):
+        monkeypatch.setattr(model3d, "_run_child", rewriting(change))
+        model3d.start(conn, person, {})
+        assert model3d.status(conn, person)["error"] == sentence
+        assert model3d.manifest(person)["rev"] == doc["rev"]
+    # no head was built, and the reason the child gives is not text: the error stays a short plain sentence
+    def nothing(doc):
+        for row in doc["looks"]:
+            row.update(ok=False, error={"deep": ["x" * 5000]})
+        return doc
+
+    monkeypatch.setattr(model3d, "_run_child", rewriting(nothing))
+    model3d.start(conn, person, {})
+    assert model3d.status(conn, person)["error"] == "No head could be built."
+    assert model3d.manifest(person)["rev"] == doc["rev"]
+
+    def says(doc):
+        for row in doc["looks"]:
+            row.update(ok=False, error="the model\x07 failed\n" + "z" * 5000)
+        return doc
+
+    monkeypatch.setattr(model3d, "_run_child", rewriting(says))
+    model3d.start(conn, person, {})
+    error = model3d.status(conn, person)["error"]
+    assert error.startswith("No head could be built: the model failed zzz") and len(error) < 260 and "\x07" not in error
 
 
 def test_tree_memory_counts_the_descendants():
