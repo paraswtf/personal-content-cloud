@@ -4179,10 +4179,14 @@ it does not have.
 
 - A whole generation by the real generator with the finishing and the relief in it. The generator without them ran on
   the owner's server and made the three heads measured above. The new stages were then run on those stored meshes with
-  their pictures, and through the job on the stand-in's heads and on made-up ones (the tests), but not behind the real
-  model: the third-party model code was not run in the session that wrote them. The first "Generate again" on a server
-  is the first run of all of it together. A failure shows as the error in the 3D tab, and a head whose photo or relief
-  could not be used says so in its note.
+  their pictures, in the server's Python and in the generator's own (the same heads, vertex for vertex), and through
+  the job on the stand-in's heads and on made-up ones (the tests), but not behind the real model: the third-party
+  model code was not run in the session that wrote them. Checked one by one instead: the server's check, through the
+  sandbox, finds the generator and the two depth model files; and inside that sandbox (no home folder, no network, the
+  weights read-only) the generator's Python ran both depth models on a made-up picture through the stage's own
+  runner, in 2 s each with 1.25 GB at the peak. The first "Generate again" on a server is the first run of all of it
+  together. A failure shows as the error in the 3D tab, and a head whose photo or relief could not be used says so in
+  its note.
 - That closing the model frees its memory before the second pass. `generator_memory_mb` in `model.json` shows it after
   the first real run: `released` should be well under `with_model`. If it is not, the relief's guard leaves the relief
   out near the limit and the looks say so.
