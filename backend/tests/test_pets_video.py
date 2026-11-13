@@ -41,26 +41,26 @@ def _animal(conn, animal_id: int):
 def test_pet_tag_with_a_new_name_and_species_puts_the_pet_in_the_item(client, conn):
     item = make_item(conn, kind="video", ext=".mp4", mime="video/mp4", write_files=False, data=None)
     r = client.post(f"/api/items/{item['uid']}/tags",
-                    json={"new_person_name": "Chikki", "kind": "pet", "species": "cat"})
+                    json={"new_person_name": "Chutney", "kind": "pet", "species": "cat"})
     assert r.status_code == 200, r.text
     (ref,) = r.json()
-    assert (ref["name"], ref["kind"], ref["relation"]) == ("Chikki", "pet", "in")
+    assert (ref["name"], ref["kind"], ref["relation"]) == ("Chutney", "pet", "in")
     row = conn.execute("SELECT kind, species FROM persons WHERE id = ?", (ref["id"],)).fetchone()
     assert (row["kind"], row["species"]) == ("pet", "cat")
     detail = client.get(f"/api/items/{item['uid']}").json()
-    assert [(p["name"], p["kind"], p["relation"]) for p in detail["people"]] == [("Chikki", "pet", "in")]
+    assert [(p["name"], p["kind"], p["relation"]) for p in detail["people"]] == [("Chutney", "pet", "in")]
     assert [i["uid"] for i in client.get(f"/api/people/{ref['id']}/items").json()["items"]] == [item["uid"]]
     person = client.get(f"/api/people/{ref['id']}").json()
     assert (person["kind"], person["species"], person["item_count"], person["related_count"]) == ("pet", "cat", 1, 0)
     # the same name again is the same pet
     other = make_item(conn)
-    r = client.post(f"/api/items/{other['uid']}/tags", json={"new_person_name": "chikki", "kind": "pet", "species": "cat"})
+    r = client.post(f"/api/items/{other['uid']}/tags", json={"new_person_name": "chutney", "kind": "pet", "species": "cat"})
     assert r.status_code == 200 and r.json()[0]["id"] == ref["id"]
 
 
 def test_pet_tag_needs_a_species_and_takes_an_existing_pet_by_id(client, conn):
     item = make_item(conn)
-    r = client.post(f"/api/items/{item['uid']}/tags", json={"new_person_name": "Chikki", "kind": "pet"})
+    r = client.post(f"/api/items/{item['uid']}/tags", json={"new_person_name": "Chutney", "kind": "pet"})
     assert r.status_code == 400 and r.json()["detail"] == "species_needed"
     assert conn.execute("SELECT COUNT(*) FROM persons").fetchone()[0] == 0
     bruno = _pet(conn, "Bruno", "dog")

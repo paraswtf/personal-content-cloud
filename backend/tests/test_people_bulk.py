@@ -77,13 +77,13 @@ def test_the_list_counts_faces_bodies_pet_boxes_and_both_relations(client, conn)
     a, b, c, d = _items(conn, 4)
     gone = make_item(conn, filename="gone.jpg", write_files=False, deleted_at=now_iso())
     asha, ben, nobody = make_person(conn, "Asha"), make_person(conn, "Ben"), make_person(conn, None)
-    chikki = _pet(conn, "Chikki", "cat")
+    chutney = _pet(conn, "Chutney", "cat")
     make_face(conn, a["id"], asha, write_crop=False)
     make_face(conn, b["id"], asha, write_crop=False)
     _body(conn, c["id"], asha)
     _tag(conn, a["id"], ben, "in")
     _tag(conn, d["id"], ben, "related")
-    _animal(conn, c["id"], chikki)
+    _animal(conn, c["id"], chutney)
     make_face(conn, b["id"], nobody, write_crop=False)
     make_face(conn, d["id"], None, write_crop=False)
     make_face(conn, gone["id"], asha, write_crop=False)   # in the trash: skipped
@@ -93,11 +93,11 @@ def test_the_list_counts_faces_bodies_pet_boxes_and_both_relations(client, conn)
     out = r.json()
     assert out["items"] == 4 and out["unnamed_faces"] == 1
     people = out["people"]
-    assert [p["id"] for p in people] == [asha, ben, chikki, nobody]   # most items first, named before unnamed
+    assert [p["id"] for p in people] == [asha, ben, chutney, nobody]   # most items first, named before unnamed
     by = {p["id"]: p for p in people}
     assert (by[asha]["items"], by[asha]["faces"], by[asha]["bodies"], by[asha]["tags"]) == (3, 2, 1, 0)
     assert (by[ben]["items"], by[ben]["tags"], by[ben]["related"], by[ben]["faces"]) == (2, 1, 1, 0)
-    assert (by[chikki]["kind"], by[chikki]["species"], by[chikki]["animals"], by[chikki]["items"]) == ("pet", "cat", 1, 1)
+    assert (by[chutney]["kind"], by[chutney]["species"], by[chutney]["animals"], by[chutney]["items"]) == ("pet", "cat", 1, 1)
     assert by[nobody]["name"] is None and by[nobody]["faces"] == 1
     assert by[asha]["cover_url"] and by[asha]["name"] == "Asha" and by[asha]["kind"] == "person"
     assert client.get(f"/api/items/{a['uid']}").status_code == 200   # the item route is not shadowed
@@ -107,7 +107,7 @@ def test_the_list_counts_the_items_where_the_owner_put_someone(client, conn):
     """`by_you`: items with a box the owner tagged or drew, or a tag; recognition alone does not count."""
     a, b, c, d, e = _items(conn, 5)
     asha, ben, carl = make_person(conn, "Asha"), make_person(conn, "Ben"), make_person(conn, "Carl")
-    chikki = _pet(conn, "Chikki", "cat")
+    chutney = _pet(conn, "Chutney", "cat")
     make_face(conn, a["id"], asha, write_crop=False)                       # recognised
     make_face(conn, b["id"], asha, assigned_by="user", write_crop=False)   # the owner tagged it
     make_face(conn, b["id"], asha, box=(0.6, 0.2, 0.2, 0.3), write_crop=False)   # recognised beside it
@@ -116,8 +116,8 @@ def test_the_list_counts_the_items_where_the_owner_put_someone(client, conn):
     _body(conn, d["id"], asha)                                             # found and grouped by the system
     _tag(conn, e["id"], ben, "related")
     make_face(conn, a["id"], carl, box=(0.6, 0.2, 0.2, 0.3), write_crop=False)
-    _animal(conn, a["id"], chikki)
-    pet_box = _animal(conn, b["id"], chikki)
+    _animal(conn, a["id"], chutney)
+    pet_box = _animal(conn, b["id"], chutney)
     with tx(conn):
         conn.execute("UPDATE bodies SET source = 'user' WHERE id = ?", (drawn,))     # drawn, even if not locked
         conn.execute("UPDATE bodies SET assigned_by = 'user' WHERE id = ?", (second,))   # b still counts once
@@ -128,7 +128,7 @@ def test_the_list_counts_the_items_where_the_owner_put_someone(client, conn):
     by = {p["id"]: p for p in r.json()["people"]}
     assert (by[asha]["items"], by[asha]["by_you"]) == (4, 2)
     assert (by[ben]["items"], by[ben]["by_you"]) == (1, 1)
-    assert (by[chikki]["items"], by[chikki]["by_you"]) == (2, 1)
+    assert (by[chutney]["items"], by[chutney]["by_you"]) == (2, 1)
     assert (by[carl]["items"], by[carl]["by_you"]) == (1, 0)
 
 
@@ -137,45 +137,45 @@ def test_change_to_takes_an_unnamed_group_off_its_only_item(client, conn):
     followed, and the "not them" memory for the gone group failed a foreign key (500 on Change to...)."""
     clip = make_item(conn, filename="kart.mov", write_files=False)
     group, other_group = make_person(conn, None), make_person(conn, None)
-    aadhya = make_person(conn, "Aadhya")
+    aabha = make_person(conn, "Aabha")
     f1 = make_face(conn, clip["id"], group, write_crop=False)
     f2 = make_face(conn, clip["id"], other_group, box=(0.6, 0.2, 0.2, 0.3), write_crop=False)
     for g in (group, other_group):
-        r = client.post("/api/items/people/move", json={"uids": [clip["uid"]], "from_person_id": g, "person_id": aadhya})
+        r = client.post("/api/items/people/move", json={"uids": [clip["uid"]], "from_person_id": g, "person_id": aabha})
         assert r.status_code == 200, r.text
-    assert {_face_owner(conn, f)[0] for f in (f1, f2)} == {aadhya}
+    assert {_face_owner(conn, f)[0] for f in (f1, f2)} == {aabha}
     assert conn.execute("SELECT COUNT(*) FROM persons WHERE id IN (?, ?)", (group, other_group)).fetchone()[0] == 0
 
 
 def test_a_move_to_someone_else_takes_lookalikes_and_tags_along(client, conn):
     asha, a_faces, b_faces, items = _mixed_person(conn)
-    bela = make_person(conn, "Bela")
+    bina = make_person(conn, "Bina")
     _tag(conn, items[6]["id"], asha, "related")
     _tag(conn, items[7]["id"], asha, "in")
-    _tag(conn, items[7]["id"], bela, "related")
+    _tag(conn, items[7]["id"], bina, "related")
     uids = [items[3]["uid"], items[4]["uid"], items[6]["uid"], items[7]["uid"]]
-    r = client.post("/api/items/people/move", json={"uids": uids, "from_person_id": asha, "person_id": bela})
+    r = client.post("/api/items/people/move", json={"uids": uids, "from_person_id": asha, "person_id": bina})
     assert r.status_code == 200, r.text
     out = r.json()
-    assert out["updated"] == 4 and out["followed"] == 1 and out["person"]["id"] == bela
-    assert _face_owner(conn, b_faces[0]) == (bela, "user") and _face_owner(conn, b_faces[1]) == (bela, "user")
-    assert _face_owner(conn, b_faces[2]) == (bela, "auto")   # the look-alike outside the selection followed
+    assert out["updated"] == 4 and out["followed"] == 1 and out["person"]["id"] == bina
+    assert _face_owner(conn, b_faces[0]) == (bina, "user") and _face_owner(conn, b_faces[1]) == (bina, "user")
+    assert _face_owner(conn, b_faces[2]) == (bina, "auto")   # the look-alike outside the selection followed
     assert all(_face_owner(conn, f)[0] == asha for f in a_faces)
     assert _rejected(conn, asha) == set(b_faces)
-    assert _tags(conn, items[6]["id"]) == {bela: "related"}    # the relation goes along
-    assert _tags(conn, items[7]["id"]) == {bela: "in"}         # 'in' wins over Bela's 'related'
+    assert _tags(conn, items[6]["id"]) == {bina: "related"}    # the relation goes along
+    assert _tags(conn, items[7]["id"]) == {bina: "in"}         # 'in' wins over Bina's 'related'
 
 
 def test_a_lookalike_the_owner_refused_for_the_target_stays(client, conn):
     asha, a_faces, b_faces, items = _mixed_person(conn)
-    bela = make_person(conn, "Bela")
-    with tx(conn):   # the owner once took this face off Bela
+    bina = make_person(conn, "Bina")
+    with tx(conn):   # the owner once took this face off Bina
         conn.execute("INSERT INTO guess_rejections(kind, ref_id, person_id, created_at) VALUES ('face', ?, ?, ?)",
-                     (b_faces[2], bela, now_iso()))
+                     (b_faces[2], bina, now_iso()))
     r = client.post("/api/items/people/move", json={"uids": [items[3]["uid"], items[4]["uid"]], "from_person_id": asha,
-                                                    "person_id": bela})
+                                                    "person_id": bina})
     assert r.status_code == 200 and r.json()["followed"] == 0, r.text
-    assert _face_owner(conn, b_faces[2]) == (asha, "auto") and _rejected(conn, bela) == {b_faces[2]}
+    assert _face_owner(conn, b_faces[2]) == (asha, "auto") and _rejected(conn, bina) == {b_faces[2]}
 
 
 def test_a_rejection_merged_onto_a_face_of_that_person_is_no_rejection(conn):
@@ -223,19 +223,19 @@ def test_a_move_to_a_new_name_and_the_refusals(client, conn):
 
 def test_a_pet_moves_only_to_a_pet_of_its_species(client, conn):
     x, y = _items(conn, 2)
-    chikki, mau, bruno = _pet(conn, "Chikki", "cat"), _pet(conn, "Mau", "cat"), _pet(conn, "Bruno", "dog")
+    chutney, mau, bruno = _pet(conn, "Chutney", "cat"), _pet(conn, "Mau", "cat"), _pet(conn, "Bruno", "dog")
     asha = make_person(conn, "Asha")
-    boxes = [_animal(conn, x["id"], chikki), _animal(conn, y["id"], chikki)]
+    boxes = [_animal(conn, x["id"], chutney), _animal(conn, y["id"], chutney)]
     face = make_face(conn, x["id"], asha, write_crop=False)
     uids = [x["uid"], y["uid"]]
-    r = client.post("/api/items/people/move", json={"uids": uids, "from_person_id": chikki, "person_id": asha})
+    r = client.post("/api/items/people/move", json={"uids": uids, "from_person_id": chutney, "person_id": asha})
     assert r.status_code == 400 and "person" in r.json()["detail"]
-    r = client.post("/api/items/people/move", json={"uids": uids, "from_person_id": chikki, "person_id": bruno})
+    r = client.post("/api/items/people/move", json={"uids": uids, "from_person_id": chutney, "person_id": bruno})
     assert r.status_code == 400 and "dog" in r.json()["detail"]
-    r = client.post("/api/items/people/move", json={"uids": uids, "from_person_id": chikki, "person_id": mau})
+    r = client.post("/api/items/people/move", json={"uids": uids, "from_person_id": chutney, "person_id": mau})
     assert r.status_code == 200 and r.json()["updated"] == 2, r.text
     assert {tuple(r) for r in conn.execute(f"SELECT person_id, assigned_by FROM animals WHERE id IN ({boxes[0]}, {boxes[1]})")} == {(mau, "user")}
-    assert conn.execute("SELECT 1 FROM persons WHERE id = ?", (chikki,)).fetchone() is not None   # named: kept
+    assert conn.execute("SELECT 1 FROM persons WHERE id = ?", (chutney,)).fetchone() is not None   # named: kept
     r = client.post("/api/items/people/move", json={"uids": uids, "from_person_id": mau, "new_person_name": "Kitty"})
     assert r.status_code == 200, r.text
     kitty = r.json()["person"]
@@ -296,12 +296,12 @@ def test_a_bulk_tag_of_both_kinds_and_relations(client, conn):
 
 def test_vault_items_need_the_vault_open(client, conn):
     v = make_item(conn, filename="v.jpg", write_files=False, nsfw=1)
-    asha, bela = make_person(conn, "Asha"), make_person(conn, "Bela")
+    asha, bina = make_person(conn, "Asha"), make_person(conn, "Bina")
     face = make_face(conn, v["id"], asha, write_crop=False)
     calls = [("/api/items/people", {"uids": [v["uid"]]}),
-             ("/api/items/people/move", {"uids": [v["uid"]], "from_person_id": asha, "person_id": bela}),
+             ("/api/items/people/move", {"uids": [v["uid"]], "from_person_id": asha, "person_id": bina}),
              ("/api/items/people/remove", {"uids": [v["uid"]], "person_id": asha}),
-             ("/api/items/people/tag", {"uids": [v["uid"]], "person_id": bela})]
+             ("/api/items/people/tag", {"uids": [v["uid"]], "person_id": bina})]
     for path, body in calls:
         r = client.post(path, json=body)
         assert r.status_code == 403 and r.json()["detail"] == "vault_locked", (path, r.text)
@@ -309,7 +309,7 @@ def test_vault_items_need_the_vault_open(client, conn):
     assert client.post("/api/auth/vault/unlock", json={"password": ACCOUNT["password"]}).status_code == 200
     assert client.post(*calls[0][:1], json=calls[0][1]).json()["people"][0]["id"] == asha
     r = client.post(calls[1][0], json=calls[1][1])
-    assert r.status_code == 200 and _face_owner(conn, face)[0] == bela, r.text
+    assert r.status_code == 200 and _face_owner(conn, face)[0] == bina, r.text
 
 
 def _body_rejected(conn, pid: int) -> set[int]:
@@ -318,12 +318,12 @@ def _body_rejected(conn, pid: int) -> set[int]:
 
 def test_bodies_taken_away_are_remembered_and_forgotten_when_put_back(client, conn):
     a, b, c = _items(conn, 3)
-    asha, bela = make_person(conn, "Asha"), make_person(conn, "Bela")
+    asha, bina = make_person(conn, "Asha"), make_person(conn, "Bina")
     face = make_face(conn, a["id"], asha, write_crop=False)
     around = _body(conn, a["id"], asha, face_id=face)   # goes with its face
     faceless = _body(conn, b["id"], asha)
     other = _body(conn, c["id"], asha)
-    r = client.post("/api/items/people/move", json={"uids": [a["uid"], b["uid"]], "from_person_id": asha, "person_id": bela})
+    r = client.post("/api/items/people/move", json={"uids": [a["uid"], b["uid"]], "from_person_id": asha, "person_id": bina})
     assert r.status_code == 200, r.text
     assert _body_rejected(conn, asha) == {around, faceless} and _rejected(conn, asha) == {face}
     assert client.post("/api/items/people/remove", json={"uids": [c["uid"]], "person_id": asha}).status_code == 200
@@ -332,7 +332,7 @@ def test_bodies_taken_away_are_remembered_and_forgotten_when_put_back(client, co
     r = client.post("/api/faces/assign", json={"face_ids": [face], "person_id": asha})
     assert r.status_code == 200, r.text
     assert _rejected(conn, asha) == set() and _body_rejected(conn, asha) == {faceless, other}
-    assert _face_owner(conn, face) == (asha, "user") and face in _rejected(conn, bela)
+    assert _face_owner(conn, face) == (asha, "user") and face in _rejected(conn, bina)
     r = client.post("/api/bodies/assign", json={"body_ids": [faceless], "person_id": asha})
     assert r.status_code == 200, r.text
     assert _body_rejected(conn, asha) == {other}
@@ -357,30 +357,30 @@ def _merge_events(conn, pid: int) -> list[dict]:
 def test_a_move_to_someone_is_learned_like_a_merge_and_pulls_lookalike_groups(client, conn):
     get_index().invalidate()
     one = lambda: make_item(conn, write_files=False)  # noqa: E731
-    bela = make_person(conn, "Bela")
-    for k in range(3):   # Bela: three faces on the axis, one the owner confirmed
-        make_face(conn, one()["id"], bela, embedding=_axis(0), assigned_by="user" if k == 0 else "auto", write_crop=False)
+    bina = make_person(conn, "Bina")
+    for k in range(3):   # Bina: three faces on the axis, one the owner confirmed
+        make_face(conn, one()["id"], bina, embedding=_axis(0), assigned_by="user" if k == 0 else "auto", write_crop=False)
     asha = make_person(conn, "Asha")
     x, y, z = one(), one(), one()
     moved = [make_face(conn, x["id"], asha, embedding=_mix(0.5, 1), write_crop=False),
              make_face(conn, y["id"], asha, embedding=_mix(0.5, 2), write_crop=False)]
     stays = make_face(conn, z["id"], asha, embedding=_axis(9), write_crop=False)
-    # a look-alike of the first moved face (0.9) follows it to Bela: left out of what the owner accepted
+    # a look-alike of the first moved face (0.9) follows it to Bina: left out of what the owner accepted
     along = make_face(conn, one()["id"], asha, embedding=(0.9 * _mix(0.5, 1) + np.sqrt(1 - 0.81) * _axis(6)).astype(np.float32),
                       write_crop=False)
     near, far = make_person(conn), make_person(conn)   # unnamed groups
     near_face = make_face(conn, one()["id"], near, embedding=_mix(0.6, 3), write_crop=False)   # 0.6 >= 0.5: pulled
     make_face(conn, one()["id"], far, embedding=_mix(0.45, 4), write_crop=False)               # 0.45 < 0.5: stays
 
-    r = client.post("/api/items/people/move", json={"uids": [x["uid"], y["uid"]], "from_person_id": asha, "person_id": bela})
+    r = client.post("/api/items/people/move", json={"uids": [x["uid"], y["uid"]], "from_person_id": asha, "person_id": bina})
     assert r.status_code == 200, r.text
     out = r.json()
     assert (out["updated"], out["followed"], out["pulled"]) == (2, 1, 1)
-    assert all(_face_owner(conn, f) == (bela, "user") for f in moved) and _face_owner(conn, along) == (bela, "auto")
-    assert _face_owner(conn, near_face)[0] == bela and _face_owner(conn, stays)[0] == asha
+    assert all(_face_owner(conn, f) == (bina, "user") for f in moved) and _face_owner(conn, along) == (bina, "auto")
+    assert _face_owner(conn, near_face)[0] == bina and _face_owner(conn, stays)[0] == asha
     persons = {int(r[0]) for r in conn.execute("SELECT id FROM persons")}
     assert near not in persons and far in persons
-    (ev,) = _merge_events(conn, bela)
+    (ev,) = _merge_events(conn, bina)
     assert ev["accepted"] == pytest.approx(0.5, abs=0.01) and ev["faces"] == 2 and ev["followed"] == 1
 
     # a new name has no other faces to compare with: nothing is pulled, nothing loosens
@@ -395,20 +395,20 @@ def test_a_move_to_someone_is_learned_like_a_merge_and_pulls_lookalike_groups(cl
 def test_a_move_the_matching_finds_unlike_the_target_is_not_learned_as_a_merge(client, conn):
     get_index().invalidate()
     one = lambda: make_item(conn, write_files=False)  # noqa: E731
-    bela = make_person(conn, "Bela")
+    bina = make_person(conn, "Bina")
     for k in range(3):
-        make_face(conn, one()["id"], bela, embedding=_axis(0), assigned_by="user" if k == 0 else "auto", write_crop=False)
+        make_face(conn, one()["id"], bina, embedding=_axis(0), assigned_by="user" if k == 0 else "auto", write_crop=False)
     asha = make_person(conn, "Asha")
     x = one()
-    moved = make_face(conn, x["id"], asha, embedding=_mix(0.1, 1), write_crop=False)   # 0.1 to Bela: below the floor
+    moved = make_face(conn, x["id"], asha, embedding=_mix(0.1, 1), write_crop=False)   # 0.1 to Bina: below the floor
     loose = make_person(conn)
     loose_face = make_face(conn, one()["id"], loose, embedding=_mix(0.35, 2), write_crop=False)
 
-    r = client.post("/api/items/people/move", json={"uids": [x["uid"]], "from_person_id": asha, "person_id": bela})
+    r = client.post("/api/items/people/move", json={"uids": [x["uid"]], "from_person_id": asha, "person_id": bina})
     assert r.status_code == 200, r.text
     assert r.json()["pulled"] == 0
-    assert _face_owner(conn, moved) == (bela, "user")            # still the owner's example of Bela
+    assert _face_owner(conn, moved) == (bina, "user")            # still the owner's example of Bina
     assert _face_owner(conn, loose_face)[0] == loose              # nothing pulled at the floor
-    (ev,) = _merge_events(conn, bela)
+    (ev,) = _merge_events(conn, bina)
     # the index reports a similarity under its minimum as 0: what matters is that it is under the floor
     assert ev["accepted"] is None and ev["below_floor"] is not None and ev["below_floor"] < cluster.PULL_FLOOR

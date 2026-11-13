@@ -63,7 +63,7 @@ def test_not_a_face_comes_back_with_its_crop_and_its_lookalikes(client, conn):
 
 def test_a_merge_and_a_person_delete_come_back_with_their_faces(client, conn):
     item = make_item(conn)
-    a, b = make_person(conn, "Asha"), make_person(conn, "Bela")
+    a, b = make_person(conn, "Asha"), make_person(conn, "Bina")
     fa = make_face(conn, item["id"], a, embedding=_unit(3), assigned_by="user")
     fb = make_face(conn, item["id"], b, embedding=_unit(4), assigned_by="user", box=(0.6, 0.2, 0.2, 0.3))
     r = client.post("/api/people/merge", json={"target_id": a, "source_ids": [b]})
@@ -71,7 +71,7 @@ def test_a_merge_and_a_person_delete_come_back_with_their_faces(client, conn):
     assert _face(conn, fb)["person_id"] == a
     assert client.post(f"/api/actions/{r.headers['x-action-id']}/undo").status_code == 200
     assert _face(conn, fb)["person_id"] == b
-    assert conn.execute("SELECT name FROM persons WHERE id = ?", (b,)).fetchone()[0] == "Bela"
+    assert conn.execute("SELECT name FROM persons WHERE id = ?", (b,)).fetchone()[0] == "Bina"
 
     r = client.delete(f"/api/people/{a}")  # ON DELETE SET NULL clears the faces: journaled too
     assert r.status_code == 200, r.text

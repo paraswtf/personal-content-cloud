@@ -208,10 +208,10 @@ def test_nested_twins_from_one_analysis_leave_one_face(conn):
     from tests.helpers import make_item
 
     big, small = (0.30, 0.20, 0.20, 0.30), (0.33, 0.24, 0.12, 0.22)   # the small box is wholly inside the big one
-    darshana, group, ravi, asha = _person(conn, "Darshana"), _person(conn, None), _person(conn, "Ravi"), _person(conn, "Asha")
+    damini, group, ravi, asha = _person(conn, "Damini"), _person(conn, None), _person(conn, "Ravi"), _person(conn, "Asha")
     a = make_item(conn, write_files=False)          # both the owner's, the same person: the better score stays
-    a1 = _twin(conn, a["id"], darshana, "user", 0.67, big)
-    a2 = _twin(conn, a["id"], darshana, "user", 0.60, small)
+    a1 = _twin(conn, a["id"], damini, "user", 0.67, big)
+    a2 = _twin(conn, a["id"], damini, "user", 0.60, small)
     b = make_item(conn, write_files=False)          # the owner's face stays over a better automatic one
     b1 = _twin(conn, b["id"], group, "auto", 0.90, big)
     b2 = _twin(conn, b["id"], ravi, "user", 0.55, small)

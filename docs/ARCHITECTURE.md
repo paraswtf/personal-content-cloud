@@ -878,7 +878,7 @@ N", and the actions "Change to...", "Rename" (an inline name field; "Name" for u
 person" or "Not this pet" (the same confirm); the unnamed faces count as a note; and "Tag someone in these"
 (the picker of both kinds with the related switch, a new pet asking its species). A move, a "Not NAME" or a
 tag closes the sheet, clears the selection, toasts the outcome ("12 items moved to Meera", "13 items marked as
-not Chikki", "+3 look-alike faces followed") and refreshes the library, the
+not Chutney", "+3 look-alike faces followed") and refreshes the library, the
 person pages, the people list and open item details; a rename keeps the sheet open and reloads its list.
 `BulkBar` (library, search, albums, vault) gets the button; the person and pet pages' Items and Related tabs
 get a Select button, selectable tiles and a selection bar with the button (`from` = that person or pet).

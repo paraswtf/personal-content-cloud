@@ -87,19 +87,19 @@ def test_drawn_box_takes_the_zero_shot_species_and_joins_a_lookalike_pet(client,
     vec = _unit(5)
     monkeypatch.setattr(animals_mod, "look_engine", lambda: FakeEngine(vec))
     other = make_item(conn)
-    chikki = _pet(conn, "cat", "Chikki", other["id"], vec)
+    chutney = _pet(conn, "cat", "Chutney", other["id"], vec)
     item = make_item(conn)
     r = client.post(f"/api/items/{item['uid']}/animals", json=CAT_BOX)
     assert r.status_code == 201, r.text
     out = r.json()
     assert out["species"] == "cat" and out["species_source"] == "auto"
-    assert out["person"] is not None and out["person"]["id"] == chikki
+    assert out["person"] is not None and out["person"]["id"] == chutney
     row = _animal(conn, out["id"])
-    assert row["person_id"] == chikki and row["assigned_by"] == "auto"
+    assert row["person_id"] == chutney and row["assigned_by"] == "auto"
     assert json.loads(row["species_scores"])["cat"] == pytest.approx(0.9)
     assert np.allclose(np.frombuffer(row["embedding"], dtype=np.float32), vec)
     # the pet's page tells the drawn box from the found one, even though the pet was matched for it
-    crops = {c["id"]: c["source"] for c in client.get(f"/api/people/{chikki}/animals").json()["items"]}
+    crops = {c["id"]: c["source"] for c in client.get(f"/api/people/{chutney}/animals").json()["items"]}
     assert crops[out["id"]] == "user" and sorted(crops.values()) == ["detector", "user"]
 
 

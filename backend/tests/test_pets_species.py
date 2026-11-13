@@ -86,17 +86,17 @@ def test_one_box_per_animal_keeps_the_better_scored_species():
 def test_stored_duplicates_collapse_and_keep_the_assignment(conn):
     item = make_item(conn, filename="two.jpg", write_files=False)
     with tx(conn):
-        chikki = pets.new_pet(conn, "cat", "Chikki")
+        chutney = pets.new_pet(conn, "cat", "Chutney")
     a_cat = _animal(conn, item["id"], "cat", unit(1), box=(0.4, 0.55, 0.45, 0.40), det_score=0.81)
     a_dog = _animal(conn, item["id"], "dog", unit(2), box=(0.41, 0.54, 0.46, 0.42), det_score=0.62)
     # the dropped box's pet moves to the kept one when their species agree
     with tx(conn):
-        conn.execute("UPDATE animals SET person_id = ?, assigned_by = 'user' WHERE id = ?", (chikki, a_dog))
-        conn.execute("UPDATE persons SET species = 'cat' WHERE id = ?", (chikki,))
+        conn.execute("UPDATE animals SET person_id = ?, assigned_by = 'user' WHERE id = ?", (chutney, a_dog))
+        conn.execute("UPDATE persons SET species = 'cat' WHERE id = ?", (chutney,))
         dropped = animals_mod.dedup_item(conn, item["id"])
     assert dropped == [a_dog]
     kept = _row(conn, a_cat)
-    assert kept["person_id"] == chikki and kept["assigned_by"] == "user"
+    assert kept["person_id"] == chutney and kept["assigned_by"] == "user"
     assert conn.execute("SELECT animal_count FROM items WHERE id = ?", (item["id"],)).fetchone()[0] == 1
 
 
@@ -147,20 +147,20 @@ def test_stored_animal_faces_are_removed_by_the_sweep(conn):
 # ------------------------------------------------------------------ the owner's corrections
 @pytest.fixture()
 def cats(conn):
-    """Chikki, a 'dog' pet whose crop X is really a cat; Y looks like X (another photo), Z does not."""
+    """Chutney, a 'dog' pet whose crop X is really a cat; Y looks like X (another photo), Z does not."""
     i1 = make_item(conn, filename="x.jpg", write_files=False)
     i2 = make_item(conn, filename="y.jpg", write_files=False)
     i3 = make_item(conn, filename="z.jpg", write_files=False)
     with tx(conn):
-        chikki = pets.new_pet(conn, "dog", "Chikki")
+        chutney = pets.new_pet(conn, "dog", "Chutney")
     base = unit(7, 768)
-    x = _animal(conn, i1["id"], "dog", base, person_id=chikki, assigned_by="user")
+    x = _animal(conn, i1["id"], "dog", base, person_id=chutney, assigned_by="user")
     y = _animal(conn, i2["id"], "dog", near(base, 8, 0.3))        # cosine about 0.96
     z = _animal(conn, i3["id"], "dog", unit(9, 768))              # a stranger
     buf = io.BytesIO(); Image.new("RGB", (32, 32), (90, 90, 90)).save(buf, "WEBP")
     for aid in (x, y, z):
         storage.write_bytes_atomic(storage.animal_crop_path(aid), buf.getvalue())
-    return dict(i1=i1, i2=i2, i3=i3, chikki=chikki, x=x, y=y, z=z)
+    return dict(i1=i1, i2=i2, i3=i3, chutney=chutney, x=x, y=y, z=z)
 
 
 def test_species_on_a_box_moves_it_out_and_lookalikes_follow(client, conn, cats):
@@ -172,46 +172,46 @@ def test_species_on_a_box_moves_it_out_and_lookalikes_follow(client, conn, cats)
     assert (x["species"], x["species_source"]) == ("cat", "user")
     assert (y["species"], y["species_source"]) == ("cat", "auto")
     assert (z["species"], z["species_source"]) == ("dog", "auto")
-    # X left the dog Chikki (a named pet stays, empty, for the owner to delete) and met Y in a new unnamed cat
-    assert conn.execute("SELECT COUNT(*) FROM animals WHERE person_id = ?", (c["chikki"],)).fetchone()[0] == 0
+    # X left the dog Chutney (a named pet stays, empty, for the owner to delete) and met Y in a new unnamed cat
+    assert conn.execute("SELECT COUNT(*) FROM animals WHERE person_id = ?", (c["chutney"],)).fetchone()[0] == 0
     assert x["person_id"] is not None and x["person_id"] == y["person_id"]
     pet = conn.execute("SELECT kind, species, name FROM persons WHERE id = ?", (x["person_id"],)).fetchone()
     assert (pet["kind"], pet["species"], pet["name"]) == ("pet", "cat", None)
     ev = _events(conn)
     assert [(e["from"], e["to"], e["followed"]) for e in ev] == [("dog", "cat", False), ("dog", "cat", True)]
-    assert ev[0]["person_id"] == c["chikki"] and ev[0]["item_id"] == c["i1"]["id"]
+    assert ev[0]["person_id"] == c["chutney"] and ev[0]["item_id"] == c["i1"]["id"]
     det = client.get(f"/api/items/{c['i1']['uid']}").json()
     assert det["animals"][0]["species"] == "cat" and det["animals"][0]["species_source"] == "user"
 
 
 def test_species_on_a_pet_keeps_its_name_and_merges_into_a_namesake(client, conn, cats):
     c = cats
-    r = client.post(f"/api/people/{c['chikki']}/species", json={"species": "cat"})
+    r = client.post(f"/api/people/{c['chutney']}/species", json={"species": "cat"})
     assert r.status_code == 200, r.text
-    assert r.json()["person"]["id"] == c["chikki"] and r.json()["person"]["species"] == "cat"
-    assert r.json()["person"]["name"] == "Chikki" and r.json()["followed"] == 1
+    assert r.json()["person"]["id"] == c["chutney"] and r.json()["person"]["species"] == "cat"
+    assert r.json()["person"]["name"] == "Chutney" and r.json()["followed"] == 1
     x = _row(conn, c["x"])
-    assert (x["species"], x["species_source"], x["person_id"]) == ("cat", "user", c["chikki"])
+    assert (x["species"], x["species_source"], x["person_id"]) == ("cat", "user", c["chutney"])
     assert _row(conn, c["y"])["species"] == "cat"
-    # a cat called Chikki already there takes the crops when the pet is corrected again
+    # a cat called Chutney already there takes the crops when the pet is corrected again
     with tx(conn):
-        other = pets.new_pet(conn, "cat", "Chikki")
-    r = client.post(f"/api/people/{c['chikki']}/species", json={"species": "cat"})
+        other = pets.new_pet(conn, "cat", "Chutney")
+    r = client.post(f"/api/people/{c['chutney']}/species", json={"species": "cat"})
     assert r.status_code == 200 and r.json()["person"]["id"] == other
     assert _row(conn, c["x"])["person_id"] == other
-    assert client.get(f"/api/people/{c['chikki']}").status_code == 404
+    assert client.get(f"/api/people/{c['chutney']}").status_code == 404
 
 
 def test_assign_with_fix_species_moves_a_cat_to_a_dog_pet_after_fixing_it(client, conn, cats):
     c = cats
     i4 = make_item(conn, filename="w.jpg", write_files=False)
     w = _animal(conn, i4["id"], "cat", near(unit(7, 768), 10, 0.3))
-    r = client.post("/api/animals/assign", json={"animal_ids": [w], "person_id": c["chikki"]})
+    r = client.post("/api/animals/assign", json={"animal_ids": [w], "person_id": c["chutney"]})
     assert r.status_code == 400 and "dog" in r.json()["detail"]
-    r = client.post("/api/animals/assign", json={"animal_ids": [w], "person_id": c["chikki"], "fix_species": True})
+    r = client.post("/api/animals/assign", json={"animal_ids": [w], "person_id": c["chutney"], "fix_species": True})
     assert r.status_code == 200, r.text
-    assert r.json()["person"]["species"] == "cat" and r.json()["person"]["name"] == "Chikki"
-    assert _row(conn, w)["person_id"] == c["chikki"] and _row(conn, c["x"])["species"] == "cat"
+    assert r.json()["person"]["species"] == "cat" and r.json()["person"]["name"] == "Chutney"
+    assert _row(conn, w)["person_id"] == c["chutney"] and _row(conn, c["x"])["species"] == "cat"
 
 
 def test_carry_over_keeps_a_user_species(conn):

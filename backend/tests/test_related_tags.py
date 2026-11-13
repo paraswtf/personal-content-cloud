@@ -89,11 +89,11 @@ def test_person_items_filter_and_counts_keep_in_as_the_default(client, conn):
 def test_search_finds_the_related_item_by_the_name(client, conn):
     toy = make_item(conn, filename="toy.jpg")
     r = client.post(f"/api/items/{toy['uid']}/tags",
-                    json={"new_person_name": "Chikki", "kind": "pet", "species": "cat", "relation": "related"})
+                    json={"new_person_name": "Chutney", "kind": "pet", "species": "cat", "relation": "related"})
     assert r.status_code == 200, r.text
     fts = conn.execute("SELECT people FROM items_fts WHERE rowid = ?", (toy["id"],)).fetchone()
-    assert fts is not None and "chikki" in fts["people"].lower()
-    assert hit_ids(service.search(conn, "Chikki", mode="text")) == [toy["id"]]
+    assert fts is not None and "chutney" in fts["people"].lower()
+    assert hit_ids(service.search(conn, "Chutney", mode="text")) == [toy["id"]]
     # removing the tag takes the name out of the index again
     client.delete(f"/api/items/{toy['uid']}/tags/{r.json()[0]['id']}")
-    assert hit_ids(service.search(conn, "Chikki", mode="text")) == []
+    assert hit_ids(service.search(conn, "Chutney", mode="text")) == []

@@ -72,11 +72,11 @@ def test_not_this_person_moves_the_lookalikes_and_keeps_them_away(client, conn):
 
 def test_moving_a_face_to_someone_else_takes_the_lookalikes_along(client, conn):
     asha, a_faces, b_faces, items, A, B = _mixed_person(conn)
-    bela = make_person(conn, "Bela")
-    r = client.post("/api/faces/assign", json={"face_ids": [b_faces[0]], "person_id": bela})
+    bina = make_person(conn, "Bina")
+    r = client.post("/api/faces/assign", json={"face_ids": [b_faces[0]], "person_id": bina})
     assert r.json()["followed"] == 2 and r.json()["person"]["face_count"] == 3
-    assert _person_of(conn, b_faces[0]) == (bela, "user")
-    assert all(_person_of(conn, f) == (bela, "auto") for f in b_faces[1:])
+    assert _person_of(conn, b_faces[0]) == (bina, "user")
+    assert all(_person_of(conn, f) == (bina, "auto") for f in b_faces[1:])
     assert _rejected(conn, asha) == set(b_faces)
     # moving within the same person is no correction
     r = client.post("/api/faces/assign", json={"face_ids": [a_faces[1]], "person_id": asha})

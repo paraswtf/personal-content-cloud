@@ -164,13 +164,13 @@ def test_meters_and_moments():
 def test_pets_get_suggestions_and_a_pet_in_the_picture_none(conn, world):
     w = world
     with tx(conn):
-        chikki = cluster.new_person(conn, "Chikki", kind="pet", species="cat")
+        chutney = cluster.new_person(conn, "Chutney", kind="pet", species="cat")
     with tx(conn):
         conn.execute("INSERT INTO item_tags(item_id, person_id, source, relation, created_at) VALUES (?, ?, 'user', 'related', ?)",
-                     (w["seed"]["id"], chikki, now_iso()))
+                     (w["seed"]["id"], chutney, now_iso()))
         conn.execute("INSERT INTO animals(item_id, person_id, assigned_by, x, y, w, h, det_score, species, created_at) "
-                     "VALUES (?, ?, 'user', 0.1, 0.1, 0.5, 0.5, 0.9, 'cat', ?)", (w["alike"]["id"], chikki, now_iso()))
-    got = {s.item_id for s in related.suggest(conn, chikki, visible=_visible())}
+                     "VALUES (?, ?, 'user', 0.1, 0.1, 0.5, 0.5, 0.9, 'cat', ?)", (w["alike"]["id"], chutney, now_iso()))
+    got = {s.item_id for s in related.suggest(conn, chutney, visible=_visible())}
     assert w["alike"]["id"] not in got and w["moment"]["id"] in got     # she is in that one, through her pet box
 
 
