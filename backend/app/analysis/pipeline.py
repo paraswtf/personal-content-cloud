@@ -704,7 +704,8 @@ def analyze_item(conn: sqlite3.Connection, item_id: int, version: int) -> None:
                     "ORDER BY id", new_face_ids,
                 )]
                 if remaining:
-                    cluster.assign_new_faces(conn, remaining, exclude_face_ids=set(old_ids))
+                    # _after runs guess_item for this item: no guess job for a face kept loose (section 10)
+                    cluster.assign_new_faces(conn, remaining, exclude_face_ids=set(old_ids), guess_kept=False)
             cluster.sync_bodies_to_faces(conn, [item_id])
 
             # Animals (section 22): boxes, crops, look embeddings, then the pet identities.

@@ -1115,28 +1115,53 @@ faces count as negatives). A logistic regression on the 512 values, trained with
     55 of that person's 5,015 faces fall under 0.2). Cutting the list at the refused person instead was tried and
     dropped: the look-alike's face then had no option left and started a one-face unnamed person each time.
   - The claim (`_claim`): every model at work (learning on, not paused, its person there) gives each face its
-    probability from its own top-3, whether or not the person is among the face's options. At 0.8 or more
-    (`CLAIM_P`) the face is kept for that person: its options shrink to that person alone when they are among them,
-    and to none when they are not (their learned cut, or the rejected look-alikes rule, kept them out). In the
-    second case the face stays loose, `_apply_item` starts no unnamed person for it (`held`), and the guess that
-    follows the analysis offers it to the person (`merge_item`, basis `face`), for the owner to confirm. Two models
-    sure of one face: the higher probability has it. A face the owner said is not the person is never kept for
-    them. The claim removes other people's options; it tags nothing the plain rules would not let the person have.
-    The check stores what this cut found and mistook (`check.claim`): on that person 4,820 of 5,015 held-out faces
-    (96 percent) with 14 of 5,474 negatives mistaken.
+    probability from its own top-3, whether or not the person is among the face's options. A face is kept for
+    that person at 0.8 or more (`CLAIM_P`), and only when the guess path would offer it to them as well
+    (`person_scan.offerable`: the two refusals of `merge_item`, asked through the same functions): no face the
+    owner took off the person is as near as the person's own faces, and no other named person scores the face as
+    high as the person's top-3 (unless that person's own model refuses it). The second test is what keeps the
+    claim from tagging the wrong person: someone named after the training was no negative for the model, so it
+    was sure of their new faces, which matched them at 0.92 and the trained person at 0.71, and without the test
+    those faces were tagged as the trained person. A face that fails either test is not kept: it goes where the
+    plain rules send it. A kept face's options shrink to that person alone when they are among them, and to none
+    when they are not (their learned cut, or the rejected look-alikes rule, kept them out). Two models sure of one
+    face: the higher probability has it. A face the owner said is not the person is never kept for them, nor is a
+    face of weight 0 (no guess is made for one). The claim removes other people's options; it tags nothing the
+    plain rules would not let the person have. The check stores what this cut found and mistook (`check.claim`):
+    on that person 4,820 of 5,015 held-out faces (96 percent) with 14 of 5,474 negatives mistaken.
+  - A kept face that the options gave nobody (`_apply_item`, `cluster.Kept`) stays loose and starts no unnamed
+    person: a guess names the person for it (`merge_item`, basis `face`), and the owner confirms. The analysis
+    makes that guess for its own item (`pipeline._after`); on every other path that assigns faces (the look-alikes
+    that follow an unassign) `assign_new_faces` queues a `guess` job for the item, or the face would wait with no
+    person, no group and no guess. It waits only where that guess can be made and kept: the item takes guesses
+    (not in the vault or the trash), the person is not in it (through a face, also one assigned in the same pass,
+    a person box or a tag: a guess never names someone who is in the item, and a confirmation names a person once
+    per item, clearing their other guesses there), and no other face of the item is kept for them already (the one
+    the model is surest of waits). A kept face that fails one of these goes back to the plain rules without the
+    named people: it joins an unnamed person among the options it had, or starts one when it is clear (in
+    `recluster_unassigned`, which starts nobody, it may only join). It never takes a named person the model kept
+    it from. A clip is where this matters: the tracks of one person are several faces, and once one of them is
+    theirs no guess can name them on another.
   - Why the claim: that person's learned cut had risen to 0.7555 and the rejected look-alikes rule removes them
     as an option for faces that resemble a removed face, so a look-alike with a lower cut won their new faces.
     Measured by scoring existing automatic faces as if they were new (each batch of 64 left out of the reference,
     the regression has seen them): of that person's 5,006 automatic faces the plain matching sent 3,292 back to
     them, 1,277 to someone else and 437 to nobody, and the gate changed none of that. With the claim 3,292 still go
-    to them, 1,520 are kept loose (1,499 of them then get a guess for the person; 21 get none, because a face taken
-    off the person is as near as the person's own, and stay loose), 90 go to someone else and 104 to nobody. Of the
-    12,130 automatic faces on other named people the claim keeps none for that person and the gate takes the
-    person off none, so nothing changes for them.
-  - A kept face that ends without the person (they are in the photo already, or no guess follows) stays loose:
-    `recluster_unassigned` scores through the same rule, and it also leaves faces that hold a `face` guess, or any
-    guess on a face a scan took out of a group. The person's learned cut is unchanged, so a new face of theirs
-    under it becomes a guess, not a tag.
+    to them, 1,499 are kept loose for a guess, 111 go to someone else and 104 to nobody. The model was sure of 21
+    more that it does not keep, because a face taken off the person is as near as the person's own: they go to
+    someone else, as the plain rules send them. No face was refused because another named person scored it as
+    high. Of the 12,130 automatic faces on other named people the model is sure of none, so the claim keeps none
+    and the gate takes the person off none: nothing changes for them.
+  - The same items taken whole (every face of an item unassigned, left out of the reference and scored together,
+    `_apply_item` deciding): of the 4,406 such faces in 4,401 photos, 3,458 are tagged as the person, 835 wait for
+    a guess and 9 are kept where no guess can follow (the person got another face of the photo 5, a second kept
+    face 2, the vault 2). Of the 600 in 530 clips, 433 are tagged, 77 wait and 31 cannot be guessed (the person
+    is on another track 29, a second kept track 2). Of those 40, 19 joined an unnamed person, 10 started one and
+    11 stayed loose, not clear enough to start a person and matching no unnamed one (as any such face does); none
+    went to a named person. Before the rule above all 40 stayed loose, with no group and no guess.
+  - `recluster_unassigned` scores through the same rules, so a face that waits for its guess keeps waiting
+    there, and it also leaves faces that hold a `face` guess, or any guess on a face a scan took out of a group.
+    The person's learned cut is unchanged, so a new face of theirs under it becomes a guess, not a tag.
 - A run (`person_scan.start`): training then the scan on one background thread (`worker.run_in_background`, nice 19,
   own connection, nothing journaled), progress in module state; inline with `WORKERS_ENABLED` off. The state of a
   run is lost with the process, so a run leaves a mark in `kv` (`recognition_run:<person>`, `{train, look,
@@ -1801,7 +1826,10 @@ also a group of look-alike faces that would vouch for each other, the check and 
 the scan (what may become a guess, what is never touched, a group the owner said is not the person), `guess_item`
 recomputing the guesses, the review actions, a face going back into its group on every path that clears its guess
 (and an emptied group coming back as one), the automatic matching (the gate and what it costs, a face the model is
-sure of kept for the person in photos and videos, the cut, the child band, two models, no model), the routes (a
+sure of kept for the person in photos and videos, the cut, the child band, two models, no model; a face another
+named person matches better or that looks like one taken off the person is not kept; the guess job for a face kept
+outside the analysis; a kept face no guess can reach, in a photo or clip the person is in, in the vault, as a
+second face of one item, and in a recluster), the routes (a
 lost run, the keyset cursor, "Leave", whose run is going), and what an undo brings back (the pause, the model of a
 deleted or merged person).
 
@@ -1981,9 +2009,9 @@ Learners (one module each, all pure numpy, all with a `status()` and a `train(co
   the learning switch and a reset removes it. Its file goes through `undo.discard` when the person is deleted or
   merged, so the undo of that action brings it back (section 33). Besides making guesses it has two says in the
   automatic matching of new faces (`cluster._score`): under `GATE_P` 0.2 the person is no option for the face,
-  and at `CLAIM_P` 0.8 or more nobody else is, so a face the person's learned cut (above) keeps off them stays
-  loose for a guess instead of going to a look-alike with a lower cut. The person's learned cut itself is not
-  touched by the model.
+  and at `CLAIM_P` 0.8 or more nobody else is, provided the guess path would offer the face to them (section 10):
+  so a face the person's learned cut (above) keeps off them stays loose for a guess instead of going to a
+  look-alike with a lower cut. The person's learned cut itself is not touched by the model.
 - `traits.py` (section 34): `params() -> TraitParams` (the tattoo and mehndi tiers, `tattoo_min_inliers`,
   `tattoo_single_min`, `single_pair_ok`, `nail_color_de`, `admission_p`, `source`), the numbers
   `analysis/trait_match.py` reads. Tiers are not fitted in this version: the library has one heavily tattooed
