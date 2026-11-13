@@ -1319,8 +1319,9 @@ _BASIS_SQL = {
     "clothes": " AND (CASE WHEN json_valid(g.guess_evidence) THEN json_extract(g.guess_evidence, '$.basis') END) IS NULL",
     "trait": " AND (CASE WHEN json_valid(g.guess_evidence) THEN json_extract(g.guess_evidence, '$.basis') END) "
              "IN ('trait', 'clothes+trait')",
-    "place": " AND (CASE WHEN json_valid(g.guess_evidence) THEN json_extract(g.guess_evidence, '$.basis') END) "
-             "IN ('place', 'clothes+place')",
+    # any guess with a position part: a trait guess that position agrees with keeps its basis and gains the part
+    "place": " AND (CASE WHEN json_valid(g.guess_evidence) THEN json_extract(g.guess_evidence, '$.basis') "
+             "IN ('place', 'clothes+place') OR json_extract(g.guess_evidence, '$.place') IS NOT NULL END)",
 }
 
 

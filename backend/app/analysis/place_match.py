@@ -20,9 +20,12 @@ CONTRACT.
   each open box, the links are walked both ways, at most HOPS photos away, through boxes nobody is named for, to
   boxes that have a person (assigned_by user or auto, as clothes references). The evidence for a person is their
   best chain: its strength is its weakest link (link_llr: by the gap, how the photos lined up, the clothes and
-  the people found in place; a link with a faceless box at either end costs FACELESS_COST and, with a gap over
-  FACELESS_NEAR_S, is never stronger than FACELESS_FAR_LLR) minus HOP_COST per further hop. People already in
-  the photo are left out, and so is
+  the people found in place; a link with a faceless box at either end costs FACELESS_COST, and a link with a gap
+  over ALONE_S or without a fit is never stronger than FAR_LLR) minus HOP_COST per further hop, and a chain of more
+  than ALONE_HOPS photos is never stronger than LONG_CHAIN_LLR. A chain is void for a person whom a photo it
+  walks through shows elsewhere, or whom the owner rejected for a box it walks through, and it never joins a
+  child's face to an adult's, also not through a faceless box. People already in the photo are left out, and
+  so is
   anyone the box's own face contradicts (the trait path's veto) or whose age band differs (a child next to a
   parent).
 - fuse(win, c_ranked, t) -> Candidate | None, after trait_match.fuse, first rule that applies: a winner that
@@ -30,9 +33,13 @@ CONTRACT.
   fragment (basis 'clothes+place' when it was plain clothes); a clothes tie inside MARGIN that position decides
   for exactly one of the tied goes to that person; with nothing from clothes or traits, a position-only guess
   (basis 'place') under admitted(): PLACE_ONLY_GUESSES on, strength at least ADMIT_LLR and a lead of LEAD_LLR
-  over the runner-up. Its score is sigmoid(strength), the measured share of right answers of its tier.
+  over the runner-up. With the two caps that means: every link of the chain at most ALONE_S apart and lined up
+  by a fit, and at most ALONE_HOPS photos. Its score is sigmoid(strength), near the measured share of right
+  answers.
 - outcome_terms(evidence) -> what a 'place' guess's outcome records for the learner.
-The constants are the ones scripts/place_eval.py measured on the owner's library (section 35 has the numbers).
+The tier strengths, the head point and the clothes floors come from one-off measurements on the owner's library
+that are not in the repository; scripts/place_eval.py gives the end-to-end numbers that check them (section 35 says
+which number is which).
 """
 from __future__ import annotations
 
@@ -74,18 +81,21 @@ TIE_LLR = 1.0              # a link at least this strong may decide a clothes ti
 MAX_SCORE = 0.99
 # (the longest gap in seconds, the strength): log odds near the lower end of the share of right answers measured
 # for that gap, pair by pair on the owner's library (two faces: 0.985 up to 3 s, 0.985 up to 10 s, 0.963 up to
-# 60 s, 0.83 up to 5 min). End to end the first three gave 0.978, 0.951 and 0.962 over all boxes, and no wrong
-# answer among named people (section 35). The last tier and a burst stay under ADMIT_LLR with every bonus: they
-# agree with clothes and break ties, they never name someone alone.
+# 60 s, 0.83 up to 5 min). They order the candidates. Who may be named alone is decided end to end (ALONE_S).
 TIERS: tuple[tuple[float, float], ...] = ((3.0, 3.9), (10.0, 3.7), (60.0, 2.9), (300.0, 1.2))
 BURST_LLR = 1.2            # photos that did not line up but are a burst (place_align.burst): not measured, so weak
 CLOTHES_BONUS = 0.5
 KEPT_BONUS = 0.5           # per other known person found in their own place, at most KEPT_MAX
 KEPT_MAX = 1.0
 FACELESS_COST = 0.5        # a head point estimated from a person box is less exact than a face
-FACELESS_NEAR_S = 10.0     # a link with a faceless box at either end and a longer gap than this...
-FACELESS_FAR_LLR = 2.7     # ...is never stronger than this, so it never names alone: with support it was right
-#                            29 times of 31, under the bar (section 35)
+ALONE_HOPS = 2             # a chain of more photos than this...
+LONG_CHAIN_LLR = 2.7       # ...is never stronger than this, so it never names alone: three-photo chains were right
+#                            17 times of 18, too few decisions to pass the bar (section 35)
+ALONE_S = 3.0              # a link with a longer gap than this, or without a fit (a burst)...
+FAR_LLR = 2.7              # ...is never stronger than this, so it never names alone: end to end, up to 3 s the
+#                            position alone was right 0.99 of the time, from 3 to 10 s 0.93 for faces and 0.89
+#                            for faceless boxes, under the bar of 0.95 (section 35). It still agrees with clothes
+#                            and breaks ties.
 
 
 def rules_sig() -> str:
@@ -94,8 +104,8 @@ def rules_sig() -> str:
     return "|".join(str(v) for v in (
         int(bool(settings.place_enabled)), int(bool(settings.place_only_guesses)), TIERS, BURST_LLR, ADMIT_LLR, LEAD_LLR,
         TIE_LLR, HOPS, HOP_COST, RESIDUAL_MAX, RESIDUAL_MAX_BOX, SECOND_RATIO, WIDTH_RATIO, CLOTHES_NO, CLOTHES_NO_MIXED,
-        CLOTHES_YES, CLOTHES_BONUS, KEPT_BONUS, KEPT_MAX, FACELESS_COST, FACELESS_NEAR_S, FACELESS_FAR_LLR,
-        HEAD_DOWN, BOX_WIDTH))
+        CLOTHES_YES, CLOTHES_BONUS, KEPT_BONUS, KEPT_MAX, FACELESS_COST, ALONE_S, FAR_LLR,
+        ALONE_HOPS, LONG_CHAIN_LLR, HEAD_DOWN, BOX_WIDTH))
 
 
 @dataclass
@@ -216,7 +226,8 @@ def load_units(conn: sqlite3.Connection, item_ids: list[int],
 
 
 def load_info(conn: sqlite3.Connection, item_ids: list[int]) -> dict[int, Info]:
-    """The live, dated photos among these items (never the vault or the trash)."""
+    """The live, dated photos among these items (never the vault or the trash), and never a screenshot, a
+    document or a Live Photo's clip: a photo that became one after it was lined up no longer takes part."""
     ids = sorted({int(i) for i in item_ids})
     out: dict[int, Info] = {}
     for start in range(0, len(ids), 400):
@@ -224,7 +235,8 @@ def load_info(conn: sqlite3.Connection, item_ids: list[int]) -> dict[int, Info]:
         marks = ",".join("?" * len(chunk))
         for r in conn.execute(
             f"SELECT id, uid, taken_at, exif_subsec, width, height FROM items WHERE id IN ({marks}) AND kind = 'image' "
-            "AND deleted_at IS NULL AND nsfw = 0 AND taken_at IS NOT NULL", chunk,
+            "AND deleted_at IS NULL AND nsfw = 0 AND taken_at IS NOT NULL AND companion_of IS NULL "
+            "AND COALESCE(category, '') NOT IN ('screenshots', 'documents')", chunk,
         ):
             out[int(r["id"])] = Info(int(r["id"]), str(r["uid"]), place.capture_time(r), float(r["width"] or 0),
                                      float(r["height"] or 0))
@@ -311,8 +323,8 @@ def link_llr(link: place.Link, pm: PairMatch, i: int, a: Unit, b: Unit, exclude:
     llr += min(KEPT_MAX, KEPT_BONUS * kept)
     if a.kind == "body" or b.kind == "body":
         llr -= FACELESS_COST
-        if abs(float(link.dt_s)) > FACELESS_NEAR_S:
-            llr = min(llr, FACELESS_FAR_LLR)
+    if link.kind == "burst" or abs(float(link.dt_s)) > ALONE_S:
+        llr = min(llr, FAR_LLR)
     return llr
 
 
@@ -325,11 +337,12 @@ class PlaceContext:
     boxes: list[Box]
     cache: dict[str, Any] | None
     present: set[int] = field(default_factory=set)
+    rejections: dict[tuple[str, int], set[int]] = field(default_factory=dict)
 
     def _store(self) -> dict[str, Any]:
         if self.cache is None:
             self.cache = {}
-        return self.cache.setdefault("place", {"links": {}, "units": {}, "info": {}, "pairs": {}})
+        return _store_of(self.cache)
 
     def _links(self, item_ids: list[int]) -> None:
         st = self._store()
@@ -384,23 +397,51 @@ class PlaceContext:
                         break
         return out
 
+    def _rejected(self, unit: Unit) -> set[int]:
+        """The people the owner rejected for this box (read per guess, never from the shared cache)."""
+        key = (unit.kind, unit.id)
+        got = self.rejections.get(key)
+        if got is None:
+            got = {int(r[0]) for r in self.conn.execute(
+                "SELECT person_id FROM guess_rejections WHERE kind = ? AND ref_id = ?", key)}
+            self.rejections[key] = got
+        return got
+
+    def _blocked(self, pid: int, via: tuple[tuple[int, int], ...]) -> bool:
+        """A chain to this person is void when a photo it walks through shows them elsewhere (the box walked
+        through is then someone else), or when the owner rejected them for a box it walks through."""
+        st = self._store()
+        for item_id, index in via:
+            units = st["units"][item_id]
+            if any(u.person_id == pid for u in units) or pid in self._rejected(units[index]):
+                return True
+        return False
+
     def _chains(self, start: int) -> dict[int, tuple[float, dict[str, Any]]]:
-        """{person: (strength, fragment)} for the unit at index `start` of this photo."""
+        """{person: (strength, fragment)} for the unit at index `start` of this photo: the best chain to each
+        person. Per hop, the strongest path to each open box is kept, so a box reached over a weak direct link
+        is walked again when a longer path reaches it more strongly; a path never returns to a box it passed."""
         st = self._store()
         iid = int(self.item["id"])
         t0 = st["info"][iid].t if st["info"].get(iid) is not None else None
         best: dict[int, tuple[float, dict[str, Any]]] = {}
-        seen = {(iid, start)}
-        frontier: list[tuple[int, int, float, str, float | None]] = [(iid, start, math.inf, "", None)]
+        origin = (iid, start)
+        # box reached -> (strength so far, how its weakest link lined up, the offset of the first link, the open
+        # boxes walked through, the age band known so far)
+        State = tuple[float, str, float | None, tuple[tuple[int, int], ...], bool | None]
+        frontier: dict[tuple[int, int], State] = {origin: (math.inf, "", None, (), st["units"][iid][start].child)}
         for hop in range(1, HOPS + 1):
-            self._links([f[0] for f in frontier])
-            nxt: list[tuple[int, int, float, str, float | None]] = []
-            for item_id, index, strength, kind0, offset0 in frontier:
+            self._links([k[0] for k in frontier])
+            nxt: dict[tuple[int, int], State] = {}
+            for (item_id, index), (strength, kind0, offset0, via, child0) in frontier.items():
                 here = st["units"][item_id][index]
                 for ln, pm, ai, other, oi in self._step(item_id, index):
-                    if (other, oi) in seen:
+                    key = (other, oi)
+                    if key == origin or key in via:
                         continue
                     there = st["units"][other][oi]
+                    if child0 is not None and there.child is not None and child0 != there.child:
+                        continue  # a child is never followed to an adult, also not through a box without a face
                     a_unit, b_unit = (here, there) if ln.a_item == item_id else (there, here)
                     e = link_llr(ln, pm, ai, a_unit, b_unit, exclude=there.person_id)
                     if e is None:
@@ -410,12 +451,14 @@ class PlaceContext:
                     kind = ln.kind if e <= strength else kind0
                     offset = pm.residual.get(ai) if offset0 is None else offset0
                     if there.person_id is None:
-                        seen.add((other, oi))
-                        nxt.append((other, oi, s, kind, offset))
+                        if key not in nxt or s > nxt[key][0]:
+                            nxt[key] = (s, kind, offset, via + (key,), there.child if child0 is None else child0)
                         continue
                     pid = int(there.person_id)
                     total = s - HOP_COST * (hop - 1)
-                    if total <= 0 or (pid in best and best[pid][0] >= total):
+                    if hop > ALONE_HOPS:
+                        total = min(total, LONG_CHAIN_LLR)
+                    if total <= 0 or (pid in best and best[pid][0] >= total) or self._blocked(pid, via):
                         continue
                     info = st["info"].get(other)
                     seconds = before = None
@@ -477,6 +520,10 @@ class PlaceContext:
         return out
 
 
+def _store_of(cache: dict[str, Any]) -> dict[str, Any]:
+    return cache.setdefault("place", {"links": {}, "units": {}, "info": {}, "pairs": {}, "ver": None})
+
+
 def _named(conn: sqlite3.Connection, person_ids: set[int]) -> set[int]:
     ids = sorted({int(p) for p in person_ids})
     out: set[int] = set()
@@ -494,6 +541,15 @@ def context(conn: sqlite3.Connection, item: sqlite3.Row, boxes: list[Box],
     if item["kind"] != "image" or not item["taken_at"]:
         return None
     iid = int(item["id"])
+    if cache is not None:
+        # the place runner writes links while a drain shares one cache: links read before the last write are
+        # read again (every new or replaced row moves the largest rowid or the count)
+        ver = tuple(conn.execute("SELECT MAX(rowid), COUNT(*) FROM place_links").fetchone())
+        st = _store_of(cache)
+        if st.get("ver") != ver:
+            st["links"].clear()
+            st["pairs"].clear()
+            st["ver"] = ver
     known = cache.get("place", {}).get("links", {}).get(iid) if cache is not None else None
     if known is None:
         hit = conn.execute(

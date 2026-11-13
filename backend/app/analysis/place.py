@@ -13,21 +13,30 @@ CONTRACT.
 - pending_items(conn, limit, skip) -> [(item id, [next ids])], by capture time, newest first.
 - run_pending(conn, budget_s=None, limit=None) -> {items, pairs, aligned, complete}: measures outside any
   transaction (one photo read and described at a time through place_align's cache), then one short write per photo.
-  A photo whose measuring raises stays pending; after ABORTS_PER_ITEM failures its pairs are stored as 'none'.
-  After a photo's usable links are written, the photos of its pairs that hold an open box are queued for a fresh
-  guess on the traits runner thread (traits.requeue: one queue for every re-guess).
+  A photo whose measuring raises stays pending; after ABORTS_PER_ITEM failures in a row its pairs are stored
+  as 'none'. After each batch, the photos with an open box among the photos just linked and the photos a chain
+  through them can reach (requeue_around) are queued for a fresh guess on the traits runner thread
+  (traits.requeue: one queue for every re-guess).
+- requeue_around(conn, item_ids, hops=None) -> int: queues the photos with an open box within `hops` usable
+  links of these photos (place_match.HOPS - 1 by default: how far a new link changes a chain; ingest passes
+  HOPS when a photo goes to the trash or comes back, as it may be a chain's last photo).
 - kick(conn=None), start(conn): the runner thread ("place", worker.run_in_background), its own connection, nice 19,
   rounds of ROUND_BUDGET_S, the traits runner's memory stops; it ends by itself when nothing is pending. Nothing
-  when the workers are off (tests call run_pending) or PLACE_ENABLED is off.
+  when the workers are off (tests call run_pending) or PLACE_ENABLED is off. OpenCV's thread count is one number
+  for the whole process: it is set to PLACE_THREADS while a photo is measured and put back after. With 1 (the
+  default) OpenCV works on the calling thread, so at nice 19; with more, its pool threads do most of the work at
+  normal priority. Meanwhile every other OpenCV call of the process runs with that count too.
 - apply_settings_change(conn) -> int, at startup: when the position rules changed (a setting, or constants of a
-  later version: place_match.rules_sig, kv place_rules), the photos whose open guesses rest on position are queued
-  for a fresh guess.
+  later version: place_match.rules_sig, kv place_rules), every photo with a usable link and an open box is queued
+  for a fresh guess, and every photo whose open guess has a position part: a looser rule brings guesses back, a
+  stricter one or PLACE_ENABLED off withdraws them and gives back what position had withdrawn.
 - links_for(conn, item_ids) -> [Link]: the usable links (current rev, kind other than 'none') touching these items.
 - progress(conn) -> {scanned, eligible, ready, rev, last_error, enabled} for Settings > Learning.
 Both tables are derived data: not journalled for undo, rows go with their items (ON DELETE CASCADE).
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import sqlite3
@@ -77,7 +86,9 @@ _PENDING_SQL = _SEQUENCE_SQL + (
     "WHERE (p.item_id IS NULL OR p.rev != :rev OR p.sig != s.sig) "
     "AND s.id NOT IN (SELECT value FROM json_each(:skip)) ORDER BY s.taken_at DESC, s.id DESC LIMIT :limit"
 )
-_ITEM_COLUMNS = "id, uid, version, taken_at, exif_subsec, dup_group_id, content_id, live_video_item_id, deleted_at, nsfw"
+# kind and ext are what animals.open_photo reads when a photo has no preview (place_align.load_gray)
+_ITEM_COLUMNS = ("id, uid, version, kind, ext, taken_at, exif_subsec, dup_group_id, content_id, live_video_item_id, "
+                 "deleted_at, nsfw")
 
 _state_lock = threading.Lock()
 _state: dict[str, Any] = {"last_error": None, "fails": {}}
@@ -210,6 +221,51 @@ def _set_error(msg: str | None) -> None:
         _state["last_error"] = msg
 
 
+@contextlib.contextmanager
+def _cv_threads():
+    """OpenCV's thread count while this thread measures (see the module contract): set to PLACE_THREADS, put back
+    after. Measured in this build: at 1 the calling thread does all the work, at 2 the pool threads do half."""
+    import cv2
+
+    want = max(1, int(settings.place_threads))
+    before = cv2.getNumThreads()
+    if before == want:
+        yield
+        return
+    cv2.setNumThreads(want)
+    try:
+        yield
+    finally:
+        cv2.setNumThreads(before)
+
+
+def linked_around(conn: sqlite3.Connection, item_ids: Iterable[int], hops: int) -> set[int]:
+    """These photos and the photos within `hops` usable links of them."""
+    seen = {int(i) for i in item_ids}
+    front = set(seen)
+    for _ in range(max(0, int(hops))):
+        if not front:
+            break
+        front = {i for ln in links_for(conn, front) for i in (ln.a_item, ln.b_item)} - seen
+        seen |= front
+    return seen
+
+
+def requeue_around(conn: sqlite3.Connection, item_ids: Iterable[int], hops: int | None = None) -> int:
+    """Queue a fresh guess for the photos with an open box among these photos and the photos within `hops` usable
+    links of them. Returns how many were queued."""
+    ids = {int(i) for i in item_ids}
+    if not ids:
+        return 0
+    if hops is None:
+        from app.analysis import place_match
+
+        hops = place_match.HOPS - 1
+    todo = [i for i in sorted(linked_around(conn, ids, hops)) if _open_box(conn, i)]
+    _requeue(conn, todo)
+    return len(todo)
+
+
 def run_pending(conn: sqlite3.Connection, *, budget_s: float | None = None, limit: int | None = None) -> dict[str, Any]:
     """Line pending photos up with their next photos, newest first, within budget_s seconds and `limit` photos."""
     out: dict[str, Any] = {"items": 0, "pairs": 0, "aligned": 0, "complete": False}
@@ -218,56 +274,80 @@ def run_pending(conn: sqlite3.Connection, *, budget_s: float | None = None, limi
     deadline = None if budget_s is None else time.monotonic() + float(budget_s)
     tried: list[int] = []
     cache: dict[str, Any] = {}
-    while True:
-        batch = pending_items(conn, BATCH_ITEMS, tried)
-        if not batch:
-            break
-        for item_id, nexts in batch:
-            if (limit is not None and out["items"] >= limit) or (deadline is not None and time.monotonic() > deadline):
-                return out
-            tried.append(item_id)
-            try:
-                pairs, aligned = _measure_item(conn, item_id, nexts, cache)
-            except Exception as e:  # noqa: BLE001 - one photo never stops the runner; it stays pending
-                log.exception("place: lining up item %s failed", item_id)
-                _set_error(f"{type(e).__name__}: {e}"[:200])
+    touched: set[int] = set()   # photos that gained a usable link in this batch
+    try:
+        while True:
+            batch = pending_items(conn, BATCH_ITEMS, tried)
+            if not batch:
+                break
+            for item_id, nexts in batch:
+                if (limit is not None and out["items"] >= limit) or (deadline is not None and time.monotonic() > deadline):
+                    return out
+                tried.append(item_id)
+                try:
+                    pairs, linked = _measure_item(conn, item_id, nexts, cache)
+                except Exception as e:  # noqa: BLE001 - one photo never stops the runner; it stays pending
+                    log.exception("place: lining up item %s failed", item_id)
+                    _set_error(f"{type(e).__name__}: {e}"[:200])
+                    with _state_lock:
+                        fails = _state["fails"][item_id] = _state["fails"].get(item_id, 0) + 1
+                    if fails >= ABORTS_PER_ITEM:
+                        _give_up(conn, item_id, nexts)
+                    continue
                 with _state_lock:
-                    fails = _state["fails"][item_id] = _state["fails"].get(item_id, 0) + 1
-                if fails >= ABORTS_PER_ITEM:
-                    _give_up(conn, item_id, nexts)
-                continue
-            out["items"] += 1
-            out["pairs"] += pairs
-            out["aligned"] += aligned
+                    _state["fails"].pop(item_id, None)  # failures count in a row only
+                out["items"] += 1
+                out["pairs"] += pairs
+                out["aligned"] += len(linked)
+                if linked:
+                    touched.update((item_id, *linked))
+            _flush_requeue(conn, touched)
+    finally:
+        _flush_requeue(conn, touched)
     out["complete"] = not pending_items(conn, 1)
     if out["complete"]:
         _set_error(None)
     return out
 
 
-def _measure_item(conn: sqlite3.Connection, item_id: int, nexts: list[int], cache: dict[str, Any]) -> tuple[int, int]:
-    """Measure the photo's missing pairs (no transaction), write them and its scan row, queue the re-guesses.
-    Returns (pairs measured, of them lined up)."""
+def _flush_requeue(conn: sqlite3.Connection, touched: set[int]) -> None:
+    """The fresh guesses a batch of new links calls for, once per batch: a guess walks HOPS links, so the photos a
+    chain through a new link can reach are queued too, not only the two photos of the link."""
+    if not touched:
+        return
+    ids = set(touched)
+    touched.clear()
+    try:
+        requeue_around(conn, ids)
+    except Exception:  # noqa: BLE001 - the next guess of these photos reads the links anyway
+        log.exception("place: could not queue the photos around %d newly linked photo(s)", len(ids))
+
+
+def _measure_item(conn: sqlite3.Connection, item_id: int, nexts: list[int],
+                  cache: dict[str, Any]) -> tuple[int, list[int]]:
+    """Measure the photo's missing pairs (no transaction), write them and its scan row.
+    Returns (pairs measured, the next photos it now has a usable link with)."""
     a = _item_row(conn, item_id)
     if a is None:
-        return 0, 0
+        return 0, []
     have = {int(r[0]) for r in conn.execute(
         "SELECT b_item FROM place_links WHERE a_item = ? AND rev = ?", (item_id, PLACE_REV))}
     rows: list[tuple[int, str, str, int, float, float]] = []
-    for nid in nexts:
-        if nid in have:
-            continue
-        b = _item_row(conn, nid)
-        if b is None:
-            continue
-        kind, m, inliers, spread, dt = measure_pair(conn, a, b, cache)
-        rows.append((nid, kind, m, inliers, spread, dt))
+    with _cv_threads():
+        for nid in nexts:
+            if nid in have:
+                continue
+            b = _item_row(conn, nid)
+            if b is None:
+                continue
+            kind, m, inliers, spread, dt = measure_pair(conn, a, b, cache)
+            rows.append((nid, kind, m, inliers, spread, dt))
     now = now_iso()
     with tx(conn):
         alive = {int(r[0]) for r in conn.execute(
             f"SELECT id FROM items WHERE id IN ({','.join('?' * (len(rows) + 1))})", [item_id, *[r[0] for r in rows]])}
         if item_id not in alive:
-            return 0, 0
+            return 0, []
         for nid, kind, m, inliers, spread, dt in rows:
             if nid in alive:
                 conn.execute(
@@ -275,10 +355,7 @@ def _measure_item(conn: sqlite3.Connection, item_id: int, nexts: list[int], cach
                     "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", (item_id, nid, PLACE_REV, kind, m, inliers, spread, dt, now))
         conn.execute("INSERT OR REPLACE INTO place_scans(item_id, rev, sig, scanned_at) VALUES (?, ?, ?, ?)",
                      (item_id, PLACE_REV, "".join(f"{n}," for n in nexts), now))
-    usable = [r[0] for r in rows if r[1] != "none"]
-    if usable:
-        _requeue(conn, [i for i in (item_id, *usable) if _open_box(conn, i)])
-    return len(rows), len(usable)
+    return len(rows), [r[0] for r in rows if r[1] != "none" and r[0] in alive]
 
 
 def _give_up(conn: sqlite3.Connection, item_id: int, nexts: list[int]) -> None:
@@ -359,17 +436,27 @@ def start(conn: sqlite3.Connection) -> None:
 
 def apply_settings_change(conn: sqlite3.Connection) -> int:
     """When the position rules differ from the ones recorded (PLACE_ENABLED, PLACE_ONLY_GUESSES, or the constants
-    of another version), the photos whose open guesses rest on position (basis 'place' or 'clothes+place') are
-    queued for a fresh guess, which withdraws what the rules no longer support. Returns how many were queued."""
+    of another version), two sets of photos are queued for a fresh guess: every photo with a usable link and an
+    open box (a looser rule or the feature switched back on brings guesses back; switched off, a clothes guess
+    that position had withdrawn comes back), and every photo whose open guess has a position part under any
+    basis (it is withdrawn or loses the part when the rules no longer support it). Returns how many."""
     from app.analysis import place_match
 
     sig = place_match.rules_sig()
     if kv_get(conn, RULES_KEY) == sig:
         return 0
-    basis = "(CASE WHEN json_valid(guess_evidence) THEN json_extract(guess_evidence, '$.basis') END) IN ('place', 'clothes+place')"
-    items = [int(r[0]) for r in conn.execute(
-        f"SELECT item_id FROM faces WHERE assigned_by = 'guess' AND person_id IS NULL AND {basis} UNION "
-        f"SELECT item_id FROM bodies WHERE assigned_by = 'guess' AND person_id IS NULL AND {basis}")]
+    part = ("(CASE WHEN json_valid(guess_evidence) THEN json_extract(guess_evidence, '$.basis') IN ('place', "
+            "'clothes+place') OR json_extract(guess_evidence, '$.place') IS NOT NULL END)")
+    found = {int(r[0]) for r in conn.execute(
+        f"SELECT item_id FROM faces WHERE assigned_by = 'guess' AND person_id IS NULL AND {part} UNION "
+        f"SELECT item_id FROM bodies WHERE assigned_by = 'guess' AND person_id IS NULL AND {part}")}
+    found.update(int(r[0]) for r in conn.execute(
+        "WITH l(i) AS (SELECT a_item FROM place_links WHERE rev = :rev AND kind != 'none' "
+        "UNION SELECT b_item FROM place_links WHERE rev = :rev AND kind != 'none') "
+        "SELECT i FROM l WHERE EXISTS (SELECT 1 FROM faces f WHERE f.item_id = l.i AND f.person_id IS NULL "
+        "AND f.assigned_by IN ('auto', 'guess')) OR EXISTS (SELECT 1 FROM bodies b WHERE b.item_id = l.i "
+        "AND b.person_id IS NULL AND b.face_id IS NULL AND b.assigned_by IN ('auto', 'guess'))", {"rev": PLACE_REV}))
+    items = sorted(found)
     _requeue(conn, items)
     with tx(conn):
         kv_set(conn, RULES_KEY, sig)

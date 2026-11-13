@@ -481,9 +481,21 @@ def _compute_fused(conn: sqlite3.Connection, item: sqlite3.Row, boxes: list[Box]
         else:
             c_win, c_ranked = None, []
         t = per_box.get((b.kind, b.id))
-        win = c_win if t is None else trait_match.fuse(c_win, c_ranked, t.without(rej), tctx.params)
+        gone: set[int] = set()
+        if t is None:
+            win = c_win
+        else:
+            t = t.without(rej)
+            win = trait_match.fuse(c_win, c_ranked, t, tctx.params)
+            if win is None and c_win is not None:
+                return None  # the traits withdrew the clothes winner: position never brings a guess back
+            # people the traits rule out for this box (a tattoo of theirs is absent): not for position either
+            gone = {q for q, terms in t.terms.items()
+                    if float((terms or {}).get("absence", 0.0)) <= trait_match.NEG_CAP + 1e-9}
         p = place_box.get((b.kind, b.id))
-        return win if p is None else place_match.fuse(win, c_ranked, p.without(rej))
+        if p is None:
+            return win
+        return place_match.fuse(win, [c for c in c_ranked if c.person_id not in gone], p.without(rej | gone))
 
     pending = list(boxes)
     taken: set[int] = set()

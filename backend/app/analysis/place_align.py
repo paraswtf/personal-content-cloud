@@ -14,7 +14,13 @@ CONTRACT.
   one scale, a shift: cv2.estimateAffinePartial2D, USAC_MAGSAC when this OpenCV has it, else RANSAC, RANSAC_PX at
   ALIGN_SIDE) fitted on the background matches (neither end inside a people box). When that fit has fewer than
   MIN_INLIERS inliers, once more on every match: people who stood still are good anchors, people who moved are
-  outliers. A fit is kept with at least MIN_INLIERS inliers, a scale within [SCALE_MIN, SCALE_MAX] and inliers
+  outliers. That second fit must not be one person's doing: it counts with at least MIN_BG_INLIERS inliers
+  outside the people boxes, or with inliers on at least two people in both photos (MIN_OWNER_INLIERS each), or
+  when each photo shows one person only. Otherwise, with a plain background, it would lock onto one person who
+  walked and put everybody else in the wrong place. Features.owner is the people box each keypoint lies in (the
+  largest, so a face counts with the person box around it; -1 for the background) and Features.groups the number
+  of people in the picture (boxes that do not lie inside a larger one).
+  A fit is kept with at least MIN_INLIERS inliers, a scale within [SCALE_MIN, SCALE_MAX] and inliers
   spanning at least MIN_SPREAD of the first picture (their convex hull). Alignment.m is the 2 x 3 matrix in
   NORMALISED picture coordinates of a -> b (x and y each 0..1 of their own picture, so two aspect ratios are
   handled); kind is 'still' (the camera hardly moved: shift under STILL_SHIFT of the picture, scale within
@@ -27,7 +33,8 @@ CONTRACT.
 - load_gray(item) -> ndarray | None: the small preview when there is one (1280 px), else the 2048 px preview, else
   the photo as the analysis saw it; grey, long side ALIGN_SIDE. Geometry is the same for all three: boxes are
   normalised to the upright picture.
-- reset(): empties the cache (tests). stats() -> counts.
+- reset(): empties the cache (tests). stats() -> counts: described, aligned (pairs matched), on_people (fits
+  kept from the second pass), refused (second-pass fits that were one person's doing).
 Thread-safe: the cache is behind one lock, and every thread has its own SIFT, CLAHE and matcher objects.
 Measured on the owner's library (2026-11-13, section 35): see the docs for the rates by gap and the timings.
 """
@@ -57,6 +64,8 @@ MIN_GOOD = 6
 RANSAC_PX = 3.0            # reprojection threshold in pixels at ALIGN_SIDE
 RANSAC_ITERS = 3000
 MIN_INLIERS = 20           # measured: see section 35
+MIN_BG_INLIERS = 6         # of a fit on every keypoint: inliers that lie outside the people boxes of both photos,
+MIN_OWNER_INLIERS = 3      # or this many inliers on each of two people, in both photos
 SCALE_MIN = 0.4
 SCALE_MAX = 2.5
 MIN_SPREAD = 0.02          # the inliers' convex hull, as a share of the first picture
@@ -78,10 +87,12 @@ class Features(NamedTuple):
     people: np.ndarray    # bool[n]: inside a face or person box
     w: int
     h: int
+    owner: np.ndarray     # int16[n]: the largest people box the keypoint lies in, -1 for the background
+    groups: int           # people in the picture: boxes that do not lie inside a larger one
 
     @property
     def nbytes(self) -> int:
-        return int(self.xy.nbytes + self.desc.nbytes + self.people.nbytes) + 64
+        return int(self.xy.nbytes + self.desc.nbytes + self.people.nbytes + self.owner.nbytes) + 64
 
 
 class Alignment(NamedTuple):
@@ -98,7 +109,7 @@ IDENTITY = (1.0, 0.0, 0.0, 0.0, 1.0, 0.0)
 _lock = threading.Lock()
 _cache: OrderedDict[Key, Features | None] = OrderedDict()
 _cache_bytes = 0
-_stats = {"described": 0, "aligned": 0}
+_stats = {"described": 0, "aligned": 0, "on_people": 0, "refused": 0}
 _local = threading.local()
 
 
@@ -151,15 +162,22 @@ def describe(gray: np.ndarray, boxes: Sequence[Box] = ()) -> Features:
     kps, desc = sift.detectAndCompute(clahe.apply(g), None)
     with _lock:
         _stats["described"] += 1
+    size = [(float(b[2]) * float(b[3]), k) for k, b in enumerate(boxes)]
+    # a box whose centre lies inside a larger one is part of that person (a face in its person box)
+    groups = sum(1 for k, (bx, by, bw, bh) in enumerate(boxes) if not any(
+        size[j] > size[k] and ox <= bx + bw / 2 <= ox + ow and oy <= by + bh / 2 <= oy + oh
+        for j, (ox, oy, ow, oh) in enumerate(boxes) if j != k))
     if desc is None or not kps:
-        return Features(np.zeros((0, 2), np.float32), np.zeros((0, 128), np.uint8), np.zeros(0, bool), w, h)
+        return Features(np.zeros((0, 2), np.float32), np.zeros((0, 128), np.uint8), np.zeros(0, bool), w, h,
+                        np.zeros(0, np.int16), groups)
     xy = np.array([k.pt for k in kps], dtype=np.float32).reshape(-1, 2)
-    people = np.zeros(len(xy), dtype=bool)
-    for bx, by, bw, bh in boxes:
+    owner = np.full(len(xy), -1, dtype=np.int16)
+    for _area, k in sorted(size):                                     # small boxes first: a larger one takes over
+        bx, by, bw, bh = boxes[k]
         gx, gy = float(bw) * BOX_GROW, float(bh) * BOX_GROW
-        people |= ((xy[:, 0] >= (bx - gx) * w) & (xy[:, 0] <= (bx + bw + gx) * w)
-                   & (xy[:, 1] >= (by - gy) * h) & (xy[:, 1] <= (by + bh + gy) * h))
-    return Features(xy, np.clip(np.rint(desc), 0, 255).astype(np.uint8), people, int(w), int(h))
+        owner[(xy[:, 0] >= (bx - gx) * w) & (xy[:, 0] <= (bx + bw + gx) * w)
+              & (xy[:, 1] >= (by - gy) * h) & (xy[:, 1] <= (by + bh + gy) * h)] = k
+    return Features(xy, np.clip(np.rint(desc), 0, 255).astype(np.uint8), owner >= 0, int(w), int(h), owner, groups)
 
 
 def features(key: Key, loader: Callable[[], tuple[np.ndarray, Sequence[Box]] | None]) -> Features | None:
@@ -241,6 +259,10 @@ def align(fa: Features | None, fb: Features | None) -> Alignment | None:
         n = int(inl.sum())
         if n < MIN_INLIERS:
             continue
+        if not is_bg and int((background & inl).sum()) < MIN_BG_INLIERS and not _people_agree(fa, fb, qi[inl], ti[inl]):
+            with _lock:
+                _stats["refused"] += 1
+            continue  # nothing but one person agrees: the fit may follow them, not the camera
         scale = math.hypot(float(m[0, 0]), float(m[1, 0]))
         if not SCALE_MIN <= scale <= SCALE_MAX:
             continue
@@ -250,9 +272,26 @@ def align(fa: Features | None, fb: Features | None) -> Alignment | None:
         roll = abs(math.degrees(math.atan2(float(m[1, 0]), float(m[0, 0]))))
         still = (abs(float(m[0, 2])) / fb.w < STILL_SHIFT and abs(float(m[1, 2])) / fb.h < STILL_SHIFT
                  and abs(scale - 1.0) < STILL_SCALE and roll < STILL_ROLL)
+        if not is_bg:
+            with _lock:
+                _stats["on_people"] += 1
         return Alignment(normalise(m, fa.w, fa.h, fb.w, fb.h), n, len(good), round(spread, 4),
                          "still" if still else "moved", is_bg)
     return None
+
+
+def _people_agree(fa: Features, fb: Features, qa: np.ndarray, tb: np.ndarray) -> bool:
+    """Whether a fit without background inliers stands (qa, tb: the keypoints of its inliers in a and in b): its
+    inliers lie on at least two people in both photos, or each photo shows one person only, so nobody else can be
+    put in the wrong place by it."""
+    if fa.groups <= 1 and fb.groups <= 1:
+        return True
+
+    def several(owner: np.ndarray) -> bool:
+        _ids, counts = np.unique(owner[owner >= 0], return_counts=True)
+        return int((counts >= MIN_OWNER_INLIERS).sum()) >= 2
+
+    return several(fa.owner[qa]) and several(fb.owner[tb])
 
 
 def burst(dt_s: float | None, cos: float | None) -> Alignment | None:
@@ -289,7 +328,7 @@ def reset() -> None:
     with _lock:
         _cache.clear()
         _cache_bytes = 0
-        _stats.update(described=0, aligned=0)
+        _stats.update(described=0, aligned=0, on_people=0, refused=0)
 
 
 def stats() -> dict[str, int]:

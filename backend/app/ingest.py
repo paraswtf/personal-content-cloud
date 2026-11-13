@@ -978,6 +978,18 @@ def soft_delete(conn: sqlite3.Connection, item_id: int) -> None:
             dedup.regroup(conn, members)
         _sync_companion(conn, item_id)
         bump_search_version(conn)
+    _reguess_followed(conn, item_id)
+
+
+def _reguess_followed(conn: sqlite3.Connection, item_id: int) -> None:
+    """Section 35: guesses in the photos lined up with this one may rest on it (a person followed from it, or
+    through it). They are made again when it goes to the trash or comes back."""
+    try:
+        from app.analysis import place, place_match
+
+        place.requeue_around(conn, [item_id], hops=place_match.HOPS)
+    except Exception:  # noqa: BLE001 - the trash never waits for a guess
+        log.exception("ingest: could not queue the photos lined up with item %s for a fresh guess", item_id)
 
 
 def _sync_companion(conn: sqlite3.Connection, still_id: int) -> None:
@@ -1011,6 +1023,7 @@ def restore(conn: sqlite3.Connection, item_id: int) -> None:
         if row["kind"] != "video":
             statuses["preview_status"] = "none"
         _enqueue_followups(conn, item_id, int(row["version"]), row["kind"], statuses)
+    _reguess_followed(conn, item_id)
 
 
 def _item_files(uid: str) -> tuple[list[Path], list[Path]]:

@@ -284,20 +284,23 @@ def test_a_faceless_box_costs_a_little_and_names_its_reference(conn):
     assert (res.evidence[p]["ref_body_id"], res.evidence[p]["ref_face_id"]) == (ref, None)
 
 
-def test_a_faceless_box_far_apart_in_time_never_names_alone(conn):
+def test_beyond_a_few_seconds_position_never_names_alone(conn):
     p, q = make_person(conn, "Asha"), make_person(conn, "Ravi")
-    for gap, capped in ((8, False), (20, True)):
+    for gap, far in ((2, False), (8, True), (20, True)):
         a, b = photo(conn, 100 * gap), photo(conn, 100 * gap + gap)
-        make_body(conn, a["id"], p, assigned_by="user", box=(0.37, 0.1, 0.26, 0.7))
-        tgt = make_body(conn, b["id"], None, box=(0.37, 0.1, 0.26, 0.7))
+        face(conn, a, p, MID)
+        make_body(conn, a["id"], p, assigned_by="user", box=(0.67, 0.1, 0.26, 0.7))
+        tf = face(conn, b, None, MID)
+        tb = make_body(conn, b["id"], None, box=(0.67, 0.1, 0.26, 0.7))
         face(conn, a, q, LEFT)
         face(conn, b, q, LEFT)                           # someone else stayed in place: support
         link(conn, a, b)
-        res = results(conn, b)[("body", tgt)]
-        full = pm.tier_llr(gap) - pm.FACELESS_COST + pm.KEPT_BONUS
-        assert res.llr[p] == pytest.approx(min(full, pm.FACELESS_FAR_LLR) if capped else full)
-        assert (pm.admitted(res) is None) == capped
-    assert pm.FACELESS_FAR_LLR < pm.ADMIT_LLR <= pm.tier_llr(pm.FACELESS_NEAR_S) - pm.FACELESS_COST
+        got = results(conn, b)
+        for key, cost in ((("face", tf), 0.0), (("body", tb), pm.FACELESS_COST)):
+            full = pm.tier_llr(gap) - cost + pm.KEPT_BONUS
+            assert got[key].llr[p] == pytest.approx(min(full, pm.FAR_LLR) if far else full)
+            assert (pm.admitted(got[key]) is None) == far
+    assert pm.FAR_LLR < pm.ADMIT_LLR <= pm.tier_llr(pm.ALONE_S) - pm.FACELESS_COST
 
 
 def test_a_chain_through_open_boxes_is_as_strong_as_its_weakest_link(conn):
@@ -309,7 +312,7 @@ def test_a_chain_through_open_boxes_is_as_strong_as_its_weakest_link(conn):
     fe = face(conn, e, None, MID)
     link(conn, a, b)
     link(conn, b, c)
-    link(conn, c, d)                                     # 26 s: a weaker tier
+    link(conn, c, d)                                     # 26 s: a weaker tier, and beyond ALONE_S
     link(conn, d, e)
     fd = conn.execute("SELECT id FROM faces WHERE item_id = ?", (d["id"],)).fetchone()[0]
     fc = conn.execute("SELECT id FROM faces WHERE item_id = ?", (c["id"],)).fetchone()[0]
@@ -317,7 +320,8 @@ def test_a_chain_through_open_boxes_is_as_strong_as_its_weakest_link(conn):
     assert two.llr[p] == pytest.approx(pm.tier_llr(2.0) - pm.HOP_COST) and two.evidence[p]["hops"] == 2
     assert two.evidence[p]["seconds_apart"] == 4.0 and two.evidence[p]["ref_item_uid"] == a["uid"]
     three = results(conn, d)[("face", fd)]
-    assert three.llr[p] == pytest.approx(pm.tier_llr(26.0) - 2 * pm.HOP_COST) and three.evidence[p]["hops"] == 3
+    weakest = min(pm.tier_llr(26.0), pm.FAR_LLR)
+    assert three.llr[p] == pytest.approx(weakest - 2 * pm.HOP_COST) and three.evidence[p]["hops"] == 3
     assert results(conn, e) == {}                        # four photos away: too far
 
 
@@ -367,3 +371,103 @@ def test_a_burst_without_a_fit_is_weaker(conn):
     res = results(conn, b)[("face", fb)]
     assert res.llr[p] == pytest.approx(pm.BURST_LLR) and res.evidence[p]["kind"] == "burst"
     assert pm.BURST_LLR < pm.ADMIT_LLR                   # it supports and breaks ties, it never names alone
+
+
+# ------------------------------------------------------------------ what a chain may not do
+def test_a_chain_of_three_photos_never_names_alone(conn):
+    p = make_person(conn, "Asha")
+    a, b, c, d = (photo(conn, s) for s in (0, 2, 4, 6))
+    face(conn, a, p, MID)
+    face(conn, b, None, MID)
+    fc = face(conn, c, None, MID)
+    fd = face(conn, d, None, MID)
+    for x, y in ((a, b), (b, c), (c, d)):                              # only neighbours lined up
+        link(conn, x, y)
+    two = results(conn, c)[("face", fc)]
+    assert two.llr[p] == pytest.approx(pm.tier_llr(2.0) - pm.HOP_COST) and pm.admitted(two) == p
+    three = results(conn, d)[("face", fd)]
+    assert three.evidence[p]["hops"] == 3 and three.llr[p] == pytest.approx(pm.LONG_CHAIN_LLR)
+    assert pm.admitted(three) is None and pm.LONG_CHAIN_LLR < pm.ADMIT_LLR
+
+
+def test_a_chain_is_void_when_a_photo_on_the_way_says_no(conn):
+    p = make_person(conn, "Asha")
+    z, y, x = photo(conn, 0), photo(conn, 2), photo(conn, 4)
+    face(conn, z, p, MID)
+    mid = face(conn, y, None, MID)
+    fx = face(conn, x, None, MID)
+    link(conn, z, y)
+    link(conn, y, x)
+    assert results(conn, x)[("face", fx)].llr[p] == pytest.approx(pm.tier_llr(2.0) - pm.HOP_COST)
+    with tx(conn):                                                     # the owner said no for the box in the middle
+        conn.execute("INSERT INTO guess_rejections(kind, ref_id, person_id, created_at) VALUES ('face', ?, ?, ?)",
+                     (mid, p, now_iso()))
+    assert results(conn, x) == {}
+    with tx(conn):
+        conn.execute("DELETE FROM guess_rejections")
+    assert p in results(conn, x)[("face", fx)].llr
+    face(conn, y, p, RIGHT)                                            # the middle photo shows the person elsewhere
+    assert results(conn, x) == {}
+
+
+def test_a_child_is_not_followed_to_an_adult_through_a_faceless_box(conn):
+    with tx(conn):
+        kv_set(conn, ages.READY_KEY, ages.MODEL_REV)
+    p = make_person(conn, "Asha")
+    z, y, x = photo(conn, 0), photo(conn, 2), photo(conn, 4)
+    clear = dict(clarity=25.0, sharpness=40.0)
+    face(conn, z, p, MID, age_groups=ages.encode(ADULT), **clear)
+    body_at(conn, y, MID[0] + MID[2] / 2, MID[1] + MID[3] / 2)         # no face: no age band of its own
+    fx = face(conn, x, None, MID, age_groups=ages.encode(CHILD), **clear)
+    link(conn, z, y)
+    link(conn, y, x)
+    assert results(conn, x) == {}
+    with tx(conn):
+        conn.execute("UPDATE faces SET age_groups = ? WHERE id = ?", (ages.encode(ADULT), fx))
+    assert p in results(conn, x)[("face", fx)].llr
+
+
+def test_a_weaker_direct_link_does_not_hide_a_stronger_chain(conn):
+    p = make_person(conn, "Asha")
+    x, w, y, z = (photo(conn, s) for s in (0, 2, 4, 6))
+    fx = face(conn, x, None, MID)
+    face(conn, w, None, MID)
+    face(conn, y, None, MID)
+    face(conn, z, p, MID)
+    for m, n in ((x, w), (w, y), (y, z)):
+        link(conn, m, n)
+    chain = results(conn, x)[("face", fx)].llr[p]
+    assert chain == pytest.approx(pm.LONG_CHAIN_LLR)
+    link(conn, x, y, dt=200.0)                                         # a weak link straight to the third photo
+    assert pm.tier_llr(200.0) - pm.HOP_COST < chain
+    assert results(conn, x)[("face", fx)].llr[p] == pytest.approx(chain)
+
+
+def test_a_photo_that_became_a_document_no_longer_takes_part(conn):
+    p = make_person(conn, "Asha")
+    a, b = photo(conn, 0), photo(conn, 2)
+    face(conn, a, p, MID)
+    fb = face(conn, b, None, MID)
+    link(conn, a, b)
+    assert p in results(conn, b)[("face", fb)].llr
+    for category in ("documents", "screenshots"):
+        with tx(conn):
+            conn.execute("UPDATE items SET category = ? WHERE id = ?", (category, b["id"]))
+        assert results(conn, b) == {}
+    with tx(conn):
+        conn.execute("UPDATE items SET category = 'misc' WHERE id = ?", (b["id"],))
+        conn.execute("UPDATE items SET category = 'documents' WHERE id = ?", (a["id"],))
+    assert results(conn, b) == {}                                      # nor is anyone followed from one
+
+
+def test_links_written_while_a_cache_is_shared_are_seen(conn):
+    p = make_person(conn, "Asha")
+    n, b, c = photo(conn, 0), photo(conn, 2), photo(conn, 4)
+    face(conn, n, p, MID)
+    fb = face(conn, b, None, MID)
+    face(conn, c, None, MID)
+    link(conn, b, c)
+    cache: dict = {}
+    assert results(conn, c, cache) == {}                               # b's links are in the cache now
+    link(conn, n, b)                                                   # the runner writes a link meanwhile
+    assert p in results(conn, b, cache)[("face", fb)].llr

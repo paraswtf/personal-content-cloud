@@ -222,3 +222,84 @@ def test_a_photo_that_keeps_failing_is_stored_as_not_lined_up(conn, pictures, mo
         assert place.run_pending(conn)["complete"] is False
     assert place.run_pending(conn)["complete"] is True           # given up: stored, not tried again
     assert links(conn) == {(a["id"], b["id"]): ("none", "")}
+
+
+def test_a_photo_without_previews_is_read_from_its_original(conn):
+    from app import storage
+
+    item = make_item(conn, taken_at=T0 % 0)                            # an original and its previews
+    for p in (storage.preview_path(item["uid"], 1), storage.preview_small_path(item["uid"], 1)):
+        p.unlink()
+    gray = place_align.load_gray(place._item_row(conn, item["id"]))    # the row the runner reads
+    assert gray is not None and gray.shape == (480, 640)
+
+
+def test_failures_count_in_a_row_only(conn, pictures, monkeypatch):
+    a, b = photo(conn, 0), photo(conn, 4)
+    pictures[a["uid"]] = pictures[b["uid"]] = scene(9)
+    real = place.measure_pair
+    boom = {"on": True}
+
+    def flaky(conn_, x, y, cache=None):
+        if boom["on"] and x["id"] == a["id"]:
+            raise RuntimeError("boom")
+        return real(conn_, x, y, cache)
+
+    monkeypatch.setattr(place, "measure_pair", flaky)
+    for _ in range(place.ABORTS_PER_ITEM - 1):
+        assert place.run_pending(conn)["complete"] is False
+    boom["on"] = False
+    assert place.run_pending(conn)["complete"] is True and links(conn)[(a["id"], b["id"])][0] == "still"
+    c = photo(conn, 2)                                                 # arrives in the middle: a is pending again
+    pictures[c["uid"]] = scene(9)
+    boom["on"] = True
+    assert place.run_pending(conn)["complete"] is False                # one new failure: not given up
+    assert (a["id"], c["id"]) not in links(conn)
+    boom["on"] = False
+    assert place.run_pending(conn)["complete"] is True and links(conn)[(a["id"], c["id"])][0] == "still"
+
+
+def queued(conn) -> set[int]:
+    return {int(r[0]) for r in conn.execute("SELECT item_id FROM trait_requeue")}
+
+
+def test_photos_a_chain_can_reach_are_queued_too(conn, pictures):
+    p = make_person(conn, "Asha")
+    first = make_item(conn, taken_at=T0 % 0, write_files=False, data=None)
+    make_face(conn, first["id"], p, assigned_by="user", write_crop=False)
+    rest = [photo(conn, 4 * k) for k in range(1, 5)]                   # four photos with an open box each
+    for it in (first, *rest):
+        pictures[it["uid"]] = scene(5)
+    assert place.run_pending(conn, limit=4)["items"] == 4              # newest first: the known person's photo is last
+    with tx(conn):
+        conn.execute("DELETE FROM trait_requeue")
+    assert place.run_pending(conn)["complete"]
+    assert (first["id"], rest[3]["id"]) not in links(conn)             # the fifth photo is not linked with the first,
+    assert queued(conn) == {it["id"] for it in rest}                   # but a chain reaches it: guessed again too
+
+
+def test_trashing_or_restoring_a_photo_queues_the_photos_lined_up_with_it(conn, pictures):
+    from app import ingest
+
+    p = make_person(conn, "Asha")
+    a = make_item(conn, taken_at=T0 % 0, write_files=False, data=None)
+    make_face(conn, a["id"], p, assigned_by="user", write_crop=False)
+    b = photo(conn, 3)
+    pictures[a["uid"]] = pictures[b["uid"]] = scene(5)
+    place.run_pending(conn)
+    for change in (ingest.soft_delete, ingest.restore):
+        with tx(conn):
+            conn.execute("DELETE FROM trait_requeue")
+        change(conn, a["id"])
+        assert queued(conn) == {b["id"]}
+
+
+def test_measuring_runs_with_the_set_number_of_opencv_threads(monkeypatch):
+    import cv2
+
+    before = cv2.getNumThreads()
+    for want in (1, 2):
+        monkeypatch.setattr(settings, "place_threads", want)
+        with place._cv_threads():
+            assert cv2.getNumThreads() == want
+        assert cv2.getNumThreads() == before

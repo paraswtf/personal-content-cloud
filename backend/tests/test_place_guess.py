@@ -317,17 +317,82 @@ def test_a_window_change_keeps_position_guesses(conn, monkeypatch):
 
 
 def test_changed_rules_queue_the_position_guesses_again(conn, monkeypatch):
-    p, a, b, fa, body = world(conn)
-    assert place.apply_settings_change(conn) == 0                       # the first start records the rules
-    guess.guess_item(conn, b["id"])
-    assert place.apply_settings_change(conn) == 0
-    monkeypatch.setattr(settings, "place_only_guesses", False)
-    assert place.apply_settings_change(conn) == 1
-    assert [int(r[0]) for r in conn.execute("SELECT item_id FROM trait_requeue")] == [b["id"]]
     from app.analysis import traits
 
+    p, a, b, fa, body = world(conn)
+    assert place.apply_settings_change(conn) == 1                       # lined up under no recorded rules: guessed
+    assert traits.drain_requeue(conn) == 1 and body_row(conn, body)["guess_person_id"] == p
+    assert place.apply_settings_change(conn) == 0                       # the rules are recorded
+    for switch in ("place_only_guesses", "place_enabled"):
+        monkeypatch.setattr(settings, switch, False)
+        assert place.apply_settings_change(conn) == 1
+        assert [int(r[0]) for r in conn.execute("SELECT item_id FROM trait_requeue")] == [b["id"]]
+        assert traits.drain_requeue(conn) == 1 and body_row(conn, body)["guess_person_id"] is None
+        assert place.apply_settings_change(conn) == 0
+        monkeypatch.setattr(settings, switch, True)                     # back on: the guess comes back
+        assert place.apply_settings_change(conn) == 1
+        assert traits.drain_requeue(conn) == 1 and body_row(conn, body)["guess_person_id"] == p
+
+
+def test_switching_position_off_gives_back_the_clothes_guess_it_withdrew(conn, monkeypatch):
+    from app.analysis import traits
+
+    p, q = make_person(conn, "Asha"), make_person(conn, "Ravi")
+    a, b, c = photo(conn, 0), photo(conn, 2), photo(conn, 600)
+    s, t = unit_vec(1), unit_vec(2)
+    for it in (a, b, c):
+        scene(conn, it, s)
+    face(conn, a, p, MID)                                               # in the spot, no clothes vector
+    body = body_at(conn, b, *HEAD, torso=near(t, 0.95, 3))
+    make_body(conn, c["id"], q, assigned_by="user", torso=t)            # the same clothes ten minutes later
+    link(conn, a, b)
+    place.apply_settings_change(conn)
     assert traits.drain_requeue(conn) == 1 and body_row(conn, body)["guess_person_id"] is None
-    assert place.apply_settings_change(conn) == 0
+    monkeypatch.setattr(settings, "place_enabled", False)
+    assert place.apply_settings_change(conn) == 1                       # no guess to find: found by its link
+    assert traits.drain_requeue(conn) == 1 and body_row(conn, body)["guess_person_id"] == q
+
+
+def test_a_trait_guess_with_a_position_part_counts_as_position(conn, client):
+    p, a, b, fa, body = world(conn)
+    guess.guess_item(conn, b["id"])
+    ev = json.loads(body_row(conn, body)["guess_evidence"])
+    ev["basis"] = "clothes+trait"                                       # as fuse leaves a trait guess it agrees with
+    with tx(conn):
+        conn.execute("UPDATE bodies SET guess_evidence = ? WHERE id = ?", (json.dumps(ev), body))
+        conn.execute("DELETE FROM place_links")                         # found by its part, not by a link
+        kv_set(conn, place.RULES_KEY, "other rules")
+    got = client.get("/api/review/guesses", params={"basis": "place"}).json()
+    assert got["total"] == 1 and got["items"][0]["guess"]["evidence"]["basis"] == "clothes+trait"
+    assert client.get("/api/review/guesses", params={"basis": "trait"}).json()["total"] == 1
+    assert client.get("/api/review/guesses", params={"basis": "clothes"}).json()["total"] == 0
+    assert place.apply_settings_change(conn) == 1
+
+
+def test_position_never_brings_back_what_the_traits_withdrew(conn, monkeypatch):
+    from app.analysis import trait_match
+    from app.learning.traits import default_params
+
+    p, a, b, fa, body = world(conn)
+    item = conn.execute("SELECT id, uid, kind, taken_at, gps_lat, gps_lon, nsfw, deleted_at FROM items WHERE id = ?",
+                        (b["id"],)).fetchone()
+    boxes = guess.open_boxes(conn, b["id"])
+    clothes = cand(p, 0.8, clothes=0.9, score=0.8)
+    pctx = pm.context(conn, item, boxes, None)
+    key = ("body", body)
+
+    class Traits:                                                       # a tattoo of the person is absent on this box
+        params = default_params()
+
+        def score_all(self, fscores, rejected):
+            return {key: trait_match.TraitResult(terms={p: {"absence": trait_match.NEG_CAP}})}
+
+    monkeypatch.setattr(guess, "_clothes_inputs", lambda *args: ([], {}, {}))
+    for winner in (clothes, None):                                      # a clothes winner, then only a ranked candidate
+        monkeypatch.setattr(guess, "score_box", lambda *args, w=winner: (w, [clothes]))
+        with_position = guess._compute_fused(conn, item, boxes, None, None, pctx)[key]
+        assert with_position.person_id == p and with_position.evidence["basis"] == "clothes+place"
+        assert guess._compute_fused(conn, item, boxes, None, Traits(), pctx)[key] is None
 
 
 def test_review_lists_position_guesses_with_the_reference_crop(conn, client):
@@ -350,3 +415,18 @@ def test_the_learning_status_carries_the_progress(conn, client):
     scan = client.get("/api/system/learning").json()["learners"]["place"]["scan"]
     assert scan["eligible"] == 2 and scan["scanned"] == 0 and scan["enabled"] is True and scan["last_error"] is None
     assert scan["ready"] is True          # the library was empty when the app started: nothing was waiting then
+
+
+def test_the_reference_crop_of_a_trashed_photo_is_left_out(conn, client):
+    p, a, b, fa, body = world(conn)
+    guess.guess_item(conn, b["id"])
+
+    def part():
+        return client.get("/api/review/guesses", params={"basis": "place"}).json()["items"][0]["guess"]["evidence"]["place"]
+
+    assert part()["ref_crop_url"].startswith(f"/files/face/{fa}") and part()["ref_item_uid"] == a["uid"]
+    for column, value in (("deleted_at", now_iso()), ("nsfw", 1)):      # the trash, then the vault
+        with tx(conn):
+            conn.execute("UPDATE items SET deleted_at = NULL, nsfw = 0 WHERE id = ?", (a["id"],))
+            conn.execute(f"UPDATE items SET {column} = ? WHERE id = ?", (value, a["id"]))
+        assert "ref_crop_url" not in part() and part()["ref_item_uid"] is None

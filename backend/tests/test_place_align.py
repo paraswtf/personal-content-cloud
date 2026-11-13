@@ -151,3 +151,39 @@ def test_the_cache_is_bounded_in_bytes(monkeypatch):
         pa.features((k, 1), lambda: (scene(10), []))
     assert pa.stats()["features"] == 2  # the two newest stay
     assert pa.features((4, 1), lambda: None) is not None  # still cached
+
+
+def test_a_fit_on_one_walking_person_alone_is_refused():
+    # a plain wall, the camera fixed, a textured person who walks 400 px: every match lies on the walker
+    h, w = 750, 1000
+    wall = np.full((h, w), 128, np.uint8)
+    walker = scene(21, 200, 400)
+    a, b = wall.copy(), wall.copy()
+    a[200:600, 100:300] = walker
+    b[200:600, 500:700] = walker
+    still = (0.75, 0.3, 0.1, 0.5)                                      # someone else, who did not move
+    fa = pa.describe(a, [(100 / w, 200 / h, 200 / w, 400 / h), still])
+    fb = pa.describe(b, [(500 / w, 200 / h, 200 / w, 400 / h), still])
+    assert len(fa.xy) >= pa.MIN_INLIERS and fa.people.all() and fb.people.all()     # nothing on the wall
+    assert fa.groups == 2 and set(fa.owner.tolist()) == {0}            # every keypoint is the walker's
+    assert pa.align(fa, fb) is None                                    # not a camera move of 400 px
+    assert pa.stats()["refused"] == 1 and pa.stats()["on_people"] == 0
+    # alone in both pictures, the same fit puts nobody else in the wrong place: it stands
+    alone = pa.align(pa.describe(a, [(100 / w, 200 / h, 200 / w, 400 / h)]), pa.describe(b, [(500 / w, 200 / h, 200 / w, 400 / h)]))
+    assert alone is not None and not alone.background and pa.apply(alone.m, 0.2, 0.5)[0] == pytest.approx(0.6, abs=0.01)
+
+
+def test_two_people_who_stood_still_carry_a_fit_without_a_background():
+    h, w = 750, 1000
+    a = np.full((h, w), 128, np.uint8)
+    a[200:600, 100:300] = scene(22, 200, 400)
+    a[250:650, 600:800] = scene(23, 200, 400)
+    b = warp(a, np.array([[1, 0, 40], [0, 1, 0]]))                     # the camera turned a little
+    boxes_a = [(100 / w, 200 / h, 200 / w, 400 / h), (600 / w, 250 / h, 200 / w, 400 / h),
+               (150 / w, 220 / h, 80 / w, 100 / h)]                    # the first person's face, inside their box
+    boxes_b = [(bx + 40 / w, by, bw, bh) for bx, by, bw, bh in boxes_a]
+    fa, fb = pa.describe(a, boxes_a), pa.describe(b, boxes_b)
+    assert fa.groups == 2 and fa.people.all() and set(fa.owner.tolist()) == {0, 1}
+    al = pa.align(fa, fb)
+    assert al is not None and not al.background and pa.stats()["on_people"] == 1
+    assert pa.apply(al.m, 0.5, 0.5)[0] == pytest.approx(0.54, abs=0.005)
