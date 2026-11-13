@@ -3,7 +3,7 @@
 Adapted from the hub's faces/cluster.py (docs/ARCHITECTURE.md section 10).
 
 CONTRACT.
-- assign_new_faces(conn, face_ids, exclude_face_ids=None) -> {face_id: person_id | None}
+- assign_new_faces(conn, face_ids, exclude_face_ids=None, guess_kept=True) -> {face_id: person_id | None}
 - carry_over(conn, old_faces, new_face_ids) -> int (reprocess keeps names, user locks and rejected
   guesses, pairing old and new faces with the pure plan_carry; rejected_ids / move_rejections /
   drop_rejections keep guess_rejections on live boxes)
@@ -15,7 +15,10 @@ CONTRACT.
   clear_guesses_for(conn, person_ids): person helpers for the pipeline and the people API.
 - Recognition trained on one person (section 10): on the default path of _score, _drop_gated takes a person off
   a face their model refuses (the face takes its next option), and _claim keeps a face a model is sure of for that
-  person alone: theirs when their cut lets it, else loose for a guess (assign_new_faces starts no person for it).
+  person alone, when the guess path would offer it to them too: theirs when their cut lets it, else loose for a
+  guess, which is queued unless the caller makes it (assign_new_faces starts no person for it). A kept face that
+  no guess can reach (the person is in the item, the item is in the vault, another face of the item is kept for
+  them already) joins an unnamed person or starts one instead: never a named person (_apply_item).
   clear_guesses_for and merge_persons send a face that a scan took out of an unnamed group back into it when
   they clear its guess, and a merge moves that memory from the sources to the target (person_scan).
 
@@ -55,6 +58,16 @@ _IN_CHUNK = 500
 _RECLUSTER_CHUNK = 200  # faces scored per recluster step (whole items, so a photo is never split)
 _SUGGEST_CHUNK = 1024  # rows of the centroid similarity matrix computed at a time
 AUTO_STATES = ("auto", "guess")  # assigned_by values automatic assignment may change
+
+
+@dataclass(frozen=True)
+class Kept:
+    """A face that a model trained on one person keeps for that person (_claim): who, how sure, and the unnamed
+    people among the options the plain rules gave the face, best first: where it may still go when no guess for
+    the person can follow (_apply_item)."""
+    person_id: int
+    p: float
+    rest: tuple[tuple[int, float], ...] = ()
 
 
 # ------------------------------------------------------------------ person helpers
@@ -286,7 +299,7 @@ def _threshold(row: sqlite3.Row) -> float:
 
 def _score(idx: FaceIndex, faces: list[sqlite3.Row], exclude: frozenset[int],
            conn: sqlite3.Connection | None = None, threshold: float | None = None,
-           claimed: set[int] | None = None) -> list[list[tuple[int, float]]]:
+           claimed: dict[int, Kept] | None = None) -> list[list[tuple[int, float]]]:
     """For each face: the people it may join, best first (score >= the face's cut, or `threshold`
     for every face when given). The cut is the default for the face's quality, moved by what the
     owner taught about the person (section 18): a learned threshold replaces the good-face default
@@ -300,8 +313,9 @@ def _score(idx: FaceIndex, faces: list[sqlite3.Row], exclude: frozenset[int],
     children, siblings above all, look alike to the face model; settings.child_lead).
     Recognition trained on one person (section 10) has a say on the default path (conn given, no `threshold`), for
     faces outside the child band: _drop_gated takes a person off a face their model refuses, and _claim keeps a
-    face a model is sure of for that person alone; the ids of the faces it kept are added to `claimed` when given
-    (the caller must not start a new person for them). Call with idx.lock held, after idx.sync."""
+    face a model is sure of for that person alone; the faces it kept are added to `claimed` when given (face id ->
+    Kept), and the caller hands them to _apply_item, which decides whether such a face may stay loose for its
+    guess. Call with idx.lock held, after idx.sync."""
     if not faces:
         return []
     ids = [r["id"] for r in faces]
@@ -419,19 +433,27 @@ def _drop_gated(idx: FaceIndex, ids: list[int], embs: np.ndarray, child: np.ndar
 
 def _claim(conn: sqlite3.Connection, idx: FaceIndex, ids: list[int], embs: np.ndarray, child: np.ndarray,
            exclude: frozenset[int], options: list[list[tuple[int, float]]],
-           claimed: set[int] | None) -> list[list[tuple[int, float]]]:
+           claimed: dict[int, Kept] | None) -> list[list[tuple[int, float]]]:
     """Recognition trained on one person (section 10): a face that a person's model is sure of is kept for that
     person. Every model at work (learning on, not paused, its person there) gives each face outside the child band
     its probability, from the model's own top-3 (the faces in `exclude` left out of its reference, as they are
-    left out of the scores), whether or not the person is among the face's options. At CLAIM_P or more the
-    face's options shrink to that person alone when they are among them, and to none when they are not (their
-    learned cut, or the rejected look-alikes rule, kept them out). In the second case the face must stay loose:
-    its id goes into `claimed`, the caller starts no person for it, and guess_item offers it to the person as a
-    guess (person_scan.merge_item) instead of the automatic matching tagging it as a look-alike with a lower cut.
-    Two models sure of one face: the higher probability has it. A face the owner said is not the person
-    (guess_rejections) is never kept for them. Nothing here tags a face the plain rules would not let the person
-    have: it removes other people's options."""
+    left out of the scores), whether or not the person is among the face's options.
+
+    A face is kept at CLAIM_P or more, and only when the guess path would offer it to the person as well
+    (person_scan.offerable, the two refusals of merge_item): no face the owner took off them is as near, and no
+    other named person scores it as high as the person's top-3. Without that second test a new face of somebody the
+    model never saw as a negative (named after the training), which matches that somebody far better, was tagged
+    as the trained person. A face that fails either test is not kept: its options stay what the plain rules gave.
+
+    A kept face's options shrink to that person alone when they are among them, and to none when they are not
+    (their learned cut, or the rejected look-alikes rule, kept them out). Its id goes into `claimed` with the
+    person, the probability and the unnamed people among its plain options (Kept): _apply_item leaves it loose for
+    the guess guess_item then makes (person_scan.merge_item) when one can follow, and sends it to those unnamed
+    people otherwise. Two models sure of one face: the higher probability has it. A face the owner said is not
+    the person (guess_rejections) is never kept for them. Nothing here tags a face the plain rules would not let
+    the person have: it removes other people's options."""
     try:
+        from app.analysis import person_scan
         from app.learning import person_model
 
         trained = person_model.trained_ids()
@@ -445,14 +467,24 @@ def _claim(conn: sqlite3.Connection, idx: FaceIndex, ids: list[int], embs: np.nd
         at_work = [int(r[0]) for r in conn.execute(
             f"SELECT id FROM persons WHERE id IN ({marks}) AND kind = 'person' AND recognition_paused_at IS NULL "
             "ORDER BY id", trained)]
+        named: set[int] = set()
         sure: dict[int, list[tuple[float, int]]] = {}
         for pid in at_work:
             model = person_model.load(pid)
             if model is None:
                 continue
-            p = model.probability(embs[rows], weights[rows], exclude_ids=exclude)
-            for k, i in enumerate(rows):
-                if p[k] >= person_model.CLAIM_P:
+            top3 = np.asarray(model.top3(embs[rows], exclude_ids=exclude), dtype=np.float64).reshape(-1)
+            p = model.probability(embs[rows], weights[rows], top3=top3)
+            hot = [k for k in range(len(rows)) if p[k] >= person_model.CLAIM_P]
+            if not hot:
+                continue
+            if not named:
+                named = person_scan._named_people(conn)
+            sel = [rows[k] for k in hot]
+            fine = person_scan.offerable(conn, idx, model, [int(ids[i]) for i in sel], embs[sel], weights[sel],
+                                         top3[hot], named, exclude)
+            for k, i, ok in zip(hot, sel, fine):
+                if ok:
                     sure.setdefault(i, []).append((float(p[k]), pid))
         if not sure:
             return options
@@ -465,10 +497,11 @@ def _claim(conn: sqlite3.Connection, idx: FaceIndex, ids: list[int], embs: np.nd
             claims = [c for c in claims if (int(ids[i]), c[1]) not in refused]
             if not claims:
                 continue
-            _, pid = max(claims, key=lambda c: (c[0], -c[1]))
+            p_best, pid = max(claims, key=lambda c: (c[0], -c[1]))
             out[i] = [(q, score) for q, score in options[i] if q == pid]
             if claimed is not None:
-                claimed.add(int(ids[i]))
+                claimed[int(ids[i])] = Kept(pid, p_best, tuple(
+                    (int(q), float(score)) for q, score in options[i] if q != pid and q not in named))
         return out
     except Exception:  # noqa: BLE001 - a trained model never blocks clustering
         log.exception("cluster: the trained recognition claim failed; matching without it")
@@ -565,16 +598,43 @@ def _eligible(rows: list[sqlite3.Row], exclude: frozenset[int]) -> list[sqlite3.
             if r["person_id"] is None and r["assigned_by"] in AUTO_STATES and r["id"] not in exclude]
 
 
+def _guess_room(conn: sqlite3.Connection, item_id: int, face_ids: set[int]) -> tuple[bool, set[int]]:
+    """For a face kept loose for a person: whether the item takes guesses at all (guess_item makes none in the
+    vault or the trash), and the people who are in it through a person box or a tag, whom a guess never names
+    again (guess._present_people; the people there through a face are the caller's `taken`). A person box that
+    belongs to one of `face_ids` follows that face, so it does not count, unless the owner tagged the box."""
+    item = conn.execute("SELECT nsfw, deleted_at FROM items WHERE id = ?", (item_id,)).fetchone()
+    if item is None or item["nsfw"] or item["deleted_at"] is not None:
+        return False, set()
+    there = {int(r["person_id"]) for r in conn.execute(
+        "SELECT person_id, face_id, assigned_by FROM bodies WHERE item_id = ? AND person_id IS NOT NULL", (item_id,))
+        if r["assigned_by"] == "user" or r["face_id"] is None or int(r["face_id"]) not in face_ids}
+    there |= {int(r[0]) for r in conn.execute(
+        "SELECT person_id FROM item_tags WHERE item_id = ? AND relation = 'in' AND person_id IS NOT NULL", (item_id,))}
+    return True, there
+
+
 def _apply_item(
     conn: sqlite3.Connection, idx: FaceIndex | None, faces: list[sqlite3.Row],
     options: list[list[tuple[int, float]]], taken: set[int], create_people: bool, result: dict[int, int | None],
-    held: set[int] | frozenset[int] = frozenset(),
+    held: dict[int, Kept] | None = None, waiting: list[tuple[int, int]] | None = None,
 ) -> int:
-    """Assign the faces of one item from their options. Returns how many got a person. A face in `held` (kept
-    for a person by their trained model, _claim) that ends without a person starts no new person: it stays loose,
-    for the guess that follows."""
+    """Assign the faces of one item from their options. Returns how many got a person.
+
+    A face in `held` (kept for a person by their trained model, _claim) that the options gave nobody stays loose
+    and starts no person, for the guess that follows, as long as that guess can be made and kept: the item takes
+    guesses (_guess_room), the person is not in it (through a face, also one assigned here, a person box or a
+    tag: guess_item never names someone who is there, and a confirmation names them once), and no other face of
+    the item is kept for them already (the one the model is surest of stays). Its (person, item) is added to
+    `waiting`, for the caller to see that the guess is made. A kept face that fails one of these would end with
+    no person, no group and no guess; it goes back to the plain rules without the named people instead: it joins
+    an unnamed person among the options it had (Kept.rest), or starts one when it is clear and `create_people`
+    is on. It never takes a named person the model kept it from."""
     changed = 0
-    if faces[0]["kind"] != "video":
+    held = held or {}
+    video = faces[0]["kind"] == "video"
+    done: set[int] = set()
+    if not video:
         # One person per photo: best-scoring (face, person) pairs win, the rest take their next option.
         cands: list[tuple[float, int, int]] = []
         for i, opts in enumerate(options):
@@ -582,7 +642,6 @@ def _apply_item(
                 if pid not in taken:
                     cands.append((score, i, pid))
         cands.sort(key=lambda c: (-c[0], faces[c[1]]["id"], c[2]))
-        done: set[int] = set()
         for score, i, pid in cands:
             if i in done or pid in taken:
                 continue
@@ -591,35 +650,61 @@ def _apply_item(
                 taken.add(pid)
                 changed += 1
             done.add(i)
-        if create_people:
-            for i, r in enumerate(faces):
-                if i in done or not _clear(r) or r["id"] in held:
-                    continue
-                pid = new_person(conn)
-                if _set_person(conn, idx, r["id"], pid):
-                    result[r["id"]] = pid
-                    taken.add(pid)
-                    changed += 1
     else:
         # Videos may show one person several times.
-        for r, opts in zip(faces, options):
-            pid: int | None = opts[0][0] if opts else None
-            if pid is None:
-                if not (create_people and _clear(r)) or r["id"] in held:
+        for i, (r, opts) in enumerate(zip(faces, options)):
+            if not opts:
+                continue
+            if _set_person(conn, idx, r["id"], opts[0][0]):
+                result[r["id"]] = opts[0][0]
+                taken.add(opts[0][0])
+                changed += 1
+            done.add(i)
+    loose: set[int] = set()  # kept faces that wait for their guess: no person is started for them
+    pending = [i for i, r in enumerate(faces) if i not in done and r["id"] in held]
+    if pending:
+        item_id = int(faces[0]["item_id"])
+        room, others = _guess_room(conn, item_id, {int(r["id"]) for r in faces})
+        pending.sort(key=lambda i: (-held[faces[i]["id"]].p, faces[i]["id"]))
+        kept_for: set[int] = set()
+        for i in pending:
+            kept = held[faces[i]["id"]]
+            who = kept.person_id
+            if room and who not in taken and who not in others and who not in kept_for:
+                kept_for.add(who)
+                loose.add(i)
+                if waiting is not None:
+                    waiting.append((who, item_id))
+                continue
+            for pid, _ in kept.rest:  # no guess can follow: an unnamed person it matches (else one of its own, below)
+                if not video and pid in taken:
                     continue
-                pid = new_person(conn)
+                if _set_person(conn, idx, faces[i]["id"], pid):
+                    result[faces[i]["id"]] = pid
+                    taken.add(pid)
+                    changed += 1
+                done.add(i)
+                break
+    if create_people:
+        for i, r in enumerate(faces):
+            if i in done or i in loose or not _clear(r):
+                continue
+            pid = new_person(conn)
             if _set_person(conn, idx, r["id"], pid):
                 result[r["id"]] = pid
+                taken.add(pid)
                 changed += 1
     return changed
 
 
 def _auto_assign(
-    conn: sqlite3.Connection, face_ids: list[int], exclude_face_ids: set[int] | None, create_people: bool
+    conn: sqlite3.Connection, face_ids: list[int], exclude_face_ids: set[int] | None, create_people: bool,
+    guess_kept: bool = True,
 ) -> dict[int, int | None]:
     exclude = frozenset(int(f) for f in (exclude_face_ids or ()))
     idx = get_index()
     result: dict[int, int | None] = {}
+    waiting: list[tuple[int, int]] = []  # (person, item) of the faces kept loose for a guess (section 10)
     try:
         with tx(conn), idx.lock:
             idx.sync(conn)
@@ -636,9 +721,10 @@ def _auto_assign(
             for item_id in item_order:
                 # Scored item by item: faces assigned (or people started) for earlier items count.
                 faces = by_item[item_id]
-                claimed: set[int] = set()  # faces a trained model keeps for its person (section 10): no new person
+                claimed: dict[int, Kept] = {}  # faces a trained model keeps for its person (section 10)
                 options = _score(idx, faces, exclude, conn, claimed=claimed)
-                changed += _apply_item(conn, idx, faces, options, used[item_id], create_people, result, held=claimed)
+                changed += _apply_item(conn, idx, faces, options, used[item_id], create_people, result,
+                                       held=claimed, waiting=waiting)
             if changed:
                 bump_faces_version(conn)
             log.debug("auto-assigned %d of %d faces", changed, len(eligible))
@@ -646,11 +732,25 @@ def _auto_assign(
         # The in-memory person ids (and anything synced inside this transaction) were rolled back.
         idx.invalidate()
         raise
+    if guess_kept and waiting:
+        _queue_guesses(conn, waiting)
     return result
 
 
+def _queue_guesses(conn: sqlite3.Connection, waiting: list[tuple[int, int]]) -> None:
+    """A face kept loose for a person is of no use without its guess: queue one for its item (the 'guess' job runs
+    guess_item there and around it). Never fails the caller: the faces are assigned already."""
+    try:
+        from app.analysis.guess import enqueue_guess
+
+        for person_id, item_id in sorted(set(waiting)):
+            enqueue_guess(conn, person_id, item_id)
+    except Exception:  # noqa: BLE001
+        log.exception("cluster: could not queue the guesses for %d kept face(s)", len(waiting))
+
+
 def assign_new_faces(conn: sqlite3.Connection, face_ids: list[int],
-                     exclude_face_ids: set[int] | None = None) -> dict[int, int | None]:
+                     exclude_face_ids: set[int] | None = None, guess_kept: bool = True) -> dict[int, int | None]:
     """Assign freshly inserted auto faces (person_id NULL, assigned_by 'auto') to people.
 
     For each face (best quality first): score = FaceIndex.person_scores(emb, settings.cluster_topk,
@@ -658,12 +758,14 @@ def assign_new_faces(conn: sqlite3.Connection, face_ids: list[int],
     settings.cluster_match_threshold for a clear face to settings.cluster_match_threshold_low as its
     face weight falls). In a photo one person appears at most once. Otherwise a clear face
     (faces.is_clear_face) starts a new unnamed person; other faces stay unassigned (a blurred, masked
-    or turned-away face never starts a person). A face that a model trained on one person is sure of
-    (section 10, _claim) goes to that person or stays unassigned, for the guess that follows: it joins
-    nobody else and starts no person.
+    or turned-away face never starts a person). A face that a model trained on one person keeps
+    (section 10, _claim) goes to that person, or stays unassigned for a guess that names them: a 'guess'
+    job is queued for its item, unless `guess_kept` is off because the caller runs guess_item for the
+    item itself (the analysis does). Where no such guess can follow (_apply_item) it joins an unnamed
+    person or starts one: it never joins another named person.
     Returns {face_id: person_id | None}. The faces must be in the database already (the index syncs
     inside the same transaction)."""
-    return _auto_assign(conn, face_ids, exclude_face_ids, create_people=True)
+    return _auto_assign(conn, face_ids, exclude_face_ids, create_people=True, guess_kept=guess_kept)
 
 
 def _iou(a: tuple[float, float, float, float], b: tuple[float, float, float, float]) -> float:
@@ -844,7 +946,10 @@ def recluster_unassigned(conn: sqlite3.Connection) -> int:
 
 
 def _recluster_chunk(conn: sqlite3.Connection, face_ids: list[int]) -> tuple[int, set[int]]:
-    """(faces that got a person, the items they are in)."""
+    """(faces that got a person, the items they are in). A face a trained model keeps (section 10) goes through
+    _apply_item as a new face does: it waits for its guess, or, where none can follow, joins an unnamed person
+    among its options (nobody is started here, and no guess is queued: the look that follows a training offers
+    the loose faces)."""
     idx = get_index()
     empty: frozenset[int] = frozenset()
     touched: set[int] = set()
@@ -853,8 +958,11 @@ def _recluster_chunk(conn: sqlite3.Connection, face_ids: list[int]) -> tuple[int
         eligible = _eligible(_face_rows(conn, face_ids), empty)
         if not eligible:
             return 0, touched
-        options = dict(zip((r["id"] for r in eligible), _score(idx, eligible, empty, conn)))
-    pids = sorted({pid for opts in options.values() for pid, _ in opts})
+        claimed: dict[int, Kept] = {}  # faces a trained model keeps for its person (section 10)
+        options = dict(zip((r["id"] for r in eligible), _score(idx, eligible, empty, conn, claimed=claimed)))
+    # the people a face may join: its options, and for a kept face that no guess can reach, its unnamed ones
+    pids = sorted({pid for opts in options.values() for pid, _ in opts}
+                  | {pid for kept in claimed.values() for pid, _ in kept.rest})
     if not pids:
         return 0, touched
     result: dict[int, int | None] = {}
@@ -863,6 +971,7 @@ def _recluster_chunk(conn: sqlite3.Connection, face_ids: list[int]) -> tuple[int
         for part in _chunks(pids):
             marks = ",".join("?" * len(part))
             alive.update(r[0] for r in conn.execute(f"SELECT id FROM persons WHERE id IN ({marks})", part))
+        held = {f: Kept(k.person_id, k.p, tuple(o for o in k.rest if o[0] in alive)) for f, k in claimed.items()}
         still = _eligible(_face_rows(conn, list(options)), empty)
         if not still:
             return 0, touched
@@ -873,7 +982,7 @@ def _recluster_chunk(conn: sqlite3.Connection, face_ids: list[int]) -> tuple[int
             faces = by_item[item_id]
             opts = [[(pid, sc) for pid, sc in options[r["id"]] if pid in alive] for r in faces]
             # The index is not touched here: the next sync reloads it from the bumped version.
-            n = _apply_item(conn, None, faces, opts, used[item_id], False, result)
+            n = _apply_item(conn, None, faces, opts, used[item_id], False, result, held=held)
             if n:
                 touched.add(int(item_id))
             changed += n

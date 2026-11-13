@@ -117,21 +117,28 @@ class _Judge:
         embs = np.asarray(embs, dtype=np.float32).reshape(-1, person_model.DIM)
         top3 = self.model.top3(embs)
         p = self.model.probability(embs, weights, top3=top3)
+        return p, top3, self.veto(embs, top3)
+
+    def veto(self, embs: np.ndarray, top3: np.ndarray) -> np.ndarray:
+        """Per row: a face the owner took off the person is at least as near as the person's own faces are (and
+        at least VETO_SIM)."""
+        embs = np.asarray(embs, dtype=np.float32).reshape(-1, person_model.DIM)
         veto = np.zeros(embs.shape[0], dtype=bool)
         if self.removed is not None and embs.shape[0]:
             near = (embs @ self.removed.T).max(axis=1)
             veto = near >= np.maximum(top3, VETO_SIM)
-        return p, top3, veto
+        return veto
 
 
 def _better_elsewhere(idx: Any, person_id: int, face_ids: list[int], embs: np.ndarray, weights: np.ndarray,
-                      top3: np.ndarray, named: set[int]) -> np.ndarray:
+                      top3: np.ndarray, named: set[int], exclude: frozenset[int] = frozenset()) -> np.ndarray:
     """Per face: another named person scores it at least as high as its top-3 for this person, and that person's
-    own model (when they have one) does not say otherwise. Call with idx.lock held, after sync."""
+    own model (when they have one) does not say otherwise. The faces themselves, and those in `exclude`, count
+    for nobody's score. Call with idx.lock held, after sync."""
     out = np.zeros(len(face_ids), dtype=bool)
     if not face_ids:
         return out
-    scores = idx.person_scores_many(embs, settings.cluster_topk, frozenset(int(f) for f in face_ids),
+    scores = idx.person_scores_many(embs, settings.cluster_topk, frozenset(int(f) for f in face_ids) | exclude,
                                     child=idx.child_flags(face_ids))
     for i, ranked in enumerate(scores):
         for other, sc in ranked:
@@ -143,6 +150,23 @@ def _better_elsewhere(idx: Any, person_id: int, face_ids: list[int], embs: np.nd
             out[i] = True
             break
     return out
+
+
+def offerable(conn: sqlite3.Connection, idx: Any, model: person_model.Model, face_ids: list[int], embs: np.ndarray,
+              weights: np.ndarray, top3: np.ndarray, named: set[int],
+              exclude: frozenset[int] = frozenset()) -> np.ndarray:
+    """Per face: neither of merge_item's two refusals applies, so a guess for the model's person may be made for
+    it: no face the owner took off them is as near (_Judge.veto), and no other named person scores it as high
+    (_better_elsewhere). The automatic matching asks this before it keeps a new face for the person
+    (cluster._claim), with the very functions merge_item judges by, so the two cannot disagree. `top3` is the
+    faces' top-3 against the model's reference, with `exclude` left out of it as it is left out of the scores.
+    Call with idx.lock held, after sync."""
+    if not face_ids:
+        return np.zeros(0, dtype=bool)
+    veto = _Judge(conn, model).veto(embs, top3)
+    worse = _better_elsewhere(idx, int(model.person_id), [int(f) for f in face_ids], embs, weights, top3, named,
+                              exclude)
+    return ~(veto | worse)
 
 
 # ------------------------------------------------------------------ the scan

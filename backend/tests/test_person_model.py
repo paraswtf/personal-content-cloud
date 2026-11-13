@@ -2,9 +2,9 @@
 hand-made face vectors: an identity, a look-alike identity at cosine about 0.7 to it, and strangers.
 
 The training (examples, conflicts, the check, determinism), the scan (what may become a guess and what is never
-touched), guess_item recomputing the guesses, the review actions, the automatic matching (the gate, and a face the
-model is sure of kept for the person), the routes, and what an undo brings back (the pause, the model of a deleted
-or merged person).
+touched), guess_item recomputing the guesses, the review actions, the automatic matching (the gate; a face the
+model is sure of kept for the person, when the guess path would offer it too; what such a face becomes where no
+guess can follow), the routes, and what an undo brings back (the pause, the model of a deleted or merged person).
 """
 from __future__ import annotations
 
@@ -880,12 +880,33 @@ def test_a_face_the_gate_takes_off_the_person_goes_to_its_next_option(conn, monk
 def _options(conn, faces: list[int], exclude: frozenset[int] = frozenset()) -> tuple[dict[int, list[int]], set[int]]:
     """The people each face may join on the default path (cluster._score), and the faces a model kept."""
     idx = get_index()
-    claimed: set[int] = set()
+    claimed: dict[int, cluster.Kept] = {}
     with idx.lock:
         idx.sync(conn)
         rows = cluster._face_rows(conn, faces)
         out = cluster._score(idx, rows, exclude, conn, claimed=claimed)
-    return {int(r["id"]): [pid for pid, _ in opts] for r, opts in zip(rows, out)}, claimed
+    return {int(r["id"]): [pid for pid, _ in opts] for r, opts in zip(rows, out)}, set(claimed)
+
+
+def _claims(conn, faces: list[int], exclude: frozenset[int] = frozenset()) -> dict[int, cluster.Kept]:
+    """What the models kept among these faces: face id -> (person, probability, unnamed options)."""
+    idx = get_index()
+    claimed: dict[int, cluster.Kept] = {}
+    with idx.lock:
+        idx.sync(conn)
+        cluster._score(idx, cluster._face_rows(conn, faces), exclude, conn, claimed=claimed)
+    return claimed
+
+
+def _guess_jobs(conn) -> set[tuple[int, int | None]]:
+    """(person, item) of the queued 'guess' jobs."""
+    rows = conn.execute("SELECT payload FROM jobs WHERE type = 'guess' AND status = 'queued'").fetchall()
+    return {(int(p["person_id"]), p["item_id"]) for p in (json.loads(r["payload"]) for r in rows)}
+
+
+def _is_unnamed(conn, person_id: int | None) -> bool:
+    r = conn.execute("SELECT name FROM persons WHERE id = ?", (person_id,)).fetchone()
+    return r is not None and r["name"] is None
 
 
 def _cut_keeps_them_off(monkeypatch, w: World) -> None:
@@ -912,15 +933,21 @@ def test_a_face_the_model_is_sure_of_is_not_given_to_a_lookalike(conn, monkeypat
     options, kept = _options(conn, everyone)
     assert kept == {face, *tracks} and all(options[f] == [] for f in kept)
     assert options[lookalike] == plain[lookalike]  # the model is not sure of this one: nothing changes for it
+    sure = _claims(conn, tracks)
+    track, other = sorted(tracks, key=lambda f: (-sure[f].p, f))  # the one the model is surest of waits for the guess
     people = conn.execute("SELECT COUNT(*) FROM persons").fetchone()[0]
     got = cluster.assign_new_faces(conn, everyone)
-    assert got[lookalike] == w.twin and [got[f] for f in (face, *tracks)] == [None, None, None]
+    assert got[lookalike] == w.twin and [got[f] for f in (face, track)] == [None, None]
     # kept loose: no look-alike, and no new unnamed person either (photo and video)
-    assert all((row(conn, f)["person_id"], row(conn, f)["assigned_by"]) == (None, "auto") for f in (face, *tracks))
-    assert conn.execute("SELECT COUNT(*) FROM persons").fetchone()[0] == people
-    # the guess that follows the analysis offers them to the person
-    assert guess.guess_item(conn, row(conn, face)["item_id"]) == 1 and guess.guess_item(conn, clip) == 2
-    for f in (face, *tracks):
+    assert all((row(conn, f)["person_id"], row(conn, f)["assigned_by"]) == (None, "auto") for f in (face, track))
+    # a person is confirmed once in an item, so one face of the clip waits for the guess: the other track starts
+    # a person of its own, as it would without a model, and is never the look-alike's
+    assert _is_unnamed(conn, got[other]) and conn.execute("SELECT COUNT(*) FROM persons").fetchone()[0] == people + 1
+    # nobody but the analysis guesses by itself, so the guesses are queued
+    assert _guess_jobs(conn) == {(w.me, row(conn, face)["item_id"]), (w.me, clip)}
+    # the guess offers them to the person
+    assert guess.guess_item(conn, row(conn, face)["item_id"]) == 1 and guess.guess_item(conn, clip) == 1
+    for f in (face, track):
         pid, by, ev = guessed(conn, f)
         assert (pid, by, ev["basis"]) == (w.me, "guess", "face") and ev["p"] >= person_model.CLAIM_P
 
@@ -937,13 +964,16 @@ def test_a_kept_face_is_the_persons_when_their_cut_lets_it(conn, monkeypatch):
         idx.sync(conn)
         ids = [face]
         embs, child = idx.embeddings_of(ids), idx.child_flags(ids)
-        kept: set[int] = set()
+        kept: dict[int, cluster.Kept] = {}
         opts = [[(w.twin, 0.9), (w.me, 0.8), (w.third, 0.5)]]
-        assert cluster._claim(conn, idx, ids, embs, child, frozenset(), opts, kept) == [[(w.me, 0.8)]] and kept == {face}
+        assert cluster._claim(conn, idx, ids, embs, child, frozenset(), opts, kept) == [[(w.me, 0.8)]]
+        assert set(kept) == {face} and kept[face].person_id == w.me and kept[face].rest == ()  # no unnamed option
     assert cluster.assign_new_faces(conn, [face])[face] == w.me
 
 
-def test_a_kept_face_stays_loose_when_the_person_is_in_the_photo(conn, monkeypatch):
+def test_a_kept_face_starts_a_group_when_the_person_is_in_the_photo(conn, monkeypatch):
+    """No guess names someone who is in the photo already, so a second face the model keeps for them could never
+    be answered: it starts a person of its own (never the look-alike the plain matching would give it to)."""
     w = World(conn)
     w.train()
     monkeypatch.setattr(cluster, "_learned", lambda pid: None)
@@ -956,13 +986,11 @@ def test_a_kept_face_stays_loose_when_the_person_is_in_the_photo(conn, monkeypat
         conn.execute("UPDATE faces SET person_id = NULL, assigned_by = 'auto' WHERE id = ?", (second,))
     monkeypatch.undo()
     monkeypatch.setattr(cluster, "_learned", lambda pid: None)
+    assert _options(conn, [second]) == ({second: [w.me]}, {second})  # kept: nobody else is an option
     people = conn.execute("SELECT COUNT(*) FROM persons").fetchone()[0]
-    assert cluster.assign_new_faces(conn, [second])[second] is None
-    assert conn.execute("SELECT COUNT(*) FROM persons").fetchone()[0] == people
-    # no guess either (they are in the photo), and the later passes leave it loose as well
-    assert guess.guess_item(conn, here) == 0 and guessed(conn, second)[0] is None
-    assert cluster.recluster_unassigned(conn) == 0
-    assert (row(conn, second)["person_id"], row(conn, second)["assigned_by"]) == (None, "auto")
+    own = cluster.assign_new_faces(conn, [second])[second]
+    assert _is_unnamed(conn, own) and conn.execute("SELECT COUNT(*) FROM persons").fetchone()[0] == people + 1
+    assert _guess_jobs(conn) == set() and guess.guess_item(conn, here) == 0  # nothing waits for a guess here
 
 
 def test_the_claim_cut_and_who_may_claim(conn, monkeypatch):
@@ -1008,6 +1036,10 @@ def test_two_models_sure_of_one_face(conn, monkeypatch):
     said: dict[int, float] = {}
     monkeypatch.setattr(person_model.Model, "probability",
                         lambda self, embs, weights, **k: np.full(len(embs), said[self.person_id]))
+    # the second model is a copy without faces of its own: here only who has the face counts, not whether the
+    # guess path would offer it (the tests below)
+    monkeypatch.setattr(person_scan, "offerable",
+                        lambda conn, idx, model, face_ids, *a, **k: np.ones(len(face_ids), dtype=bool))
     face = w.face(w.photo(), w.like_me())
     idx = get_index()
     opts = [[(w.twin, 0.9), (w.me, 0.8), (w.third, 0.7)]]
@@ -1059,14 +1091,215 @@ def test_without_a_model_the_matching_is_what_it_was(conn, monkeypatch):
             idx.sync(conn)
             return cluster._score(idx, cluster._face_rows(conn, faces), frozenset(), conn, **more)
 
-    kept: set[int] = set()
+    kept: dict[int, cluster.Kept] = {}
     before = scored()
-    assert scored(claimed=kept) == before and kept == set()  # nobody trained
+    assert scored(claimed=kept) == before and not kept  # nobody trained
     w.train()
-    assert scored(claimed=kept) != before and kept == {faces[0]}
+    assert scored(claimed=kept) != before and set(kept) == {faces[0]}
     store.set_enabled(conn, False)  # learning off: the trained recognition has no say
     kept.clear()
-    assert scored(claimed=kept) == before and kept == set()
+    assert scored(claimed=kept) == before and not kept
+
+
+# ------------------------------------------------------------------ the claim asks what the guess path asks
+def _someone_named_later(conn, w: World) -> tuple[int, list[int], list[int]]:
+    """A person the owner named after the training, so none of their faces was a negative for the model, and it
+    takes their faces for the trained person's (cosine about 0.8 to that identity). Returns (the person, their
+    six tagged faces, five new faces of theirs)."""
+    o = unit(77) - float(unit(77) @ ME) * ME
+    base = (0.8 * ME + 0.6 * o / np.linalg.norm(o)).astype(np.float32)
+    other = make_person(conn, "Lena")
+    tagged = [w.face(w.photo(), near(base, next(w.seed), 0.3), other, "user") for _ in range(6)]
+    return other, tagged, [w.face(w.photo(), near(base, next(w.seed), 0.3)) for _ in range(5)]
+
+
+def _model_says(conn, person_id: int, faces: list[int]) -> np.ndarray:
+    idx = get_index()
+    model = person_model.load(person_id)
+    with idx.lock:
+        idx.sync(conn)
+        return person_scan._Judge(conn, model).score(idx.embeddings_of(faces), idx.weights_of(faces))[0]
+
+
+@pytest.mark.parametrize("cut", [None, 0.95])
+def test_a_face_another_named_person_matches_better_is_not_kept(conn, monkeypatch, cut):
+    """With the trained person among the face's options (their cut lets it) and without: someone else with a name
+    matches the face better, the guess path would not offer it (person_scan.offerable), so the claim leaves it
+    alone. Before, the first case tagged the trained person on the other person's new faces."""
+    w = World(conn)
+    w.train()
+    monkeypatch.setattr(cluster, "_learned", lambda pid: cut if pid == w.me else None)
+    other, tagged, fresh = _someone_named_later(conn, w)
+    assert (_model_says(conn, w.me, fresh) >= person_model.CLAIM_P).all()  # the model is sure of every one
+    options, kept = _options(conn, fresh)
+    assert kept == set() and all(options[f][0] == other for f in fresh)
+    assert (w.me in options[fresh[0]]) == (cut is None)
+    # the faces left out of the scores are left out of that question too: without the other person's own faces
+    # nobody matches these better than the trained person, and the model has them
+    assert _options(conn, fresh, frozenset(tagged))[1] == set(fresh)
+    got = cluster.assign_new_faces(conn, fresh)
+    assert [got[f] for f in fresh] == [other] * 5 and _guess_jobs(conn) == set()
+
+
+def test_a_face_that_looks_like_one_taken_off_the_person_is_not_kept(conn, monkeypatch):
+    """The other refusal of the guess path: a face the owner took off the person is as near as their own faces
+    are. A model that is sure all the same keeps nothing, and the face goes where the plain rules send it."""
+    w = World(conn)
+    w.train()
+    with tx(conn):  # the look-alike has no name here: only the faces taken off the person speak against them
+        conn.execute("UPDATE persons SET name = NULL, name_key = NULL WHERE id = ?", (w.twin,))
+    face = w.face(w.photo(), w.like_twin())
+    monkeypatch.setattr(person_model, "CLAIM_P", 1.01)
+    plain, _ = _options(conn, [face])
+    monkeypatch.undo()
+    assert plain[face] == [w.twin]
+    monkeypatch.setattr(person_model.Model, "probability", lambda self, embs, weights, **k: np.full(len(embs), 0.99))
+    assert _options(conn, [face]) == (plain, set())
+    assert cluster.assign_new_faces(conn, [face])[face] == w.twin and _guess_jobs(conn) == set()
+
+
+def test_what_the_claim_never_keeps(conn, monkeypatch):
+    w = World(conn)
+    w.train()
+    _cut_keeps_them_off(monkeypatch, w)
+    face = w.face(w.photo(), w.like_me())
+    blurred = w.face(w.photo(), w.like_me(), clarity=1.0)
+    idx = get_index()
+    idx.sync(conn)
+    assert idx.weights_of([face, blurred]).tolist() == [1.0, 0.0]
+    # a face of weight 0, though the model is as sure of it: merge_item makes no guess for one
+    assert (_model_says(conn, w.me, [face, blurred]) >= person_model.CLAIM_P).all()
+    assert _options(conn, [face, blurred])[1] == {face}
+    # the faces left out of the scores are left out of the model's reference: with none of the person's own
+    # faces to compare with, it is not sure of this one
+    assert _options(conn, [face], frozenset(w.mine))[1] == set()
+    # a pet (a person turned into one keeps the model file): the recognition is trained on people
+    with tx(conn):
+        conn.execute("UPDATE persons SET kind = 'pet' WHERE id = ?", (w.me,))
+    assert _options(conn, [face])[1] == set()
+
+
+# ------------------------------------------------------------------ a kept face and its guess
+def test_lookalikes_that_follow_an_unassign_get_their_guess(client, conn, monkeypatch):
+    """Only the analysis guesses for its own item. On every other path (here the look-alikes that follow an
+    unassign) a face kept loose gets a guess job for its item: without one it would wait with no person, no group
+    and no guess, and every later recluster would keep it loose again."""
+    w = World(conn)
+    w.train()
+    _cut_keeps_them_off(monkeypatch, w)
+    seeds = [w.face(w.photo(), w.like_me(), w.twin) for _ in range(2)]  # the person's faces, wrongly on the look-alike
+    more = [w.face(w.photo(), w.like_me(), w.twin) for _ in range(3)]
+    assert set(cluster.followers(conn, seeds, w.twin)) == set(more)
+    assert client.post("/api/faces/assign", json={"face_ids": seeds, "person_id": None}).json()["followed"] == 3
+    assert all((row(conn, f)["person_id"], row(conn, f)["assigned_by"]) == (None, "auto") for f in more)
+    items = {int(row(conn, f)["item_id"]) for f in more}
+    assert {(w.me, i) for i in items} <= _guess_jobs(conn)
+    assert cluster.recluster_unassigned(conn) == 0  # they wait for the guess
+    for i in sorted(items):  # what the worker does with such a job
+        guess.propagate(conn, w.me, i)
+    assert all(guessed(conn, f)[:2] == (w.me, "guess") for f in more)
+
+
+def test_the_analysis_asks_for_no_guess_job(conn, monkeypatch):
+    """The analysis runs guess_item for its item itself (pipeline._after), so it turns the job off."""
+    w = World(conn)
+    w.train()
+    _cut_keeps_them_off(monkeypatch, w)
+    face = w.face(w.photo(), w.like_me())
+    assert cluster.assign_new_faces(conn, [face], guess_kept=False)[face] is None and _guess_jobs(conn) == set()
+    assert guess.guess_item(conn, row(conn, face)["item_id"]) == 1 and guessed(conn, face)[:2] == (w.me, "guess")
+
+
+# ------------------------------------------------------------------ a kept face no guess can reach
+def test_two_faces_of_one_photo_the_model_keeps(conn, monkeypatch):
+    """A person is in a photo once. Their cut lets them have a face: the better one is theirs and the other,
+    which the plain matching would give to the look-alike, starts a person of its own. Their cut keeps both off:
+    the one the model is surest of waits for the guess, the other joins an unnamed person it matches."""
+    w = World(conn)
+    w.train()
+    monkeypatch.setattr(cluster, "_learned", lambda pid: None)
+    here = w.photo()
+    a, b = w.face(here, near(ME, 4242, 0.1)), w.face(here, w.like_me(), box=(0.6, 0.2, 0.2, 0.3))
+    monkeypatch.setattr(person_model, "CLAIM_P", 1.01)
+    assert _options(conn, [a, b])[0] == {a: [w.me, w.twin], b: [w.me, w.twin]}  # the plain rules: b to the look-alike
+    monkeypatch.undo()
+    monkeypatch.setattr(cluster, "_learned", lambda pid: None)
+    got = cluster.assign_new_faces(conn, [a, b])
+    own = got[b]
+    assert got[a] == w.me and _is_unnamed(conn, own) and _guess_jobs(conn) == set()
+    _cut_keeps_them_off(monkeypatch, w)
+    there = w.photo()
+    c, d = w.face(there, w.like_me()), w.face(there, w.like_me(), box=(0.6, 0.2, 0.2, 0.3))
+    sure = _claims(conn, [c, d])
+    assert all(k.person_id == w.me and [pid for pid, _ in k.rest] == [own] for k in sure.values())
+    first, second = sorted((c, d), key=lambda f: (-sure[f].p, f))
+    got = cluster.assign_new_faces(conn, [c, d])
+    assert (got[first], got[second]) == (None, own) and _guess_jobs(conn) == {(w.me, there)}
+    assert guess.guess_item(conn, there) == 1 and guessed(conn, first)[:2] == (w.me, "guess")
+
+
+def test_a_kept_track_of_a_clip_the_person_is_in(conn, monkeypatch):
+    """A clip may show one person several times, but a guess never names someone who is in it, and a confirmation
+    names them once. So a track kept for a person who is tagged on another track (before, or in this very pass)
+    could never be answered: it starts or joins an unnamed person, and is never the look-alike's."""
+    w = World(conn)
+    w.train()
+    _cut_keeps_them_off(monkeypatch, w)
+    clip = w.photo(kind="video")
+    w.face(clip, w.like_me(), w.me, "user")
+    track = w.face(clip, w.like_me(), box=(0.6, 0.2, 0.2, 0.3))
+    assert _options(conn, [track]) == ({track: []}, {track})
+    own = cluster.assign_new_faces(conn, [track])[track]
+    assert _is_unnamed(conn, own) and _guess_jobs(conn) == set()
+    # their cut lets them have the nearer face of a new clip only: once it is theirs, the other track cannot wait
+    monkeypatch.setattr(cluster, "_learned", lambda pid: 0.86 if pid == w.me else None)
+    again = w.photo(kind="video")
+    nearer, other = w.face(again, near(ME, 4243, 0.1)), w.face(again, w.like_me(), box=(0.6, 0.2, 0.2, 0.3))
+    assert _options(conn, [nearer, other]) == ({nearer: [w.me], other: []}, {nearer, other})
+    got = cluster.assign_new_faces(conn, [nearer, other])
+    assert (got[nearer], got[other]) == (w.me, own) and _guess_jobs(conn) == set()
+
+
+@pytest.mark.parametrize("how", ["vault", "person box", "their own person box", "tag"])
+def test_a_kept_face_where_no_guess_is_made(conn, monkeypatch, how):
+    """guess_item makes no guesses in the vault, and names nobody who is in the item through a person box or a
+    tag: a face kept for the person there starts a person of its own instead of waiting for nothing. (A person
+    box around the face itself counts when the owner tagged it; one the app tagged follows its face.)"""
+    w = World(conn)
+    w.train()
+    _cut_keeps_them_off(monkeypatch, w)
+    item = w.photo(nsfw=1 if how == "vault" else 0)
+    if how == "person box":
+        make_body(conn, item, w.me, assigned_by="user")
+    elif how == "tag":
+        with tx(conn):
+            conn.execute("INSERT INTO item_tags(item_id, person_id, relation, source, created_at) "
+                         "VALUES (?, ?, 'in', 'user', ?)", (item, w.me, "2026-03-20T10:00:00.000Z"))
+    face = w.face(item, w.like_me(), box=(0.6, 0.2, 0.2, 0.3))
+    if how == "their own person box":
+        make_body(conn, item, w.me, assigned_by="user", face_id=face)
+    assert _options(conn, [face]) == ({face: []}, {face})
+    own = cluster.assign_new_faces(conn, [face])[face]
+    assert _is_unnamed(conn, own) and _guess_jobs(conn) == set()
+    assert guess.guess_item(conn, item) == 0
+
+
+def test_recluster_lets_a_kept_face_join_an_unnamed_group(conn, monkeypatch):
+    """Recluster starts no people, so a kept face that no guess can reach stays loose there unless an unnamed
+    person is among the options it had: that one it may join (never the look-alike)."""
+    w = World(conn)
+    w.train()
+    monkeypatch.setattr(cluster, "_learned", lambda pid: None)
+    here = w.photo()
+    w.face(here, w.like_me(), w.me, "user")
+    second = w.face(here, w.like_me(), box=(0.6, 0.2, 0.2, 0.3))
+    assert cluster.recluster_unassigned(conn) == 0 and row(conn, second)["person_id"] is None
+    group = unnamed(conn)
+    for _ in range(3):
+        w.face(w.photo(), w.like_me(), group)
+    kept = _claims(conn, [second])[second]
+    assert kept.person_id == w.me and [pid for pid, _ in kept.rest] == [group]
+    assert cluster.recluster_unassigned(conn) == 1 and row(conn, second)["person_id"] == group
 
 
 def test_the_models_reference_leaves_faces_out_on_request(conn):
