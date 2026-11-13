@@ -244,6 +244,8 @@ const files = new Map()
 let fetches = 0
 const asked = [] // every address the page asked for, in order
 globalThis.fetch = async (url, { signal } = {}) => {
+  // three.js asks for a buffer with fetch(new Request(address)) and for a picture with fetch(address)
+  if (typeof url !== 'string' && typeof url?.url === 'string') url = url.url
   asked.push(String(url))
   if (String(url).startsWith('blob:')) {
     const blob = resolveObjectURL(String(url))
@@ -820,26 +822,32 @@ if (existsSync(path.join(GLB, 'photo.glb'))) {
 // ---------------------------------------------------------------- R: a head that names an address outside itself
 // A head file holds its picture inside. One whose description names an address for it (which no file of the app's
 // writer does) must not have the page fetch that address: the request could carry anything out. <glb dir> may hold
-// outside.glb, a head with its photo whose picture is named by an address in place of the bytes in the file.
+// outside.glb, a head with its photo whose picture is named by an address in place of the bytes in the file, and
+// outside-buffer.glb, one whose picture is read from a second buffer that is named by an address (three.js asks
+// for a picture and for a buffer in two different ways, and both must stay inside).
 if (existsSync(path.join(GLB, 'outside.glb'))) {
-  const before = asked.length
+  const kinds = ['outside', 'outside-buffer'].filter((file) => existsSync(path.join(GLB, `${file}.glb`)))
   const say = console.error
   console.error = () => {} // three.js says that the texture did not load; that is what this step is about
-  const out = look('out', 'outside', 'r20')
-  give(stage, [...looks, plain, out])
-  stage.want('out')
-  await settle()
-  await step()
+  for (const [n, file] of kinds.entries()) {
+    const before = asked.length
+    const out = look(`out${n}`, file, 'r20')
+    give(stage, [...looks, plain, out])
+    stage.want(out.key)
+    await settle()
+    await step()
+    const since = asked.slice(before)
+    assert.ok(since.includes(out.mesh_url), 'the head file itself is fetched')
+    assert.ok(!since.some((url) => /^\s*([a-z]+:)?\/\//i.test(url) || /example|\[object/i.test(url)), `${file}: the page asked for ${since.join(', ')}`)
+    const e = stage.entryOf(out.key)
+    assert.notEqual(e.state, 'loading', 'the head was read to its end before this is judged')
+    assert.ok(e.state === 'error' || e.photo === null, 'the head shows without the picture, or not at all')
+  }
   console.error = say
-  const since = asked.slice(before)
-  assert.ok(since.includes(out.mesh_url), 'the head file itself is fetched')
-  assert.ok(!since.some((url) => /^(https?:)?\/\//i.test(url) || url.includes('example')), `the page asked for ${since.join(', ')}`)
-  const e = stage.entryOf('out')
-  assert.ok(e.state === 'error' || e.photo === null, 'the head shows without the picture, or not at all')
   give(stage, [...looks, plain])
   stage.want('l1')
   await settle()
-  ok('R a head that names an address outside itself: the address is never asked for')
+  ok(`R a head that names an address outside itself (${kinds.length} kinds): the address is never asked for`)
 }
 
 // ---------------------------------------------------------------- M: letting meshes go

@@ -985,6 +985,7 @@ def test_a_head_file_with_more_than_its_one_description_is_never_taken(conn, fak
         "bytes after the last chunk": sized(body + b"\0\0\0\0"),
         "a length that is not the file's": good[:8] + struct.pack("<I", len(good) - 4) + good[12:],
         "the data before the description": sized(body[8 + n_json:] + body[:8 + n_json]),
+        "a last chunk longer than the file": sized(body[:-8]),
         "cut short": good[:len(good) // 2],
         "a header and nothing": good[:12],
     }
@@ -1060,7 +1061,6 @@ def test_a_pipe_or_a_link_in_a_files_place_is_not_read(conn, fake, monkeypatch, 
         assert not job.is_alive(), change.__name__                        # never held at a pipe
         status = model3d.status(conn, person)
         assert status["error"] == error, change.__name__
-        assert "not-for-the-tab" not in json.dumps(status)
         doc = model3d.manifest(person)
         assert (None if doc is None else [lk["key"] for lk in doc["looks"]]) == looks, change.__name__
         if doc is not None:
@@ -1074,7 +1074,9 @@ def test_a_pipe_or_a_link_in_a_files_place_is_not_read(conn, fake, monkeypatch, 
     monkeypatch.setattr(model3d, "_command",
                         lambda args, work, fake_run: [sys.executable, "-c", code, str(work / "stderr.log"), str(secret)])
     model3d.start(conn, person, {})
-    assert model3d.status(conn, person)["error"] == "The generator stopped with an error (exit 4)."
+    status = model3d.status(conn, person)
+    assert status["error"] == "The generator stopped with an error (exit 4)."
+    assert "not-for-the-tab" not in json.dumps(status)
 
 
 def test_heads_whose_lines_wait_behind_others_are_kept_when_a_limit_stops_the_child(conn, fake, monkeypatch):
@@ -1097,8 +1099,16 @@ def test_heads_whose_lines_wait_behind_others_are_kept_when_a_limit_stops_the_ch
         "time.sleep(120)\n")
     monkeypatch.setattr(model3d, "_command", lambda args, work, fake_run: [sys.executable, "-c", code, args[1]])
 
+    head_file = model3d.person_dir(person) / "work" / "out" / "l1.glb"
+
     def over_the_limit(pid):
-        time.sleep(0.5)             # the reader has put every line in the queue by the time the limit is seen
+        # The limit is seen only once the child has written its head and said so: a child that is slow to start
+        # on a busy machine must not decide this test. The head's file comes just before its lines, and half a
+        # second after it the reader has put every one of them in the queue.
+        deadline = time.monotonic() + 30.0
+        while not head_file.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        time.sleep(0.5)
         return 10.0 ** 6
 
     monkeypatch.setattr(model3d, "tree_rss_mb", over_the_limit)

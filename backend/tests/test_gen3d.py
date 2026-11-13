@@ -547,16 +547,31 @@ def test_the_viewer_reads_the_heads(tmp_path):
     # does: the viewer must not ask for that address
     data = (out / "photo.glb").read_bytes()
     n_json = struct.unpack_from("<I", data, 12)[0]
-    doc = json.loads(data[20:20 + n_json])
-    doc["images"] = [{"uri": "https://example.invalid/carried-out.jpg"}]
-    text = json.dumps(doc, separators=(",", ":")).encode()
-    text += b" " * (-len(text) % 4)
     rest = data[20 + n_json:]
-    (out / "outside.glb").write_bytes(struct.pack("<III", 0x46546C67, 2, 12 + 8 + len(text) + len(rest))
-                                      + struct.pack("<II", len(text), 0x4E4F534A) + text + rest)
+
+    def with_description(name: str, change) -> None:
+        doc = json.loads(data[20:20 + n_json])
+        change(doc)
+        text = json.dumps(doc, separators=(",", ":")).encode()
+        text += b" " * (-len(text) % 4)
+        (out / name).write_bytes(struct.pack("<III", 0x46546C67, 2, 12 + 8 + len(text) + len(rest))
+                                 + struct.pack("<II", len(text), 0x4E4F534A) + text + rest)
+
+    def picture_by_address(doc: dict) -> None:
+        doc["images"] = [{"uri": "https://example.invalid/carried-out.jpg"}]
+
+    def picture_from_a_buffer_by_address(doc: dict) -> None:
+        # three.js asks for a buffer in another way than for a picture: both must stay inside
+        doc["buffers"].append({"byteLength": 4, "uri": "https://example.invalid/carried-out.bin"})
+        doc["bufferViews"].append({"buffer": 1, "byteOffset": 0, "byteLength": 4})
+        doc["images"] = [{"bufferView": len(doc["bufferViews"]) - 1, "mimeType": "image/jpeg"}]
+
+    with_description("outside.glb", picture_by_address)
+    with_description("outside-buffer.glb", picture_from_a_buffer_by_address)
     done = subprocess.run([node, str(front / "scripts" / "check-head3d.mjs"), str(out), str(tmp_path / "work")],
                           capture_output=True, text=True, timeout=180, check=False)
     assert done.returncode == 0, done.stdout[-1500:] + done.stderr[-3000:]
-    assert "Q a head with its photo" in done.stdout and "R a head that names an address" in done.stdout
+    assert "Q a head with its photo" in done.stdout
+    assert "R a head that names an address outside itself (2 kinds)" in done.stdout
     assert "19 groups passed" in done.stdout
 

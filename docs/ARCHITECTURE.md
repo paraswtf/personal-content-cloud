@@ -1947,10 +1947,11 @@ of them holds for both. When the folder also holds a `photo.glb`, a head that is
 group checks the photo layer itself: how it is drawn, the light of a model with such a head, Colour off and Photo off,
 what is kept and let go, what the stage says about a look whose picture cannot be decoded, and what happens when the
 browser takes the graphics memory away. `test_gen3d.py` runs the script on plain heads of the stand-in, on one
-`photo.glb` that the finishing itself wrote, and on `outside.glb`, the same head with its picture named by an address
-in place of the bytes in the file: a 19th group checks that the page never asks for that address. All 19 groups run
-in the suite; the test skips when node or the frontend's packages are missing. What the pictures look like is not
-something it can tell: that takes a browser.
+`photo.glb` that the finishing itself wrote, and on `outside.glb` and `outside-buffer.glb`, the same head with its
+picture named by an address in place of the bytes in the file, and with its picture read from a second buffer that
+is named by an address (three.js asks for a picture and for a buffer in two different ways): a 19th group checks
+that the page asks for neither address. All 19 groups run in the suite; the test skips when node or the frontend's
+packages are missing. What the pictures look like is not something it can tell: that takes a browser.
 
 ## 17. Build notes
 

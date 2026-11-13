@@ -694,9 +694,6 @@ class HeadStage {
   }
 }
 
-/** The parts of a loaded file. The head is the first mesh without a texture (the first mesh when all have one).
- *  The photo is the first other mesh that has both a texture and the coordinates to place it: a layer whose
- *  texture could not be read is left out, and the head then shows its own colours there. The rest is let go. */
 /** A head file is whole in itself: its picture sits inside it, and the loader reads that through a blob: address
  *  of its own making. So a loader for heads follows no other address. A file whose description named one (for a
  *  buffer or a picture) would otherwise have this page fetch it, with whatever the address carries, and the files
@@ -708,6 +705,9 @@ function keptInside(): LoadingManager {
   return manager
 }
 
+/** The parts of a loaded file. The head is the first mesh without a texture (the first mesh when all have one).
+ *  The photo is the first other mesh that has both a texture and the coordinates to place it: a layer whose
+ *  texture could not be read is left out, and the head then shows its own colours there. The rest is let go. */
 function takeParts(root: Object3D): { head: BufferGeometry; photo: { geometry: BufferGeometry; map: Texture } | null } {
   const meshes: Mesh[] = []
   root.traverse((node) => {
