@@ -1106,7 +1106,9 @@ faces count as negatives). A logistic regression on the 512 values, trained with
     is tagged: a look-alike's own new face whose best raw score is the trained person goes to the look-alike, which
     is what the gate is for, and a face of the person that the model misses goes to its runner-up too (out of fold,
     55 of that person's 5,015 faces fall under 0.2). Cutting the list at the refused person instead was tried and
-    dropped: the look-alike's face then had no option left and started a one-face unnamed person each time.
+    dropped: the look-alike's face then had no option left and started a one-face unnamed person each time. A
+    paused model (the owner took its guesses back) has no say here either, as in the claim: the plain rules
+    decide until the next look or training.
   - The claim (`_claim`): every model at work (learning on, not paused, its person there) gives each face its
     probability from its own top-3, whether or not the person is among the face's options. A face is kept for
     that person at 0.8 or more (`CLAIM_P`), and only when the guess path would offer it to them as well
@@ -1116,11 +1118,17 @@ faces count as negatives). A logistic regression on the 512 values, trained with
     claim from tagging the wrong person: someone named after the training was no negative for the model, so it
     was sure of their new faces, which matched them at 0.92 and the trained person at 0.71, and without the test
     those faces were tagged as the trained person. A face that fails either test is not kept: it goes where the
-    plain rules send it. A kept face's options shrink to that person alone when they are among them, and to none
-    when they are not (their learned cut, or the rejected look-alikes rule, kept them out). Two models sure of one
-    face: the higher probability has it. A face the owner said is not the person is never kept for them, nor is a
-    face of weight 0 (no guess is made for one). The claim removes other people's options; it tags nothing the
-    plain rules would not let the person have. The check stores what this cut found and mistook (`check.claim`):
+    plain rules send it. A kept face's options shrink to that person alone when they are its best option, and to
+    none when they are not: their learned cut or the rejected look-alikes rule kept them out, or someone else
+    scores the face higher. That someone is an unnamed person (a named one fails the second test): a look-alike
+    the owner never named sits in an unnamed group, the model never saw them as a negative, and the second test
+    asks about named people only. In a test library such a face matched its own group at 0.81 and the trained
+    person at 0.61 to 0.71, the model gave it 0.80 to 0.97, and with the person among its options it was tagged
+    as them. Now it waits as a guess, and after a no it joins its group at the next recluster. Two models sure of
+    one face: the higher probability has it. A face the owner said is not the person is never kept for them, nor
+    is a face of weight 0 (no guess is made for one). The claim removes other people's options. It never tags a
+    face that the plain rules would give to someone else or refuse the person: where the model and the plain
+    rules disagree, the face becomes a guess. The check stores what this cut found and mistook (`check.claim`):
     on that person 4,820 of 5,015 held-out faces (96 percent) with 14 of 5,474 negatives mistaken.
   - A kept face that the options gave nobody (`_apply_item`, `cluster.Kept`) stays loose and starts no unnamed
     person: a guess names the person for it (`merge_item`, basis `face`), and the owner confirms. The analysis
@@ -1135,6 +1143,16 @@ faces count as negatives). A logistic regression on the 512 values, trained with
     `recluster_unassigned`, which starts nobody, it may only join). It never takes a named person the model kept
     it from. A clip is where this matters: the tracks of one person are several faces, and once one of them is
     theirs no guess can name them on another.
+  - Waiting is a forecast, and it can be wrong by the time the guess is made: the same analysis puts a new photo
+    in the vault after it assigned the faces, a person box of the photo holds a stronger guess for the person
+    (one person per photo), sibling tracks of a clip went to a named look-alike in the same pass and that person
+    now scores the kept track as high, or the guess failed. So after its guess the analysis settles what it left
+    waiting (`cluster.release_unguessed`, from `pipeline._after`): a face that still has no person and no guess
+    joins the unnamed person among the options it had when it was kept (if that person is still unnamed), or
+    starts one when it is clear. Never a named person. The paths that queue the guess as a job (the look-alikes
+    that follow an unassign) do not settle: a face whose guess does not come there stays loose, among the
+    unassigned faces, and so does a kept face whose guess the owner later turns down, until a recluster joins it
+    to a match.
   - Why the claim: that person's learned cut had risen to 0.7555 and the rejected look-alikes rule removes them
     as an option for faces that resemble a removed face, so a look-alike with a lower cut won their new faces.
     Measured by scoring existing automatic faces as if they were new (each batch of 64 left out of the reference,
@@ -1154,6 +1172,8 @@ faces count as negatives). A logistic regression on the 512 values, trained with
     went to a named person. Before the rule above all 40 stayed loose, with no group and no guess.
   - `recluster_unassigned` scores through the same rules, so a face that waits for its guess keeps waiting
     there, and it also leaves faces that hold a `face` guess, or any guess on a face a scan took out of a group.
+    It scores before its write transaction, so the unnamed people a kept face may join are read again inside it:
+    one that got a name in between is not joined.
     The person's learned cut is unchanged, so a new face of theirs under it becomes a guess, not a tag.
 - A run (`person_scan.start`): training then the scan on one background thread (`worker.run_in_background`, nice 19,
   own connection, nothing journaled), progress in module state; inline with `WORKERS_ENABLED` off. The state of a
