@@ -3,6 +3,7 @@ GLB writer read back, the fake backend, and `python -m gen3d` end to end with it
 hands the written files to the viewer's own code and three.js, in node, when the frontend's packages are installed."""
 from __future__ import annotations
 
+import io
 import json
 import os
 import shutil
@@ -210,10 +211,49 @@ def test_job_builds_every_look_it_can(tmp_path):
     assert not by_key["l2"]["ok"] and by_key["l2"]["error"] and by_key["l2"]["mesh"] is None
     assert glb.read(tmp_path / "out" / "l3.glb")["positions"].shape[0] == by_key["l3"]["vertices"]
     assert not (tmp_path / "out" / "l2.glb").exists()
+    # the picture is laid over the front of the stand-in head: a second part with the picture as its texture
+    row, back = by_key["l1"], glb.read(tmp_path / "out" / "l1.glb")
+    assert row["textured"] is True and row["note"] is None and row["overlap"] is None and row["overlap_head"] is None
+    assert back["photo"] is not None and back["photo"]["indices"].size > 300 and back["texture"][:3] == b"\xff\xd8\xff"
+    with Image.open(io.BytesIO(back["texture"])) as texture:
+        assert list(texture.size) == row["texture"] and max(texture.size) <= 128   # the picture's own pixels, never more
+    assert back["photo"]["alpha"].max() == 1.0 and back["photo"]["uv"].min() >= 0.0 and back["photo"]["uv"].max() <= 1.0
+    assert by_key["l2"]["textured"] is False and by_key["l2"]["texture"] is None
     # deterministic: the same picture, the same bytes
     first = (tmp_path / "out" / "l1.glb").read_bytes()
     assert _run(["--job", str(job)]).returncode == 0
     assert (tmp_path / "out" / "l1.glb").read_bytes() == first
+
+
+def test_job_options_for_the_finishing(tmp_path):
+    picture = str(_picture(tmp_path / "l1.png"))
+    # texture 0: a colour per vertex and nothing else, the file a head always was
+    job = _job(tmp_path, [{"key": "l1", "image": picture}], options={"detail": 2, "smoothing": 0, "texture": 0})
+    assert _run(["--job", str(job)]).returncode == 0
+    row = json.loads((tmp_path / "out" / "result.json").read_text())["looks"][0]
+    plain = glb.read(tmp_path / "out" / "l1.glb")
+    assert row["ok"] and row["textured"] is False and row["texture"] is None and row["note"] is None
+    assert plain["photo"] is None and len(plain["json"]["meshes"][0]["primitives"]) == 1
+    # the part of the picture that is the photo itself: nothing below row 80 of 128 reaches the texture
+    job = _job(tmp_path, [{"key": "l1", "image": picture, "inside": [0, 0, 128, 80]}])
+    assert _run(["--job", str(job)]).returncode == 0
+    row = json.loads((tmp_path / "out" / "result.json").read_text())["looks"][0]
+    assert row["textured"] is True and row["texture"][1] <= 80
+    whole = _job(tmp_path, [{"key": "l1", "image": picture, "inside": None}])        # not known: all of the picture
+    assert _run(["--job", str(whole)]).returncode == 0
+    assert json.loads((tmp_path / "out" / "result.json").read_text())["looks"][0]["texture"][1] > 80
+    # a picture that shows nothing of the photo still gives its head, without the layer, and says why
+    job = _job(tmp_path, [{"key": "l1", "image": picture, "inside": [0, 0, 0, 0]}])
+    assert _run(["--job", str(job)]).returncode == 0
+    row = json.loads((tmp_path / "out" / "result.json").read_text())["looks"][0]
+    assert row["ok"] and row["textured"] is False and "nothing of the photo" in row["note"]
+    for bad in ({"options": {"smoothing": 4}}, {"options": {"texture": -1}}, {"options": {"texture": "fine"}},
+                {"options": {"smoothing": True}}, {"looks": [{"key": "l1", "image": picture, "inside": [0, 0, 128]}]},
+                {"looks": [{"key": "l1", "image": picture, "inside": "all"}]},
+                {"looks": [{"key": "l1", "image": picture, "inside": [0, 0, True, 80]}]}):
+        job = _job(tmp_path, bad.pop("looks", [{"key": "l1", "image": picture}]), **bad)
+        done = _run(["--job", str(job)])
+        assert done.returncode == 2, (bad, done.stderr)
 
 
 def test_job_exit_codes(tmp_path):
@@ -303,6 +343,143 @@ def test_sigterm_stops_the_job_cleanly(tmp_path):
     assert proc.returncode == 5 and err.strip().splitlines()[-1] == "stopped"
     assert (slow / "slow_backend.py.closed").exists()  # the backend was closed
     assert json.loads((tmp_path / "out" / "result.json").read_text())["looks"] == []
+
+
+LOGGING_BACKEND = """
+import pathlib
+
+import numpy as np
+
+from gen3d.backends.fake import BACKEND as FAKE
+from gen3d.mesh import Mesh
+
+LOG = pathlib.Path(__file__).with_name("events.log")
+
+
+def note(line):
+    with LOG.open("a") as f:
+        f.write(line + "\\n")
+
+
+class B:
+    name, version = "fake", "t"
+
+    def available(self, weights_dir):
+        return True
+
+    def load(self, weights_dir, device, options):
+        note("load")
+
+    def generate(self, image, options):
+        key = options["key"]
+        note("generate " + key)
+        if key == "l2":
+            raise RuntimeError("the model failed")
+        if key == "l4":
+            return Mesh(np.zeros((3, 3), np.float32), np.zeros((0, 3), np.uint32))   # no mesh at all
+        return FAKE.generate(image, options)
+
+    def close(self):
+        note("close")
+
+
+BACKEND = B()
+"""
+
+
+def _logging_job(tmp_path: Path, keys: list[str], patch: str) -> tuple[list[str], Path, Path]:
+    """A job on a backend that writes down what it is asked, started through a small script that first applies
+    `patch` (Python source). Returns (the command, the job's out folder, the backend's log)."""
+    pkg = tmp_path / "logpkg"
+    pkg.mkdir()
+    (pkg / "logging_backend.py").write_text(LOGGING_BACKEND, encoding="utf-8")
+    runner = tmp_path / "run.py"
+    runner.write_text(
+        "import sys, time\n"
+        f"sys.path[:0] = [{str(pkg)!r}, {str(REPO)!r}]\n"
+        "from gen3d import backends, glb\n"
+        "import gen3d.__main__ as job\n"
+        "backends.REGISTRY['fake'] = 'logging_backend'\n"
+        f"{patch}\n"
+        "sys.exit(job.main(sys.argv[1:]))\n", encoding="utf-8")
+    looks = [{"key": key, "image": str(tmp_path / "missing.png" if key == "l3" else _picture(tmp_path / f"{key}.png"))}
+             for key in keys]
+    return [sys.executable, str(runner), "--job", str(_job(tmp_path, looks))], tmp_path / "out", pkg / "events.log"
+
+
+def test_a_job_runs_in_two_passes_and_reports_a_look_when_its_file_is_there(tmp_path):
+    """First every look goes through the model, then the model is closed, then the heads are finished and reported
+    one by one. The writer is slowed down here: a line printed before its file was written would be caught."""
+    command, out, log = _logging_job(tmp_path, ["l1", "l2", "l3", "l4", "l5"], patch=(
+        "real = glb.write\n"
+        "def slow(path, head):\n"
+        "    time.sleep(0.3)\n"
+        "    return real(path, head)\n"
+        "glb.write = slow"))
+    proc = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    lines, seen = [], {}
+    for line in proc.stdout:
+        line = line.strip()
+        lines.append(line)
+        if line.startswith("look: "):
+            key, state = line.split()[1:3]
+            seen[key] = {"state": state, "file": (out / f"{key}.glb").exists(),
+                         "events": log.read_text().split("\n")[:-1], "result": (out / "result.json").exists()}
+    _, err = proc.communicate(timeout=60)
+    assert proc.returncode == 0, err
+    # nothing but the start is said during the first pass; then every look in the job's order, each with its count
+    assert lines[0] == "progress: 0/5" and [ln.split()[0] for ln in lines[1:]] == ["look:", "progress:"] * 5
+    assert [ln for ln in lines if ln.startswith("progress")] == [f"progress: {n}/5" for n in range(6)]
+    assert [(key, got["state"]) for key, got in seen.items()] == [
+        ("l1", "ok"), ("l2", "error"), ("l3", "error"), ("l4", "error"), ("l5", "ok")]
+    # a look that worked has its file in place when its line is read; one that did not never gets a file
+    assert seen["l1"]["file"] and seen["l5"]["file"]
+    assert not any((out / f"{key}.glb").exists() for key in ("l2", "l3", "l4"))
+    # before the first look was finished, the model had been asked for every look it could be asked for, and closed
+    first_pass = ["load", "generate l1", "generate l2", "generate l4", "generate l5", "close"]   # l3 has no picture
+    assert all(got["events"] == first_pass for got in seen.values()) and log.read_text().split("\n")[:-1] == first_pass
+    assert not seen["l1"]["result"]                                      # the result file is written at the end
+    result = json.loads((out / "result.json").read_text())
+    rows = result["looks"]
+    assert [r["key"] for r in rows] == ["l1", "l2", "l3", "l4", "l5"] and [r["ok"] for r in rows] == [True, False, False, False, True]
+    assert rows[1]["error"] == "RuntimeError: the model failed"           # failed in the model: the others still ran
+    assert rows[2]["error"].startswith("FileNotFoundError")              # failed before it
+    assert rows[3]["error"].startswith("BadMesh")                        # failed in the finishing
+    assert rows[0]["textured"] and rows[4]["textured"] and all(r["seconds"] >= 0 for r in rows)
+    assert rows[0]["seconds"] >= 0.3                                      # both passes count for a look's time
+    memory = result["memory_mb"]
+    assert set(memory) == {"peak", "with_model", "released"}
+    if sys.platform.startswith("linux"):
+        assert all(isinstance(memory[k], int) and memory[k] > 10 for k in memory)
+        assert memory["peak"] >= memory["released"] - 1 and memory["peak"] >= memory["with_model"] - 1
+
+
+def test_sigterm_in_the_second_pass_keeps_what_was_reported(tmp_path):
+    import signal
+
+    command, out, log = _logging_job(tmp_path, ["l1", "l5", "l6"], patch=(
+        "real, calls = job.finish_head, []\n"
+        "def slow(mesh, prepared, options):\n"
+        "    calls.append(1)\n"
+        "    if len(calls) == 2:\n"
+        "        time.sleep(60)\n"
+        "    return real(mesh, prepared, options)\n"
+        "job.finish_head = slow"))
+    proc = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    while True:
+        line = proc.stdout.readline()
+        assert line, "the job ended before its first look"
+        if line.startswith("look: l1 ok"):
+            break
+    assert proc.stdout.readline().strip() == "progress: 1/3"
+    proc.send_signal(signal.SIGTERM)                                      # while the second head is being finished
+    rest, err = proc.communicate(timeout=20)
+    assert proc.returncode == 5 and err.strip().splitlines()[-1] == "stopped" and "look:" not in rest
+    result = json.loads((out / "result.json").read_text())
+    assert [(r["key"], r["ok"]) for r in result["looks"]] == [("l1", True)]   # what was reported stays
+    assert (out / "l1.glb").exists() and not (out / "l5.glb").exists() and not (out / "l6.glb").exists()
+    assert glb.read(out / "l1.glb")["photo"] is not None
+    assert log.read_text().split("\n")[:-1].count("close") == 1          # closed once, between the passes
 
 
 # ------------------------------------------------------------------ the viewer reads what the writer wrote

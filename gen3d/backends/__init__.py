@@ -13,9 +13,15 @@ object with:
         image: a square picture of the head and shoulders, the face centred. RGB, or RGBA with the background cut out
         (alpha 0 there) when gen3d.prep ran before. options: the job's options plus "out_dir" and the look's "key"
         (a backend may write a debug file there when options["debug"] is true).
-        The mesh: +Y up, +Z towards the viewer, any scale (gen3d.mesh.finish centres and scales it). Its colours,
+        The mesh: +Y up, +Z towards the viewer, any scale (it is centred and scaled at the very end). Its colours,
         when it has any: one sRGB byte triple per vertex, as in the picture.
+        A backend that knows where the picture was taken from sets `mesh.camera` (gen3d.mesh.Camera) and leaves
+        the mesh in that camera's frame, not centred and not scaled: gen3d.finishing then lays the picture over
+        the front of the head as its texture. Without a camera the head keeps a colour per vertex.
     close() -> None
+        Let the model go and hand its memory back (the graphics card's too). A job closes its backend once every
+        look has been through `generate`, and finishes the heads after that: the app's memory limit is shared
+        with this process, and the finishing must not sit on top of the model.
 """
 from __future__ import annotations
 
@@ -23,9 +29,9 @@ import importlib
 from pathlib import Path
 from typing import Any, Protocol
 
-from gen3d.mesh import Mesh
+from gen3d.mesh import Camera, Mesh
 
-__all__ = ["Backend", "Mesh", "ORDER", "REGISTRY", "get", "is_available", "pick"]
+__all__ = ["Backend", "Camera", "Mesh", "ORDER", "REGISTRY", "get", "is_available", "pick"]
 
 REGISTRY: dict[str, str] = {
     "fake": "gen3d.backends.fake",
