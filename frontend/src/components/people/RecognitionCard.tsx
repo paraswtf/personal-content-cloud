@@ -1,10 +1,11 @@
 // Recognition trained on one person (docs/ARCHITECTURE.md section 10), on that person's page. The owner says the
 // faces now on NAME are right; "Train and look again" fits a model on them (and on the faces taken off NAME as
-// wrong), checks it on days it was not trained on, then looks at every other face and adds what looks like NAME as
-// guesses (basis 'face'). Nothing is tagged until the owner confirms. The run is in the background: the card polls
-// its progress. Two lists help the owner clean up: faces on NAME that look the same as faces they took off NAME
-// (conflicts), and faces the app put on other people that look like NAME. Each is settled with the usual face
-// assignment, so every answer is an owner action with its undo.
+// wrong), checks it on photos it was not trained on (whole days held out when the photos span several), then
+// looks at every other face and adds what looks like NAME as guesses (basis 'face'). Nothing is tagged until the
+// owner confirms. The run is in the background: the card polls its progress, and a run the app was restarted under
+// comes back as an error, never as a success. Two lists help the owner clean up: faces on NAME that look the same
+// as faces they took off NAME (conflicts), and faces the app put on other people that look like NAME. Each answer
+// is an owner action with its undo: the usual face assignment, or "Leave" (not NAME, the face stays where it is).
 import { useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
@@ -21,8 +22,9 @@ import { Button, Spinner } from '../ui'
 const POLL_MS = 2000
 const BUSY_POLL_MS = 6000
 
-function startError(e: unknown, fallback: string): string {
+function startError(e: unknown, name: string, fallback: string): string {
   if (e instanceof ApiError && e.code === 'busy') return "Another person's training is running. Try again when it is done."
+  if (e instanceof ApiError && e.code === 'running') return `A training or a look for ${name} is running. Try again when it is done.`
   if (e instanceof ApiError && e.code === 'not_trained') return 'Train it first.'
   return errorMessage(e, fallback)
 }
@@ -36,7 +38,7 @@ function stepText(s: RecognitionOut): string {
       ? `Looking at other faces: ${p.done.toLocaleString()} of ${p.total.toLocaleString()}.`
       : 'Looking at other faces.'
   }
-  if (p?.step === 'check') return 'Checking it on days it was not trained on.'
+  if (p?.step === 'check') return 'Checking it on photos it was not trained on.'
   if (p?.step === 'save') return 'Saving.'
   if (p?.step === 'fit') return `Training: step ${Math.min(p.done + 1, p.total)} of ${p.total}.`
   return 'Reading the faces.'
@@ -66,8 +68,10 @@ function Bar({ value, label }: { value: number | null; label: string }) {
 function checkText(s: RecognitionOut, name: string): string | null {
   const cut = s.check?.cuts[0]
   if (!s.check || !cut) return null
+  // the check says how it held photos out: whole days, or single photos when the days do not spread the faces
+  const held = s.check.folds === 'day' ? 'On days it was not trained on' : 'On photos it was not trained on'
   let text =
-    `On days it was not trained on, it found ${cut.found.toLocaleString()} of ${name}'s ${s.check.positives.toLocaleString()} faces ` +
+    `${held}, it found ${cut.found.toLocaleString()} of ${name}'s ${s.check.positives.toLocaleString()} faces ` +
     `and mistook ${cut.mistaken.toLocaleString()} of ${s.check.negatives.toLocaleString()} faces of other people for ${name}.`
   if (s.check.unclear_positives > 0) {
     text += ` Of the ${s.check.unclear_positives.toLocaleString()} blurred, small or turned ones it found ${cut.unclear_found.toLocaleString()}.`
@@ -126,12 +130,12 @@ export default function RecognitionCard({ id, name, faceCount }: { id: number; n
   const train = useMutation({
     mutationFn: () => recognitionApi.train(id),
     onSuccess: started('train'),
-    onError: (e) => toast.error(startError(e, 'Could not start the training.')),
+    onError: (e) => toast.error(startError(e, name, 'Could not start the training.')),
   })
   const look = useMutation({
     mutationFn: () => recognitionApi.scan(id),
     onSuccess: started('scan'),
-    onError: (e) => toast.error(startError(e, 'Could not start looking.')),
+    onError: (e) => toast.error(startError(e, name, 'Could not start looking.')),
   })
   const withdraw = useMutation({
     mutationFn: () => recognitionApi.withdraw(id),
@@ -140,7 +144,11 @@ export default function RecognitionCard({ id, name, faceCount }: { id: number; n
       toast.success(`Took back ${formatCount(r.updated, 'guess', 'guesses')} of the recognition trained on ${name}.`)
       void refresh()
     },
-    onError: (e) => toast.error(startError(e, 'Could not take the guesses back.')),
+    onError: (e) => {
+      setConfirm(null)
+      toast.error(startError(e, name, 'Could not take the guesses back.'))
+      void qc.invalidateQueries({ queryKey: key }) // a run may have started meanwhile: show it
+    },
   })
   const forget = useMutation({
     mutationFn: () => recognitionApi.forget(id),
@@ -150,7 +158,11 @@ export default function RecognitionCard({ id, name, faceCount }: { id: number; n
       toast.success(`Forgot the recognition trained on ${name}.`)
       void refresh()
     },
-    onError: (e) => toast.error(startError(e, 'Could not forget it.')),
+    onError: (e) => {
+      setConfirm(null)
+      toast.error(startError(e, name, 'Could not forget it.'))
+      void qc.invalidateQueries({ queryKey: key })
+    },
   })
 
   if (!s) return null
@@ -208,9 +220,14 @@ export default function RecognitionCard({ id, name, faceCount }: { id: number; n
             </p>
           )}
           {s.withdrawn && (
-            <p className="mt-1 text-xs text-ink-soft">Its guesses were taken back. Look again to bring them back.</p>
+            <p className="mt-1 text-xs text-ink-soft">Its guesses were taken back. It makes no new ones until you look again.</p>
           )}
-          {!s.available && s.reason && <p className="mt-1 text-xs text-ink-soft">{s.reason} The trained recognition is not used meanwhile.</p>}
+          {!s.available && s.reason && (
+            <p className="mt-1 text-xs text-ink-soft">
+              {s.reason}
+              {!s.learning && ' The trained recognition is not used meanwhile.'}
+            </p>
+          )}
           {s.error && <p className="mt-1 text-xs text-danger">{s.error}</p>}
           {s.busy && <p className="mt-1 text-xs text-ink-soft">Another person's training is running. This one can run when it is done.</p>}
           {s.answers_since > 0 && (
@@ -219,7 +236,8 @@ export default function RecognitionCard({ id, name, faceCount }: { id: number; n
             </p>
           )}
           <div className="mt-3 flex flex-wrap gap-2">
-            <Button variant="secondary" disabled={!s.available || busy} loading={look.isPending} onClick={() => look.mutate()}>
+            {/* a look needs the trained recognition in use (learning on), not enough faces for a new training */}
+            <Button variant="secondary" disabled={!s.learning || busy} loading={look.isPending} onClick={() => look.mutate()}>
               Look again
             </Button>
             <Button variant="secondary" disabled={!s.available || busy} loading={train.isPending} onClick={() => train.mutate()}>
@@ -357,17 +375,28 @@ function Conflicts({ id, name }: { id: number; name: string }) {
 }
 
 function Elsewhere({ id, name }: { id: number; name: string }) {
+  const toast = useToast()
+  const refresh = useRefreshLibrary()
   const q = useQuery({ queryKey: ['person', id, 'recognition', 'elsewhere'], queryFn: () => recognitionApi.elsewhere(id) })
   const settle = useSettle('Could not move the face.')
-  const [left, setLeft] = useState<Set<number>>(() => new Set())
+  // "Leave" is an answer too (not NAME): it is kept, so the face leaves this list and its count for good
+  const leave = useMutation({
+    mutationFn: (v: { face: number; on: string }) => recognitionApi.leave(id, [v.face]),
+    onSuccess: (_r, v) => {
+      toast.success(`Left on ${v.on}. It is not asked about for ${name} again.`)
+      void refresh()
+    },
+    onError: (e) => toast.error(errorMessage(e, 'Could not save the answer.')),
+  })
   if (q.isPending) return <p className="mt-2 text-xs text-ink-soft">Loading.</p>
   if (q.isError) return <p className="mt-2 text-xs text-danger">{errorMessage(q.error, 'Could not load them.')}</p>
-  const items: RecognitionElsewhere[] = q.data.items.filter((e) => !left.has(e.face.id))
+  const items: RecognitionElsewhere[] = q.data.items
   if (!items.length) return <p className="mt-2 text-xs text-ink-soft">Nothing left here.</p>
   return (
     <ul className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3" aria-label={`Faces on other people that look like ${name}`}>
       {items.map((e) => {
-        const busy = settle.isPending && settle.variables?.face === e.face.id
+        const busy =
+          (settle.isPending && settle.variables?.face === e.face.id) || (leave.isPending && leave.variables?.face === e.face.id)
         return (
           <li key={e.face.id} className="rounded-xl border border-line bg-surface p-2">
             <div className="flex items-center gap-2">
@@ -380,7 +409,7 @@ function Elsewhere({ id, name }: { id: number; name: string }) {
               <Button size="sm" variant="secondary" disabled={busy} onClick={() => settle.mutate({ face: e.face.id, person: id, text: `Moved to ${name}.` })}>
                 This is {name}
               </Button>
-              <Button size="sm" variant="ghost" disabled={busy} onClick={() => setLeft((prev) => new Set(prev).add(e.face.id))}>
+              <Button size="sm" variant="ghost" disabled={busy} onClick={() => leave.mutate({ face: e.face.id, on: personName(e.person) })}>
                 Leave
               </Button>
             </div>

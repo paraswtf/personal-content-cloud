@@ -2,7 +2,8 @@
 hand-made face vectors: an identity, a look-alike identity at cosine about 0.7 to it, and strangers.
 
 The training (examples, conflicts, the check, determinism), the scan (what may become a guess and what is never
-touched), guess_item recomputing the guesses, the review actions, the gate in the automatic matching, and the routes.
+touched), guess_item recomputing the guesses, the review actions, the gate in the automatic matching, the routes,
+and what an undo brings back (the pause, the model of a deleted or merged person).
 """
 from __future__ import annotations
 
@@ -20,6 +21,16 @@ from app.learning import person_model, store
 from tests.helpers import make_body, make_face, make_item, make_person
 
 DIM = 512
+
+
+@pytest.fixture(autouse=True)
+def _no_run_left_over():
+    """The state of a run lives in the module (one process, one library): each test starts without one."""
+    person_scan._state.clear()
+    person_scan._running = None
+    yield
+    person_scan._state.clear()
+    person_scan._running = None
 
 
 def unit(seed: int) -> np.ndarray:
@@ -43,7 +54,7 @@ class World:
     look-alike faces the owner took off them and gave to someone else, five faces the owner tagged as a third
     person, and two faces still on the person that look like the look-alike."""
 
-    def __init__(self, conn, faces: int = 40, lookalike: np.ndarray = TWIN) -> None:
+    def __init__(self, conn, faces: int = 40, lookalike: np.ndarray = TWIN, locked: int = 5, days: int = 10) -> None:
         self.conn = conn
         self.lookalike = lookalike
         self.seed = count(1000)
@@ -53,8 +64,8 @@ class World:
         self.mine: list[int] = []
         self.minute = count(0)
         for k in range(faces):
-            item = self.photo(day=1 + k % 10)
-            self.mine.append(self.face(item, near(ME, next(self.seed)), self.me, "user" if k < 5 else "auto"))
+            item = self.photo(day=1 + k % days)
+            self.mine.append(self.face(item, near(ME, next(self.seed)), self.me, "user" if k < locked else "auto"))
             self.face(item, unit(next(self.seed)), box=(0.6, 0.2, 0.2, 0.3))
         self.removed: list[int] = []
         for k in range(12):
@@ -169,9 +180,17 @@ def test_an_ambiguous_face_of_the_same_photo_is_no_negative(conn):
     for _ in range(3):
         w.face(w.photo(day=8), near(special, next(w.seed), 0.2), w.third)
     there = w.face(other_photo, near(special, next(w.seed), 0.2), w.third, box=(0.1, 0.5, 0.2, 0.3))  # ...and a fourth
+    # the same shape in an UNNAMED group (the person in prints, say): such a group may hold the person's own
+    # faces, so it never makes the face a negative
+    printed = near(ME, 44)
+    group = unnamed(conn)
+    for _ in range(3):
+        w.face(w.photo(day=9), near(printed, next(w.seed), 0.2), group)
+    print_photo = conn.execute("SELECT item_id FROM faces WHERE id = ?", (w.mine[12],)).fetchone()[0]
+    w.face(print_photo, near(printed, next(w.seed), 0.2), group, box=(0.1, 0.5, 0.2, 0.3))
     model = w.train()
-    # the mirror is left out (not a sure negative); the look-alike matches the third person better: a negative
-    assert model["counts"]["ambiguous"] == 1 and model["counts"]["same_photo"] == 42 + 1
+    # the mirror and the print are left out (no sure negatives); the look-alike matches the third person better
+    assert model["counts"]["ambiguous"] == 2 and model["counts"]["same_photo"] == 42 + 1
     assert mirror not in model["ref_ids"] and there not in model["ref_ids"]
 
 
@@ -410,9 +429,15 @@ def test_withdraw_pauses_until_the_next_look(conn, monkeypatch):
     assert sorted(settled) == sorted([row(conn, detached)["item_id"], row(conn, loose)["item_id"]])
     monkeypatch.undo()
     assert row(conn, detached)["person_id"] == group and row(conn, loose)["person_id"] is None  # back in its group
-    assert person_model.load(w.me).withdrawn
+    assert person_model.paused(conn, [w.me, w.twin]) == {w.me}
     assert guess.guess_item(conn, row(conn, loose)["item_id"]) == 0 and guessed(conn, loose)[0] is None  # paused
-    assert person_scan.scan(conn, w.me)["guesses"] == 2 and not person_model.load(w.me).withdrawn
+    assert person_scan.scan(conn, w.me)["guesses"] == 2 and person_model.paused(conn, [w.me]) == set()
+    # a guess in the trash goes too, so none comes back with its photo; a new training un-pauses as a look does
+    with tx(conn):
+        conn.execute("UPDATE items SET deleted_at = '2026-06-01T00:00:00.000Z' WHERE id = ?", (row(conn, loose)["item_id"],))
+    assert person_scan.withdraw(conn, w.me) == 1 and guessed(conn, loose)[0] is None
+    w.train()
+    assert person_model.paused(conn, [w.me]) == set()
 
 
 def test_a_guess_without_its_model_waits_for_an_answer(conn):
@@ -460,7 +485,16 @@ def test_the_gate_keeps_lookalikes_off_the_person(conn):
     w.train()
     gated = options(True)
     assert w.me not in gated[faces[0]] and w.me in gated[faces[1]]
-    assert w.twin in gated[faces[0]]  # other people's options are never the gate's business
+    assert gated[faces[0]] == [w.twin]  # who the face matched better than the person the model refused stays
+    # the option of the refused person goes with every option ranked after it: no runner-up inherits the face
+    with idx.lock:
+        idx.sync(conn)
+        ids = [faces[0], faces[1]]
+        embs, child = idx.embeddings_of(ids), idx.child_flags(ids)
+        opts = [[(w.me, 0.6), (w.third, 0.5)], [(w.me, 0.8), (w.third, 0.5)]]
+        assert cluster._drop_gated(idx, ids, embs, child, opts) == [[], [(w.me, 0.8), (w.third, 0.5)]]
+        opts = [[(w.third, 0.7), (w.me, 0.6), (w.twin, 0.5)], []]
+        assert cluster._drop_gated(idx, ids, embs, child, opts) == [[(w.third, 0.7)], []]
 
 
 def test_new_faces_are_matched_through_the_gate(conn, monkeypatch):
@@ -531,6 +565,7 @@ def test_routes_train_look_settle_and_take_back(client, conn):
     rest = client.get(f"{url}/conflicts?limit=1&cursor={first['next_cursor']}").json()
     assert len(rest["items"]) == 1 and rest["next_cursor"] is None
     assert rest["items"][0]["face"]["id"] != first["items"][0]["face"]["id"]
+    assert client.get(f"{url}/conflicts?cursor=bm9wZQ").status_code == 400
     elsewhere = client.get(f"{url}/elsewhere").json()["items"]
     assert [(e["face"]["id"], e["person"]["id"]) for e in elsewhere] == [(on_named, w.third)]
     # the review list and its filter
@@ -554,12 +589,25 @@ def test_routes_train_look_settle_and_take_back(client, conn):
     assert client.get(url).json()["withdrawn"] is True
     u = client.post(f"/api/actions/{r.headers['x-action-id']}/undo")
     assert u.status_code == 200, u.text
+    # the undo brings the guesses back and un-pauses the model: the card does not contradict itself, the model
+    # answers for the restored guesses again, and a new photo of the person gets its guess
     assert guessed(conn, detached)[0] == guessed(conn, loose)[0] == w.me
-    assert guess.guess_item(conn, row(conn, loose)["item_id"]) == 0  # the paused model leaves the restored guess
+    s = client.get(url).json()
+    assert s["withdrawn"] is False and s["guesses"] == 2
+    assert guess.guess_item(conn, row(conn, loose)["item_id"]) == 0
+    new = w.face(w.photo(), w.like_me())
+    assert guess.guess_item(conn, row(conn, new)["item_id"]) == 1 and guessed(conn, new)[0] == w.me
+    # the redo takes them back again and pauses it again
+    redo = client.post(f"/api/actions/{u.json()['undo_id']}/undo")
+    assert redo.status_code == 200, redo.text
+    assert client.get(url).json()["withdrawn"] is True and guessed(conn, loose)[0] is None
     assert client.post(f"{url}/scan").status_code == 202 and client.get(url).json()["withdrawn"] is False
-    assert client.delete(url).status_code == 200
+    # forgetting is not an undoable action: nothing half comes back
+    r = client.delete(url)
+    assert r.status_code == 200 and "x-action-id" not in r.headers
     s = client.get(url).json()
     assert s["trained"] is False and s["guesses"] == 0 and guessed(conn, loose)[0] is None
+    assert row(conn, detached)["person_id"] == group
 
 
 def test_routes_refuse_what_cannot_be_trained(client, conn):
@@ -568,18 +616,18 @@ def test_routes_refuse_what_cannot_be_trained(client, conn):
     make_face(conn, item["id"], few, write_crop=False)
     url = f"/api/people/{few}/recognition"
     s = client.get(url).json()
-    assert s["available"] is False and "at least 20 faces" in s["reason"]
+    assert s["available"] is False and "about 20 clear faces" in s["reason"] and "count as" not in s["reason"]
     r = client.post(f"{url}/train", json={})
-    assert r.status_code == 409 and "at least 20 faces" in r.json()["detail"]
+    assert r.status_code == 409 and "about 20 clear faces" in r.json()["detail"]
     with tx(conn):
         pet = int(conn.execute("INSERT INTO persons(name, name_key, created_at, updated_at, kind, species) "
-                               "VALUES ('Chikki', 'chikki', '2026-01-01', '2026-01-01', 'pet', 'dog')").lastrowid)
+                               "VALUES ('Pebble', 'pebble', '2026-01-01', '2026-01-01', 'pet', 'dog')").lastrowid)
     assert client.get(f"/api/people/{pet}/recognition").status_code == 404
     assert client.get("/api/people/999999/recognition").status_code == 404
     w = World(conn)
     store.set_enabled(conn, False)
     s = client.get(f"/api/people/{w.me}/recognition").json()
-    assert s["available"] is False and "switched off" in s["reason"]
+    assert s["available"] is False and s["learning"] is False and "switched off" in s["reason"]
     assert client.post(f"/api/people/{w.me}/recognition/train", json={}).status_code == 409
 
 
@@ -602,3 +650,390 @@ def test_deleting_or_merging_the_person_forgets_the_model(client, conn):
     r = client.post("/api/people/merge", json={"target_id": w.third, "source_ids": [w.me]})
     assert r.status_code == 200, r.text
     assert person_model.trained_ids() == []
+
+
+# ------------------------------------------------------------------ the conflict rule
+@pytest.mark.parametrize("extra", [6, 12, 25])
+def test_lookalike_faces_on_the_person_do_not_vouch_for_each_other(conn, extra):
+    """Several faces of the look-alike sit on the person. Each one's best matches on the person are the others,
+    as near as the faces the owner took off: only faces that are no suspects may clear a suspect."""
+    w = World(conn)
+    for k in range(extra):
+        item = w.photo(day=1 + k % 10)
+        w.conflicts.append(w.face(item, w.like_twin(), w.me))
+        w.face(item, unit(next(w.seed)), box=(0.6, 0.2, 0.2, 0.3))
+    model = w.train()
+    assert {x["face_id"] for x in model["conflicts"]} == set(w.conflicts)
+    assert model["counts"]["conflicts"] == extra + 2 and set(model["ref_ids"]) == set(w.mine)
+    assert model["check"]["cuts"][0]["mistaken"] <= 1 and model["check"]["positives"] == 40
+    order = [(-x["sim"], x["face_id"]) for x in model["conflicts"]]
+    assert order == sorted(order)  # strongest first, then by face: the order the list is paged in
+    loaded = person_model.load(w.me)
+    get_index().sync(conn)
+    assert loaded.probability(np.stack([w.like_twin() for _ in range(8)]), np.ones(8), conn=conn).max() < 0.2
+
+
+def test_the_plain_conflict_rule_decides_when_no_face_is_beyond_suspicion(conn):
+    """The look-alike is close to the person and the owner locked nothing: every face on the person is near a face
+    taken off them, so none is trusted. Setting them all aside would keep nothing: the plain rule decides."""
+    close = (0.8 * ME + 0.6 * _other / np.linalg.norm(_other)).astype(np.float32)
+    w = World(conn, lookalike=close, locked=0)
+    model = w.train()
+    assert {x["face_id"] for x in model["conflicts"]} == set(w.conflicts)
+    assert model["counts"]["positives"] == 40 and set(model["ref_ids"]) == set(w.mine)
+
+
+def test_the_check_records_how_it_folded(conn):
+    w = World(conn)
+    assert w.train()["check"]["folds"] == "day"
+    # everyone of this person's photos is from one day: no day can be held out, so photos are
+    one_day = make_person(conn, "Tara")
+    base = unit(9)
+    for _ in range(30):
+        item = w.photo(day=15)
+        w.face(item, near(base, next(w.seed)), one_day)
+        w.face(item, unit(next(w.seed)), box=(0.6, 0.2, 0.2, 0.3))
+    model = person_model.train(conn, one_day)
+    assert model["check"]["folds"] == "photo" and model["check"]["positives"] == 30
+
+
+# ------------------------------------------------------------------ faces go back to their groups
+def test_an_emptied_group_comes_back_as_one_group(conn):
+    w = World(conn)
+    w.train()
+
+    def emptied() -> tuple[int, list[int]]:
+        group = unnamed(conn)
+        return group, [w.face(w.photo(), w.like_me(), group) for _ in range(3)]
+
+    (g1, together), (g2, one_by_one), (g3, taken_back) = emptied(), emptied(), emptied()
+    assert person_scan.scan(conn, w.me)["detached"] == 9
+    assert conn.execute("SELECT COUNT(*) FROM persons WHERE id IN (?, ?, ?)", (g1, g2, g3)).fetchone()[0] == 0
+
+    def group_of(faces: list[int]) -> int:
+        people = {row(conn, f)["person_id"] for f in faces}
+        assert len(people) == 1 and None not in people, people
+        (person,) = people
+        assert conn.execute("SELECT name FROM persons WHERE id = ?", (person,)).fetchone()["name"] is None
+        return int(person)
+
+    # turned down in one answer
+    assert guess.reject(conn, together, []) == 3
+    first = group_of(together)
+    # turned down one at a time: the first answer brings the group back, and the others remember the new one
+    assert guess.reject(conn, one_by_one[:1], []) == 1
+    second = row(conn, one_by_one[0])["person_id"]
+    assert second not in (None, first, w.me)
+    for f in one_by_one[1:]:
+        assert guessed(conn, f)[2]["was_person_id"] == second
+        assert guess.reject(conn, [f], []) == 1
+    assert group_of(one_by_one) == second
+    # taken back
+    assert person_scan.withdraw(conn, w.me) == 3
+    third = group_of(taken_back)
+    assert len({first, second, third}) == 3
+    assert conn.execute("SELECT COUNT(*) FROM persons WHERE name IS NULL").fetchone()[0] == 3
+
+
+def test_a_face_goes_back_to_its_group_whenever_its_guess_goes(conn):
+    w = World(conn)
+    w.train()
+    group = unnamed(conn)
+    w.face(w.photo(), unit(next(w.seed)), group, "user")
+    item_a, item_b, item_c = w.photo(), w.photo(), w.photo()
+    a, b, c = (w.face(i, w.like_me(), group) for i in (item_a, item_b, item_c))
+    other = w.face(item_a, unit(next(w.seed)), box=(0.6, 0.2, 0.2, 0.3))
+    assert person_scan.scan(conn, w.me)["detached"] == 3
+    assert all(guessed(conn, f)[0] == w.me and row(conn, f)["person_id"] is None for f in (a, b, c))
+    version = conn.execute("SELECT value FROM kv WHERE key = 'faces_version'").fetchone()[0]
+    # the owner puts another box of the photo on the person: the guess goes, the face is back in its group
+    with tx(conn):
+        conn.execute("UPDATE faces SET person_id = ?, assigned_by = 'user' WHERE id = ?", (w.me, other))
+    assert guess.guess_item(conn, item_a) == 1
+    assert (row(conn, a)["person_id"], row(conn, a)["assigned_by"], guessed(conn, a)[0]) == (group, "auto", None)
+    assert conn.execute("SELECT value FROM kv WHERE key = 'faces_version'").fetchone()[0] != version
+    # the photo goes to the vault
+    with tx(conn):
+        conn.execute("UPDATE items SET nsfw = 1 WHERE id = ?", (item_b,))
+    assert guess.guess_item(conn, item_b) == 1 and row(conn, b)["person_id"] == group
+    # a guess that cannot be confirmed (the person is in the photo already)
+    make_body(conn, item_c, w.me, assigned_by="user")
+    assert guess.confirm(conn, [c], []) == 0
+    assert (row(conn, c)["person_id"], row(conn, c)["assigned_by"], guessed(conn, c)[0]) == (group, "auto", None)
+
+
+def test_another_guess_on_such_a_face_keeps_the_memory(conn):
+    from app.db import kv_set
+
+    w = World(conn)
+    w.train()
+    group = unnamed(conn)
+    w.face(w.photo(), unit(next(w.seed)), group, "user")
+    face, moved = w.face(w.photo(), w.like_me(), group), w.face(w.photo(), w.like_me(), group)
+    person_scan.scan(conn, w.me)
+    # other evidence holds the face now (as guess_item writes it, the memory kept)
+    with tx(conn):
+        conn.execute("UPDATE faces SET guess_person_id = ?, guess_score = 0.9, guess_evidence = ? WHERE id = ?",
+                     (w.third, json.dumps({"clothes": 0.9, "ref_item_uid": "gone", "was_person_id": group}), face))
+    # the usual matching leaves it to the owner (it would put a face like this on the person)
+    assert cluster.recluster_unassigned(conn) == 0 and guessed(conn, face)[0] == w.third
+    # the group is merged into another unnamed one: the faces remember that one
+    target = unnamed(conn)
+    w.face(w.photo(), unit(next(w.seed)), target, "user")
+    cluster.merge_persons(conn, target, [group])
+    assert guessed(conn, face)[2]["was_person_id"] == guessed(conn, moved)[2]["was_person_id"] == target
+    assert guess.guess_item(conn, row(conn, moved)["item_id"]) == 0  # the memory is written as guess_item writes it
+    assert guess.reject(conn, [moved], []) == 1 and row(conn, moved)["person_id"] == target
+    # the window the clothes guess was made with changes: it is withdrawn, and the face is back in the group
+    with tx(conn):
+        kv_set(conn, guess.WINDOW_KEY, "0.125")
+    assert guess.apply_window_change(conn) == 1
+    assert (row(conn, face)["person_id"], row(conn, face)["assigned_by"]) == (target, "auto")
+
+
+def test_deleting_the_person_puts_the_faces_back(client, conn):
+    w = World(conn)
+    w.train()
+    alone = unnamed(conn)
+    was_alone = [w.face(w.photo(), w.like_me(), alone) for _ in range(2)]  # the look empties this group
+    shared = unnamed(conn)
+    w.face(w.photo(), unit(next(w.seed)), shared, "user")
+    in_shared = w.face(w.photo(), w.like_me(), shared)
+    assert person_scan.scan(conn, w.me)["detached"] == 3
+    r = client.delete(f"/api/people/{w.me}")
+    assert r.status_code == 200, r.text
+    assert row(conn, in_shared)["person_id"] == shared
+    back = {row(conn, f)["person_id"] for f in was_alone}
+    assert len(back) == 1 and None not in back and back != {alone}
+    assert all(guessed(conn, f)[0] is None and row(conn, f)["assigned_by"] == "auto" for f in [*was_alone, in_shared])
+
+
+def test_a_group_the_owner_deleted_is_not_remembered(client, conn):
+    w = World(conn)
+    w.train()
+    group = unnamed(conn)
+    w.face(w.photo(), unit(next(w.seed)), group, "user")
+    face = w.face(w.photo(), w.like_me(), group)
+    person_scan.scan(conn, w.me)
+    assert guessed(conn, face)[2]["was_person_id"] == group
+    assert client.delete(f"/api/people/{group}").status_code == 200
+    pid, _, ev = guessed(conn, face)
+    assert pid == w.me and "was_person_id" not in ev
+    assert guess.guess_item(conn, row(conn, face)["item_id"]) == 0  # written as guess_item writes it
+    assert guess.reject(conn, [face], []) == 1 and row(conn, face)["person_id"] is None  # no group to go back to
+
+
+# ------------------------------------------------------------------ what the owner said about a group
+def test_scan_leaves_a_group_the_owner_said_is_not_the_person(conn):
+    w = World(conn)
+    w.train()
+    group = unnamed(conn)
+    faces = [w.face(w.photo(), w.like_me(), group) for _ in range(3)]
+    other = unnamed(conn)
+    w.face(w.photo(), unit(next(w.seed)), other, "user")
+    later = w.face(w.photo(), w.like_me(), other)
+
+    def dismiss(a: int, b: int) -> None:
+        with tx(conn):
+            conn.execute("INSERT INTO merge_dismissals(person_a, person_b, created_at) VALUES (?, ?, '2026-01-01')",
+                         (min(a, b), max(a, b)))
+
+    dismiss(group, w.me)
+    result = person_scan.scan(conn, w.me)
+    assert all(row(conn, f)["person_id"] == group and guessed(conn, f)[0] is None for f in faces)
+    assert conn.execute("SELECT COUNT(*) FROM merge_dismissals").fetchone()[0] == 1  # the answer is still there
+    assert (result["guesses"], result["detached"]) == (1, 1) and guessed(conn, later)[0] == w.me
+    # said after the look: the guess goes the next time the photo is guessed, and the face is back in its group
+    dismiss(other, w.me)
+    assert guess.guess_item(conn, row(conn, later)["item_id"]) == 1
+    assert row(conn, later)["person_id"] == other and guessed(conn, later)[0] is None
+    assert person_scan.scan(conn, w.me)["guesses"] == 0 and row(conn, later)["person_id"] == other
+
+
+# ------------------------------------------------------------------ the automatic matching, the runner-up
+def test_a_face_the_gate_keeps_off_the_person_goes_to_no_runner_up(conn, monkeypatch):
+    w = World(conn)
+    runner = make_person(conn, "Lena")
+    for _ in range(3):
+        w.face(w.photo(), near(w.lookalike, next(w.seed), 1.5), runner)  # looks a little like the look-alike
+    w.train()
+    with tx(conn):  # forget the removals, so only the trained model keeps the look-alike off the person
+        conn.execute("DELETE FROM guess_rejections")
+    monkeypatch.setattr(cluster, "_learned", lambda pid: None)
+    face = w.face(w.photo(), w.like_twin())
+    without = set(w.removed)  # the look-alike's own faces left out: the person scores best, the runner-up next
+    idx = get_index()
+    with idx.lock:
+        idx.sync(conn)
+        plain = cluster._score(idx, cluster._face_rows(conn, [face]), frozenset(without), None)[0]
+    assert [pid for pid, _ in plain] == [w.me, runner]
+    got = cluster.assign_new_faces(conn, [face], exclude_face_ids=without)
+    # not the person (the model says no) and not the runner-up either: a clear face nobody takes starts a group
+    assert got[face] not in (None, w.me, runner, w.twin)
+    assert conn.execute("SELECT name FROM persons WHERE id = ?", (got[face],)).fetchone()["name"] is None
+
+
+# ------------------------------------------------------------------ routes, second part
+def test_a_run_lost_to_a_restart_is_reported(client, conn):
+    from app.db import kv_set
+
+    w = World(conn)
+    url = f"/api/people/{w.me}/recognition"
+    person_scan._mark_run(conn, w.me, True, True)  # the app stopped under a training: its mark, and no run
+    s = client.get(url).json()
+    assert s["running"] is None and s["trained"] is False and "training stopped" in s["error"]
+    assert client.get(f"/api/people/{w.third}/recognition").json()["error"] is None
+    # a run that ends takes its mark away
+    assert client.post(f"{url}/train", json={}).status_code == 202
+    s = client.get(url).json()
+    assert s["trained"] and s["error"] is None and s["check"]["folds"] == "day"
+    assert conn.execute("SELECT COUNT(*) FROM kv WHERE key LIKE 'recognition_run:%'").fetchone()[0] == 0
+    # stopped under the look, the training done; and under a look alone
+    with tx(conn):
+        kv_set(conn, person_scan.RUN_KEY.format(w.me),
+               json.dumps({"train": True, "look": True, "started_at": "2000-01-01T00:00:00.000Z"}))
+    assert "It was trained, but the look" in client.get(url).json()["error"]
+    person_scan._mark_run(conn, w.me, False, True)
+    assert client.get(url).json()["error"].startswith("The look at other faces stopped")
+    # the next run starts clean
+    assert client.post(f"{url}/scan").status_code == 202 and client.get(url).json()["error"] is None
+
+
+def test_a_failed_run_leaves_no_mark(client, conn, monkeypatch):
+    w = World(conn)
+
+    def boom(*a, **k):
+        raise RuntimeError("no")
+
+    monkeypatch.setattr(person_model, "train", boom)
+    assert client.post(f"/api/people/{w.me}/recognition/train", json={}).status_code == 202
+    assert client.get(f"/api/people/{w.me}/recognition").json()["error"] == "It stopped on an error. Try again."
+    assert conn.execute("SELECT COUNT(*) FROM kv WHERE key LIKE 'recognition_run:%'").fetchone()[0] == 0
+    assert person_scan.busy_with() is None
+
+
+def test_the_conflicts_cursor_skips_nothing_when_one_is_settled(client, conn):
+    w = World(conn)
+    for k in range(3):
+        w.conflicts.append(w.face(w.photo(day=5 + k), w.like_twin(), w.me))
+    w.train()
+    url = f"/api/people/{w.me}/recognition/conflicts"
+    everything = [c["face"]["id"] for c in client.get(url).json()["items"]]
+    assert sorted(everything) == sorted(w.conflicts) and len(everything) == 5
+    first = client.get(f"{url}?limit=2").json()
+    assert [c["face"]["id"] for c in first["items"]] == everything[:2] and first["total"] == 5
+    # the owner settles one of the page just read; the next page still starts where that page ended
+    assert client.post("/api/faces/assign", json={"face_ids": [everything[0]], "person_id": w.me}).status_code == 200
+    rest = client.get(f"{url}?limit=2&cursor={first['next_cursor']}").json()
+    assert [c["face"]["id"] for c in rest["items"]] == everything[2:4] and rest["total"] == 4
+    last = client.get(f"{url}?limit=2&cursor={rest['next_cursor']}").json()
+    assert [c["face"]["id"] for c in last["items"]] == everything[4:] and last["next_cursor"] is None
+
+
+def test_training_is_offered_by_face_weight_not_by_count(client, conn):
+    from app.analysis.faces import face_weight
+
+    size = next(px for px in range(25, 48) if 0.3 <= face_weight(0.9, px) <= 0.6)
+    small = make_person(conn, "Omar")
+    base = unit(11)
+    for k in range(25):  # 25 faces, but small ones: they count for less than 20
+        item = make_item(conn, write_files=False, data=None)
+        make_face(conn, item["id"], small, embedding=near(base, 500 + k), size_px=size, write_crop=False)
+    weight, faces = person_model.clear_weight(conn, small)
+    assert faces == 25 and 5 < weight < 20
+    url = f"/api/people/{small}/recognition"
+    s = client.get(url).json()
+    assert s["available"] is False and f"Their 25 faces count as about {int(weight)}" in s["reason"]
+    assert client.post(f"{url}/train", json={}).status_code == 409
+    for k in range(20):  # clear faces added: now a training has enough to start from
+        item = make_item(conn, write_files=False, data=None)
+        make_face(conn, item["id"], small, embedding=near(base, 600 + k), write_crop=False)
+    s = client.get(url).json()
+    assert s["available"] is True and s["reason"] is None and person_model.clear_weight(conn, small)[0] >= 20
+
+
+def test_leave_is_remembered(client, conn):
+    w = World(conn)
+    w.train()
+    on_named = [w.face(w.photo(), w.like_me(), w.third) for _ in range(2)]
+    person_scan.scan(conn, w.me)
+    url = f"/api/people/{w.me}/recognition"
+    assert client.get(url).json()["elsewhere"] == 2
+    r = client.post(f"{url}/leave", json={"face_ids": [on_named[0]]})
+    assert r.status_code == 200 and r.json() == {"updated": 1} and r.headers.get("x-action-id")
+    s = client.get(url).json()
+    assert (s["elsewhere"], s["answers_since"]) == (1, 1)
+    assert [e["face"]["id"] for e in client.get(f"{url}/elsewhere").json()["items"]] == [on_named[1]]
+    kept = row(conn, on_named[0])
+    assert (kept["person_id"], kept["assigned_by"]) == (w.third, "auto")  # the face stays where it is
+    assert client.post(f"{url}/leave", json={"face_ids": [on_named[0]]}).json() == {"updated": 0}
+    # only a face on another person can be left there
+    assert client.post(f"{url}/leave", json={"face_ids": [w.mine[0]]}).status_code == 400
+    # the next look does not list it again
+    assert [e["face_id"] for e in person_scan.scan(conn, w.me)["elsewhere"]] == [on_named[1]]
+    # the answer is an owner action: its undo forgets it
+    assert client.post(f"/api/actions/{r.headers['x-action-id']}/undo").status_code == 200
+    assert sorted(e["face_id"] for e in person_scan.scan(conn, w.me)["elsewhere"]) == on_named
+    # and the next training takes a face that was left as one that is not the person
+    assert client.post(f"{url}/leave", json={"face_ids": [on_named[0]]}).json() == {"updated": 1}
+    assert w.train()["counts"]["rejected"] == 13
+
+
+def test_take_back_and_forget_say_whose_run_is_going(client, conn, monkeypatch):
+    w = World(conn)
+    w.train()
+    url = f"/api/people/{w.me}/recognition"
+    monkeypatch.setattr(person_scan, "_running", w.me)  # a run for this very person
+    for r in (client.post(f"{url}/withdraw"), client.delete(url)):
+        assert r.status_code == 409 and r.json()["detail"] == "running"
+    assert client.post(f"{url}/scan").json() == {"started": False}
+    monkeypatch.setattr(person_scan, "_running", w.third)  # another person's run
+    r = client.post(f"{url}/scan")
+    assert r.status_code == 409 and r.json()["detail"] == "busy"
+    assert client.get(url).json()["busy"] is True
+    assert client.post(f"{url}/withdraw").status_code == 200
+
+
+def test_taking_an_existing_name_merges_and_forgets_the_model(client, conn):
+    w = World(conn)
+    w.train()
+    assert person_model.trained_ids() == [w.me]
+    r = client.patch(f"/api/people/{w.me}", json={"name": "meera"})
+    assert r.status_code == 200 and r.json()["id"] == w.third, r.text
+    assert person_model.trained_ids() == [] and person_model.stored(w.me) is None
+
+
+def test_undo_brings_the_model_of_a_deleted_or_merged_person_back(client, conn):
+    w = World(conn)
+    w.train()
+    loose = w.face(w.photo(), w.like_me())
+    person_scan.scan(conn, w.me)
+    trained_at = person_model.stored(w.me)["trained_at"]
+
+    def undo(response) -> dict:
+        action = response.headers["x-action-id"] if "x-action-id" in response.headers else response.json()["undo_id"]
+        u = client.post(f"/api/actions/{action}/undo")
+        assert u.status_code == 200, u.text
+        return u
+
+    def back() -> None:
+        assert person_model.trained_ids() == [w.me] and person_model.load(w.me).trained_at == trained_at
+        assert guessed(conn, loose)[0] == w.me
+        assert guess.guess_item(conn, row(conn, loose)["item_id"]) == 0  # the model answers for its guess again
+
+    r = client.delete(f"/api/people/{w.me}")
+    assert r.status_code == 200 and person_model.trained_ids() == [] and guessed(conn, loose)[0] is None
+    first = undo(r)
+    back()
+    again = undo(first)  # a redo: the person and the model go again
+    assert person_model.trained_ids() == [] and conn.execute("SELECT 1 FROM persons WHERE id = ?", (w.me,)).fetchone() is None
+    undo(again)
+    back()
+    r = client.post("/api/people/merge", json={"target_id": w.third, "source_ids": [w.me]})
+    assert r.status_code == 200 and person_model.trained_ids() == []
+    undo(r)
+    back()
+    r = client.patch(f"/api/people/{w.me}", json={"name": "Meera"})
+    assert r.status_code == 200 and person_model.trained_ids() == []
+    undo(r)
+    back()

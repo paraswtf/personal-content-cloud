@@ -27,7 +27,10 @@ CONTRACT.
   app.analysis.person_scan.merge_item for the trained models' guesses on the item's open faces (basis 'face') and
   merges them with the result above. Without a model the result is untouched. Such a guess has no time window
   (apply_window_change keeps it), its outcome is recorded with its own terms (record_outcome; the clothes weights
-  leave it out), and turning one down sends a face the scan took out of an unnamed group back to a group.
+  leave it out). A face a scan took out of an unnamed group for such a guess (evidence was_person_id) goes back
+  into that group whenever its guess goes without the owner's answer for it: turned down (reject), cleared by
+  guess_item (the model stops naming it, the person is in the photo now, the photo went to the vault), not
+  confirmable (confirm), or withdrawn with the guess window (person_scan.regroup).
 
 Scoring for an open box D in item I against a reference box F (face or body of a person with
 assigned_by user or auto) in item J:
@@ -241,7 +244,8 @@ def open_boxes(conn: sqlite3.Connection, item_id: int) -> list[Box]:
 def _reference_boxes(conn: sqlite3.Connection, item_ids: list[int], exclude_people: set[int],
                      cache: dict[str, Any] | None = None) -> list[Box]:
     if cache is not None:
-        # Guessing never changes who a box belongs to, so one propagate run can reuse the references.
+        # Guessing never takes a box away from its person, so one propagate run can reuse the references. (A face
+        # that goes back into its unnamed group when its guess goes, section 10, is a reference from the next run on.)
         known: dict[int, list[Box]] = cache.setdefault("refs", {})
         missing = sorted({int(i) for i in item_ids} - known.keys())
         if missing:
@@ -527,6 +531,31 @@ def _merge_models(conn: sqlite3.Connection, item: sqlite3.Row, boxes: list[Box],
         return results
 
 
+def _left_groups(conn: sqlite3.Connection, where: str, params: list[Any]) -> dict[int, int]:
+    """{face id: the unnamed group a scan took it out of} for the open guesses among the faces that match `where`
+    (section 10, person_scan.left_groups). A guess that goes without the owner's answer sends its face back there."""
+    try:
+        from app.analysis import person_scan
+
+        return dict(person_scan.left_groups(conn, where, params))
+    except Exception:  # noqa: BLE001 - a trained model never blocks guessing
+        log.exception("guess: could not read the groups faces were taken out of")
+        return {}
+
+
+def _regroup(conn: sqlite3.Connection, faces: list[tuple[int, int]]) -> int:
+    """Put faces whose guess just went back into the unnamed group a scan took them out of (person_scan.regroup)."""
+    if not faces:
+        return 0
+    try:
+        from app.analysis import person_scan
+
+        return person_scan.regroup(conn, faces)
+    except Exception:  # noqa: BLE001 - the guess already went; the face stays loose
+        log.exception("guess: could not put %d face(s) back into their groups", len(faces))
+        return 0
+
+
 def _advance_index(conn: sqlite3.Connection, nested: bool, base: int | None, new: int | None) -> None:
     """Guess writes touch only guess fields, which the face index does not hold: an index that was
     current at `base` is current at `new` too, so the next sync need not re-read every face."""
@@ -553,10 +582,15 @@ def guess_item(conn: sqlite3.Connection, item_id: int, cache: dict[str, Any] | N
     else:
         results = _merge_models(conn, item, boxes, _compute(conn, item, boxes, cache))
     changed = 0
+    regrouped = 0
     nested = conn.in_transaction
     base = new = None
     with tx(conn):
         base = faces_version(conn)
+        # faces a scan took out of an unnamed group for a model's guess (section 10): one that loses its guess here
+        # goes back into the group, and one that keeps a guess keeps the memory of it
+        left = _left_groups(conn, "item_id = ?", [int(item_id)])
+        back: list[tuple[int, int]] = []
         for (kind, box_id), cand in results.items():
             table = "faces" if kind == "face" else "bodies"
             extra = "" if kind == "face" else " AND face_id IS NULL"
@@ -566,10 +600,14 @@ def guess_item(conn: sqlite3.Connection, item_id: int, cache: dict[str, Any] | N
                     f"guess_evidence = NULL WHERE id = ? AND person_id IS NULL AND assigned_by = 'guess'{extra}",
                     (box_id,),
                 )
+                if cur.rowcount and kind == "face" and box_id in left:
+                    back.append((box_id, left[box_id]))
             else:
                 alive = conn.execute("SELECT 1 FROM persons WHERE id = ?", (cand.person_id,)).fetchone()
                 if alive is None:
                     continue
+                if kind == "face" and box_id in left and "was_person_id" not in cand.evidence:
+                    cand = Candidate(cand.person_id, cand.score, {**cand.evidence, "was_person_id": left[box_id]})
                 cur = conn.execute(
                     f"UPDATE {table} SET assigned_by = 'guess', guess_person_id = ?, guess_score = ?, guess_evidence = ? "
                     f"WHERE id = ? AND person_id IS NULL AND assigned_by IN ('auto', 'guess'){extra} "
@@ -581,8 +619,10 @@ def guess_item(conn: sqlite3.Connection, item_id: int, cache: dict[str, Any] | N
         if changed:
             bump_faces_version(conn)
             new = faces_version(conn)
+        regrouped = _regroup(conn, back)
     if changed:
-        _advance_index(conn, nested, base, new)
+        if not regrouped:  # a face that went back into its group changed who it belongs to: the index reads again
+            _advance_index(conn, nested, base, new)
         log.info("guess: item %s, %d box(es) changed", item["uid"], changed)
     return changed
 
@@ -682,6 +722,7 @@ def apply_window_change(conn: sqlite3.Connection) -> int:
         return 0
     limit_s = float(settings.guess_window_h) * 3600.0
     withdrawn = 0
+    back: list[tuple[int, int]] = []  # faces a scan took out of a group (section 10): they go back into it
     with tx(conn):
         for table in ("faces", "bodies"):
             rows = conn.execute(
@@ -709,8 +750,11 @@ def apply_window_change(conn: sqlite3.Connection) -> int:
                 )
                 enqueue_guess(conn, int(r["guess_person_id"]), int(r["item_id"]))
                 withdrawn += 1
+                if table == "faces" and isinstance(ev, dict) and isinstance(ev.get("was_person_id"), int):
+                    back.append((int(r["id"]), int(ev["was_person_id"])))
         if withdrawn:
             bump_faces_version(conn)
+        _regroup(conn, back)
         kv_set(conn, WINDOW_KEY, current)
     if withdrawn:
         log.info("guess window is now %s h: withdrew %d guess(es) made against a reference further away", current, withdrawn)
@@ -788,6 +832,7 @@ def confirm(conn: sqlite3.Connection, face_ids: list[int], body_ids: list[int]) 
     dropped = 0
     now = now_iso()
     present: dict[int, set[int]] = {}
+    back: list[tuple[int, int]] = []  # faces a scan took out of a group whose guess could not be confirmed
 
     def already(table: str, r: sqlite3.Row, pid: int) -> bool:
         """True (and the stale guess cleared) when pid is already in the box's item."""
@@ -803,6 +848,9 @@ def confirm(conn: sqlite3.Connection, face_ids: list[int], body_ids: list[int]) 
             "guess_person_id = NULL, guess_score = NULL, guess_evidence = NULL WHERE id = ?",
             (r["id"],),
         )
+        was = _detached_by_model(r["guess_evidence"]) if table == "faces" else None
+        if was is not None:
+            back.append((int(r["id"]), was))
         dropped += 1
         return True
 
@@ -862,6 +910,7 @@ def confirm(conn: sqlite3.Connection, face_ids: list[int], body_ids: list[int]) 
                 conn.execute("UPDATE persons SET updated_at = ? WHERE id = ?", (now, pid))
         if updated or dropped:
             bump_faces_version(conn)
+        _regroup(conn, back)
     for pid, iid in sorted(pairs):
         enqueue_guess(conn, pid, iid)
     refresh_fts(conn, {i for _, i in pairs})
@@ -871,7 +920,7 @@ def confirm(conn: sqlite3.Connection, face_ids: list[int], body_ids: list[int]) 
 def reject(conn: sqlite3.Connection, face_ids: list[int], body_ids: list[int], *, regroup: bool = True) -> int:
     """Turn down open guesses: remember the pair in guess_rejections and clear the guess. A face that a model
     trained on one person took out of an unnamed group for its guess (evidence was_person_id, section 10) then
-    goes back to that group, unless `regroup` is off (the caller moves the box itself) or a transaction is open."""
+    goes back to that group, in the same transaction, unless `regroup` is off (the caller moves the box itself)."""
     updated = 0
     now = now_iso()
     detached: list[tuple[int, int]] = []
@@ -901,10 +950,8 @@ def reject(conn: sqlite3.Connection, face_ids: list[int], body_ids: list[int], *
                     updated += 1
         if updated:
             bump_faces_version(conn)
-    if detached and regroup and not conn.in_transaction:
-        from app.analysis import person_scan
-
-        person_scan.regroup(conn, detached)
+        if regroup:
+            _regroup(conn, detached)
     return updated
 
 

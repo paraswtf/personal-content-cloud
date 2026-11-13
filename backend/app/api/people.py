@@ -25,9 +25,12 @@ Routes (all under /api, all require a logged-in session; writes need the CSRF he
   GET    /people/{id}/recognition -> RecognitionOut (the model, its check, the last look, a run's progress)
   POST   /people/{id}/recognition/train {scan=true} -> 202 {started} (background; 409 with the reason when it
          cannot be trained, 409 busy while another person's run is going);  POST .../scan -> 202 (409 not_trained)
-  GET    /people/{id}/recognition/conflicts?limit&cursor -> RecognitionConflictPage;  GET .../elsewhere
-  POST   /people/{id}/recognition/withdraw -> BulkOut (its open guesses taken back, the model paused);
-  DELETE /people/{id}/recognition -> Ok (the model forgotten, its guesses taken back)
+  GET    /people/{id}/recognition/conflicts?limit&cursor -> RecognitionConflictPage (a keyset cursor);
+  GET    /people/{id}/recognition/elsewhere -> RecognitionElsewhereList;  POST .../leave {face_ids} -> BulkOut
+         (those faces on other people are not this person: remembered, and off the list)
+  POST   /people/{id}/recognition/withdraw -> BulkOut (its open guesses taken back, the model paused; the undo
+         brings them back and un-pauses it);  DELETE /people/{id}/recognition -> Ok (the model forgotten, its
+         guesses taken back; not undoable). Both 409 running while a run for this person is going.
   Body traits (section 34):
   GET    /people/{id}/traits -> PersonTraitsOut (tattoos by design, recent mehndi and nails; empty for a pet)
   PUT    /traits/{id} {hidden, verdict=not_trait|not_theirs} -> TraitOut: hide a trait, or show it again on this
@@ -153,6 +156,7 @@ from app.schemas import (
     RecognitionConflictPage,
     RecognitionElsewhere,
     RecognitionElsewhereList,
+    RecognitionLeaveIn,
     RecognitionOut,
     RecognitionStartIn,
     RecognitionStartOut,
@@ -607,8 +611,8 @@ def merge_people(body: MergeIn, conn: sqlite3.Connection = Depends(get_db),
         _, followers = cluster.merge_and_follow(conn, body.target_id, sources)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e) or "Cannot merge these people") from e
-    for source in sources:
-        person_model.forget(source)  # the faces a model was trained on are the target's now
+    for gone in [*sources, *followers]:
+        person_model.forget(gone)  # the faces a model was trained on are the target's now
     _after_people_change(conn, _items_of_person(conn, body.target_id), {(body.target_id, None)})
     out = _person_out(conn, body.target_id)
     out.followed = len(followers)
@@ -642,6 +646,7 @@ def update_person(person_id: int, body: PersonUpdate, conn: sqlite3.Connection =
     result = person_id
     renamed = False
     followed = 0
+    merged: list[int] = []
     with tx(conn):
         row = _visible_person_row(conn, session, person_id)
         now = now_iso()
@@ -671,12 +676,15 @@ def update_person(person_id: int, body: PersonUpdate, conn: sqlite3.Connection =
             if other is not None:
                 _, followers = cluster.merge_and_follow(conn, other, [person_id])
                 followed = len(followers)
+                merged = [person_id, *followers]
                 result = other
             else:
                 conn.execute("UPDATE persons SET name = ?, name_key = ?, updated_at = ? WHERE id = ?",
                              (name, name.casefold() if name else None, now, person_id))
             renamed = name is not None
         bump_faces_version(conn)
+    for gone in merged:
+        person_model.forget(gone)  # taking a name that exists is a merge: a model trained on them goes with them
     if "name" in fields:
         _after_people_change(conn, _items_of_person(conn, result), {(result, None)} if renamed else set())
     out = _person_out(conn, result)
@@ -691,6 +699,8 @@ def delete_person(person_id: int, conn: sqlite3.Connection = Depends(get_db),
         _visible_person_row(conn, session, person_id)
         items = _items_of_person(conn, person_id)
         cluster.clear_guesses_for(conn, [person_id])
+        # section 10: a face a look took out of this (unnamed) group does not come back to a group the owner deleted
+        person_scan.repoint(conn, {person_id: None})
         conn.execute("UPDATE faces SET person_id = NULL, assigned_by = 'user', by_guess = 0 WHERE person_id = ?", (person_id,))
         conn.execute("UPDATE bodies SET person_id = NULL, assigned_by = 'user', by_guess = 0 WHERE person_id = ?", (person_id,))
         conn.execute("UPDATE animals SET person_id = NULL, assigned_by = 'user' WHERE person_id = ?", (person_id,))
@@ -1566,9 +1576,6 @@ def person_childhood(
 
 
 # ------------------------------------------------------------------ recognition trained on one person (section 10)
-RECOGNITION_MIN_FACES = int(person_model.MIN_POSITIVE_WEIGHT)
-
-
 def _recognition_person(conn: sqlite3.Connection, session: SessionInfo, person_id: int) -> sqlite3.Row:
     row = _visible_person_row(conn, session, person_id)
     if row["kind"] != "person":
@@ -1613,17 +1620,24 @@ def _standing_elsewhere(conn: sqlite3.Connection, person_id: int, raw: dict[str,
 
 def _recognition_out(conn: sqlite3.Connection, person_id: int) -> RecognitionOut:
     raw = person_model.stored(person_id)
-    faces = int(conn.execute("SELECT COUNT(*) FROM faces WHERE person_id = ?", (person_id,)).fetchone()[0])
+    learning = learned_store.enabled(conn)
     reason = None
-    if not learned_store.enabled(conn):
+    if not learning:
         reason = "Learning is switched off in Settings."
-    elif faces < RECOGNITION_MIN_FACES:
-        reason = f"This person needs at least {RECOGNITION_MIN_FACES} faces before recognition can be trained on them alone."
-    st = person_scan.state(person_id)
+    else:
+        # the same count the training makes: the face weight of their faces outside the child band
+        need = int(person_model.MIN_POSITIVE_WEIGHT)
+        weight, faces = person_model.clear_weight(conn, person_id)
+        if weight < need:
+            reason = f"This person needs about {need} clear faces before recognition can be trained on them alone."
+            if faces >= need:
+                reason += (f" Their {faces} faces count as about {int(weight)}: a small, blurred or turned face counts "
+                           "for less, and faces of a young child are left out.")
+    st = person_scan.state(person_id, conn)
     busy_with = person_scan.busy_with()
     data: dict[str, Any] = {
-        "available": reason is None, "reason": reason, "running": st["running"], "progress": st["progress"],
-        "error": st["error"], "busy": busy_with is not None and busy_with != person_id,
+        "available": reason is None, "reason": reason, "learning": learning, "running": st["running"],
+        "progress": st["progress"], "error": st["error"], "busy": busy_with is not None and busy_with != person_id,
     }
     if raw is not None:
         scan = raw.get("scan") if isinstance(raw.get("scan"), dict) else None
@@ -1635,7 +1649,8 @@ def _recognition_out(conn: sqlite3.Connection, person_id: int) -> RecognitionOut
             check=raw.get("check"), guess_p=raw.get("guess_p"), sure_p=raw.get("sure_p"),
             conflicts=len(_standing_conflicts(conn, person_id, raw)),
             elsewhere=len(_standing_elsewhere(conn, person_id, raw)),
-            guesses=person_scan.standing_count(conn, person_id), withdrawn=bool(raw.get("withdrawn_at")),
+            guesses=person_scan.standing_count(conn, person_id),
+            withdrawn=person_id in person_model.paused(conn, [person_id]),
             answers_since=(max(0, owner_faces - int(counts.get("owner_faces", owner_faces)))
                            + max(0, rejections - int(counts.get("rejections", rejections)))),
             scan={**scan, "elsewhere": len(scan.get("elsewhere") or [])} if scan is not None else None,
@@ -1653,7 +1668,7 @@ def person_recognition(person_id: int, conn: sqlite3.Connection = Depends(get_db
 
 
 def _start_recognition(conn: sqlite3.Connection, person_id: int, *, train: bool, look: bool) -> RecognitionStartOut:
-    started = person_scan.start(person_id, train=train, look=look)
+    started = person_scan.start(conn, person_id, train=train, look=look)
     if not started and person_scan.busy_with() not in (None, person_id):
         raise HTTPException(status_code=409, detail="busy")
     return RecognitionStartOut(started=started)
@@ -1691,12 +1706,23 @@ def recognition_conflicts(
     session: SessionInfo = Depends(require_user),
 ) -> RecognitionConflictPage:
     """Faces on the person that look the same as faces the owner took off them or gave to someone else, strongest
-    first: the owner settles each with /faces/assign (to the person, to the other person, or to nobody)."""
+    first: the owner settles each with /faces/assign (to the person, to the other person, or to nobody). A settled
+    one leaves the list, so the cursor is a keyset (the similarity and face of the last one read): what was not
+    read yet is never skipped."""
     _recognition_person(conn, session, person_id)
-    standing = _standing_conflicts(conn, person_id, person_model.stored(person_id))
-    v = _keyset(cursor, 1)
-    start = int(v[0]) if v is not None and isinstance(v[0], int) and v[0] >= 0 else 0
-    page = standing[start:start + limit]
+
+    def order(c: dict[str, Any]) -> tuple[float, int]:
+        return -float(c.get("sim") or 0.0), int(c["face_id"])
+
+    standing = sorted(_standing_conflicts(conn, person_id, person_model.stored(person_id)), key=order)
+    v = _keyset(cursor, 2)
+    rest = standing
+    if v is not None:
+        if isinstance(v[0], bool) or not isinstance(v[0], (int, float)) or isinstance(v[1], bool) or not isinstance(v[1], int):
+            raise HTTPException(status_code=400, detail="Invalid cursor")
+        after = (-float(v[0]), int(v[1]))
+        rest = [c for c in standing if order(c) > after]
+    page = rest[:limit]
     ids = sorted({int(c["face_id"]) for c in page} | {int(c["like_face_id"]) for c in page})
     faces: dict[int, FaceListItem] = {}
     if ids:
@@ -1712,7 +1738,7 @@ def recognition_conflicts(
         items.append(RecognitionConflict(
             face=face, like=like, sim=float(c.get("sim") or 0.0),
             like_person=refs.get(like.person_id) if like is not None and like.person_id is not None else None))
-    nxt = encode_cursor([start + limit]) if start + limit < len(standing) else None
+    nxt = encode_cursor([float(page[-1].get("sim") or 0.0), int(page[-1]["face_id"])]) if len(rest) > limit else None
     return RecognitionConflictPage(items=items, next_cursor=nxt, total=len(standing))
 
 
@@ -1734,16 +1760,40 @@ def recognition_elsewhere(person_id: int, conn: sqlite3.Connection = Depends(get
         for e in standing if int(e["face_id"]) in faces and int(e["person_id"]) in refs])
 
 
+@router.post("/people/{person_id}/recognition/leave", response_model=BulkOut)
+def leave_recognition_elsewhere(person_id: int, body: RecognitionLeaveIn, conn: sqlite3.Connection = Depends(get_db),
+                                session: SessionInfo = Depends(require_user)) -> BulkOut:
+    """"Leave" on a face of the elsewhere list: the owner says this face on another person is not this person. It
+    is remembered as any "not them" (guess_rejections), so the face leaves the list and its count, a later look
+    does not bring it back, and the next training takes it as a face that is not the person. The face stays where
+    it is. An owner action with its undo."""
+    _recognition_person(conn, session, person_id)
+    ids = sorted({int(f) for f in body.face_ids})
+    _check_boxes_vault(conn, session, "faces", ids)
+    with tx(conn):
+        rows = conn.execute(
+            f"SELECT id FROM faces WHERE id IN ({_ids_sql(ids)}) AND person_id IS NOT NULL AND person_id != ?",
+            [*ids, person_id]).fetchall()
+        if len(rows) != len(ids):
+            raise HTTPException(status_code=400, detail="Only a face on another person can be left there.")
+        known = conn.execute(
+            f"SELECT COUNT(*) FROM guess_rejections WHERE kind = 'face' AND person_id = ? AND ref_id IN ({_ids_sql(ids)})",
+            [person_id, *ids]).fetchone()[0]
+        cluster.record_rejections(conn, ids, person_id)
+    return BulkOut(updated=len(ids) - int(known))
+
+
 def _recognition_idle(person_id: int) -> None:
+    """409 `running` while a training or a look for this very person is going (`busy` means another person's)."""
     if person_scan.busy_with() == person_id:
-        raise HTTPException(status_code=409, detail="busy")
+        raise HTTPException(status_code=409, detail="running")
 
 
 @router.post("/people/{person_id}/recognition/withdraw", response_model=BulkOut)
 def withdraw_recognition(person_id: int, conn: sqlite3.Connection = Depends(get_db),
                          session: SessionInfo = Depends(require_user)) -> BulkOut:
-    """Take the model's open guesses back (an owner action: undo brings them back). The model makes no new ones
-    until the next look."""
+    """Take the model's open guesses back and pause it: it makes no new ones until the next look or training. An
+    owner action: its undo brings the guesses back and un-pauses the model (the pause is a journaled column)."""
     _recognition_person(conn, session, person_id)
     _recognition_idle(person_id)
     return BulkOut(updated=person_scan.withdraw(conn, person_id))
@@ -1753,11 +1803,14 @@ def withdraw_recognition(person_id: int, conn: sqlite3.Connection = Depends(get_
 def forget_recognition(person_id: int, conn: sqlite3.Connection = Depends(get_db),
                        session: SessionInfo = Depends(require_user)) -> Ok:
     """Forget the model trained on this person and take its open guesses back. The faces and the owner's answers
-    stay; the usual matching goes on as before."""
+    stay; the usual matching goes on as before. Not an undoable action: the model and its guesses are derived, and
+    an undo could bring the guesses back but not the model behind them. Training again makes both again."""
     _recognition_person(conn, session, person_id)
     _recognition_idle(person_id)
-    person_scan.withdraw(conn, person_id)
-    person_model.forget(person_id)
+    with undo_mod.not_undoable():
+        person_model.forget(person_id)  # first: without the model nothing makes the guesses again
+        person_scan.take_back(conn, person_id)
+        person_model.resume(conn, person_id)
     return Ok()
 
 

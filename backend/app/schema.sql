@@ -206,7 +206,9 @@ CREATE TABLE IF NOT EXISTS persons (
   created_at    TEXT NOT NULL,
   updated_at    TEXT NOT NULL,
   kind          TEXT NOT NULL DEFAULT 'person', -- 'person' or 'pet' (section 22)
-  species       TEXT                            -- pets: the detector's species
+  species       TEXT,                           -- pets: the detector's species
+  recognition_paused_at TEXT                    -- section 10: the guesses of the recognition trained on this
+                                                -- person were taken back; it makes none until the next look
 );
 CREATE INDEX IF NOT EXISTS persons_name ON persons(name_key);
 

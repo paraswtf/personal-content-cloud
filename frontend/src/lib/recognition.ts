@@ -14,6 +14,8 @@ export interface RecognitionCut {
   unclear_mistaken: number
 }
 export interface RecognitionCheck {
+  /** What it was tested on: days it was not trained on, or (when the days do not spread the faces) photos. */
+  folds?: 'day' | 'photo' | null
   positives: number
   negatives: number
   unclear_positives: number
@@ -30,8 +32,10 @@ export interface RecognitionScan {
 }
 export interface RecognitionOut {
   available: boolean
-  /** Why it cannot be trained or used (learning off, too few faces). */
+  /** Why it cannot be trained or used (learning off, too few clear faces). */
   reason: string | null
+  /** Learning is on in Settings. Off, a trained recognition is not used. */
+  learning: boolean
   trained: boolean
   trained_at: string | null
   counts: Record<string, number>
@@ -49,6 +53,7 @@ export interface RecognitionOut {
   scan: RecognitionScan | null
   running: 'train' | 'scan' | null
   progress: { done: number; total: number; step: string } | null
+  /** Why the last run failed, or that it stopped when the app was restarted. */
   error: string | null
   /** The owner's answers about this person since the training. */
   answers_since: number
@@ -81,6 +86,8 @@ export const recognitionApi = {
   conflicts: (id: number, cursor?: string | null, limit = 60) =>
     get<RecognitionConflictPage>(`/api/people/${id}/recognition/conflicts${qs({ cursor, limit })}`),
   elsewhere: (id: number) => get<{ items: RecognitionElsewhere[] }>(`/api/people/${id}/recognition/elsewhere`),
+  /** "Leave": these faces on other people are not this person. Remembered; they leave the list. */
+  leave: (id: number, faceIds: number[]) => post<{ updated: number }>(`/api/people/${id}/recognition/leave`, { face_ids: faceIds }),
   withdraw: (id: number) => post<{ updated: number }>(`/api/people/${id}/recognition/withdraw`),
   forget: (id: number) => del<OkOut>(`/api/people/${id}/recognition`),
 }

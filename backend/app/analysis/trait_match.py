@@ -1557,11 +1557,13 @@ def apply_settings_change(conn: sqlite3.Connection) -> int:
     off = not (_matching_on() and settings.trait_only_guesses)
     items: set[int] = set()
     withdrawn = touched = 0
+    back: list[tuple[int, int]] = []  # faces a scan took out of an unnamed group (section 10) go back into it
     with tx(conn):
         if previous is not None:
             for table in ("faces", "bodies"):
                 for r in conn.execute(
-                        f"SELECT id, item_id, json_extract(guess_evidence, '$.basis') AS basis FROM {table} "
+                        f"SELECT id, item_id, json_extract(guess_evidence, '$.basis') AS basis, "
+                        f"json_extract(guess_evidence, '$.was_person_id') AS was FROM {table} "
                         "WHERE assigned_by = 'guess' AND person_id IS NULL AND guess_evidence IS NOT NULL "
                         "AND json_valid(guess_evidence) "
                         "AND json_extract(guess_evidence, '$.basis') IN ('trait', 'clothes+trait')").fetchall():
@@ -1572,8 +1574,14 @@ def apply_settings_change(conn: sqlite3.Connection) -> int:
                                      "guess_score = NULL, guess_evidence = NULL WHERE id = ? AND person_id IS NULL "
                                      "AND assigned_by = 'guess'", (r["id"],))
                         withdrawn += 1
+                        if table == "faces" and isinstance(r["was"], int):
+                            back.append((int(r["id"]), int(r["was"])))
             if withdrawn:
                 bump_faces_version(conn)
+            if back:
+                from app.analysis import person_scan
+
+                person_scan.regroup(conn, back)
         kv_set(conn, atraits.RULES_KEY, current)
     if items:
         atraits.requeue(conn, sorted(items))

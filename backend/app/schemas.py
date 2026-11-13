@@ -765,6 +765,7 @@ class RecognitionCut(BaseModel):
 
 
 class RecognitionCheck(BaseModel):
+    folds: Literal["day", "photo"] | None = None  # what it was tested on: days, or photos, it was not trained on
     positives: int
     negatives: int
     unclear_positives: int = 0
@@ -794,7 +795,8 @@ class RecognitionOut(BaseModel):
     """Recognition trained on one person (section 10, app.learning.person_model)."""
 
     available: bool
-    reason: str | None = None  # why it cannot be trained or used (learning off, too few faces)
+    reason: str | None = None  # why it cannot be trained or used (learning off, too few clear faces)
+    learning: bool = True  # learning is on in Settings; off, a trained model is not used
     trained: bool = False
     trained_at: str | None = None
     counts: dict[str, float] = {}
@@ -808,7 +810,7 @@ class RecognitionOut(BaseModel):
     scan: RecognitionScan | None = None
     running: Literal["train", "scan"] | None = None
     progress: RecognitionProgress | None = None
-    error: str | None = None
+    error: str | None = None  # why the last run failed, or that it stopped when the app was restarted
     answers_since: int = 0  # the owner's answers about this person since the training
     busy: bool = False  # a run for another person is going
 
@@ -819,6 +821,10 @@ class RecognitionStartIn(BaseModel):
 
 class RecognitionStartOut(BaseModel):
     started: bool
+
+
+class RecognitionLeaveIn(BaseModel):
+    face_ids: list[int] = Field(min_length=1, max_length=1000)
 
 
 class RecognitionConflict(BaseModel):

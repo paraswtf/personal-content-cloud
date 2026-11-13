@@ -3,20 +3,27 @@
 app.learning.person_model holds the model; this module applies it to faces that are not on the person:
 
 - scan(conn, person_id): every face that is not theirs, not the owner's own say, in a live item outside the vault,
-  not turned down for them before, in an item they are not in yet. A loose face or one in an unnamed group that the
-  model gives GUESS_P or more becomes a GUESS (basis 'face'), one per photo. guess_item writes the guess (the scan
-  runs it for every photo it picked); the scan itself only takes a face out of its unnamed group first, and only
-  when the guess will stand (the group goes when it is left empty; the evidence remembers it, was_person_id). Faces
-  the app put on other NAMED people are never touched: the sure ones are listed in the result ("elsewhere").
+  not turned down for them before, in an item they are not in yet, and not in an unnamed group the owner said is
+  not this person (a dismissed merge suggestion, merge_dismissals). A loose face or one in an unnamed group that
+  the model gives GUESS_P or more becomes a GUESS (basis 'face'), one per photo. guess_item writes the guess (the
+  scan runs it for every photo it picked); the scan itself only takes a face out of its unnamed group first, and
+  only when the guess will stand (the group goes when it is left empty; the evidence remembers it, was_person_id).
+  Faces the app put on other NAMED people are never touched: the sure ones are listed in the result ("elsewhere").
   Nothing is ever tagged here.
 - merge_item(conn, item, boxes, results): the same judgement for the open faces of one item, merged into what the
   clothes and trait paths found (guess.guess_item calls it), so a model guess is recomputed on every run instead of
   being erased, and a new photo of the person gets one when it is analysed.
-- regroup(conn, faces): a face taken out of a group whose guess was turned down or taken back goes back into that
-  group (or, the group gone, a clear face starts an unnamed person of its own). No matching step, never a named
-  person: exactly what the scan undid.
-- withdraw(conn, person_id): takes the model's open guesses back and pauses it (no new guesses until the next scan).
+- regroup(conn, faces): a face taken out of a group goes back into that group whenever its guess goes away without
+  the owner's answer for that face: turned down, taken back, or cleared by any other path (guess_item when the
+  model stops naming it or the person is in the photo now, the person deleted or merged, the guess window, the
+  vault). left_groups() finds such faces before a guess is cleared. A group that went when the scan left it empty
+  comes back as ONE unnamed person for all its faces (the open guesses that remember it are re-pointed, so later
+  answers find it); a group that got a name meanwhile is never joined: a clear face starts a new unnamed one. No
+  matching step, never a named person.
+- withdraw(conn, person_id): takes the model's open guesses back and pauses it (no new guesses until the next look
+  or training). The pause is persons.recognition_paused_at, so the undo of the action un-pauses the model.
 - start / state: one background thread (worker.run_in_background) for training and scanning, with its progress.
+  A run leaves a mark in kv while it works; a mark without a run (the app was restarted) is reported as an error.
 
 A candidate is dropped when a face the owner took off the person is nearer to it than the person's own faces are
 (cosine >= max(top-3, VETO_SIM)), and when another named person scores it at least as high as the person does,
@@ -34,7 +41,7 @@ from typing import Any, Callable
 import numpy as np
 
 from app.config import settings
-from app.db import bump_faces_version, tx
+from app.db import bump_faces_version, kv_get, kv_set, tx
 from app.learning import person_model
 from app.util import json_dumps, json_loads, now_iso
 
@@ -49,6 +56,8 @@ ELSEWHERE_KEPT = 200
 _IN_CHUNK = 500
 # CASE keeps json_extract away from malformed JSON (AND does not promise an order in SQLite)
 BASIS_SQL = "(CASE WHEN json_valid({col}) THEN json_extract({col}, '$.basis') END)"
+WAS_SQL = "(CASE WHEN json_valid({col}) THEN json_extract({col}, '$.was_person_id') END)"
+RUN_KEY = "recognition_run:{}"  # kv: a run for this person is going (or was, when the app stopped under it)
 
 Progress = Callable[[int, int, str], None]
 
@@ -85,6 +94,15 @@ def _removed(conn: sqlite3.Connection, person_id: int) -> np.ndarray | None:
 def _named_people(conn: sqlite3.Connection) -> set[int]:
     return {int(r[0]) for r in conn.execute(
         "SELECT id FROM persons WHERE name IS NOT NULL AND name != '' AND kind = 'person'")}
+
+
+def _dismissed(conn: sqlite3.Connection, person_id: int) -> set[int]:
+    """The people the owner said are not this person (a merge suggestion turned down): an unnamed group among them
+    is not looked at for this person, and a face that came out of one gets no guess for them."""
+    pid = int(person_id)
+    return {int(r[0]) for r in conn.execute(
+        "SELECT CASE WHEN person_a = ? THEN person_b ELSE person_a END FROM merge_dismissals "
+        "WHERE person_a = ? OR person_b = ?", (pid, pid, pid))}
 
 
 class _Judge:
@@ -152,8 +170,11 @@ def candidates(conn: sqlite3.Connection, person_id: int) -> list[sqlite3.Row]:
         "AND NOT EXISTS (SELECT 1 FROM guess_rejections g WHERE g.kind = 'face' AND g.ref_id = f.id AND g.person_id = ?) "
         "ORDER BY f.id", (pid, pid),
     ).fetchall()
-    # the person is in the item already (a face, a person box or a tag): confirming would be refused there
-    return [r for r in rows if int(r["item_id"]) not in present]
+    dismissed = _dismissed(conn, pid)
+    # the person is in the item already (a face, a person box or a tag): confirming would be refused there; and an
+    # unnamed group the owner said is not this person keeps its faces
+    return [r for r in rows if int(r["item_id"]) not in present
+            and (r["named"] or r["person_id"] is None or int(r["person_id"]) not in dismissed)]
 
 
 def scan(conn: sqlite3.Connection, person_id: int, progress: Progress | None = None) -> dict[str, Any]:
@@ -167,7 +188,7 @@ def scan(conn: sqlite3.Connection, person_id: int, progress: Progress | None = N
         raise person_model.NotEnough("Recognition is not trained on this person yet.")
     if conn.execute("SELECT 1 FROM persons WHERE id = ? AND kind = 'person'", (pid,)).fetchone() is None:
         raise person_model.NotEnough("This person is not here any more.")
-    person_model.update(pid, withdrawn_at=None)  # looking again un-pauses the model for guess_item
+    person_model.resume(conn, pid)  # looking again un-pauses the model for guess_item
     model = person_model.load(pid)
     if model is None:
         raise person_model.NotEnough("Recognition is not trained on this person yet.")
@@ -232,22 +253,22 @@ def scan(conn: sqlite3.Connection, person_id: int, progress: Progress | None = N
     # only takes faces out of unnamed groups, and only those whose guess guess_item will keep: a face stays in
     # its group when clothes or traits name someone more strongly there, or another box of the photo keeps the person.
     grouped = [pk for pk in chosen if pk.person_id is not None and _would_stand(conn, pid, pk)]
-    detached = 0
+    taken_out: set[int] = set()
     touched: set[int] = {pk.item_id for pk in chosen}
     for part in _chunks(grouped, WRITE_CHUNK):
-        n, items = _write(conn, model, part)
-        detached += n
+        ids, items = _write(conn, model, part)
+        taken_out |= ids
         touched |= items
     # a guess of an earlier scan that the model does not make any more goes (and its face back to a group)
     stale = [r for r in _standing(conn, pid) if int(r["id"]) not in keep_ids]
     if stale:
         touched |= {int(r["item_id"]) for r in stale}
-        _clear(conn, pid, stale)
+        _clear(conn, pid, [int(r["id"]) for r in stale])
     _settle(conn, touched)
     # the safety net of _would_stand: a face taken out whose guess did not stand after all goes back
-    undone = _restore_unsettled(conn, pid, grouped)
-    detached = max(0, detached - undone)
+    _restore_unsettled(conn, pid, grouped)
     standing = _standing(conn, pid)
+    detached = sum(1 for r in standing if int(r["id"]) in taken_out)
     elsewhere.sort(key=lambda e: (-e["p"], e["face_id"]))
     result = {
         "at": now_iso(), "looked": int(looked), "guesses": len(standing),
@@ -296,6 +317,8 @@ def _settle(conn: sqlite3.Connection, item_ids: set[int]) -> None:
 
 
 def _restore_unsettled(conn: sqlite3.Connection, person_id: int, picks: list[_Pick]) -> int:
+    """Faces this scan took out of a group that are still loose without the model's guess (another guess won
+    after all): back into the group, without that guess. guess_item itself puts back the ones it cleared."""
     back: list[tuple[int, int]] = []
     for pk in picks:
         r = conn.execute("SELECT person_id, assigned_by, guess_person_id, guess_evidence FROM faces WHERE id = ?",
@@ -306,16 +329,20 @@ def _restore_unsettled(conn: sqlite3.Connection, person_id: int, picks: list[_Pi
         if (r["guess_person_id"] is not None and int(r["guess_person_id"]) == int(person_id)
                 and isinstance(ev, dict) and ev.get("basis") == BASIS):
             continue  # the model's guess stands
-        back.append((pk.face_id, pk.person_id))
+        # what the evidence remembers now (a group that came back under a new id), else where the scan found it
+        was = _was(r["guess_evidence"])
+        back.append((pk.face_id, was if was is not None else pk.person_id))
     return regroup(conn, back, clear_guess=True)
 
 
-def _standing(conn: sqlite3.Connection, person_id: int) -> list[sqlite3.Row]:
-    """The model's open guesses for the person in live items outside the vault."""
+def _standing(conn: sqlite3.Connection, person_id: int, *, hidden: bool = False) -> list[sqlite3.Row]:
+    """The model's open guesses for the person in live items outside the vault; with `hidden` those in the trash
+    and the vault too (what taking the guesses back clears)."""
+    where = "" if hidden else "AND i.deleted_at IS NULL AND i.nsfw = 0 "
     return conn.execute(
         "SELECT f.id, f.item_id, f.guess_score, f.guess_evidence FROM faces f JOIN items i ON i.id = f.item_id "
         "WHERE f.guess_person_id = ? AND f.person_id IS NULL AND f.assigned_by = 'guess' "
-        f"AND i.deleted_at IS NULL AND i.nsfw = 0 AND {BASIS_SQL.format(col='f.guess_evidence')} = ? ORDER BY f.id",
+        f"{where}AND {BASIS_SQL.format(col='f.guess_evidence')} = ? ORDER BY f.id",
         (int(person_id), BASIS),
     ).fetchall()
 
@@ -330,13 +357,13 @@ def _was(evidence_json: str | None) -> int | None:
     return int(v) if isinstance(v, int) else None
 
 
-def _write(conn: sqlite3.Connection, model: person_model.Model, picks: list[_Pick]) -> tuple[int, set[int]]:
-    """Write these guesses in one short transaction, each row read again first. Returns (faces taken out of an
+def _write(conn: sqlite3.Connection, model: person_model.Model, picks: list[_Pick]) -> tuple[set[int], set[int]]:
+    """Write these guesses in one short transaction, each row read again first. Returns (the faces taken out of an
     unnamed group, items changed)."""
     from app.analysis import cluster, guess
 
     pid = model.person_id
-    detached = 0
+    detached: set[int] = set()
     detached_from: set[int] = set()
     detached_items: set[int] = set()
     changed_items: set[int] = set()
@@ -344,7 +371,8 @@ def _write(conn: sqlite3.Connection, model: person_model.Model, picks: list[_Pic
     now = now_iso()
     with tx(conn):
         if conn.execute("SELECT 1 FROM persons WHERE id = ?", (pid,)).fetchone() is None:
-            return 0, set()
+            return set(), set()
+        dismissed = _dismissed(conn, pid)
         for pk in picks:
             row = conn.execute(
                 "SELECT f.person_id, f.assigned_by, f.guess_person_id, f.guess_score, f.guess_evidence, i.deleted_at, i.nsfw "
@@ -357,6 +385,8 @@ def _write(conn: sqlite3.Connection, model: person_model.Model, picks: list[_Pic
             if cur is not None and conn.execute(
                     "SELECT 1 FROM persons WHERE id = ? AND (name IS NULL OR name = '')", (cur,)).fetchone() is None:
                 continue  # its group got a name meanwhile
+            if cur is not None and cur in dismissed:
+                continue  # the owner said meanwhile that this group is not the person
             if conn.execute("SELECT 1 FROM guess_rejections WHERE kind = 'face' AND ref_id = ? AND person_id = ?",
                             (pk.face_id, pid)).fetchone():
                 continue
@@ -381,7 +411,7 @@ def _write(conn: sqlite3.Connection, model: person_model.Model, picks: list[_Pic
                 (pid, round(pk.p, 4), json_dumps(ev), pk.face_id))
             changed_items.add(pk.item_id)
             if cur is not None:
-                detached += 1
+                detached.add(pk.face_id)
                 detached_from.add(cur)
                 detached_items.add(pk.item_id)
                 conn.execute("UPDATE persons SET cover_face_id = NULL, updated_at = ? WHERE cover_face_id = ?",
@@ -391,89 +421,147 @@ def _write(conn: sqlite3.Connection, model: person_model.Model, picks: list[_Pic
             cluster.prune_empty_persons(conn, detached_from)
         if changed_items:
             bump_faces_version(conn)
-    if detached_items:
-        guess.refresh_fts(conn, detached_items)
+    # no search text to refresh: an unnamed group has no name on its photos
     return detached, changed_items
 
 
-def _clear(conn: sqlite3.Connection, person_id: int, rows: list[sqlite3.Row]) -> int:
-    """Clear these open guesses of the person, then put the faces that were taken out of a group back."""
-    ids = [int(r["id"]) for r in rows]
-    back = [(int(r["id"]), was) for r in rows if (was := _was(r["guess_evidence"])) is not None]
-    n = 0
+def _clear(conn: sqlite3.Connection, person_id: int, face_ids: list[int]) -> list[int]:
+    """Clear these open guesses of the person and put the faces that were taken out of a group back, in one
+    transaction. Returns the faces whose guess went."""
+    cleared: list[int] = []
     with tx(conn):
-        for part in _chunks(ids, _IN_CHUNK):
+        for part in _chunks(sorted({int(f) for f in face_ids}), _IN_CHUNK):
             marks = ",".join("?" * len(part))
-            n += conn.execute(
+            where = f"id IN ({marks}) AND person_id IS NULL AND assigned_by = 'guess' AND guess_person_id = ?"
+            hit = [int(r[0]) for r in conn.execute(f"SELECT id FROM faces WHERE {where}", [*part, int(person_id)])]
+            if not hit:
+                continue
+            back = left_groups(conn, where, [*part, int(person_id)])
+            conn.execute(
                 "UPDATE faces SET assigned_by = 'auto', guess_person_id = NULL, guess_score = NULL, guess_evidence = NULL "
-                f"WHERE id IN ({marks}) AND person_id IS NULL AND assigned_by = 'guess' AND guess_person_id = ?",
-                [*part, int(person_id)]).rowcount
-        if n:
+                f"WHERE {where}", [*part, int(person_id)])
+            cleared.extend(hit)
+            regroup(conn, back)
+        if cleared:
             bump_faces_version(conn)
-    regroup(conn, back)
-    return n
+    return cleared
 
 
 def _items_of(rows: list[sqlite3.Row]) -> set[int]:
     return {int(r["item_id"]) for r in rows}
 
 
-def regroup(conn: sqlite3.Connection, faces: list[tuple[int, int]], *, clear_guess: bool = False) -> int:
-    """(face id, the unnamed person a scan took it out of) for faces that are loose again, the guess turned down or
-    taken back: each goes back to that group when it still exists and still has no name, else a clear face starts
-    an unnamed person of its own (as it had). Exactly what the scan undid, with no new matching: a face is never
-    put on a named person here. With clear_guess a face that holds another open guess goes back too, without it.
-    Returns how many found a group."""
-    from app.analysis import cluster, guess
+def left_groups(conn: sqlite3.Connection, where: str, params: list[Any] | tuple[Any, ...] = ()) -> list[tuple[int, int]]:
+    """(face id, the unnamed person a scan took the face out of) for the faces that match `where` (a condition on
+    the faces table) and hold an open guess whose evidence remembers one (was_person_id). Whoever clears such a
+    guess without the owner's answer for that face asks first and hands the result to regroup() afterwards."""
+    rows = conn.execute(
+        f"SELECT id, {WAS_SQL.format(col='guess_evidence')} AS was FROM faces WHERE person_id IS NULL "
+        "AND assigned_by = 'guess' AND guess_person_id IS NOT NULL AND guess_evidence LIKE '%was_person_id%' "
+        f"AND ({where}) ORDER BY id", list(params)).fetchall()
+    return [(int(r["id"]), int(r["was"])) for r in rows if isinstance(r["was"], int)]
+
+
+def repoint(conn: sqlite3.Connection, moved: dict[int, int | None]) -> int:
+    """The open guesses that remember one of these unnamed people (keys) remember its replacement from now on: a
+    group that was merged into another person, or one that came back under a new id. With None they forget it:
+    the owner deleted that group, so a face whose guess goes later stays loose. The evidence is written the way
+    guess_item writes it, so the next run finds it unchanged. Call inside a transaction."""
+    if not moved:
+        return 0
+    n = 0
+    for r in conn.execute(
+            f"SELECT id, guess_evidence, {WAS_SQL.format(col='guess_evidence')} AS was FROM faces WHERE person_id IS NULL "
+            "AND assigned_by = 'guess' AND guess_person_id IS NOT NULL AND guess_evidence LIKE '%was_person_id%'").fetchall():
+        if not isinstance(r["was"], int) or int(r["was"]) not in moved:
+            continue
+        ev = json_loads(r["guess_evidence"], {}) or {}
+        if not isinstance(ev, dict):
+            continue
+        new = moved[int(r["was"])]
+        if new is None:
+            ev.pop("was_person_id", None)
+        else:
+            ev["was_person_id"] = int(new)
+        conn.execute("UPDATE faces SET guess_evidence = ? WHERE id = ?", (json_dumps(ev), int(r["id"])))
+        n += 1
+    return n
+
+
+def regroup(conn: sqlite3.Connection, faces: list[tuple[int, int]], *, clear_guess: bool = False,
+            gone: Any = ()) -> int:
+    """(face id, the unnamed person a scan took it out of) for faces that are loose again, the guess turned down,
+    taken back or cleared: each goes back to that group when it still exists and still has no name. A group that
+    is gone (it went when it was left empty, or is one of `gone`, about to be deleted) comes back as ONE new
+    unnamed person for all its faces here, and the open guesses that still remember it are re-pointed to the new
+    one, so later answers reuse it. A group that has a name now is never joined: when one of its faces here is
+    clear, they start a new unnamed person together, else they stay loose. No new matching: a face is never put
+    on a named person here. With clear_guess a face that holds another open guess goes back too, without it.
+    Works inside the caller's transaction as well. Returns how many found a group."""
+    from app.analysis import cluster
     from app.analysis.faces import is_clear_face
 
     if not faces:
         return 0
+    states = "('auto', 'guess')" if clear_guess else "('auto')"
+    gone_ids = {int(g) for g in gone}
     done = 0
     items: set[int] = set()
     try:
         with tx(conn):
+            by_group: dict[int, list[sqlite3.Row]] = {}
             for face_id, was in faces:
-                states = "('auto', 'guess')" if clear_guess else "('auto')"
                 r = conn.execute(
-                    "SELECT item_id, det_score, size_px, clarity, sharpness FROM faces WHERE id = ? AND person_id IS NULL "
-                    f"AND assigned_by IN {states}", (int(face_id),)).fetchone()
-                if r is None:
+                    "SELECT id, item_id, det_score, size_px, clarity, sharpness FROM faces WHERE id = ? "
+                    f"AND person_id IS NULL AND assigned_by IN {states}", (int(face_id),)).fetchone()
+                if r is not None:
+                    by_group.setdefault(int(was), []).append(r)
+            moved: dict[int, int] = {}
+            for was, rows in by_group.items():
+                p = None if was in gone_ids else conn.execute(
+                    "SELECT name, kind FROM persons WHERE id = ?", (was,)).fetchone()
+                if p is not None and p["kind"] == "person" and not p["name"]:
+                    target = was
+                elif p is None or any(is_clear_face(r["det_score"], r["size_px"], r["clarity"], r["sharpness"]) for r in rows):
+                    target = moved[was] = cluster.new_person(conn)
+                else:
                     continue
-                target: int | None = None
-                if conn.execute("SELECT 1 FROM persons WHERE id = ? AND (name IS NULL OR name = '') AND kind = 'person'",
-                                (int(was),)).fetchone() is not None:
-                    target = int(was)
-                elif is_clear_face(r["det_score"], r["size_px"], r["clarity"], r["sharpness"]):
-                    target = cluster.new_person(conn)
-                if target is None:
-                    continue
-                conn.execute(
-                    "UPDATE faces SET person_id = ?, assigned_by = 'auto', guess_person_id = NULL, guess_score = NULL, "
-                    f"guess_evidence = NULL WHERE id = ? AND person_id IS NULL AND assigned_by IN {states}",
-                    (target, int(face_id)))
-                items.add(int(r["item_id"]))
-                done += 1
+                for r in rows:
+                    n = conn.execute(
+                        "UPDATE faces SET person_id = ?, assigned_by = 'auto', guess_person_id = NULL, guess_score = NULL, "
+                        f"guess_evidence = NULL WHERE id = ? AND person_id IS NULL AND assigned_by IN {states}",
+                        (target, int(r["id"]))).rowcount
+                    if n:
+                        items.add(int(r["item_id"]))
+                        done += 1
+            repoint(conn, moved)
             if done:
                 cluster.sync_bodies_to_faces(conn, sorted(items))
                 bump_faces_version(conn)
-    except Exception:  # noqa: BLE001 - the owner's answer already happened; the face stays loose
+    except Exception:  # noqa: BLE001 - the guess already went; the face stays loose
         log.exception("person scan: could not put %d faces back into their groups", len(faces))
         return 0
-    if items:
-        guess.refresh_fts(conn, items)
     return done
+
+
+def take_back(conn: sqlite3.Connection, person_id: int) -> int:
+    """Clear every open guess the model made for the person (those in the trash and the vault too, so none comes
+    back with its photo) and let guess_item settle the items. Returns how many went in items the owner can see."""
+    pid = int(person_id)
+    rows = _standing(conn, pid, hidden=True)
+    shown = {int(r["id"]) for r in _standing(conn, pid)}
+    cleared = _clear(conn, pid, [int(r["id"]) for r in rows])
+    _settle(conn, _items_of(rows))  # a guess of other evidence that the model's had replaced comes back
+    return len(shown.intersection(cleared))
 
 
 def withdraw(conn: sqlite3.Connection, person_id: int) -> int:
     """Take the model's open guesses for the person back. The model is paused first, so guess_item does not make
-    them again; the next scan un-pauses it. Returns how many guesses went."""
-    pid = int(person_id)
-    person_model.update(pid, withdrawn_at=now_iso())
-    rows = _standing(conn, pid)
-    n = _clear(conn, pid, rows)
-    _settle(conn, _items_of(rows))  # a guess of other evidence that the model's had replaced comes back
-    return n
+    them again; the next look or training un-pauses it, and so does the undo of this (the pause is journaled).
+    Returns how many guesses went."""
+    if person_model.stored(person_id) is not None:  # nothing to pause without a model
+        person_model.pause(conn, int(person_id))
+    return take_back(conn, person_id)
 
 
 # ------------------------------------------------------------------ guess_item's part
@@ -485,7 +573,10 @@ def merge_item(conn: sqlite3.Connection, item: sqlite3.Row, boxes: list[Any],
     Against the clothes or trait candidate of a face: the same person keeps the higher score and notes the other
     evidence (`also`, or `p` on the other's evidence); a different person: the higher score wins, except that a
     candidate for an unnamed person never displaces the model's (the face may come from that very group, and a
-    named guess is the one the owner can answer; turned down, the other shows next time). Then one person per photo."""
+    named guess is the one the owner can answer; turned down, the other shows next time). Then one person per photo.
+    A face that came out of an unnamed group the owner said is not the person (merge_dismissals) gets no guess for
+    them. A face left without a candidate here loses its guess in guess_item, which then puts it back into the
+    group it came out of (regroup)."""
     from app.analysis import guess
     from app.analysis.index import get_index
 
@@ -503,10 +594,22 @@ def merge_item(conn: sqlite3.Connection, item: sqlite3.Row, boxes: list[Any],
     present = guess._present_people(conn, item_id)
     rejected = guess._rejections(conn, faces)
     active: dict[int, person_model.Model] = {}
+    paused = person_model.paused(conn, trained) if trained else set()
     for pid in trained:
         m = person_model.load(pid)
-        if m is not None and not m.withdrawn:
+        if m is not None and pid not in paused:
             active[pid] = m
+    dismissed: dict[int, set[int]] = {}
+
+    def not_them(fid: int, pid: int) -> bool:
+        """The face came out of an unnamed group the owner said is not this person."""
+        was = was_of.get(fid)
+        if was is None:
+            return False
+        if pid not in dismissed:
+            dismissed[pid] = _dismissed(conn, pid)
+        return was in dismissed[pid]
+
     cands: dict[int, guess.Candidate] = {}
     named: set[int] | None = None
     live = {pid: m for pid, m in active.items() if pid not in present}
@@ -528,7 +631,7 @@ def merge_item(conn: sqlite3.Connection, item: sqlite3.Row, boxes: list[Any],
                 p, top3, veto = _Judge(conn, model).score(embs, weights)
                 hot = [k for k in range(len(faces))
                        if p[k] >= model.guess_p and not veto[k] and weights[k] > 0 and not child[k]
-                       and pid not in rejected.get(("face", faces[k].id), set())]
+                       and pid not in rejected.get(("face", faces[k].id), set()) and not not_them(faces[k].id, pid)]
                 if not hot:
                     continue
                 worse = _better_elsewhere(idx, pid, [ids[k] for k in hot], embs[hot], weights[hot], top3[hot], named)
@@ -544,6 +647,8 @@ def merge_item(conn: sqlite3.Connection, item: sqlite3.Row, boxes: list[Any],
     # answers it: an undo may have brought it back, and only a model that is at work may withdraw its own guess.
     for fid, (qid, score, ev) in held.items():
         if fid in cands or qid in active or qid in present or qid in rejected.get(("face", fid), set()):
+            continue
+        if not_them(fid, qid):
             continue
         if conn.execute("SELECT 1 FROM persons WHERE id = ?", (qid,)).fetchone() is None:
             continue
@@ -609,12 +714,42 @@ _state: dict[int, dict[str, Any]] = {}
 _running: int | None = None
 
 
-def state(person_id: int) -> dict[str, Any]:
-    """{running: 'train' | 'scan' | None, progress: {done, total, step} | None, error: str | None}."""
+def state(person_id: int, conn: sqlite3.Connection | None = None) -> dict[str, Any]:
+    """{running: 'train' | 'scan' | None, progress: {done, total, step} | None, error: str | None}. The state of a
+    run lives in memory; with a connection, a run that the app was stopped under (its mark is still in kv and
+    nothing is running) is reported as the error, so it is never taken for a run that finished."""
+    pid = int(person_id)
     with _state_lock:
-        s = _state.get(int(person_id)) or {}
-        return {"running": s.get("running"), "progress": dict(s["progress"]) if s.get("progress") else None,
-                "error": s.get("error")}
+        s = _state.get(pid) or {}
+        out = {"running": s.get("running"), "progress": dict(s["progress"]) if s.get("progress") else None,
+               "error": s.get("error")}
+        idle = _running != pid
+    if conn is not None and idle and out["running"] is None and out["error"] is None:
+        out["error"] = _lost_run(conn, pid)
+    return out
+
+
+def _lost_run(conn: sqlite3.Connection, person_id: int) -> str | None:
+    mark = json_loads(kv_get(conn, RUN_KEY.format(int(person_id))), None)
+    if not isinstance(mark, dict):
+        return None
+    if not mark.get("train"):
+        return "The look at other faces stopped before it finished, because the app was restarted. Look again."
+    stored = person_model.stored(person_id) or {}
+    if mark.get("look") and str(stored.get("trained_at") or "") > str(mark.get("started_at") or "~"):
+        return "It was trained, but the look at other faces stopped because the app was restarted. Look again."
+    return "The training stopped before it finished, because the app was restarted. Start it again."
+
+
+def _mark_run(conn: sqlite3.Connection, person_id: int, train: bool, look: bool) -> None:
+    with tx(conn):
+        kv_set(conn, RUN_KEY.format(int(person_id)),
+               json_dumps({"train": bool(train), "look": bool(look), "started_at": now_iso()}))
+
+
+def _unmark_run(conn: sqlite3.Connection, person_id: int) -> None:
+    with tx(conn):
+        conn.execute("DELETE FROM kv WHERE key = ?", (RUN_KEY.format(int(person_id)),))
 
 
 def busy_with() -> int | None:
@@ -628,9 +763,9 @@ def _set(person_id: int, **fields: Any) -> None:
         _state.setdefault(int(person_id), {}).update(fields)
 
 
-def start(person_id: int, *, train: bool = True, look: bool = True) -> bool:
+def start(conn: sqlite3.Connection, person_id: int, *, train: bool = True, look: bool = True) -> bool:
     """Train and/or scan on the background thread (inline with settings.workers_enabled off, as the tests run).
-    False when a run is already going."""
+    False when a run is already going. The run is marked in kv until it ends (state() reads the mark)."""
     global _running
     from app import worker
 
@@ -640,15 +775,29 @@ def start(person_id: int, *, train: bool = True, look: bool = True) -> bool:
             return False
         _running = pid
         _state[pid] = {"running": "train" if train else "scan", "progress": None, "error": None}
+    try:
+        _mark_run(conn, pid, train, look)
+    except BaseException:
+        _not_started(pid)
+        raise
     if not settings.workers_enabled:
         contextvars.Context().run(_run, pid, train, look)  # no owner action: as on the thread, nothing is journaled
         return True
     if worker.run_in_background(RUNNER_KEY, _run, pid, train, look) is None:
-        with _state_lock:
-            _running = None
-            _state[pid]["running"] = None
+        try:
+            _unmark_run(conn, pid)
+        except Exception:  # noqa: BLE001 - the mark of a run that never started; the next run replaces it
+            log.exception("person model: could not take the mark of the run for person %s away", pid)
+        _not_started(pid)
         return False
     return True
+
+
+def _not_started(person_id: int) -> None:
+    global _running
+    with _state_lock:
+        _running = None
+        _state.setdefault(int(person_id), {})["running"] = None
 
 
 def _run(person_id: int, train: bool, look: bool) -> None:
@@ -672,6 +821,10 @@ def _run(person_id: int, train: bool, look: bool) -> None:
         log.exception("person model: the run for person %s failed", person_id)
         _set(person_id, error="It stopped on an error. Try again.")
     finally:
+        try:
+            _unmark_run(conn, person_id)  # before the state says idle: a mark without a run means a lost run
+        except Exception:  # noqa: BLE001
+            log.exception("person model: could not take the mark of the run for person %s away", person_id)
         conn.close()
         with _state_lock:
             _running = None

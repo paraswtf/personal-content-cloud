@@ -13,6 +13,9 @@ CONTRACT.
 - merge_suggestions(conn, limit) -> [(a, b, similarity)] with a < b
 - new_person(conn, name) / find_person_by_name(conn, name) / prune_empty_persons(conn, ids) /
   clear_guesses_for(conn, person_ids): person helpers for the pipeline and the people API.
+- Recognition trained on one person (section 10): _drop_gated keeps a face off a person whose model refuses it;
+  clear_guesses_for and merge_persons send a face that a scan took out of an unnamed group back into it when
+  they clear its guess, and a merge moves that memory from the sources to the target (person_scan).
 
 Every function that changes faces, bodies or persons runs inside `with tx(conn):` (nesting is
 fine) and calls app.db.bump_faces_version(conn) when it changed anything.
@@ -28,6 +31,7 @@ import logging
 import sqlite3
 from collections import defaultdict
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 
@@ -96,12 +100,48 @@ def find_or_create_person(conn: sqlite3.Connection, name: str | None, *, kind: s
     return found if found is not None else new_person(conn, clean, kind=kind, species=species)
 
 
+def _left_groups(conn: sqlite3.Connection, where: str, params: list[Any] | tuple[Any, ...]) -> list[tuple[int, int]]:
+    """(face, the unnamed group a scan took it out of for a guess) among the open guesses on the faces that match
+    `where` (section 10, person_scan.left_groups): asked before such guesses are cleared here."""
+    try:
+        from app.analysis import person_scan
+
+        return person_scan.left_groups(conn, where, params)
+    except Exception:  # noqa: BLE001 - a trained model never blocks the people helpers
+        log.exception("cluster: could not read the groups faces were taken out of")
+        return []
+
+
+def _regroup(conn: sqlite3.Connection, faces: list[tuple[int, int]], gone: list[int] | set[int] = ()) -> None:
+    """Those faces go back into their groups, their guess gone (person_scan.regroup); never into one of `gone`."""
+    if not faces:
+        return
+    try:
+        from app.analysis import person_scan
+
+        person_scan.regroup(conn, faces, gone=gone)
+    except Exception:  # noqa: BLE001 - the guess already went; the face stays loose
+        log.exception("cluster: could not put %d face(s) back into their groups", len(faces))
+
+
+def _repoint_groups(conn: sqlite3.Connection, moved: dict[int, int]) -> None:
+    try:
+        from app.analysis import person_scan
+
+        person_scan.repoint(conn, moved)
+    except Exception:  # noqa: BLE001 - only the memory of where a face came from
+        log.exception("cluster: could not move the memory of %d merged group(s)", len(moved))
+
+
 def clear_guesses_for(conn: sqlite3.Connection, person_ids: list[int] | set[int]) -> int:
-    """Drop open guesses that point at these people (call before deleting them). Returns rows changed."""
+    """Drop open guesses that point at these people (call before deleting them). A face that a scan took out of
+    an unnamed group for such a guess (section 10) goes back into that group. Returns rows changed."""
     ids = sorted({int(p) for p in person_ids})
     n = 0
+    back: list[tuple[int, int]] = []
     for chunk in _chunks(ids):
         marks = ",".join("?" * len(chunk))
+        back += _left_groups(conn, f"guess_person_id IN ({marks})", chunk)
         for table in ("faces", "bodies"):
             n += conn.execute(
                 f"UPDATE {table} SET guess_person_id = NULL, guess_score = NULL, guess_evidence = NULL, "
@@ -109,6 +149,7 @@ def clear_guesses_for(conn: sqlite3.Connection, person_ids: list[int] | set[int]
                 f"WHERE guess_person_id IN ({marks})",
                 chunk,
             ).rowcount
+    _regroup(conn, back, gone=ids)
     return n
 
 
@@ -336,10 +377,15 @@ def _drop_rejected_lookalikes(conn: sqlite3.Connection, embs: np.ndarray,
 
 def _drop_gated(idx: FaceIndex, ids: list[int], embs: np.ndarray, child: np.ndarray,
                 options: list[list[tuple[int, float]]]) -> list[list[tuple[int, float]]]:
-    """Recognition trained on one person (section 10, app.learning.person_model): an option for a person who has
-    such a model is dropped when the model says the face is not them (its score there as the top-3). It only ever
-    removes options, so nothing more is tagged than before; it keeps the look-alikes the owner took off the person
-    from being put back on them. Faces in the child band are left to the child rules (the model knows adults)."""
+    """Recognition trained on one person (section 10, app.learning.person_model): when the model of a person among
+    a face's options says the face is not them (its score there as the top-3), that option goes, and so does every
+    option ranked after it. The face keeps only the people it matched better than the one the model refused, so
+    the model's no never hands a face to someone it matched less well: a face of the person that the model misses
+    is left without a person (a clear one starts an unnamed group, as any unmatched face does) instead of being
+    tagged as the runner-up, a look-alike. This keeps the look-alikes the owner took off the person from being put
+    back on them. What it does not rule out: the person it refused for one face stays free for another face of
+    the same photo that clears their cut and the model. Faces in the child band are left to the child rules (the
+    model knows adults)."""
     try:
         from app.learning import person_model
 
@@ -354,7 +400,7 @@ def _drop_gated(idx: FaceIndex, ids: list[int], embs: np.ndarray, child: np.ndar
                 if pid in trained and not child[i]:
                     model = person_model.load(pid)
                     if model is not None and not model.gate(embs[i], float(weights[i]), float(score)):
-                        continue
+                        break  # nobody ranked after them inherits the face
                 kept.append((pid, score))
             out.append(kept)
         return out
@@ -697,12 +743,14 @@ def recluster_unassigned(conn: sqlite3.Connection) -> int:
     Works in steps of about _RECLUSTER_CHUNK faces (whole items). Each step scores its faces with no
     write transaction open (holding only the index lock), then applies the result in one short
     transaction that skips faces no longer unassigned and people that no longer exist."""
-    # A face holding the guess of a model trained on one person (basis 'face', section 10) waits for the owner's
-    # answer: the scan may have taken it out of the very group this pass would put it back into.
+    # A face holding the guess of a model trained on one person (basis 'face', section 10), or any guess on a face
+    # a scan took out of an unnamed group (was_person_id), waits for the owner's answer: the scan may have taken
+    # it out of the very group this pass would put it back into. When the guess goes, regroup puts it back.
     rows = conn.execute(
         "SELECT id, item_id, quality FROM faces WHERE person_id IS NULL AND assigned_by IN ('auto', 'guess') "
         "AND NOT (assigned_by = 'guess' AND (CASE WHEN json_valid(guess_evidence) "
-        "THEN json_extract(guess_evidence, '$.basis') END) IS 'face')"
+        "THEN (json_extract(guess_evidence, '$.basis') IS 'face' "
+        "OR json_extract(guess_evidence, '$.was_person_id') IS NOT NULL) END) IS 1)"
     ).fetchall()
     if not rows:
         return 0
@@ -829,15 +877,20 @@ def merge_persons(conn: sqlite3.Connection, target_id: int, source_ids: list[int
             "GROUP BY kind, ref_id",
             [target_id, *sources],
         )
+        # Section 10: an open guess that remembers a source as the unnamed group its face came out of remembers
+        # the target from now on (the face goes there when the guess goes, if the target has no name).
+        _repoint_groups(conn, {src: target_id for src in sources})
         # A guess re-pointed to the target on a box that already turned the target down is dropped
         # (after the copy above, so rejections of a source count as rejections of the target).
         for kind, table in (("face", "faces"), ("body", "bodies")):
+            where = "guess_person_id = ? AND id IN (SELECT ref_id FROM guess_rejections WHERE kind = ? AND person_id = ?)"
+            back = _left_groups(conn, where, (target_id, kind, target_id)) if kind == "face" else []
             conn.execute(
                 f"UPDATE {table} SET guess_person_id = NULL, guess_score = NULL, guess_evidence = NULL, "
-                "assigned_by = CASE WHEN assigned_by = 'guess' THEN 'auto' ELSE assigned_by END "
-                "WHERE guess_person_id = ? AND id IN (SELECT ref_id FROM guess_rejections WHERE kind = ? AND person_id = ?)",
+                f"assigned_by = CASE WHEN assigned_by = 'guess' THEN 'auto' ELSE assigned_by END WHERE {where}",
                 (target_id, kind, target_id),
             )
+            _regroup(conn, back, gone=sources)
         conn.execute(
             "INSERT OR IGNORE INTO merge_dismissals(person_a, person_b, created_at) "
             "SELECT MIN(?, other), MAX(?, other), MIN(created_at) FROM ("

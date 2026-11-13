@@ -27,6 +27,9 @@ CONTRACT.
   logged, never raised.
 - item_ids(conn, action_id): the items an action touched (the vault check of the route).
 - discard(path): during an action a removed crop moves to DATA_DIR/undo/<action>/ instead of being deleted.
+  The same holds for the recognition trained on a person (section 10, learned/person_<id>.json): the file goes
+  with its persons row (ROW_FILES), so undoing the delete or the merge of a trained person brings the model back
+  with them, and a redo takes it away again.
 - keep_copy(path): during an action a crop about to be replaced (a moved box, section 10) is copied there
   first. An undo that puts a box's x, y, w or h back swaps the crops: the one on disk goes to the undo's
   stash and the action's copy comes back (so a redo swaps them again), and faces whose vectors came back
@@ -76,6 +79,16 @@ NOISE = frozenset({"updated_at", "face_count", "body_count", "animal_count"})
 BOX_COLUMNS = frozenset({"x", "y", "w", "h"})  # a box's place: its crop follows it (keep_copy)
 FACE_VECTOR_COLUMNS = frozenset({"embedding", "det_score", "size_px", "clarity", "sharpness", "age_groups"})
 COUNTS = {"face_count": "faces", "body_count": "bodies", "animal_count": "animals"}
+
+
+def _person_model_path(person_id: int) -> Path:
+    from app.learning import person_model, store
+
+    return store.path(person_model.name_of(person_id))
+
+
+# Files that go and come back with their row: a box's crop, and the recognition trained on a person (section 10).
+ROW_FILES: dict[str, Callable[[int], Path]] = {**CROPS, "persons": _person_model_path}
 
 
 class UndoError(Exception):
@@ -344,7 +357,7 @@ def undo(conn: sqlite3.Connection, action_id: str) -> dict[str, Any]:
                     where = " AND ".join(f'"{k}" IS ?' for k in pk)
                     n = conn.execute(f"DELETE FROM {table} WHERE {where}",
                                      [_sql_value(new.get(k), k in blobs) for k in pk]).rowcount
-                    if n and table in CROPS:
+                    if n and table in ROW_FILES:
                         removed.append((table, int(new["id"])))
                     skipped += 0 if n else 1
                 elif e["op"] == "delete" and old is not None:
@@ -356,7 +369,7 @@ def undo(conn: sqlite3.Connection, action_id: str) -> dict[str, Any]:
                         f"INSERT INTO {table} ({', '.join(chr(34) + n + chr(34) for n in names)}) "
                         f"VALUES ({', '.join('?' * len(names))})",
                         [_sql_value(old[n], n in blobs) for n in names])
-                    if table in CROPS:
+                    if table in ROW_FILES:
                         restored.append((table, int(old["id"])))
                 elif e["op"] == "update" and old is not None and new is not None:
                     now = _current(conn, table, pk, new, cols)
@@ -392,11 +405,17 @@ def undo(conn: sqlite3.Connection, action_id: str) -> dict[str, Any]:
     finally:
         current_action.reset(token)
     for table, row_id in restored:
-        _move(_stash_path(action_id, CROPS[table](row_id)), CROPS[table](row_id))
+        _move(_stash_path(action_id, ROW_FILES[table](row_id)), ROW_FILES[table](row_id))
     for table, row_id in removed:
-        path = CROPS[table](row_id)
+        path = ROW_FILES[table](row_id)
         if path.exists():
             _move(path, _stash_path(undo_id, path))
+    people = [row_id for table, row_id in [*restored, *removed] if table == "persons"]
+    if people:
+        from app.learning import person_model
+
+        for row_id in people:  # a model file came back or went: what is remembered of it is stale
+            person_model.file_changed(row_id)
     for table, row_id in swapped:
         path = CROPS[table](row_id)
         before = _stash_path(action_id, path)
