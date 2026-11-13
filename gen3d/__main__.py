@@ -114,7 +114,10 @@ def check(weights_dir: Path, with_device: bool = False) -> int:
     found = {name: (True if name == "fake" else backends.is_available(name, weights_dir)) for name in backends.REGISTRY}
     version, device = _torch() if with_device else (None, None)
     auto = next((name for name in backends.ORDER if found.get(name)), None)
-    say(json.dumps({"backends": found, "auto": auto, "device": device, "torch": version}, sort_keys=True))
+    from gen3d import relief  # noqa: PLC0415 - numpy at import; "relief": the two depth model files are there
+
+    say(json.dumps({"backends": found, "auto": auto, "device": device, "relief": relief.available(weights_dir),
+                    "torch": version}, sort_keys=True))
     return EXIT_OK
 
 
