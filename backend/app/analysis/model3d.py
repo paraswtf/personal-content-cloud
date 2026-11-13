@@ -17,15 +17,20 @@ Files, under DATA_DIR/people3d/<person id>/:
 
 The child (see gen3d/__main__.py for the contract):
 - its own process group, with oom_score_adj 1000 so a memory limit takes it and not the server;
-- inside a sandbox when the real generator runs (settings.gen3d_sandbox, bwrap): the whole filesystem read-only
-  but the work folder, no network, its own process ids. The generator runs third-party model code on the owner's
-  face photos; the sandbox makes sure that code can neither send anything out nor change a file;
+- an environment of its own: a short list (_child_env), never the server's;
+- inside a sandbox when the real generator runs (settings.gen3d_sandbox, bwrap; sandbox_prefix says exactly what
+  it is made of). The generator runs third-party model code on the owner's face photos. Inside the sandbox that
+  code sees the system's programs and libraries, its own Python environment, weights and code, and the job's work
+  folder, which is the only place it can write. It does not see the home folder, the library, the database, the
+  rest of the repository, the machine's sockets (Docker, the session bus) or the network;
 - watched once a second: stopped when the resident memory of its whole process tree passes GEN3D_MAX_RSS_MB, when a
-  head takes longer than GEN3D_LOOK_TIMEOUT_S, on cancel, and when the server exits.
+  head takes longer than GEN3D_LOOK_TIMEOUT_S, on Stop or Delete, when its person is deleted or merged away, and
+  when the server exits. The heads that were finished before a limit stopped it are kept.
 
-One job at a time for the whole app (one GPU). A look whose source photo was deleted, put in the trash or moved to
-the vault since is neither listed nor served. Folders of people who no longer exist are removed by sweep()
-(housekeeping); a deleted person's model stops being served at once, as its routes ask for the person first.
+One job at a time for the whole app (one GPU). A look is neither listed nor served once its source photo is deleted,
+in the trash or in the vault, or once its source face is no longer this person's. Folders of people who no longer
+exist, and what an interrupted run left behind, are removed by sweep() (housekeeping); a deleted person's model
+stops being served at once, as its routes ask for the person first.
 """
 from __future__ import annotations
 
@@ -38,13 +43,15 @@ import re
 import shutil
 import signal
 import sqlite3
+import struct
 import subprocess
 import sys
 import threading
 import time
+from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from app import storage
 from app.analysis import looks as looks_mod
@@ -61,7 +68,9 @@ PICTURE_SIDE = 512
 PICTURE_QUALITY = 88
 CHECK_TTL_S = 300.0        # how long "the generator is installed" is believed
 CHECK_RETRY_S = 30.0       # ... and "it is not"
-CHECK_TIMEOUT_S = 120.0
+CHECK_TIMEOUT_S = 30.0
+GONE_CHECK_S = 1.0         # how often a running job looks whether its person still exists
+LOOK_FACE_IOU = 0.5        # how much one of the person's faces must overlap a look's source face to stand in for it
 STOP_WAIT_S = 5.0
 EXIT_WAIT_S = 30.0         # after its last line the child has this long to exit by itself
 DETAIL_MIN, DETAIL_MAX, DETAIL_DEFAULT = 1, 3, 2
@@ -98,6 +107,7 @@ _lock = threading.Lock()
 _state: dict[str, Any] | None = None       # the running job, or None
 _proc: subprocess.Popen[bytes] | None = None
 _check: tuple[float, tuple[Any, ...], dict[str, Any]] | None = None
+_checking = False
 _atexit_done = False
 
 
@@ -141,8 +151,11 @@ def file_url(person_id: int, rev: str, name: str) -> str:
 
 
 # ------------------------------------------------------------------ the generator and its sandbox
-def _python() -> Path:
-    if settings.gen3d_fake:
+def _python(fake: bool = False) -> Path:
+    """The Python that runs the generator. The stand-in needs only numpy and Pillow, so it runs with the server's
+    own Python however it was asked for (GEN3D_FAKE, GEN3D_GENERATOR=fake, or the job's own option); the real
+    generator runs with GEN3D_PYTHON, or GEN3D_DIR/venv/bin/python."""
+    if fake or settings.gen3d_fake or settings.gen3d_generator == "fake":
         return Path(sys.executable)
     return settings.gen3d_python or (settings.gen3d_dir / "venv" / "bin" / "python")
 
@@ -172,42 +185,143 @@ def sandbox_wanted(fake: bool) -> bool:
     return not fake and sandbox_bin() is not None
 
 
-def sandbox_prefix(work: Path) -> list[str]:
-    """The bwrap command line in front of the generator's: everything read-only except `work`, a private /tmp, no
-    network, its own process ids and IPC, gone when this process goes."""
-    return [
-        sandbox_bin() or SANDBOX_BIN,
-        "--ro-bind", "/", "/", "--dev-bind", "/dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp",
-        "--bind", str(work), str(work),
-        "--unshare-net", "--unshare-ipc", "--unshare-pid", "--die-with-parent", "--new-session",
-        "--setenv", "HOME", "/tmp", "--setenv", "XDG_CACHE_HOME", "/tmp/cache",
-        "--setenv", "HF_HUB_OFFLINE", "1", "--setenv", "TRANSFORMERS_OFFLINE", "1",
-        # libraries that keep a cache beside their code or in the home folder get a place they can write
-        "--setenv", "MPLCONFIGDIR", "/tmp/mpl", "--setenv", "NUMBA_CACHE_DIR", "/tmp/numba",
-    ]
+SANDBOX_HOME = "/tmp"      # the sandbox's own, empty /tmp
+ENV_PASSED = ("CUDA_VISIBLE_DEVICES", "NVIDIA_VISIBLE_DEVICES", "LD_LIBRARY_PATH", "GEN3D_THREADS")
+SYSTEM_DIRS = ("/bin", "/sbin", "/lib", "/lib32", "/lib64", "/libx32")
+LOADER_FILES = ("/etc/ld.so.cache", "/etc/ld.so.conf", "/etc/ld.so.conf.d", "/etc/alternatives")
 
 
-def _child_env() -> dict[str, str]:
-    env = dict(os.environ)
+def _child_env(home: str | Path = SANDBOX_HOME) -> dict[str, str]:
+    """The child's whole environment: a short list, never the server's own, which holds the server's settings and
+    can hold secrets and the address of a Docker socket. `home` is where HOME and the libraries' caches point: the
+    sandbox's private /tmp, or a folder inside the work folder when there is no sandbox (the machine's /tmp may be
+    shared with other users). The Hugging Face libraries are told to stay offline either way, so a run never asks
+    the hub for a newer file than the installer pinned. Four variables come from the server when it has them: the
+    GPU choice (two names), the library path and the generator's thread count."""
+    home = str(home)
     weights = _weights_dir()
-    env.update(PYTHONUNBUFFERED="1", HF_HOME=str(weights / "hf"), U2NET_HOME=str(weights / "u2net"))
-    env.pop("PYTHONHOME", None)
+    env = {
+        "PATH": "/usr/bin:/bin", "HOME": home, "LANG": "C.UTF-8", "PYTHONUNBUFFERED": "1",
+        "XDG_CACHE_HOME": f"{home}/cache", "MPLCONFIGDIR": f"{home}/mpl", "NUMBA_CACHE_DIR": f"{home}/numba",
+        "HF_HOME": str(weights / "hf"), "U2NET_HOME": str(weights / "u2net"),
+        "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1",
+    }
+    env.update({name: os.environ[name] for name in ENV_PASSED if name in os.environ})
     return env
+
+
+def _env_for(work: Path, fake: bool) -> dict[str, str]:
+    """The environment a child that works in `work` is started with: its home is the sandbox's /tmp when it runs
+    inside the sandbox, else a folder in `work`, which goes when `work` goes."""
+    try:
+        boxed = sandbox_wanted(fake)
+    except GeneratorMissing:
+        boxed = False
+    if boxed:
+        return _child_env(SANDBOX_HOME)
+    home = Path(work) / "home"
+    home.mkdir(parents=True, exist_ok=True)
+    return _child_env(home)
+
+
+def _gpu_nodes() -> list[str]:
+    """The NVIDIA device nodes of this machine, /dev/nvidia-caps included (none without the driver)."""
+    try:
+        return [f"/dev/{name}" for name in sorted(os.listdir("/dev")) if name.startswith("nvidia")]
+    except OSError:
+        return []
+
+
+def _python_root(root: str) -> bool:
+    """A folder that is a Python environment or installation, and not, say, a home folder that holds a bin/python."""
+    try:
+        return os.path.isfile(os.path.join(root, "pyvenv.cfg")) or any(Path(root, "lib").glob("python3*"))
+    except OSError:
+        return False
+
+
+def sandbox_reads(python: Path) -> list[str]:
+    """What the sandbox shows read-only besides the system's programs and libraries: the Python environment that
+    runs the child (where it is named and where it really is), the installation its interpreter comes from, the
+    generator's folder (weights and model code, as named and as it really is) and this repository's gen3d package.
+    An environment's python is a link, often to a link (uv names an installation by its minor version and links
+    that name to the exact one): the installation is shown under every name on that way, or the link leads
+    nowhere inside. Only what exists; never / and nothing that /usr already covers."""
+    python = Path(python)
+    roots = [str(python.parent.parent), os.path.realpath(python.parent.parent)]
+    hop = str(python)
+    for _ in range(16):
+        if not os.path.islink(hop):
+            break
+        hop = os.path.normpath(os.path.join(os.path.dirname(hop), os.readlink(hop)))
+        roots.append(str(Path(hop).parent.parent))
+    roots.append(str(Path(os.path.realpath(python)).parent.parent))
+    wanted = [r for r in roots if _python_root(r)]
+    wanted += [str(settings.gen3d_dir), os.path.realpath(settings.gen3d_dir), str(REPO_ROOT / "gen3d")]
+    out: list[str] = []
+    for path in wanted:
+        path = os.path.abspath(path)
+        if path in ("/", "/usr") or path.startswith("/usr/") or path in out or not os.path.exists(path):
+            continue
+        out.append(path)
+    return out
+
+
+def sandbox_prefix(work: Path, python: Path | None = None) -> list[str]:
+    """The bwrap command line in front of the generator's. The generator sees a system made of exactly these parts
+    and nothing else of the machine:
+    - /usr and the loader's files from /etc, read-only: the system's programs and libraries;
+    - its own /proc, a new /dev with the NVIDIA device nodes added, /sys read-only, an empty /tmp and /run;
+    - read-only: the Python environment that runs it and the installation behind it, GEN3D_DIR (weights and model
+      code) and this repository's gen3d package (sandbox_reads);
+    - read and write: `work` (and its own /tmp and /dev/shm, which are memory and go with it).
+    So it has no home folder, no DATA_DIR, no other part of the repository and none of the machine's sockets (they
+    live in /run and in the home folder); no network; its own process ids, IPC, host name and user namespace; and
+    an environment of its own (_child_env) in place of the server's."""
+    python = Path(python) if python is not None else _python()
+    args = [
+        sandbox_bin() or SANDBOX_BIN,
+        "--unshare-user", "--unshare-ipc", "--unshare-pid", "--unshare-net", "--unshare-uts", "--unshare-cgroup-try",
+        "--die-with-parent", "--new-session", "--clearenv",
+    ]
+    for name, value in _child_env(SANDBOX_HOME).items():
+        args += ["--setenv", name, value]
+    args += ["--ro-bind", "/usr", "/usr"]
+    for path in SYSTEM_DIRS:
+        if os.path.islink(path):
+            args += ["--symlink", os.readlink(path), path]
+        elif os.path.isdir(path):
+            args += ["--ro-bind", path, path]
+    for path in LOADER_FILES:
+        if os.path.exists(path):
+            args += ["--ro-bind", path, path]
+    args += ["--proc", "/proc", "--dev", "/dev"]
+    for node in _gpu_nodes():
+        args += ["--dev-bind", node, node]
+    args += ["--ro-bind", "/sys", "/sys", "--tmpfs", "/tmp", "--tmpfs", "/run"]
+    for path in sandbox_reads(python):  # after the empty /tmp and /run, so a folder that lives there still shows
+        args += ["--ro-bind", path, path]
+    # the folders that only lead to the parts above sit on the sandbox's own root: read-only as well, so the work
+    # folder, /tmp and /dev/shm (both in memory, both its own) are the only places it can write at all
+    args += ["--bind", str(work), str(work), "--remount-ro", "/", "--chdir", str(REPO_ROOT)]
+    return args
 
 
 def _command(args: list[str], work: Path, fake: bool) -> list[str]:
     """The child's full command line. The shell in front raises the child's oom_score_adj before anything else
     runs (inherited by everything it starts), then becomes the command itself."""
-    cmd = [str(_python()), "-m", "gen3d", *args]
+    python = _python(fake)
+    cmd = [str(python), "-m", "gen3d", *args]
     if sandbox_wanted(fake):
-        cmd = [*sandbox_prefix(work), *cmd]
+        cmd = [*sandbox_prefix(work, python), *cmd]
     return ["/bin/sh", "-c", '{ echo 1000 > /proc/self/oom_score_adj; } 2>/dev/null; exec "$@"', "gen3d", *cmd]
 
 
 def generator(refresh: bool = False) -> dict[str, Any]:
     """{"installed", "name", "device", "reason"}: what a Generate would run with. The real generator is asked with
-    `python -m gen3d --check` (remembered for CHECK_TTL_S; CHECK_RETRY_S while it is missing)."""
-    global _check
+    `python -m gen3d --check`, which only looks at files, and the answer is remembered for CHECK_TTL_S
+    (CHECK_RETRY_S while it is missing). A status read waits for that at most once: after the first answer an old
+    one is given at once and a new one is fetched in the background. start() asks again itself (`refresh`)."""
     fake = bool(settings.gen3d_fake) or settings.gen3d_generator == "fake"
     if fake:
         try:
@@ -217,42 +331,73 @@ def generator(refresh: bool = False) -> dict[str, Any]:
         return {"installed": True, "name": "fake", "device": "cpu", "reason": None}
     python = _python()
     key = (str(python), str(_weights_dir()), settings.gen3d_generator, settings.gen3d_sandbox)
-    now = time.monotonic()
     with _lock:
         cached = _check
-    if not refresh and cached is not None and cached[1] == key:
-        ttl = CHECK_TTL_S if cached[2]["installed"] else CHECK_RETRY_S
-        if now - cached[0] < ttl:
-            return dict(cached[2])
+    if refresh or cached is None or cached[1] != key:
+        return dict(_ask_and_remember(python, key))
+    ttl = CHECK_TTL_S if cached[2]["installed"] else CHECK_RETRY_S
+    if time.monotonic() - cached[0] >= ttl:
+        if not settings.workers_enabled:  # no background threads (tests): ask here
+            return dict(_ask_and_remember(python, key))
+        _ask_in_background(python, key)
+    return dict(cached[2])
+
+
+def _ask_and_remember(python: Path, key: tuple[Any, ...]) -> dict[str, Any]:
+    global _check
     out = _ask_generator(python)
     with _lock:
-        _check = (now, key, out)
-    return dict(out)
+        _check = (time.monotonic(), key, out)
+    return out
+
+
+def _ask_in_background(python: Path, key: tuple[Any, ...]) -> None:
+    global _checking
+    with _lock:
+        if _checking:
+            return
+        _checking = True
+
+    def ask() -> None:
+        global _checking
+        try:
+            _ask_and_remember(python, key)
+        finally:
+            with _lock:
+                _checking = False
+
+    threading.Thread(target=ask, name="pcc-model3d-check", daemon=True).start()
 
 
 MISSING = "The 3D generator is not installed. Run scripts/setup_3d.sh once on the server."
 
 
 def _ask_generator(python: Path) -> dict[str, Any]:
+    """Ask the generator's own Python what is installed. The check runs as a job does: inside the sandbox when that
+    is wanted, with an empty folder of its own as the only place it may write (never the models' folder)."""
     missing = {"installed": False, "name": None, "device": None, "reason": MISSING}
     if not python.is_file():
         return missing
+    scratch = storage.tmp_path(".gen3d-check")
+    info: Any = None
     try:
-        root().mkdir(parents=True, exist_ok=True)
-        cmd = _command(["--check", "--weights-dir", str(_weights_dir())], root(), fake=False)
-    except GeneratorMissing as e:
-        return {**missing, "reason": str(e)}
-    try:
-        done = subprocess.run(cmd, cwd=str(REPO_ROOT), env=_child_env(), capture_output=True, timeout=CHECK_TIMEOUT_S,
-                              check=False)
+        scratch.mkdir(parents=True, exist_ok=True)
+        cmd = _command(["--check", "--weights-dir", str(_weights_dir())], scratch, False)
+        done = subprocess.run(cmd, cwd=str(REPO_ROOT), env=_env_for(scratch, False), capture_output=True,
+                              timeout=CHECK_TIMEOUT_S, check=False)
         lines = [ln for ln in done.stdout.decode("utf-8", "replace").splitlines() if ln.strip().startswith("{")]
         info = json.loads(lines[-1]) if lines else None
+        if not isinstance(info, dict):
+            log.warning("3D heads: the generator's check said nothing (exit %s): %s", done.returncode,
+                        done.stderr.decode("utf-8", "replace")[-300:])
+    except GeneratorMissing as e:
+        return {**missing, "reason": str(e)}
     except (OSError, ValueError, subprocess.TimeoutExpired) as e:
         log.warning("3D heads: the generator did not answer the check: %s", e)
         return missing
+    finally:
+        storage.remove_tree(scratch)
     if not isinstance(info, dict):
-        log.warning("3D heads: the generator's check said nothing (exit %s): %s", done.returncode,
-                    done.stderr.decode("utf-8", "replace")[-300:])
         return missing
     wanted = settings.gen3d_generator
     found = info.get("backends") or {}
@@ -263,24 +408,50 @@ def _ask_generator(python: Path) -> dict[str, Any]:
 
 
 # ------------------------------------------------------------------ status
-def _live_items(conn: sqlite3.Connection, item_ids: list[int]) -> set[int]:
-    """The items among these that are in the library: not deleted, not in the trash, not in the vault."""
-    ids = sorted({int(i) for i in item_ids})
-    if not ids:
-        return set()
-    marks = ",".join("?" * len(ids))
-    return {int(r[0]) for r in conn.execute(
-        f"SELECT id FROM items WHERE id IN ({marks}) AND deleted_at IS NULL AND nsfw = 0", ids)}
+def _overlap(a: Any, b: Any) -> float:
+    """Intersection over union of two (x, y, w, h) boxes."""
+    ax, ay, aw, ah = (float(v) for v in a)
+    bx, by, bw, bh = (float(v) for v in b)
+    w = min(ax + aw, bx + bw) - max(ax, bx)
+    h = min(ay + ah, by + bh) - max(ay, by)
+    if w <= 0 or h <= 0:
+        return 0.0
+    return w * h / max(aw * ah + bw * bh - w * h, 1e-12)
+
+
+def _own_looks(conn: sqlite3.Connection, person_id: int, looks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The looks that may be shown: the source face is still this person's, on a photo that is in the library (not
+    deleted, not in the trash, not in the vault). A face that was moved to someone else, unassigned or removed
+    takes its look with it. A photo that was processed again has new face rows; its look stays when one of this
+    person's faces on that photo sits where the look's face was."""
+    item_ids = sorted({int(lk.get("item_id") or 0) for lk in looks})
+    if not item_ids:
+        return []
+    marks = ",".join("?" * len(item_ids))
+    faces: dict[int, list[sqlite3.Row]] = defaultdict(list)
+    for row in conn.execute(
+            f"SELECT f.id, f.item_id, f.x, f.y, f.w, f.h FROM faces f JOIN items i ON i.id = f.item_id "
+            f"WHERE f.item_id IN ({marks}) AND f.person_id = ? AND i.deleted_at IS NULL AND i.nsfw = 0",
+            (*item_ids, int(person_id))):
+        faces[int(row["item_id"])].append(row)
+    shown = []
+    for lk in looks:
+        theirs = faces.get(int(lk.get("item_id") or 0), [])
+        box = lk.get("box")
+        if any(int(f["id"]) == int(lk.get("face_id") or 0) for f in theirs):
+            shown.append(lk)
+        elif isinstance(box, list) and len(box) == 4 and any(
+                _overlap(box, (f["x"], f["y"], f["w"], f["h"])) >= LOOK_FACE_IOU for f in theirs):
+            shown.append(lk)
+    return shown
 
 
 def listed_looks(conn: sqlite3.Connection, person_id: int) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
-    """(the manifest, its looks that may be shown): a look goes when its source photo left the library."""
+    """(the manifest, its looks that may be shown, see _own_looks)."""
     doc = manifest(person_id)
     if doc is None:
         return None, []
-    looks = [lk for lk in doc["looks"] if isinstance(lk, dict)]
-    live = _live_items(conn, [lk.get("item_id") or 0 for lk in looks])
-    return doc, [lk for lk in looks if int(lk.get("item_id") or 0) in live]
+    return doc, _own_looks(conn, person_id, [lk for lk in doc["looks"] if isinstance(lk, dict)])
 
 
 def running() -> dict[str, Any] | None:
@@ -324,6 +495,7 @@ def status(conn: sqlite3.Connection, person_id: int) -> dict[str, Any]:
         "usable_photos": photos,
         "state": "running" if mine else "done" if out_looks else "error" if error else "none",
         "busy": job is not None and not mine,
+        "stopping": bool(mine and job["cancel"]),  # Stop or Delete was pressed and the job is on its way out
         "progress": {"step": job["step"], "done": job["done"], "total": job["total"]} if mine else None,
         "error": error,
         "generated_at": doc.get("generated_at") if doc and out_looks else None,
@@ -395,13 +567,18 @@ def remove(conn: sqlite3.Connection, person_id: int) -> None:  # noqa: ARG001 - 
         if mine:
             _state["remove"] = True  # type: ignore[index]
     if mine:
-        cancel(person_id)  # the job removes the folder as it ends
+        # not listed and not served from this moment; the job removes the folder as it ends
+        storage.safe_unlink(person_dir(person_id) / "current")
+        cancel(person_id)
     else:
         storage.remove_tree(person_dir(person_id))
 
 
 def sweep(conn: sqlite3.Connection) -> int:
-    """Remove the model folders of people who no longer exist (housekeeping). Returns how many went."""
+    """Housekeeping. Removes the model folders of people who no longer exist and, while no job runs, what an
+    interrupted run left behind for everyone else: a work folder (a server that stopped in the middle of a job
+    never got to remove it) and model folders that `current` does not name. Returns how many people's folders
+    went."""
     base = root()
     if not base.is_dir():
         return 0
@@ -417,6 +594,19 @@ def sweep(conn: sqlite3.Connection) -> int:
         if row is None or row["kind"] == "pet":
             storage.remove_tree(entry)
             gone += 1
+    left = 0
+    with _lock:  # held, so no job can start and make a work folder while the leftovers go
+        if _state is None:
+            for entry in base.iterdir():
+                if not entry.is_dir() or not entry.name.isdigit():
+                    continue
+                keep = current_rev(int(entry.name))
+                for sub in entry.iterdir():
+                    if sub.is_dir() and (sub.name == "work" or (STAMP_RE.fullmatch(sub.name) and sub.name != keep)):
+                        storage.remove_tree(sub)
+                        left += 1
+    if left:
+        log.info("3D heads: removed %d folders that interrupted runs left behind", left)
     return gone
 
 
@@ -528,15 +718,19 @@ def _tail(path: Path, limit: int = 400) -> str:
     return lines[-1][-limit:] if lines else ""
 
 
-def _run_child(work: Path, job_path: Path, total: int, fake: bool) -> None:
-    """Start the generator on the job file and follow it to its end. _Failed with the reason when it ends badly,
-    _Cancelled when it was stopped on request."""
+def _run_child(work: Path, job_path: Path, total: int, fake: bool,
+               stopped: Callable[[], bool] | None = None) -> tuple[set[str], str | None]:
+    """Start the generator on the job file and follow it to its end. Returns (the keys of the looks it said it
+    finished, why it ended badly or None): a child that was stopped at a limit, or that broke, may have finished
+    some heads first. _Failed when it cannot be started, _Cancelled when `stopped` (Stop, Delete, the person gone)
+    says so."""
     global _proc, _atexit_done
+    stopped = stopped or _cancelled
     cmd = _command(["--job", str(job_path)], work, fake)
     err_path = work / "stderr.log"
     with open(err_path, "wb") as err:
         try:
-            proc = subprocess.Popen(cmd, cwd=str(REPO_ROOT), env=_child_env(), stdout=subprocess.PIPE, stderr=err,
+            proc = subprocess.Popen(cmd, cwd=str(REPO_ROOT), env=_env_for(work, fake), stdout=subprocess.PIPE, stderr=err,
                                     stdin=subprocess.DEVNULL, process_group=0)
         except OSError as e:
             raise _Failed(f"The generator could not be started: {e}") from e
@@ -558,6 +752,7 @@ def _run_child(work: Path, job_path: Path, total: int, fake: bool) -> None:
     timeout = float(settings.gen3d_look_timeout_s)
     last_look = time.monotonic()
     reason: str | None = None
+    finished: set[str] = set()
     ended = False
     try:
         while not ended:
@@ -575,9 +770,12 @@ def _run_child(work: Path, job_path: Path, total: int, fake: bool) -> None:
                     pass
             elif line.startswith("look:"):
                 last_look = time.monotonic()
+                words = line.split()
+                if len(words) >= 3 and words[2] == "ok":
+                    finished.add(words[1])
             if ended:
                 break
-            if _cancelled():
+            if stopped():
                 raise _Cancelled()
             used = tree_rss_mb(proc.pid)
             if used > limit_mb:
@@ -596,14 +794,12 @@ def _run_child(work: Path, job_path: Path, total: int, fake: bool) -> None:
         _stop_child(proc)
         with _lock:
             _proc = None
-    if reason is not None:
-        raise _Failed(reason)
-    if _cancelled():
+    if reason is None and _cancelled():
         raise _Cancelled()
-    code = proc.returncode
-    if code not in (0, 3):
+    if reason is None and proc.returncode not in (0, 3):
         said = _tail(err_path)
-        raise _Failed(f"The generator stopped with an error{': ' + said if said else f' (exit {code})'}.")
+        reason = f"The generator stopped with an error{': ' + said if said else f' (exit {proc.returncode})'}."
+    return finished, reason
 
 
 # ------------------------------------------------------------------ the job
@@ -635,21 +831,42 @@ def _prepare(conn: sqlite3.Connection, plan: looks_mod.Plan, work: Path, framing
             "key": look.key, "label": look.label, "age": look.age, "age_band": look.age_band, "hair": look.hair,
             "hair_label": look.hair_label, "facial_hair": look.facial_hair, "facial_hair_label": look.facial_hair_label,
             "photos": look.photos, "face_id": chosen.face_id, "item_id": chosen.item_id, "item_uid": chosen.item_uid,
-            "taken_at": chosen.taken_at, "faults": list(chosen.faults),
+            "taken_at": chosen.taken_at, "faults": list(chosen.faults), "box": [round(float(v), 5) for v in chosen.box],
         })
     return rows
 
 
+def _glb_counts(path: Path) -> tuple[int, int]:
+    """(vertices, triangles) as a .glb says them in its own description; (0, 0) when that cannot be read."""
+    try:
+        with open(path, "rb") as f:
+            magic, _version, _total, n_json, kind = struct.unpack("<IIIII", f.read(20))
+            if magic != 0x46546C67 or kind != 0x4E4F534A or n_json > 4_000_000:
+                return 0, 0
+            doc = json.loads(f.read(n_json).decode("utf-8"))
+        prim = doc["meshes"][0]["primitives"][0]
+        return (int(doc["accessors"][prim["attributes"]["POSITION"]]["count"]),
+                int(doc["accessors"][prim["indices"]]["count"]) // 3)
+    except (OSError, ValueError, KeyError, IndexError, TypeError, struct.error):
+        return 0, 0
+
+
 def _collect(person_id: int, work: Path, rows: list[dict[str, Any]], plan: looks_mod.Plan, options: dict[str, Any],
-             seconds: float) -> None:
-    """Move the meshes and pictures of the looks that worked into a new folder and make it the model in use."""
+             seconds: float, finished: set[str] | None = None) -> int:
+    """Move the meshes and pictures of the looks that worked into a new folder and make it the model in use.
+    Returns how many looks it holds. `finished` is given when the child did not end by itself: then the looks it
+    reported as finished count (a mesh is written whole before it is reported), with or without a result file."""
     from PIL import Image
 
     try:
         result = json.loads((work / "out" / "result.json").read_text(encoding="utf-8"))
     except (OSError, ValueError) as e:
-        raise _Failed("The generator left no result.") from e
+        if finished is None:
+            raise _Failed("The generator left no result.") from e
+        result = {}
     built = {r.get("key"): r for r in result.get("looks") or [] if isinstance(r, dict) and r.get("ok")}
+    if finished is not None:
+        built = {key: built.get(key) or {} for key in finished}
     rev = _stamp()
     base = person_dir(person_id)
     dest = base / rev
@@ -662,13 +879,16 @@ def _collect(person_id: int, work: Path, rows: list[dict[str, Any]], plan: looks
         mesh = work / "out" / f"{row['key']}.glb"
         if made is None or not mesh.is_file():
             continue
+        vertices, faces = int(made.get("vertices") or 0), int(made.get("faces") or 0)
+        if not vertices:
+            vertices, faces = _glb_counts(mesh)
         target = dest / f"{row['key']}.glb"
         storage.move_into_place(mesh, target)
         with Image.open(work / f"{row['key']}.png") as im:
             im.convert("RGB").resize((PICTURE_SIDE, PICTURE_SIDE), Image.Resampling.LANCZOS).save(
                 dest / f"{row['key']}.jpg", "JPEG", quality=PICTURE_QUALITY)
         looks.append({**row, "mesh": target.name, "picture": f"{row['key']}.jpg", "bytes": target.stat().st_size,
-                      "vertices": int(made.get("vertices") or 0), "faces": int(made.get("faces") or 0)})
+                      "vertices": vertices, "faces": faces})
     if not looks:
         storage.remove_tree(dest)
         failed = [r.get("error") for r in result.get("looks") or [] if isinstance(r, dict) and r.get("error")]
@@ -682,6 +902,16 @@ def _collect(person_id: int, work: Path, rows: list[dict[str, Any]], plan: looks
     for entry in base.iterdir():  # the older models
         if entry.is_dir() and STAMP_RE.fullmatch(entry.name) and entry.name != rev:
             storage.remove_tree(entry)
+    return len(looks)
+
+
+def _gone(conn: sqlite3.Connection, person_id: int) -> bool:
+    """The person no longer exists as a person: deleted, merged into someone else, or turned into a pet."""
+    try:
+        row = conn.execute("SELECT kind FROM persons WHERE id = ?", (int(person_id),)).fetchone()
+    except sqlite3.Error:
+        return False  # a busy database is no reason to stop a job
+    return row is None or row["kind"] == "pet"
 
 
 def _run(person_id: int, options: dict[str, Any], fake: bool) -> None:
@@ -696,16 +926,38 @@ def _run(person_id: int, options: dict[str, Any], fake: bool) -> None:
     work = base / "work"
     started = time.monotonic()
     conn = connect()
+    looked = [0.0]
+
+    def stopped(now: bool = False) -> bool:
+        """Stop or Delete was pressed, or the person is gone (deleted, or merged into someone else, which no route
+        could stop afterwards): either way the job ends here. The person is looked up at most once every
+        GONE_CHECK_S, and at once with `now`."""
+        if _cancelled():
+            return True
+        t = time.monotonic()
+        if now or t - looked[0] >= GONE_CHECK_S:
+            looked[0] = t
+            if _gone(conn, person_id):
+                log.info("3D heads: person %s is gone, their job stops", person_id)
+                _set(cancel=True)
+                return True
+        return False
+
+    def reading(done: int, total: int) -> None:
+        """Called before the models load and after every photo: where Stop takes effect while looks are found."""
+        _set(step=STEP_LOOKS, done=done, total=total)
+        if stopped():
+            raise _Cancelled()
+
     try:
         storage.remove_tree(work)
         (work / "out").mkdir(parents=True, exist_ok=True)
         storage.safe_unlink(base / "error.json")
         try:
-            plan = looks_mod.plan(conn, person_id, options["max_looks"],
-                                  progress=lambda done, total: _set(step=STEP_LOOKS, done=done, total=total))
+            plan = looks_mod.plan(conn, person_id, options["max_looks"], progress=reading)
         except looks_mod.NoPhotos as e:
             raise _Failed("There are too few clear, large face photos of this person.") from e
-        if _cancelled():
+        if stopped(now=True):
             raise _Cancelled()
         if not plan.looks:
             raise _Failed("No look could be told from the photos: none of them shows the face clearly enough.")
@@ -720,9 +972,22 @@ def _run(person_id: int, options: dict[str, Any], fake: bool) -> None:
         }
         _write_json(work / "job.json", job)
         _set(step=STEP_BUILD, done=0, total=len(rows))
-        _run_child(work, work / "job.json", len(rows), fake)
+        finished, reason = _run_child(work, work / "job.json", len(rows), fake, stopped)
+        if stopped(now=True):
+            raise _Cancelled()
+        if reason is not None and not finished:
+            raise _Failed(reason)
         _set(step=STEP_SAVE, done=len(rows), total=len(rows))
-        _collect(person_id, work, rows, plan, options, time.monotonic() - started)
+        try:
+            kept = _collect(person_id, work, rows, plan, options, time.monotonic() - started,
+                            finished if reason is not None else None)
+        except _Failed:
+            if reason is not None:
+                raise _Failed(reason) from None
+            raise
+        if reason is not None:  # the child was stopped part of the way: what it had finished is the new model
+            _note_error(base, f"{reason} {kept} of {len(rows)} heads {'was' if kept == 1 else 'were'} finished "
+                              f"before that and {'is' if kept == 1 else 'are'} kept.")
         log.info("3D heads: person %s done in %.0f s", person_id, time.monotonic() - started)
     except _Cancelled:
         log.info("3D heads: the job of person %s was stopped", person_id)

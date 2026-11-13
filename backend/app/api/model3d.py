@@ -7,8 +7,10 @@ POST   /api/people/{id}/model3d   Model3dIn {max_looks 1..12 = 6, detail 1..3 = 
                                   -> 202 {started: true}. 409 `busy` (one generation at a time), 409
                                   `generator_missing`, 422 `not_enough_photos`.
 POST   /api/people/{id}/model3d/stop
-                                  stops the person's running job -> {stopped}; the model in use, if any, stays
-DELETE /api/people/{id}/model3d   removes the model and stops the person's running job -> Ok
+                                  stops the person's running job -> {stopped}; the model in use, if any, stays.
+                                  The job ends within about a second (`stopping` in the status until then).
+DELETE /api/people/{id}/model3d   removes the model and stops the person's running job -> Ok. The model is not
+                                  listed or served from that moment, also while the job is still on its way out.
 GET    /files/model3d/{id}/{rev}/{name}
                                   a look's mesh (model/gltf-binary) or the picture it was made from (image/jpeg),
                                   only for the model in use and a look that is still listed (its source photo is in
@@ -79,6 +81,7 @@ class Model3dOut(BaseModel):
     usable_photos: int
     state: str  # none | running | done | error
     busy: bool = False  # another person's model is being generated
+    stopping: bool = False  # Stop or Delete was pressed and the running job is on its way out
     progress: Model3dProgress | None = None
     error: str | None = None
     generated_at: str | None = None

@@ -3,7 +3,7 @@
 // .glb files that the Python writer (gen3d/glb.py) made. Only the WebGL renderer and the page are stand-ins, so
 // this checks the logic (which look is drawn when, the cross-fade, the camera, the lamp, what is kept and let go)
 // and that three.js reads the files; what the pictures look like is for a browser. It also checks the look
-// sliders' logic in src/lib/model3d.ts.
+// sliders' logic in src/lib/model3d.ts and the value src/lib/theme.ts gives React to compare.
 //
 // Run by backend/tests/test_gen3d.py, which writes the files:
 //   node scripts/check-head3d.mjs <glb dir> <scratch dir>
@@ -51,7 +51,7 @@ export class WebGLRenderer {
 )
 
 const STUBS = {
-  react: 'export const useEffect=()=>{}, useImperativeHandle=()=>{}, useRef=(v)=>({current:v}), useState=(v)=>[v,()=>{}]',
+  react: 'export const useEffect=()=>{}, useImperativeHandle=()=>{}, useRef=(v)=>({current:v}), useState=(v)=>[v,()=>{}], useSyncExternalStore=(s,g)=>g()',
   'react/jsx-runtime': 'export const jsx=()=>null, jsxs=()=>null, Fragment=null',
   ui: 'export const Button=()=>null, Spinner=()=>null',
   hooks: 'export const useStableCallback=(f)=>f',
@@ -63,6 +63,7 @@ await build({
   stdin: {
     contents: `export { HeadStage } from ${JSON.stringify(VIEWER)}
 export * as model from ${JSON.stringify(path.join(FRONT, 'src/lib/model3d.ts'))}
+export * as theme from ${JSON.stringify(path.join(FRONT, 'src/lib/theme.ts'))}
 export * as THREE from 'three'`,
     resolveDir: FRONT,
     loader: 'ts',
@@ -95,6 +96,7 @@ export * as THREE from 'three'`,
 // ---------------------------------------------------------------- the stand-in page
 let clock = 1000
 let reduced = false
+let dark = false
 let rafs = []
 let rafId = 0
 let timers = []
@@ -145,14 +147,16 @@ globalThis.document = {
 }
 const win = element({
   devicePixelRatio: 3,
-  matchMedia: () => ({ matches: reduced }),
+  matchMedia: (query) => ({ matches: String(query).includes('prefers-color-scheme') ? dark : reduced }),
   setTimeout: (f, ms) => (timers.push({ id: ++timerId, at: clock + ms, f }), timerId),
   clearTimeout: (id) => {
     timers = timers.filter((t) => t.id !== id)
   },
 })
 globalThis.window = win
-globalThis.getComputedStyle = () => ({ backgroundColor: 'rgb(239, 239, 235)' })
+globalThis.getComputedStyle = () => ({ backgroundColor: dark ? 'rgb(35, 39, 43)' : 'rgb(239, 239, 235)' })
+globalThis.document.documentElement = element({ removeAttribute() {} })
+globalThis.document.querySelector = () => null
 const observers = []
 globalThis.ResizeObserver = class {
   constructor(cb) {
@@ -201,7 +205,7 @@ async function steps(n, ms = 16) {
   for (let i = 0; i < n; i++) await step(ms)
 }
 
-const { HeadStage, model, THREE } = await import(pathToFileURL(OUT).href)
+const { HeadStage, model, theme, THREE } = await import(pathToFileURL(OUT).href)
 const near = (a, b, eps = 1e-3) => assert.ok(Math.abs(a - b) <= eps, `${a} is not near ${b}`)
 const look = (key, file = key, rev = 'r1') => {
   const url = `/files/model3d/7/${rev}/${key}.glb`
@@ -518,6 +522,21 @@ assert.deepEqual(renderer.size, [300, 600, false])
 near(stage.camera.aspect, 0.5)
 near(stage.camera.position.length(), BASE / 0.5, 1e-3) // a tall picture: the head must fit its width
 ok('P context lost and restored; a resize draws at once and fits the narrow side')
+
+// ---------------------------------------------------------------- the theme
+assert.equal(theme.themeSnapshot(), 'system:light')
+dark = true // the system goes dark while the choice is "System"
+assert.equal(theme.themeSnapshot(), 'system:dark', 'what React compares changes with the system, so the viewer is drawn again')
+stage.setBackground()
+assert.deepEqual(renderer.clear, ['23272b', 1], 'and the background is read again from the wrapper')
+dark = false
+theme.setTheme('dark')
+assert.equal(theme.themeSnapshot(), 'dark:dark')
+theme.setTheme('system')
+assert.equal(theme.themeSnapshot(), 'system:light')
+stage.setBackground()
+assert.deepEqual(renderer.clear, ['efefeb', 1])
+ok('the theme: a system switch under "System" reaches the viewer, and the background follows')
 
 // ---------------------------------------------------------------- O: letting go of everything
 stage.want('m1')

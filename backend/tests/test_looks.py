@@ -250,6 +250,19 @@ def test_the_sample_keeps_every_year():
     assert looks.spread(rows[:10], 60) == rows[:10]               # room for all: all
 
 
+def test_the_sample_never_passes_its_limit():
+    kids = [{"id": k, "year": 2010 + (k % 6), "child": True, "quality": 1.0 - k / 10000} for k in range(3000)]
+    picked = looks.spread(kids, 240)                              # someone who is a child in every photo
+    assert len(picked) == 240 and {r["year"] for r in picked} == set(range(2010, 2016))
+    assert {0, 1, 2, 3, 4, 5} <= {r["id"] for r in picked}         # the best of each year
+    adults = [{"id": 5000 + k, "year": 2024.5, "child": False, "quality": 0.9} for k in range(500)]
+    prints = [{"id": 9000 + k, "year": 2024.2, "child": True, "quality": 0.1} for k in range(20)]
+    picked = looks.spread(adults + prints, 60)                    # childhood prints photographed again that year
+    assert len(picked) == 60 and sum(1 for r in picked if r["child"]) >= looks.YEAR_FLOOR
+    many = [{"id": k, "year": 1900 + k, "child": False, "quality": 0.5} for k in range(100)]
+    assert len(looks.spread(many, 30)) == 30 and looks.spread(many, 0) == []   # more years than room
+
+
 # ------------------------------------------------------------------ rows, the plan, the picture (no models)
 def _person_with_faces(conn, n_adult=4, n_older=3):
     person = make_person(conn, "Asha")
@@ -344,3 +357,28 @@ def test_the_generators_picture_is_cut_from_the_original(conn, tmp_path):
         conn.execute("UPDATE items SET nsfw = 1 WHERE id = ?", (item["id"],))
     assert looks.picture(conn, face) is None and not looks.write_picture(conn, face, tmp_path / "x.png")
     assert looks.picture(conn, 99999) is None
+
+
+def test_reading_reports_before_the_models_load_and_after_every_photo(conn, monkeypatch):
+    person = _person_with_faces(conn)[0]
+    rows = looks.source_rows(conn, person)
+    order: list = []
+    real = looks.engines()
+    monkeypatch.setattr(looks, "engines", lambda: (order.append("models"), real)[1])
+    looks.read_faces(conn, rows, None, lambda done, total: order.append((done, total)))
+    assert order[:3] == [(0, 7), "models", (0, 7)] and order[3:] == [(n, 7) for n in range(1, 8)]
+
+    class Stop(Exception):
+        pass
+
+    seen = []
+
+    def stop(done, total):
+        seen.append(done)
+        if done == 2:
+            raise Stop()                                          # what the caller raises ends the reading there
+
+    with pytest.raises(Stop):
+        looks.plan(conn, person, progress=stop)
+    assert seen == [0, 0, 1, 2]
+

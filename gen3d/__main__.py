@@ -1,5 +1,7 @@
 """`python -m gen3d --job JOB.json` builds one 3D head per look; `python -m gen3d --check --weights-dir DIR` says
-what is installed. The contract with the app (docs/ARCHITECTURE.md section 36):
+what is installed by looking at files (add `--device` to have PyTorch imported and its version and the device
+named; that takes seconds, and the app asks the plain check for status reads). The contract with the app
+(docs/ARCHITECTURE.md section 36):
 
 Job file:
     {"out_dir": "/abs/work", "weights_dir": "/abs/models/gen3d/weights", "generator": "auto", "device": "auto",
@@ -106,9 +108,11 @@ def _torch() -> tuple[str | None, str]:
         return str(getattr(torch, "__version__", "")) or None, "cpu"
 
 
-def check(weights_dir: Path) -> int:
+def check(weights_dir: Path, with_device: bool = False) -> int:
+    """One JSON line: which backends are installed. PyTorch is imported only with `with_device`; without it
+    "device" and "torch" are null."""
     found = {name: (True if name == "fake" else backends.is_available(name, weights_dir)) for name in backends.REGISTRY}
-    version, device = _torch()
+    version, device = _torch() if with_device else (None, None)
     auto = next((name for name in backends.ORDER if found.get(name)), None)
     say(json.dumps({"backends": found, "auto": auto, "device": device, "torch": version}, sort_keys=True))
     return EXIT_OK
@@ -218,9 +222,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--job", help="the job file (JSON)")
     parser.add_argument("--check", action="store_true", help="print what is installed as one JSON line")
     parser.add_argument("--weights-dir", default=".", help="where the backends' weights are (for --check)")
+    parser.add_argument("--device", action="store_true",
+                        help="with --check: also import PyTorch and name its version and the device")
     args = parser.parse_args(argv)
     if args.check:
-        return check(Path(args.weights_dir))
+        return check(Path(args.weights_dir), args.device)
     if not args.job:
         return fail("give --job JOB.json or --check", EXIT_BAD_JOB)
     try:

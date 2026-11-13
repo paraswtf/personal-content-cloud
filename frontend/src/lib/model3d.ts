@@ -47,6 +47,8 @@ export interface Model3dStatus {
   state: Model3dState
   /** Another person's model is being generated: one at a time. */
   busy: boolean
+  /** Stop or Delete was pressed and the running job is on its way out. */
+  stopping: boolean
   progress: Model3dProgress | null
   error: string | null
   generated_at: string | null

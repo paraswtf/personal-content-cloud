@@ -369,7 +369,11 @@ export default function Model3dTab({ id, name }: { id: number; name: string | nu
   })
   const stop = useMutation({
     mutationFn: () => model3dApi.stop(id),
-    onSuccess: () => void refetch(),
+    onSuccess: () => {
+      // the job ends within about a second; until the next read says so, the card says that it is stopping
+      qc.setQueryData<Model3dStatus>(key, (old) => (old && old.state === 'running' ? { ...old, stopping: true } : old))
+      void refetch()
+    },
     onError: (e) => toast.error(errorMessage(e, 'Could not stop.')),
   })
   const remove = useMutation({
@@ -377,6 +381,10 @@ export default function Model3dTab({ id, name }: { id: number; name: string | nu
     onSuccess: () => {
       setDeleteOpen(false)
       setAgain(false)
+      // the server stops listing and serving the model at once; a job that was running is on its way out
+      qc.setQueryData<Model3dStatus>(key, (old) =>
+        old && { ...old, looks: [], generated_at: null, options: null, error: null, stopping: old.state === 'running' },
+      )
       toast.success('The 3D model is deleted.')
       void refetch()
     },
@@ -396,7 +404,7 @@ export default function Model3dTab({ id, name }: { id: number; name: string | nu
 
   const failure = status.error && !running && (
     <p role="alert" className="rounded-xl border border-warn/40 bg-warn/10 px-3 py-2 text-sm text-ink">
-      The last try did not work. {status.error}
+      About the last run: {status.error}
     </p>
   )
   const generateButton = (
@@ -413,22 +421,27 @@ export default function Model3dTab({ id, name }: { id: number; name: string | nu
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="min-w-0">
               <h2 className="text-sm font-semibold">
-                {status.progress.step}
-                {status.progress.total > 0 && (
+                {status.stopping ? 'Stopping' : status.progress.step}
+                {!status.stopping && status.progress.total > 0 && (
                   <span className="font-normal text-ink-soft tabular-nums">
                     , {status.progress.done.toLocaleString()} of {status.progress.total.toLocaleString()}
                   </span>
                 )}
               </h2>
               <p className="mt-0.5 text-xs text-ink-soft">
-                The server is working. You can leave this page; the work goes on
-                {hasModel ? ', and the model below stays until the new one is ready.' : '.'}
+                {status.stopping
+                  ? 'The work is being stopped. That takes a moment.'
+                  : `The server is working. You can leave this page; the work goes on${
+                      hasModel ? ', and the model below stays until the new one is ready.' : '.'
+                    }`}
               </p>
             </div>
-            <Button variant="secondary" size="sm" onClick={() => stop.mutate()} loading={stop.isPending}>
-              <CircleStop className="size-4" aria-hidden />
-              Stop
-            </Button>
+            {!status.stopping && (
+              <Button variant="secondary" size="sm" onClick={() => stop.mutate()} loading={stop.isPending}>
+                <CircleStop className="size-4" aria-hidden />
+                Stop
+              </Button>
+            )}
           </div>
           <div className="mt-3">
             <Progress progress={status.progress} />

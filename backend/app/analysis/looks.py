@@ -440,32 +440,38 @@ def choose(readings: list[Reading], max_looks: int = LOOKS_DEFAULT) -> list[Look
 
 
 def spread(rows: list[Any], limit: int = MAX_SCORED) -> list[Any]:
-    """At most `limit` rows, the best of every year: each year keeps YEAR_FLOOR of its rows (all of them when it has
-    fewer), the rest of the room goes to the years by their share. Rows need "year" (None: undated), "child",
-    "quality" and "id"; child-band rows are all kept."""
-    kids = [r for r in rows if r["child"]]
-    rest = [r for r in rows if not r["child"]]
-    room = max(0, limit - len(kids))
-    if len(rest) <= room:
-        return kids + rest
-    by_year: dict[Any, list[Any]] = defaultdict(list)
-    for r in rest:
-        by_year[None if r["year"] is None else int(r["year"])].append(r)
-    for group in by_year.values():
+    """At most `limit` rows, the best of every year. The child-band rows of a year are a group of their own beside
+    that year's other rows: a childhood print photographed again carries the year it was photographed in and must
+    not be crowded out by that year's other photos. Every group keeps YEAR_FLOOR of its rows (all of them when it
+    has fewer; fewer when there are more groups than room), and the rest of the room goes to the groups by their
+    share, child groups first. Rows need "year" (None: undated), "child", "quality" and "id"."""
+    limit = max(0, int(limit))
+    if len(rows) <= limit:
+        return list(rows)
+    groups: dict[tuple[bool, Any], list[Any]] = defaultdict(list)
+    for r in rows:
+        groups[(bool(r["child"]), None if r["year"] is None else int(r["year"]))].append(r)
+    for group in groups.values():
         group.sort(key=lambda r: (-r["quality"], r["id"]))
-    take = {y: min(len(g), YEAR_FLOOR) for y, g in by_year.items()}
-    left = room - sum(take.values())
-    if left < 0:  # more years than room: the floor shrinks evenly
-        per = max(1, room // max(1, len(by_year)))
-        take = {y: min(len(g), per) for y, g in by_year.items()}
-        left = max(0, room - sum(take.values()))
-    spare = {y: len(g) - take[y] for y, g in by_year.items()}
+    order = sorted(groups, key=lambda k: (not k[0], k[1] is None, k[1] or 0))
+    floor = min(YEAR_FLOOR, limit // len(groups))
+    take = {k: min(len(groups[k]), floor) for k in order}
+    left = limit - sum(take.values())
+    spare = {k: len(groups[k]) - take[k] for k in order}
     total_spare = sum(spare.values())
     if left > 0 and total_spare > 0:
-        for y in sorted(by_year, key=lambda v: (v is None, v)):
-            take[y] += min(spare[y], int(left * spare[y] / total_spare))
-    picked = [r for y, g in by_year.items() for r in g[:take[y]]]
-    return kids + picked
+        for k in order:
+            take[k] += min(spare[k], int(left * spare[k] / total_spare))
+    left = limit - sum(take.values())
+    while left > 0:  # what the rounding left over, one row at a time
+        before = left
+        for k in order:
+            if left > 0 and take[k] < len(groups[k]):
+                take[k] += 1
+                left -= 1
+        if left == before:
+            break
+    return [r for k in order for r in groups[k][:take[k]]]
 
 
 # ------------------------------------------------------------------ reading the faces
@@ -632,10 +638,16 @@ def face_light(face: Any) -> tuple[float, float, float]:
 
 def read_faces(conn: sqlite3.Connection, rows: list[dict[str, Any]], eng: Engines | None = None,
                progress: Callable[[int, int], None] | None = None) -> list[Reading]:
-    """A Reading per source row. Pictures are read one photo at a time; SigLIP runs once per photo's faces."""
+    """A Reading per source row. Pictures are read one photo at a time; SigLIP runs once per photo's faces.
+    `progress(done, total)` is called before and after the models load and after every photo; what it raises ends
+    the reading."""
     from app.analysis.trait_regions import load_preview
 
+    if progress is not None:
+        progress(0, len(rows))  # before the models load and after: the caller may end the work here by raising
     eng = eng if eng is not None else engines()
+    if progress is not None:
+        progress(0, len(rows))
     by_item: dict[int, list[dict[str, Any]]] = defaultdict(list)
     for r in rows:
         by_item[int(r["item_id"])].append(r)

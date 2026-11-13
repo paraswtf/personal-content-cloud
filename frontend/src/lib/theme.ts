@@ -85,9 +85,15 @@ function subscribe(l: () => void): () => void {
   return () => listeners.delete(l)
 }
 
+/** The stored choice and the theme in effect as one value, "choice:theme". React re-renders when the value it is
+ *  given changes: with the choice on 'system' an OS switch changes only the theme in effect, and the choice alone
+ *  would look unchanged. */
+export function themeSnapshot(): string {
+  return `${current}:${resolvedTheme(current)}`
+}
+
 /** React binding: the stored choice and the theme in effect. */
 export function useTheme(): { choice: ThemeChoice; resolved: 'light' | 'dark'; setTheme: (c: ThemeChoice) => void } {
-  const choice = useSyncExternalStore(subscribe, getTheme, getTheme)
-  // resolvedTheme reads matchMedia; listeners fire on system changes, so this re-renders then
-  return { choice, resolved: resolvedTheme(choice), setTheme }
+  const [choice, resolved] = useSyncExternalStore(subscribe, themeSnapshot, themeSnapshot).split(':') as [ThemeChoice, 'light' | 'dark']
+  return { choice, resolved, setTheme }
 }

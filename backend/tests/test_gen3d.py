@@ -4,6 +4,7 @@ hands the written files to the viewer's own code and three.js, in node, when the
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import struct
 import subprocess
@@ -241,11 +242,31 @@ def test_job_exit_codes(tmp_path):
 
 
 def test_check_says_what_is_installed(tmp_path):
-    done = _run(["--check", "--weights-dir", str(tmp_path)])
-    assert done.returncode == 0, done.stderr
-    info = json.loads(done.stdout.strip().splitlines()[-1])
+    # a PyTorch that leaves a note when it is imported: the plain check, which the app asks for status reads, must
+    # not touch it
+    (tmp_path / "torch.py").write_text(
+        "import pathlib\n"
+        "pathlib.Path(__file__).with_name('imported').write_text('x')\n"
+        "__version__ = '9.9'\n"
+        "class cuda:\n"
+        "    @staticmethod\n"
+        "    def is_available():\n"
+        "        return False\n", encoding="utf-8")
+    weights = tmp_path / "weights"
+    weights.mkdir()
+
+    def check(*more: str) -> dict:
+        done = subprocess.run([sys.executable, "-m", "gen3d", "--check", "--weights-dir", str(weights), *more],
+                              cwd=str(REPO), capture_output=True, text=True, timeout=120, check=False,
+                              env={**os.environ, "PYTHONPATH": str(tmp_path)})
+        assert done.returncode == 0, done.stderr
+        return json.loads(done.stdout.strip().splitlines()[-1])
+
+    info = check()
     assert info["backends"] == {"fake": True, "triposr": False} and info["auto"] is None
-    assert info["device"] in ("cpu", "cuda") and "torch" in info
+    assert info["device"] is None and info["torch"] is None and not (tmp_path / "imported").exists()
+    info = check("--device")
+    assert info["device"] == "cpu" and info["torch"] == "9.9" and (tmp_path / "imported").exists()
 
 
 def test_sigterm_stops_the_job_cleanly(tmp_path):
@@ -303,5 +324,5 @@ def test_the_viewer_reads_the_heads(tmp_path):
     done = subprocess.run([node, str(front / "scripts" / "check-head3d.mjs"), str(out), str(tmp_path / "work")],
                           capture_output=True, text=True, timeout=180, check=False)
     assert done.returncode == 0, done.stdout[-1500:] + done.stderr[-3000:]
-    assert "16 groups passed" in done.stdout
+    assert "17 groups passed" in done.stdout
 
