@@ -88,7 +88,10 @@ struct SyncView: View {
                 }
             }
             .navigationTitle("Sync")
-            .onAppear { if AppSettings.autoSync { engine.start(manual: false) } }
+            .task {
+                // The first visit asks for Photos access (never at launch); the automatic sync starts once allowed.
+                if await PhotoLibrary.requestAccessIfNeeded(), AppSettings.autoSync { engine.start(manual: false) }
+            }
         }
     }
 }

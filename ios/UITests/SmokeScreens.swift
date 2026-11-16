@@ -1,6 +1,6 @@
 import XCTest
 
-/// The screens the app has today, against the seeded server.
+/// Signing in with a device token, and the phone's sync screens under More, Upload and sync, against the seeded server.
 final class SmokeScreens: ScreenTestCase {
     /// The real sign-in: the token typed into the sign-in screen is checked by the server (GET /api/auth/state).
     func testSignInWithDeviceToken() throws {
@@ -11,18 +11,30 @@ final class SmokeScreens: ScreenTestCase {
         field.tap()
         field.typeText(token)
         app.buttons["Sign in"].tap()
-        XCTAssertTrue(app.tabBars.buttons["Sync"].waitForExistence(timeout: 30), "the server did not accept the token")
+        XCTAssertTrue(app.tabBars.buttons["Library"].waitForExistence(timeout: 30), "the server did not accept the token")
         snap("signed-in")
     }
 
-    func testSyncAndSettings() throws {
+    func testSyncScreensAndSettings() throws {
         try launchSignedIn()
+        tab("More")
+        app.buttons["more.upload"].tap()
+        XCTAssertTrue(app.navigationBars["Upload and sync"].waitForExistence(timeout: 10))
+        snap("upload")
+        app.buttons["upload.sync"].tap()
         XCTAssertTrue(app.navigationBars["Sync"].waitForExistence(timeout: 30))
         snap("sync")
-        tab("Settings")
+        app.navigationBars["Sync"].buttons.firstMatch.tap()
+        app.buttons["upload.syncSettings"].tap()
+        XCTAssertTrue(app.navigationBars["Sync settings"].waitForExistence(timeout: 10))
+        snap("sync-settings")
+        app.navigationBars["Sync settings"].buttons.firstMatch.tap()
+        app.buttons["upload.deleteSynced"].tap()
+        XCTAssertTrue(app.navigationBars["Delete synced"].waitForExistence(timeout: 10))
+        snap("delete-synced")
+        tab("More")
+        app.buttons["more.settings"].tap()
         XCTAssertTrue(app.navigationBars["Settings"].waitForExistence(timeout: 10))
         snap("settings")
-        tab("Delete synced")
-        snap("delete-synced")
     }
 }

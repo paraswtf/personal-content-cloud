@@ -96,6 +96,14 @@ the core in its own change.
   message with `Fmt.guessedTail(answer.guessed)` ("2 faces that look alike wait in Review."), and a merge's with
   `Fmt.followedTail(answer.followed)`.
 
+## Photos access and the phone's sync
+
+- The app asks for Photos access only on the upload and sync screens (`PhotoLibrary.requestAccessIfNeeded()`
+  when Upload and sync, Sync or Delete synced opens, or when the automatic sync is turned on), never at launch or
+  sign-in. The background task is registered at every launch (`BackgroundSync.register()`); the library observer
+  starts once access is given, and the shell starts the automatic sync when the app opens if it is on and allowed.
+- The upload area keeps that: its screen calls `PhotoLibrary.requestAccessIfNeeded()` when it opens.
+
 ## Pictures and video
 
 - `RemoteImage(ref: item.thumbRef, maxPixel: 384)` for any address the API returns (thumbs, previews, face crops,
@@ -111,5 +119,17 @@ the core in its own change.
 
 ## Tests
 
-Screen tests run on the simulator against a seeded server (see the test harness section in `README.md` once it
-lands): each area adds one test per screen that opens it and attaches a screenshot.
+Every push that touches `ios/` or `backend/` builds the app and runs its tests on GitHub's Macs against a seeded
+server (`README.md`, "Tests on GitHub"; the seed is `ci/seed_server.py`: 37 drawn photos, two named people with
+face boxes, one photo where a face sits inside a larger person box, faces nobody named, albums, a share, a vault
+photo and one in the trash).
+
+- Screen tests: a file per area under `UITests/` (`AlbumsScreens.swift`), a subclass of `ScreenTestCase` that calls
+  `try launchSignedIn()`, goes to its screen (`tab("Albums")`, `app.buttons["more.map"].tap()`), checks what the
+  seed put there and calls `snap("albums")` (unique names: they become the PNG files of the "screenshots"
+  artifact). The core's own are `CoreScreens.swift` and `SmokeScreens.swift`.
+- Unit tests: `UnitTests/`, hosted by the app; pure logic (`BoxStackTests`, `PickerOptionsTests`) and
+  `APIDecodingTests`, which decodes the seeded server's answers into the generated types. An area that adds data
+  to the seed adds the matching decoding check there.
+- Add to the seed what a screen needs (in `library()` with the backend's test helpers, or in `api()` over HTTP),
+  made up, never from anyone's library.

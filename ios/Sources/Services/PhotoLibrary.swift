@@ -9,6 +9,26 @@ enum PhotoLibrary {
         await PHPhotoLibrary.requestAuthorization(for: .readWrite)
     }
 
+    /// Asks for Photos access when it was never asked (iOS shows its prompt once), then starts watching the library
+    /// for the sync. Called when the owner opens the upload and sync screens or turns the automatic sync on, never at
+    /// launch or sign-in. True when the app may read the library.
+    @MainActor
+    @discardableResult
+    static func requestAccessIfNeeded() async -> Bool {
+        if PHPhotoLibrary.authorizationStatus(for: .readWrite) == .notDetermined {
+            _ = await requestAccess()
+        }
+        guard hasAccess else { return false }
+        BackgroundSync.observeLibraryIfAllowed()
+        return true
+    }
+
+    /// Asked and refused (or restricted): only the Settings app can change it.
+    static var refused: Bool {
+        let s = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+        return s == .denied || s == .restricted
+    }
+
     static var hasAccess: Bool {
         let s = PHPhotoLibrary.authorizationStatus(for: .readWrite)
         return s == .authorized || s == .limited

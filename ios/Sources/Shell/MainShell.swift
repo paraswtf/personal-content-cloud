@@ -4,6 +4,7 @@ import SwiftUI
 /// the viewer over everything.
 struct MainShell: View {
     @State private var router = AppRouter()
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
         TabView(selection: tabSelection) {
@@ -29,6 +30,18 @@ struct MainShell: View {
                 .environment(router)
                 .toastHost()
         }
+        .task { startAutomaticSync() }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active { startAutomaticSync() }
+        }
+    }
+
+    /// The phone's photos sync while the app is open (ios/README.md), once Photos access was given on the upload and
+    /// sync screens: this only checks the access, it never asks for it.
+    private func startAutomaticSync() {
+        guard AppSettings.autoSync, PhotoLibrary.hasAccess else { return }
+        BackgroundSync.observeLibraryIfAllowed()
+        SyncEngine.shared.start(manual: false)
     }
 
     /// Tapping the selected tab again goes back to its first screen.

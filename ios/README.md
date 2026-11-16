@@ -1,12 +1,17 @@
 # Content Cloud for iPhone
 
-A small SwiftUI app that keeps your phone's new photos and videos flowing into your Personal Content
-Cloud, and that can clear the ones it has synced out of the phone's library when you ask.
+The Personal Content Cloud on the phone: the library, people, albums, review and the rest of the website as
+native SwiftUI screens (being built area by area; see `ARCHITECTURE-ios.md` for the structure and the conventions
+every screen follows), and the sync that keeps your phone's new photos and videos flowing into your cloud and can
+clear the ones it has synced out of the phone's library when you ask.
 
-What it does:
+What the sync does (More, Upload and sync):
 
 - Signs in with a device token (Settings > Sessions > Devices on the website creates one; it is shown
-  once). No password is stored on the phone.
+  once), or with the account's username and password, which create a device token for the phone
+  (`POST /api/auth/device-login`). No password is stored on the phone.
+- Asks for Photos access the first time you open Upload and sync or turn the automatic sync on, never
+  at launch or sign-in.
 - Watches the photo library and uploads what is new: photos, videos, and both halves of a Live Photo,
   as the original files, through the server's resumable upload protocol. Nothing is re-sent after a
   reinstall: the app asks the server what it already holds, by asset and by file hash.

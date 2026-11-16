@@ -59,7 +59,10 @@ struct DeleteSyncedView: View {
             .confirmationDialog(confirmTitle, isPresented: $confirm, titleVisibility: .visible) {
                 Button("Remove from this phone", role: .destructive) { Task { await deleteSelected() } }
             }
-            .task { await load() }
+            .task {
+                await PhotoLibrary.requestAccessIfNeeded()
+                await load()
+            }
             .refreshable { await load() }
             .overlay(alignment: .bottom) {
                 if let message {

@@ -163,7 +163,7 @@ struct SignInView: View {
             password = ""
             session.signIn(server: url, token: newToken)
             ConnectionCache.shared.reset()
-            _ = await PhotoLibrary.requestAccess()
+            // Photos access is asked for on the upload and sync screens, not here.
             BackgroundSync.schedule()
         } catch {
             self.error = ErrorText.describe(error)

@@ -170,6 +170,29 @@ def library() -> dict:
                              ((end - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%S.000Z"), item["id"]))
             counts["trash"] += 1
 
+    # The viewer's box test (ios/UITests/CoreScreens.swift): the newest photo, where one person's face sits inside a
+    # larger person box of someone else, so a tap on the face must reach the face and not the person box around it.
+    from tests.helpers import make_body
+
+    face_box = (0.40, 0.28, 0.12, 0.17)
+    body_box = (0.28, 0.16, 0.42, 0.74)
+    img = scene(3000, [(face_box, PEOPLE[1][1], PEOPLE[1][2])])
+    item = make_item(conn, data=jpeg(img), width=W, height=H, filename="IMG_4900.JPG",
+                     taken_at=(end + timedelta(days=11)).strftime("%Y-%m-%dT%H:%M:%S.000Z"), camera="CI Camera",
+                     category="personal")
+    for path, side in ((storage.thumb_path(item["uid"], 1), 480), (storage.preview_path(item["uid"], 1), 2048),
+                       (storage.preview_small_path(item["uid"], 1), 1280)):
+        copy = img.copy()
+        copy.thumbnail((side, side))
+        copy.save(path, "WEBP", quality=80)
+    face_id = make_face(conn, int(item["id"]), person_ids[PEOPLE[1][0]], box=face_box, size_px=int(face_box[2] * W),
+                        assigned_by="user")
+    crop(img, face_box).save(storage.face_crop_path(face_id), "WEBP", quality=85)
+    make_body(conn, int(item["id"]), person_ids[PEOPLE[0][0]], box=body_box, assigned_by="user")
+    counts["photos"] += 1
+    counts["faces"] += 1
+    counts["person_boxes"] = 1
+
     # the photos step 2 uploads: drawn here, where Pillow is at hand, with a date and a place in their EXIF
     out = uploads_dir()
     out.mkdir(parents=True, exist_ok=True)

@@ -20,7 +20,13 @@ struct SettingsView: View {
                     Button("Sign out", role: .destructive) { confirmSignOut = true }
                 }
                 Section("Sync") {
-                    Toggle("Sync automatically", isOn: $autoSync).onChange(of: autoSync) { _, v in AppSettings.autoSync = v; if v { BackgroundSync.schedule() } }
+                    Toggle("Sync automatically", isOn: $autoSync).onChange(of: autoSync) { _, v in
+                        AppSettings.autoSync = v
+                        if v {
+                            BackgroundSync.schedule()
+                            Task { await PhotoLibrary.requestAccessIfNeeded() }
+                        }
+                    }
                     Toggle("Only on Wi-Fi", isOn: $wifiOnly).onChange(of: wifiOnly) { _, v in AppSettings.wifiOnly = v; BackgroundUploader.shared.settingsChanged() }
                     Toggle("Only while charging", isOn: $chargingOnly).onChange(of: chargingOnly) { _, v in AppSettings.chargingOnly = v; BackgroundSync.schedule(); BackgroundUploader.shared.settingsChanged() }
                     Toggle("Include videos", isOn: $includeVideos).onChange(of: includeVideos) { _, v in AppSettings.includeVideos = v }

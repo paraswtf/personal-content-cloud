@@ -1,7 +1,8 @@
 import SwiftUI
 
-/// Upload and sync. Placeholder of the core (the upload area replaces this file and keeps these three links):
-/// the phone's library sync, removing synced photos from the phone, and the sync's options.
+/// Upload and sync. Placeholder of the core (the upload area replaces this file, keeps these three links and keeps
+/// asking for Photos access when it opens): the phone's library sync, removing synced photos from the phone, and the
+/// sync's options.
 struct UploadScreen: View {
     var body: some View {
         List {
@@ -15,5 +16,7 @@ struct UploadScreen: View {
             }
         }
         .navigationTitle("Upload and sync")
+        // Opening upload is where the app first asks for Photos access (never at launch or sign-in).
+        .task { await PhotoLibrary.requestAccessIfNeeded() }
     }
 }
