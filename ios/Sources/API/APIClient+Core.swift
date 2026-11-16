@@ -171,15 +171,11 @@ extension APIClient {
         return URLSession(configuration: cfg)
     }()
 
-    /// The server and token the generated endpoints speak with. `APIClient` keeps its own `base` and `token`
-    /// private (Services/APIClient.swift), so this reads the signed-in ones, the values `current()` builds a
-    /// client from. A client made for another server (the sign-in screen's check) still answers `state()`
-    /// with its own values, but its generated methods go to the signed-in server.
+    /// The server and token the generated endpoints speak with: this client's own, so a client made for
+    /// another server (the sign-in screen's check) sends its generated calls there too.
     nonisolated func connection() throws -> APIConnection {
-        guard let connection = APIConnection.signedIn() else {
-            throw APIError(status: 401, detail: "login_required")
-        }
-        return connection
+        guard !token.isEmpty else { throw APIError(status: 401, detail: "login_required") }
+        return APIConnection(base: base, token: token)
     }
 
     /// A request to the server: the token, the CSRF header, the undo id of a write, `vault=1` in vault mode,

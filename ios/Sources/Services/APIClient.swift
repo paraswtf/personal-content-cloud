@@ -68,8 +68,10 @@ struct ItemBrief: Decodable {
 }
 
 actor APIClient {
-    private let base: URL
-    private let token: String
+    /// Read by the generated endpoints (API/APIClient+Core.swift, `connection()`): immutable and Sendable,
+    /// so they can be read without hopping onto the actor.
+    let base: URL
+    let token: String
     private let session: URLSession
 
     init(base: URL, token: String) {
