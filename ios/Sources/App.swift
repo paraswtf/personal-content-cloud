@@ -18,6 +18,7 @@ struct PersonalContentCloudApp: App {
             RootView()
                 .environmentObject(session)
                 .modelContainer(SyncStore.shared.container)
+                .settingsAppearance()  // Settings > Appearance (Features/Settings/Account)
         }
     }
 }
