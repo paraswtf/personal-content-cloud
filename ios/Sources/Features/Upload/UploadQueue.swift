@@ -111,7 +111,7 @@ final class UploadQueue {
         var result = addAssets(assets) + addFiles(copies, origin: "file")
         result.rejected += unreadable
         say(result)
-        pump()
+        await resume()   // an asset the sync had left half sent continues too
     }
 
     private func addFiles(_ files: [UploadIncoming], origin: String) -> AddResult {
