@@ -284,6 +284,7 @@ export default function PeopleBulkAction({ uids, busy = false, onDone, from }: P
             species={who.species ?? undefined}
             speciesOnly={pet && !!who.species}
             excludeIds={[who.id]}
+            like={{ uids, person_id: who.id }}
             placeholder={pet ? 'Search pets or type a new name' : 'Search people or type a new name'}
             onPick={(choice) => !working && move.mutate({ who, choice })}
           />
@@ -367,7 +368,7 @@ export default function PeopleBulkAction({ uids, busy = false, onDone, from }: P
             <Spinner label="Tagging" />
           </div>
         ) : (
-          <PersonPicker autoFocus kind="all" onPick={pickTag} />
+          <PersonPicker autoFocus kind="all" like={count === 1 ? { around_uid: uids[0] } : null} onPick={pickTag} />
         )}
       </div>
     )

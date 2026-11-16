@@ -6,7 +6,9 @@
 // with its probability as the percentage and one line: "Looks like Priya's photos, 0.61, and the same clothes".
 // Position (section 35) adds its own reason ("In the same spot as Priya 8 s earlier"); a guess from the position
 // alone (basis "place") carries no clothes keys either, and its score is the measured share of right answers for
-// that gap, so it shows a percentage.
+// that gap, so it shows a percentage. A guess made when the owner named a face the app had grouped with this one
+// (basis "group", section 10) reads "Grouped", its similarity as "face 0.62" (not calibrated, so no percentage),
+// and one line: "grouped with the face you named Priya".
 //
 // The sources meet in two ways. A trained-recognition guess that another source agrees with names that source in
 // `also` (its basis: clothes, trait, place and their combinations) and keeps the position part (`place`) when
@@ -45,7 +47,9 @@ export function safeHex(v: unknown): string | undefined {
  *  clothes with one of them, or recognition trained on the person. */
 export function guessBasis(guess: Ev): GuessBasis {
   const b = guess.evidence?.basis
-  return b === 'trait' || b === 'clothes+trait' || b === 'face' || b === 'place' || b === 'clothes+place' ? b : 'clothes'
+  return b === 'trait' || b === 'clothes+trait' || b === 'face' || b === 'place' || b === 'clothes+place' || b === 'group'
+    ? b
+    : 'clothes'
 }
 
 /** The position part of the evidence (section 35): the box the person was followed from. Null when there is none. */
@@ -278,10 +282,11 @@ function joinWords(words: string[]): string {
 }
 
 /** "Face", "By clothes", "By tattoo", "By mehndi and nails", "By clothes and tattoo", "By face", "By position",
- *  "By clothes and position". */
+ *  "By clothes and position", "Grouped". */
 export function guessLabel(kind: 'face' | 'body', guess: Ev): string {
   const basis = guessBasis(guess)
   if (basis === 'face') return 'By face'
+  if (basis === 'group') return 'Grouped'
   const kinds = traitKinds(guess)
   const place = guessPlace(guess) ? ['position'] : []
   if (basis === 'place') return 'By position'
@@ -298,6 +303,7 @@ export type GuessIcon = 'clothes' | 'tattoo' | 'hand' | 'face' | 'place'
  *  footprints (position). */
 export function guessIcons(kind: 'face' | 'body', guess: Ev): GuessIcon[] {
   const basis = guessBasis(guess)
+  if (basis === 'group') return ['face']
   if (basis === 'face') {
     const also = alsoParts(guess)
     const icons: GuessIcon[] = ['face']
@@ -316,9 +322,13 @@ export function guessIcons(kind: 'face' | 'body', guess: Ev): GuessIcon[] {
 
 /** "85% sure" for a clothes guess (its score is learned), for trained recognition (its probability, checked on
  *  photos it was not trained on) and for a guess from the position alone (its score is the measured share of right
- *  answers for that gap); "strong match" for traits alone (no percentage). */
+ *  answers for that gap); "strong match" for traits alone (no percentage); "face 0.62" for a grouped face (its
+ *  similarity to the face the owner named, not a probability). */
 export function guessSure(guess: Pick<GuessOut, 'evidence' | 'score'>): string {
-  return guessBasis(guess) === 'trait' ? 'strong match' : `${formatPercent(guess.score)} sure`
+  const basis = guessBasis(guess)
+  if (basis === 'trait') return 'strong match'
+  if (basis === 'group') return `face ${(Number.isFinite(guess.score) ? guess.score : 0).toFixed(2)}`
+  return `${formatPercent(guess.score)} sure`
 }
 
 /** What else names the person of a trained-recognition guess: `also` holds the basis of the guess that agreed
@@ -367,9 +377,11 @@ export function faceLine(guess: Ev & { person?: PersonRef | null }, withPlace = 
 
 /** The line under a guess. Clothes: time window, scene, place, clothes, face (and the trained recognition when it
  *  agrees). Trained recognition: faceLine. A guess from traits alone or from the position alone has no clothes or
- *  time-window words: its line is empty, or "trained face 92%" when the trained recognition agrees. */
+ *  time-window words: its line is empty, or "trained face 92%" when the trained recognition agrees. A grouped face:
+ *  "grouped with the face you named Priya". */
 export function clothesLine(guess: Ev & { person?: PersonRef | null }): string {
   const basis = guessBasis(guess)
+  if (basis === 'group') return guess.person?.name ? `grouped with the face you named ${personName(guess.person)}` : 'grouped with a face you named'
   if (basis === 'trait' || basis === 'place') {
     const agrees = num(guess.evidence?.p)
     return agrees !== null ? `trained face ${formatPercent(agrees)}` : ''

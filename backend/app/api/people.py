@@ -1,13 +1,18 @@
 """People, faces, bodies, guesses, merge suggestions and person tags (docs/ARCHITECTURE.md section 13).
 
 Routes (all under /api, all require a logged-in session; writes need the CSRF header):
-  GET    /people?q&filter=all|named|unnamed&sort=items|name|recent&cursor&limit -> PersonPage (keyset)
+  GET    /people?q&filter=all|named|unnamed&sort=items|name|recent&cursor&limit -> PersonPage (keyset). Unnamed
+         groups of faces stay in the background (section 10): the list has named people and the pets, so
+         filter=unnamed lists only pets without a name, and every route by id answers 404 for such a group
   POST   /people {name, face_ids?} -> PersonOut (an existing person with that name is reused)
   POST   /people/merge {target_id, source_ids} -> PersonOut
   GET    /people/{id} -> PersonOut;  PATCH {name?, cover_face_id?} -> PersonOut (renaming to a name another
          person has merges into that person and returns it);  DELETE -> Ok
   GET    /people/{id}/faces?cursor&limit -> FacePage;  GET /people/{id}/items?cursor&limit&vault -> ItemPage
-  GET    /faces/unassigned -> FacePage;  POST /faces/assign -> AssignOut;  DELETE /faces/{id} -> Ok
+  GET    /faces/unassigned -> FacePage (the faces to name: no person, or an unnamed group's, a group's faces
+         side by side, larger groups first, each by face quality);  POST /faces/assign -> AssignOut (naming
+         a face of an unnamed group turns the group's other faces into guesses for that person, AssignOut.guessed);
+         DELETE /faces/{id} -> Ok
   POST   /bodies/assign -> AssignOut;  DELETE /bodies/{id} -> Ok
   POST   /items/{uid}/faces {x, y, w, h, t?, person_id | new_person_name} -> 201 FaceOut: a face box the owner
          draws (section 10, person_boxes.prepare_face); 422 no_face when no face shows inside, 409 when the face
@@ -18,9 +23,10 @@ Routes (all under /api, all require a logged-in session; writes need the CSRF he
   POST   /guesses/confirm {faces, bodies} -> BulkOut;  POST /guesses/reject -> BulkOut
   POST   /guesses/correct {faces, bodies, person_id | new_person_name} -> AssignOut ("Someone else": the guess learned
          as wrong and the box given to the right person, one action)
-  GET    /review/guesses?cursor&limit&person&basis=all|clothes|trait -> GuessPage (basis, section 34: clothes =
-         guesses from clothes alone, trait = guesses that tattoos, mehndi or nails made or backed, face = guesses of
-         a model trained on one person)
+  GET    /review/guesses?cursor&limit&person&basis=all|clothes|trait|face|place|group -> GuessPage (basis, section
+         34: clothes = guesses from clothes alone, trait = guesses that tattoos, mehndi or nails made or backed, face =
+         guesses of a model trained on one person, place = with the position, group = the other faces of an unnamed
+         group the owner named a face of). Only guesses for named people (section 10).
   Recognition trained on one person (section 10, app.learning.person_model; people only, 404 for a pet):
   GET    /people/{id}/recognition -> RecognitionOut (the model, its check, the last look, a run's progress)
   POST   /people/{id}/recognition/train {scan=true} -> 202 {started} (background; 409 with the reason when it
@@ -51,7 +57,6 @@ Routes (all under /api, all require a logged-in session; writes need the CSRF he
   Related tags suggested (section 10, app.analysis.related):
   GET    /people/{id}/related-suggestions?limit&vault -> RelatedSuggestionList;  POST .../dismiss {uids} -> Ok
   GET    /items/{uid}/related-suggestions -> ItemRelatedSuggestions
-  GET    /people/{id}/childhood -> ChildhoodOut (who an unnamed group of childhood photos may be, section 10)
   POST   /recluster -> Ok
 Faces, bodies and counts in NSFW or trashed items are never shown here (person items take vault=1
 with an unlocked session). With the vault locked, acting on a box or the tags of an NSFW item is
@@ -71,7 +76,7 @@ from app import storage
 from app import undo as undo_mod
 from app.analysis import cluster, guess
 from app.analysis import animals as animals_mod
-from app.analysis import box_edit, person_boxes, person_scan, trait_match
+from app.analysis import box_edit, hidden_groups, person_boxes, person_scan, trait_match
 from app.analysis import traits as atraits
 from app.analysis import related as related_mod
 from app.analysis.index import get_index
@@ -83,6 +88,7 @@ from app.api.common import (
     ITEM_CARD_COLUMNS,
     animal_out,
     body_out,
+    box_person,
     box_person_ids,
     face_out,
     guess_out,
@@ -90,6 +96,7 @@ from app.api.common import (
     page_sql,
     person_refs,
     pet_cover_ids,
+    shown,
     trait_out,
     valid_cursor_scalar,
     visible_sql,
@@ -105,8 +112,6 @@ from app.schemas import (
     AssignFacesIn,
     AssignOut,
     BulkOut,
-    ChildhoodCandidate,
-    ChildhoodOut,
     DismissIn,
     GuessCorrectIn,
     ItemRelatedSuggestion,
@@ -234,7 +239,10 @@ def _check_boxes_vault(conn: sqlite3.Connection, session: SessionInfo, table: st
 
 
 def _hidden_person(conn: sqlite3.Connection, session: SessionInfo, person_id: int) -> bool:
-    """A locked session does not see people whose only items are in the vault (the list hides them too)."""
+    """A person no route by id shows: an unnamed group of faces, which stays in the background (section 10), and, for
+    a locked session, someone whose only items are in the vault (the list hides them too)."""
+    if _unnamed_group(conn, person_id):
+        return True
     if session.vault_unlocked:
         return False
     row = conn.execute(
@@ -244,6 +252,17 @@ def _hidden_person(conn: sqlite3.Connection, session: SessionInfo, person_id: in
         (person_id, person_id, person_id),
     ).fetchone()
     return int(row[0]) == 0 and int(row[1]) > 0
+
+
+def _unnamed_group(conn: sqlite3.Connection, person_id: int) -> bool:
+    """True for a person without a name who is not a pet: a group the matching keeps in the background (section 10)."""
+    return conn.execute("SELECT 1 FROM persons WHERE id = ? AND kind != 'pet' AND (name IS NULL OR name = '')",
+                        (int(person_id),)).fetchone() is not None
+
+
+# A person the API may show (section 10): named, or a pet. SQL over persons aliased `alias`.
+def _shown_sql(alias: str) -> str:
+    return f"({alias}.kind = 'pet' OR ({alias}.name IS NOT NULL AND {alias}.name != ''))"
 
 
 def _visible_person_row(conn: sqlite3.Connection, session: SessionInfo, person_id: int) -> sqlite3.Row:
@@ -453,7 +472,8 @@ def _tags_of(conn: sqlite3.Connection, item_id: int) -> list[PersonRef]:
         (item_id,),
     ).fetchall()
     refs = person_refs(conn, [int(r["id"]) for r in rows])
-    return [refs[int(r["id"])].model_copy(update={"relation": r["relation"]}) for r in rows if int(r["id"]) in refs]
+    return [refs[int(r["id"])].model_copy(update={"relation": r["relation"]}) for r in rows
+            if shown(refs.get(int(r["id"]))) is not None]
 
 
 FACE_SELECT = (
@@ -471,12 +491,14 @@ def _face_items(conn: sqlite3.Connection, rows: list[sqlite3.Row]) -> list[FaceL
 
 
 def _face_item(conn: sqlite3.Connection, row: sqlite3.Row, refs: dict[int, PersonRef] | None = None) -> FaceListItem:
+    """A face of a list. A face of an unnamed group reads as a face nobody is named for (common.box_person)."""
+    person, assigned_by, by_guess = box_person(conn, row, refs)
     return FaceListItem(
         id=row["id"], item_uid=row["item_uid"], item_kind=row["item_kind"],
         thumb_url=thumb_url(row["item_uid"], int(row["item_version"])), url=face_url(int(row["id"])),
         det_score=row["det_score"], size_px=row["size_px"], quality=row["quality"],
-        frame_time_s=row["frame_time_s"], person_id=row["person_id"], assigned_by=row["assigned_by"],
-        source="user" if row["source"] == "user" else "detector", by_guess=bool(row["by_guess"]),
+        frame_time_s=row["frame_time_s"], person_id=person.id if person is not None else None,
+        assigned_by=assigned_by, source="user" if row["source"] == "user" else "detector", by_guess=by_guess,
         guess=guess_out(conn, row, refs), created_at=row["created_at"],
     )
 
@@ -509,7 +531,7 @@ def list_people(
     limit: int = Query(default=100, ge=1, le=500),
     conn: sqlite3.Connection = Depends(get_db),
 ) -> PersonPage:
-    conds = ["(x.item_count > 0 OR x.any_count = 0)"]
+    conds = ["(x.item_count > 0 OR x.any_count = 0)", _shown_sql("x")]  # unnamed groups stay in the background
     params: list[Any] = []
     if kind != "all":
         conds.append("x.kind = ?")
@@ -591,7 +613,9 @@ def create_person(body: PersonCreate, conn: sqlite3.Connection = Depends(get_db)
         pid = cluster.find_or_create_person(conn, name)
         assert pid is not None
         if body.face_ids:
+            groups = _unnamed_groups_of(conn, _leaving(conn, "faces", body.face_ids, pid))
             _, items = _move_boxes(conn, "faces", body.face_ids, pid)
+            _name_from_groups(conn, groups, pid)
         bump_faces_version(conn)
     _after_people_change(conn, items | _items_of_person(conn, pid), {(pid, None)})
     return _person_out(conn, pid)
@@ -775,25 +799,48 @@ def person_items(
 
 
 # ------------------------------------------------------------------ faces and bodies
+# The faces to name (section 10): a face of nobody, or of an unnamed group (those stay in the background). Each row
+# carries its group's live face count (gn, 1 for a face of nobody) and the group (gid, 0 for nobody).
+_TO_NAME = (
+    "WITH g AS (SELECT f.person_id AS pid, COUNT(*) AS n FROM faces f JOIN items i ON i.id = f.item_id AND "
+    f"{LIVE} JOIN persons p ON p.id = f.person_id AND p.kind != 'pet' AND (p.name IS NULL OR p.name = '') "
+    "GROUP BY f.person_id), "
+    "x AS (SELECT f.id, f.person_id, f.assigned_by, f.source, f.by_guess, f.det_score, f.size_px, f.quality, "
+    "f.frame_time_s, f.created_at, f.guess_person_id, f.guess_score, f.guess_evidence, i.uid AS item_uid, "
+    "i.kind AS item_kind, i.version AS item_version, COALESCE(g.n, 1) AS gn, COALESCE(g.pid, 0) AS gid "
+    f"FROM faces f JOIN items i ON i.id = f.item_id AND {LIVE} LEFT JOIN g ON g.pid = f.person_id "
+    "WHERE f.person_id IS NULL OR g.pid IS NOT NULL) "
+)
+
+
 @router.get("/faces/unassigned", response_model=FacePage)
 def unassigned_faces(
     cursor: str | None = Query(default=None, max_length=512),
     limit: int = Query(default=200, ge=1, le=1000),
     conn: sqlite3.Connection = Depends(get_db),
 ) -> FacePage:
-    conds = ["f.person_id IS NULL", LIVE]
+    """The faces to name: faces of nobody and the faces of unnamed groups, which the API never shows as people
+    (section 10). A group's faces come side by side, the larger groups first, each group's best faces first; a face
+    of nobody is a group of one. The cursor is a keyset over (group size, group, quality, id), all descending."""
+    total = conn.execute(f"{_TO_NAME} SELECT COUNT(*) FROM x").fetchone()[0]
+    conds: list[str] = []
     params: list[Any] = []
-    total = conn.execute(f"SELECT COUNT(*) FROM faces f JOIN items i ON i.id = f.item_id WHERE {' AND '.join(conds)}",
-                         params).fetchone()[0]
-    v = _keyset(cursor, 1)
+    v = _keyset(cursor, 4)
     if v is not None:
-        conds.append("f.id < ?")
-        params.append(v[0])
-    rows = conn.execute(f"{FACE_SELECT} WHERE {' AND '.join(conds)} ORDER BY f.id DESC LIMIT ?",
-                        [*params, limit + 1]).fetchall()
+        if any(x is None or isinstance(x, (bool, str)) for x in v):
+            raise HTTPException(status_code=400, detail="Invalid cursor")
+        conds.append("(x.gn < ? OR (x.gn = ? AND (x.gid < ? OR (x.gid = ? AND "
+                     "(x.quality < ? OR (x.quality = ? AND x.id < ?))))))")
+        params += [v[0], v[0], v[1], v[1], v[2], v[2], v[3]]
+    where = f" WHERE {' AND '.join(conds)}" if conds else ""
+    rows = conn.execute(f"{_TO_NAME} SELECT * FROM x{where} ORDER BY x.gn DESC, x.gid DESC, x.quality DESC, x.id DESC "
+                        "LIMIT ?", [*params, limit + 1]).fetchall()
     more = len(rows) > limit
     rows = rows[:limit]
-    nxt = encode_cursor([int(rows[-1]["id"])]) if more and rows else None
+    nxt = None
+    if more and rows:
+        last = rows[-1]
+        nxt = encode_cursor([int(last["gn"]), int(last["gid"]), float(last["quality"]), int(last["id"])])
     return FacePage(items=_face_items(conn, rows), next_cursor=nxt, total=int(total))
 
 
@@ -801,13 +848,16 @@ def _assign(conn: sqlite3.Connection, table: str, ids: list[int], person_id: int
             name_given: bool, session: SessionInfo) -> AssignOut:
     _check_boxes_vault(conn, session, table, ids)
     followed: list[int] = []
+    guessed: list[int] = []
     with tx(conn):
         target = _target_person(conn, person_id, new_name, name_given, session)
         leaving = _leaving(conn, table, ids, target) if table == "faces" else {}
+        groups = _unnamed_groups_of(conn, leaving)  # taken out of `leaving`: no look-alikes follow from those
         updated, items = _move_boxes(conn, table, ids, target)
         if leaving:
             followed, more_items = _follow_lookalikes(conn, leaving, target)
             items |= more_items
+        guessed = _name_from_groups(conn, groups, target)
     guesses = {(target, i) for i in items} if target is not None else set()
     _after_people_change(conn, items, guesses)  # type: ignore[arg-type]
     if followed and target is None:
@@ -819,7 +869,26 @@ def _assign(conn: sqlite3.Connection, table: str, ids: list[int], person_id: int
             log.exception("could not regroup %d look-alike faces", len(followed))
         guess.refresh_fts(conn, items)
     return AssignOut(updated=updated, person=_person_out(conn, target) if target is not None else None,
-                     followed=len(followed))
+                     followed=len(followed), guessed=len(guessed))
+
+
+def _unnamed_groups_of(conn: sqlite3.Connection, leaving: dict[int, list[int]]) -> dict[int, list[int]]:
+    """The entries of `leaving` ({person: faces leaving them}) whose person is an unnamed group (section 10), taken
+    out of `leaving`. Read before the move: a group the move empties is gone after it."""
+    groups = {pid: seeds for pid, seeds in leaving.items() if _unnamed_group(conn, pid)}
+    for pid in groups:
+        del leaving[pid]
+    return groups
+
+
+def _name_from_groups(conn: sqlite3.Connection, groups: dict[int, list[int]], target: int | None) -> list[int]:
+    """The owner named faces of unnamed groups (section 10), which they never see as groups: only those faces take
+    the name, and the groups' other faces become guesses for that person, to review (hidden_groups.rest_to_guesses;
+    the owner's choice of 2026-11-17, "Guesses to review"). Returns the faces that became guesses."""
+    if not groups:
+        return []
+    guessed, _ = hidden_groups.rest_to_guesses(conn, groups, target)
+    return guessed
 
 
 def _leaving(conn: sqlite3.Connection, table: str, ids: list[int], target: int | None) -> dict[int, list[int]]:
@@ -1329,6 +1398,7 @@ def correct_guesses(body: GuessCorrectIn, conn: sqlite3.Connection = Depends(get
         # only the boxes with an open guess (of someone else) are touched; they go to the target right below
         guess.reject(conn, rest_f, rest_b, regroup=False)
         leaving = _leaving(conn, "faces", rest_f, target) if rest_f else {}
+        groups = _unnamed_groups_of(conn, leaving)
         updated = 0
         for table, ids in (("faces", rest_f), ("bodies", rest_b)):
             if ids:
@@ -1338,8 +1408,10 @@ def correct_guesses(body: GuessCorrectIn, conn: sqlite3.Connection = Depends(get
         if leaving:
             followed, more = _follow_lookalikes(conn, leaving, target)
             items |= more
+        guessed = _name_from_groups(conn, groups, target)
     _after_people_change(conn, items, {(target, i) for i in items})
-    return AssignOut(updated=updated + confirmed, person=_person_out(conn, target), followed=len(followed))
+    return AssignOut(updated=updated + confirmed, person=_person_out(conn, target), followed=len(followed),
+                     guessed=len(guessed))
 
 
 # Section 34: evidence.basis is 'trait' (traits alone), 'clothes+trait' (clothes backed by traits) or absent (clothes).
@@ -1352,6 +1424,8 @@ _BASIS_SQL = {
              "IN ('trait', 'clothes+trait')",
     # section 10: the guesses of a model trained on one person
     "face": " AND (CASE WHEN json_valid(g.guess_evidence) THEN json_extract(g.guess_evidence, '$.basis') END) IS 'face'",
+    # section 10: the other faces of an unnamed group the owner named a face of
+    "group": " AND (CASE WHEN json_valid(g.guess_evidence) THEN json_extract(g.guess_evidence, '$.basis') END) IS 'group'",
     # any guess with a position part: a trait guess that position agrees with keeps its basis and gains the part
     "place": " AND (CASE WHEN json_valid(g.guess_evidence) THEN json_extract(g.guess_evidence, '$.basis') "
              "IN ('place', 'clothes+place') OR json_extract(g.guess_evidence, '$.place') IS NOT NULL END)",
@@ -1363,8 +1437,9 @@ def review_guesses(
     cursor: str | None = Query(default=None, max_length=512),
     limit: int = Query(default=60, ge=1, le=200),
     person: int | None = Query(default=None, description="only guesses naming this person"),
-    basis: Literal["all", "clothes", "trait", "face", "place"] = Query(
-        default="all", description="clothes alone, with traits, a model trained on one person, or with the position"),
+    basis: Literal["all", "clothes", "trait", "face", "place", "group"] = Query(
+        default="all", description="clothes alone, with traits, a model trained on one person, with the position, or "
+                                   "the other faces of a group the owner named a face of"),
     conn: sqlite3.Connection = Depends(get_db),
 ) -> GuessPage:
     person_sql = " AND g.guess_person_id = ?" if person is not None else ""
@@ -1380,7 +1455,10 @@ def review_guesses(
         "b.id, b.x, b.y, b.w, b.h, b.det_score, NULL, NULL, b.frame_time_s, NULL, b.face_id, "
         "b.person_id, b.assigned_by, b.guess_score, b.guess_evidence FROM bodies b "
         "WHERE b.guess_person_id IS NOT NULL AND b.person_id IS NULL"
-        f") g JOIN items i ON i.id = g.item_id AND {LIVE}{person_sql}"
+        f") g JOIN items i ON i.id = g.item_id AND {LIVE} "
+        # a guess for an unnamed group is never shown (section 10); it shows once that person has a name
+        "JOIN persons gp ON gp.id = g.guess_person_id AND gp.name IS NOT NULL AND gp.name != ''"
+        f"{person_sql}"
     )
     base_params: list[Any] = [person] if person is not None else []
     total = conn.execute(f"SELECT COUNT(*) FROM ({base})", base_params).fetchone()[0]
@@ -1502,12 +1580,15 @@ def suggestions(
     limit: int = Query(default=30, ge=1, le=200),
     conn: sqlite3.Connection = Depends(get_db),
 ) -> SuggestionList:
-    """Merge suggestions, best first: people who look alike (cluster.merge_suggestions, up to `limit`), then up to
-    CHILD_SUGGEST_MAX pairs whose childhood photos look alike (cluster.childhood_suggestions, kind 'childhood',
-    section 10; their samples are those childhood photos)."""
-    young = cluster.childhood_suggestions(conn, CHILD_SUGGEST_MAX)
+    """Merge suggestions between named people, best first: people who look alike (cluster.merge_suggestions, up to
+    `limit`), then up to CHILD_SUGGEST_MAX pairs whose childhood photos look alike (cluster.childhood_suggestions,
+    kind 'childhood', section 10; their samples are those childhood photos). Unnamed groups take no part."""
+    # Only named people (section 10): an unnamed group stays in the background, so a pair with one is not shown.
+    named = {int(r[0]) for r in conn.execute(f"SELECT id FROM persons p WHERE p.kind = 'person' AND {_shown_sql('p')}")}
+    young = cluster.childhood_suggestions(conn, CHILD_SUGGEST_MAX, keep=named)
     kinds = {(int(a), int(b)): "childhood" for a, b, _ in young}
-    same = [t for t in cluster.merge_suggestions(conn, limit + len(kinds)) if (int(t[0]), int(t[1])) not in kinds][:limit]
+    same = [t for t in cluster.merge_suggestions(conn, limit + len(kinds), keep=named)
+            if (int(t[0]), int(t[1])) not in kinds][:limit]
     pairs = [*same, *young]  # the childhood pairs after the usual ones, not counted against `limit`: they are rare
     if not pairs:
         return SuggestionList(items=[])
@@ -1556,27 +1637,6 @@ def _childhood_samples(conn: sqlite3.Connection, person_ids: set[int], n: int = 
             flags = idx.child_flags(ids)
             out[pid] = [face_url(f) for f, young in zip(ids, flags) if young][:n]
     return out
-
-
-@router.get("/people/{person_id}/childhood", response_model=ChildhoodOut)
-def person_childhood(
-    person_id: int,
-    limit: int = Query(default=3, ge=1, le=10),
-    conn: sqlite3.Connection = Depends(get_db),
-    session: SessionInfo = Depends(require_user),
-) -> ChildhoodOut:
-    """Who an unnamed group of childhood photos may be as a child (section 10): named people ranked by how their
-    adult photos look like the group's childhood photos (cluster.childhood_candidates). No bar: the owner picks
-    (a merge, learned as a cross-age link) or ignores it."""
-    _visible_person_row(conn, session, person_id)
-    ranked = cluster.childhood_candidates(conn, person_id, limit)
-    if not ranked:
-        return ChildhoodOut(candidates=[])
-    rows = conn.execute(f"SELECT {PERSON_COLUMNS} FROM persons WHERE id IN ({_ids_sql([p for p, _ in ranked])})",
-                        [p for p, _ in ranked]).fetchall()
-    outs = {o.id: o for o in person_outs(conn, rows)}
-    return ChildhoodOut(candidates=[ChildhoodCandidate(person=outs[p], similarity=round(float(sv), 4))
-                                    for p, sv in ranked if p in outs and not _hidden_person(conn, session, p)])
 
 
 # ------------------------------------------------------------------ recognition trained on one person (section 10)
@@ -1905,7 +1965,7 @@ def item_related_suggestions(uid: str, conn: sqlite3.Connection = Depends(get_db
         raise _vault_locked()
     visible = "i.deleted_at IS NULL AND i.nsfw = " + ("1" if item["nsfw"] else "0")
     found = related_mod.suggest_for_item(conn, int(item["id"]), visible=visible)
-    found = [(pid, reason, seed) for pid, reason, seed in found if not _hidden_person(conn, session, pid)]
+    found = [(pid, reason, seed) for pid, reason, seed in found if not _hidden_person(conn, session, pid)]  # unnamed too
     if not found:
         return ItemRelatedSuggestions(people=[])
     persons = {int(r["id"]): r for r in conn.execute(
@@ -2113,9 +2173,9 @@ def _pet_target(conn: sqlite3.Connection, session: SessionInfo, person_id: int |
 def people_on_items(body: ItemsPeopleIn, conn: sqlite3.Connection = Depends(get_db),
                     session: SessionInfo = Depends(require_user)) -> ItemsPeopleOut:
     """The people and pets on the selected items (section 10): who is on them through faces, bodies, pet
-    boxes and tags, most items first, named before unnamed; and the faces nobody is named for. `by_you`
-    counts the items where the owner put them there (a box they tagged or drew, or a tag), the rest came
-    from recognition alone."""
+    boxes and tags, most items first, named before unnamed (pets only: an unnamed group of faces stays in the
+    background, and its faces count with the faces nobody is named for). `by_you` counts the items where the owner
+    put them there (a box they tagged or drew, or a tag), the rest came from recognition alone."""
     item_ids = _selection(conn, session, body.uids)
     stats: dict[int, dict[str, Any]] = {}
 
@@ -2147,10 +2207,12 @@ def people_on_items(body: ItemsPeopleIn, conn: sqlite3.Connection = Depends(get_
             if r["source"] != "guess":
                 e["mine"].add(int(r["item_id"]))
         unnamed += int(conn.execute(
-            f"SELECT COUNT(*) FROM faces WHERE person_id IS NULL AND item_id IN ({ph})", chunk).fetchone()[0])
+            f"SELECT COUNT(*) FROM faces f LEFT JOIN persons p ON p.id = f.person_id WHERE f.item_id IN ({ph}) "
+            f"AND (f.person_id IS NULL OR NOT {_shown_sql('p')})", chunk).fetchone()[0])
     rows: list[sqlite3.Row] = []
     for chunk in _chunks(sorted(stats)):
-        rows += conn.execute(f"SELECT {PERSON_COLUMNS} FROM persons WHERE id IN ({_ids_sql(chunk)})", chunk).fetchall()
+        rows += conn.execute(f"SELECT {PERSON_COLUMNS} FROM persons p WHERE id IN ({_ids_sql(chunk)}) "
+                             f"AND {_shown_sql('p')}", chunk).fetchall()
     covers = _covers(conn, rows) if rows else {}
     people = []
     for r in rows:

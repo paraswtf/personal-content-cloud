@@ -710,6 +710,7 @@ class AssignOut(BaseModel):
     updated: int
     person: PersonOut | None = None
     followed: int = 0   # faces that looked like the ones taken away from a person and went with them
+    guessed: int = 0    # section 10: the other faces of an unnamed group a named face came from, now guesses for them
 
 
 class Suggestion(BaseModel):
@@ -747,18 +748,6 @@ class ItemRelatedSuggestion(BaseModel):
 
 class ItemRelatedSuggestions(BaseModel):
     people: list[ItemRelatedSuggestion]
-
-
-class ChildhoodCandidate(BaseModel):
-    person: PersonOut
-    similarity: float
-
-
-class ChildhoodOut(BaseModel):
-    """Who an unnamed group of childhood photos may be as a child (section 10), best first; empty when the group
-    is not mostly childhood photos."""
-
-    candidates: list[ChildhoodCandidate]
 
 
 class RecognitionCut(BaseModel):

@@ -275,6 +275,7 @@ extension APIClient {
         return try await perform("POST", "/api/faces/assign", body: body, as: API.AssignOut.self)
     }
 
+    /// The faces to name: faces of nobody and the faces of unnamed groups, which the API never shows as people (section 10).
     /// GET /api/faces/unassigned
     nonisolated func unassignedFaces(cursor: String? = nil, limit: Int? = nil) async throws -> API.FacePage {
         var query = APIQuery()
@@ -336,7 +337,7 @@ extension APIClient {
         return try await perform("POST", "/api/items/bulk", body: body, as: API.BulkOut.self)
     }
 
-    /// The people and pets on the selected items (section 10): who is on them through faces, bodies, pet boxes and tags, most items first, named before unnamed; and ...
+    /// The people and pets on the selected items (section 10): who is on them through faces, bodies, pet boxes and tags, most items first, named before unnamed (pets ...
     /// POST /api/items/people
     nonisolated func peopleOnItems(body: API.ItemsPeopleIn) async throws -> API.ItemsPeopleOut {
         return try await perform("POST", "/api/items/people", body: body, as: API.ItemsPeopleOut.self)
@@ -542,6 +543,11 @@ extension APIClient {
         return try await perform("POST", "/api/people/merge", body: body, as: API.PersonOut.self)
     }
 
+    /// POST /api/people/similar
+    nonisolated func similarPeople(body: API.SimilarIn) async throws -> API.SimilarOut {
+        return try await perform("POST", "/api/people/similar", body: body, as: API.SimilarOut.self)
+    }
+
     /// DELETE /api/people/{person_id}
     nonisolated func deletePerson(personId: Int) async throws -> API.Ok {
         return try await perform("DELETE", "/api/people/\(APIPath.segment(personId))", as: API.Ok.self)
@@ -564,14 +570,6 @@ extension APIClient {
         query.add("cursor", cursor)
         query.add("limit", limit)
         return try await perform("GET", "/api/people/\(APIPath.segment(personId))/animals", query: query.items, as: API.AnimalPage.self)
-    }
-
-    /// Who an unnamed group of childhood photos may be as a child (section 10): named people ranked by how their adult photos look like the group's childhood photos ...
-    /// GET /api/people/{person_id}/childhood
-    nonisolated func personChildhood(personId: Int, limit: Int? = nil) async throws -> API.ChildhoodOut {
-        var query = APIQuery()
-        query.add("limit", limit)
-        return try await perform("GET", "/api/people/\(APIPath.segment(personId))/childhood", query: query.items, as: API.ChildhoodOut.self)
     }
 
     /// GET /api/people/{person_id}/faces
@@ -777,7 +775,7 @@ extension APIClient {
         return try await perform("GET", "/api/stats", as: API.Stats.self)
     }
 
-    /// Merge suggestions, best first: people who look alike (cluster.merge_suggestions, up to `limit`), then up to CHILD_SUGGEST_MAX pairs whose childhood photos look ...
+    /// Merge suggestions between named people, best first: people who look alike (cluster.merge_suggestions, up to `limit`), then up to CHILD_SUGGEST_MAX pairs whose ...
     /// GET /api/suggestions
     nonisolated func suggestions(limit: Int? = nil) async throws -> API.SuggestionList {
         var query = APIQuery()

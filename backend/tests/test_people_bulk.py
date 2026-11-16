@@ -91,14 +91,15 @@ def test_the_list_counts_faces_bodies_pet_boxes_and_both_relations(client, conn)
     r = client.post("/api/items/people", json={"uids": [a["uid"], b["uid"], c["uid"], d["uid"], gone["uid"], "nope", a["uid"]]})
     assert r.status_code == 200, r.text
     out = r.json()
-    assert out["items"] == 4 and out["unnamed_faces"] == 1
+    # an unnamed group stays in the background (section 10): not listed, its face counted as not named
+    assert out["items"] == 4 and out["unnamed_faces"] == 2
     people = out["people"]
-    assert [p["id"] for p in people] == [asha, ben, chutney, nobody]   # most items first, named before unnamed
+    assert [p["id"] for p in people] == [asha, ben, chutney]   # most items first
     by = {p["id"]: p for p in people}
     assert (by[asha]["items"], by[asha]["faces"], by[asha]["bodies"], by[asha]["tags"]) == (3, 2, 1, 0)
     assert (by[ben]["items"], by[ben]["tags"], by[ben]["related"], by[ben]["faces"]) == (2, 1, 1, 0)
     assert (by[chutney]["kind"], by[chutney]["species"], by[chutney]["animals"], by[chutney]["items"]) == ("pet", "cat", 1, 1)
-    assert by[nobody]["name"] is None and by[nobody]["faces"] == 1
+    assert nobody not in by
     assert by[asha]["cover_url"] and by[asha]["name"] == "Asha" and by[asha]["kind"] == "person"
     assert client.get(f"/api/items/{a['uid']}").status_code == 200   # the item route is not shadowed
 
@@ -134,14 +135,17 @@ def test_the_list_counts_the_items_where_the_owner_put_someone(client, conn):
 
 def test_change_to_takes_an_unnamed_group_off_its_only_item(client, conn):
     """Regression (2026-11-09): the move emptied the unnamed group, which was pruned before its look-alikes were
-    followed, and the "not them" memory for the gone group failed a foreign key (500 on Change to...)."""
+    followed, and the "not them" memory for the gone group failed a foreign key (500 on Change to...). The sheet
+    no longer lists unnamed groups (section 10), so the faces are named one by one, as the owner now does."""
     clip = make_item(conn, filename="kart.mov", write_files=False)
     group, other_group = make_person(conn, None), make_person(conn, None)
     aabha = make_person(conn, "Aabha")
     f1 = make_face(conn, clip["id"], group, write_crop=False)
     f2 = make_face(conn, clip["id"], other_group, box=(0.6, 0.2, 0.2, 0.3), write_crop=False)
-    for g in (group, other_group):
-        r = client.post("/api/items/people/move", json={"uids": [clip["uid"]], "from_person_id": g, "person_id": aabha})
+    r = client.post("/api/items/people/move", json={"uids": [clip["uid"]], "from_person_id": group, "person_id": aabha})
+    assert r.status_code == 404  # not found by id
+    for f in (f1, f2):
+        r = client.post("/api/faces/assign", json={"face_ids": [f], "person_id": aabha})
         assert r.status_code == 200, r.text
     assert {_face_owner(conn, f)[0] for f in (f1, f2)} == {aabha}
     assert conn.execute("SELECT COUNT(*) FROM persons WHERE id IN (?, ?)", (group, other_group)).fetchone()[0] == 0
