@@ -1,0 +1,114 @@
+import XCTest
+@testable import PersonalContentCloud
+
+/// The Upload screen's rules match the website's (lib/uploader.ts, SummaryBar.tsx, status.tsx, UploadPage.tsx).
+final class UploadTests: XCTestCase {
+    func testKindsFollowTheMimeTypeThenTheExtension() {
+        XCTAssertEqual(UploadKind.of(name: "IMG_0001.HEIC"), .image)
+        XCTAssertEqual(UploadKind.of(name: "scan.dng"), .image)
+        XCTAssertEqual(UploadKind.of(name: "clip.MOV"), .video)
+        XCTAssertEqual(UploadKind.of(name: "Invoice.PDF"), .pdf)
+        XCTAssertEqual(UploadKind.of(name: "notes.txt"), .document)
+        XCTAssertEqual(UploadKind.of(name: "report", mime: "application/vnd.openxmlformats-officedocument.wordprocessingml.document"), .document)
+        XCTAssertEqual(UploadKind.of(name: "noext", mime: "video/mp4"), .video)
+        XCTAssertEqual(UploadKind.of(name: "archive.zip"), .other)
+        XCTAssertEqual(UploadKind.of(name: ".hidden"), .other)
+        XCTAssertEqual(UploadKind.fileExtension("a.b.JPG"), "jpg")
+        XCTAssertEqual(UploadKind.fileExtension("README"), "")
+    }
+
+    func testPhasesFromTheRecordAndTheServer() {
+        XCTAssertEqual(UploadPhase.of(status: "pending", serverStatus: nil, checking: false), .waiting)
+        XCTAssertEqual(UploadPhase.of(status: "pending", serverStatus: nil, checking: true), .checking)
+        XCTAssertEqual(UploadPhase.of(status: "uploading", serverStatus: nil, checking: false), .uploading)
+        XCTAssertEqual(UploadPhase.of(status: "uploaded", serverStatus: nil, checking: false), .processing)
+        XCTAssertEqual(UploadPhase.of(status: "uploaded", serverStatus: "queued", checking: false), .processing)
+        XCTAssertEqual(UploadPhase.of(status: "synced", serverStatus: "stored", checking: false), .done)
+        XCTAssertEqual(UploadPhase.of(status: "synced", serverStatus: "duplicate", checking: false), .done)
+        XCTAssertEqual(UploadPhase.of(status: "uploaded", serverStatus: "error", checking: false), .done)
+        XCTAssertEqual(UploadPhase.of(status: "uploaded", serverStatus: "cancelled", checking: false), .cancelled)
+        XCTAssertEqual(UploadPhase.of(status: "failed", serverStatus: nil, checking: false), .failed)
+        XCTAssertEqual(UploadPhase.of(status: "skipped", serverStatus: nil, checking: false), .failed)
+        XCTAssertEqual(UploadPhase.of(status: "cancelled", serverStatus: nil, checking: true), .cancelled)
+        XCTAssertTrue(UploadPhase.checking.canCancel)
+        XCTAssertFalse(UploadPhase.processing.canCancel)
+        XCTAssertTrue(UploadPhase.cancelled.isFinished)
+        XCTAssertFalse(UploadPhase.processing.isFinished)
+    }
+
+    func testRetryAsTheWebsiteAllowsIt() {
+        XCTAssertTrue(UploadRowInfo(phase: .failed, bytes: 1).canRetry)
+        XCTAssertFalse(UploadRowInfo(phase: .failed, bytes: 0, skipped: true).canRetry)
+        XCTAssertTrue(UploadRowInfo(phase: .cancelled, bytes: 1).canRetry)
+        XCTAssertTrue(UploadRowInfo(phase: .done, serverStatus: "error", bytes: 1).canRetry)
+        XCTAssertFalse(UploadRowInfo(phase: .done, serverStatus: "rejected", bytes: 1).canRetry)
+        XCTAssertFalse(UploadRowInfo(phase: .done, serverStatus: "stored", bytes: 1).canRetry)
+    }
+
+    func testSummaryCountsAndWords() {
+        let rows = [
+            UploadRowInfo(phase: .uploading, bytes: 100, progress: 0.5),
+            UploadRowInfo(phase: .waiting, bytes: 100),
+            UploadRowInfo(phase: .processing, bytes: 200),
+            UploadRowInfo(phase: .done, serverStatus: "stored", bytes: 100),
+            UploadRowInfo(phase: .done, serverStatus: "duplicate", bytes: 100),
+            UploadRowInfo(phase: .done, serverStatus: "rejected", bytes: 100),
+            UploadRowInfo(phase: .failed, bytes: 0, skipped: true),
+            UploadRowInfo(phase: .cancelled, bytes: 100),
+        ]
+        let s = UploadSummary.of(rows)
+        XCTAssertEqual(s, UploadSummary(total: 8, added: 1, duplicates: 1, failed: 2, sending: 2, processing: 1, cancelled: 1))
+        XCTAssertEqual(s.finished, 5)
+        // (50 + 0 + 200 + 100 + 100 + 100) of 700: failed and cancelled files do not count
+        XCTAssertEqual(UploadSummary.progress(rows), 550.0 / 700.0, accuracy: 0.0001)
+        XCTAssertEqual(s.headline(progress: 0.5), "Uploading 2 files, 50%")
+        XCTAssertEqual(s.outcomes, "1 added · 1 already in your library · 2 not uploaded · 1 cancelled")
+        let processing = UploadSummary(total: 1, processing: 1)
+        XCTAssertEqual(processing.headline(progress: 1), "Processing 1 file")
+        XCTAssertEqual(UploadSummary(total: 1, added: 1).headline(progress: 1), "All done")
+        XCTAssertEqual(UploadSummary.progress([]), 0)
+    }
+
+    func testNoticesLimitsAndRefusals() {
+        XCTAssertEqual(UploadText.notice(added: 1, rejected: 0, skipped: 0), "1 file added to the queue.")
+        XCTAssertEqual(UploadText.notice(added: 3, rejected: 2, skipped: 1),
+                       "3 files added to the queue. 2 files were skipped because they are empty or too large. 1 file is already in the list.")
+        XCTAssertEqual(UploadText.notice(added: 0, rejected: 1, skipped: 2),
+                       "1 file was skipped because it is empty or too large. 2 files are already in the list.")
+        XCTAssertEqual(UploadText.notice(added: 0, rejected: 0, skipped: 0), "")
+        let gb: Int64 = 1024 * 1024 * 1024
+        XCTAssertEqual(UploadText.limit(16 * gb), "16 GB")
+        XCTAssertEqual(UploadText.limit(gb + gb / 2), "1.5 GB")
+        XCTAssertEqual(UploadText.limit(512 * 1024 * 1024), "512 MB")
+        XCTAssertEqual(UploadText.rejection(size: 0, limit: gb), "This file is empty.")
+        XCTAssertEqual(UploadText.rejection(size: 2 * gb, limit: gb), "This file is larger than the 1 GB limit.")
+        XCTAssertNil(UploadText.rejection(size: 10, limit: gb))
+    }
+
+    func testBadgesAndPhaseWords() {
+        XCTAssertEqual(UploadText.badge(phase: .done, serverStatus: "stored", skipped: false), "Added")
+        XCTAssertEqual(UploadText.badge(phase: .done, serverStatus: "duplicate", skipped: false), "Already in your library")
+        XCTAssertEqual(UploadText.badge(phase: .done, serverStatus: "rejected", skipped: false), "Not accepted")
+        XCTAssertEqual(UploadText.badge(phase: .done, serverStatus: "error", skipped: false), "Processing failed")
+        XCTAssertEqual(UploadText.badge(phase: .failed, serverStatus: nil, skipped: true), "Skipped")
+        XCTAssertEqual(UploadText.badge(phase: .failed, serverStatus: nil, skipped: false), "Not uploaded")
+        XCTAssertEqual(UploadText.badge(phase: .cancelled, serverStatus: nil, skipped: false), "Cancelled")
+        XCTAssertNil(UploadText.badge(phase: .uploading, serverStatus: nil, skipped: false))
+        XCTAssertEqual(UploadText.phase(.uploading, progress: 0.42, resumed: false), "Uploading 42%")
+        XCTAssertEqual(UploadText.phase(.uploading, progress: 0.42, resumed: true), "Resuming 42%")
+        XCTAssertEqual(UploadText.phase(.checking, progress: nil, resumed: false), "Checking")
+        XCTAssertEqual(UploadText.phase(.waiting, progress: nil, resumed: false), "Waiting")
+        XCTAssertNil(UploadText.phase(.done, progress: nil, resumed: false))
+    }
+
+    func testCopyNamesAreSafe() {
+        XCTAssertEqual(UploadIncoming.safeName("a/b:c.jpg"), "a_b_c.jpg")
+        XCTAssertEqual(UploadIncoming.safeName("..hidden"), "hidden")
+        XCTAssertEqual(UploadIncoming.safeName("  "), "Untitled")
+        let date = Date(timeIntervalSince1970: 1_794_856_697)   // 16 Nov 2026, 19:18:17 UTC
+        let name = UploadIncoming.cameraName(prefix: "IMG", ext: "jpg", at: date)
+        XCTAssertTrue(name.hasPrefix("IMG_20261"), name)
+        XCTAssertTrue(name.hasSuffix(".jpg"), name)
+        XCTAssertEqual(name.count, "IMG_20261116_191817.jpg".count)
+    }
+}

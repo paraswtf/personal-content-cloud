@@ -18,14 +18,17 @@ struct SyncView: View {
     }
 
     static var recentFailed: FetchDescriptor<SyncRecord> {
-        var d = FetchDescriptor<SyncRecord>(predicate: #Predicate<SyncRecord> { $0.status == "failed" },
+        var d = FetchDescriptor<SyncRecord>(predicate: #Predicate<SyncRecord> { $0.status == "failed" && $0.origin == "library" },
                                             sortBy: [SortDescriptor(\.updatedAt, order: .reverse)])
         d.fetchLimit = 20
         return d
     }
 
     private func count(_ status: String) -> Int {
-        (try? ctx.fetchCount(FetchDescriptor<SyncRecord>(predicate: #Predicate<SyncRecord> { $0.status == status }))) ?? 0
+        // the library's assets only: the Upload screen lists its own files
+        (try? ctx.fetchCount(FetchDescriptor<SyncRecord>(predicate: #Predicate<SyncRecord> {
+            $0.status == status && $0.origin == "library"
+        }))) ?? 0
     }
 
     var body: some View {

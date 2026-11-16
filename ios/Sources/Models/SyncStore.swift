@@ -32,6 +32,16 @@ final class SyncRecord {
     var filesData: Data?        // [UploadFile] as JSON: the exported originals and their upload state
     var trashedOnServer: Bool = false  // the server holds it, in its trash (shown apart in Delete synced)
 
+    // The Upload screen's queue (Features/Upload). A file chosen there from Files, a picker copy or the camera
+    // gets a record of its own ("upload:<uuid>", origin file or camera); a photo chosen from the library uses
+    // the asset's own record (origin library), so the phone's sync knows it is sent.
+    var queuedAt: Date?         // listed in the Upload screen's queue since then; nil when not listed
+    var origin: String = "library"   // library (an asset of the phone's library), file, camera
+    var serverStatus: String?   // the server's last word on the upload (queued, processing, stored, duplicate,
+                                // rejected, error, cancelled), read while the queue lists it
+    var thumbRef: String?       // the stored item's thumb (item_thumb_url)
+    var itemVault: Bool = false // the stored item is in the vault (item_nsfw): open it with vault=1
+
     init(assetId: String, filename: String, kind: String, bytes: Int64, createdAt: Date) {
         self.assetId = assetId
         self.filename = filename
@@ -48,6 +58,10 @@ final class SyncRecord {
         get { filesData.flatMap { try? JSONDecoder().decode([UploadFile].self, from: $0) } ?? [] }
         set { filesData = newValue.isEmpty ? nil : try? JSONEncoder().encode(newValue) }
     }
+
+    /// A file of the Upload screen, not an asset of the library: its copy stays until the queue lets it go
+    /// (Retry needs it after a failure or a cancel), and the phone's sync leaves it to the queue.
+    var isQueueFile: Bool { origin != "library" }
 
     /// Forgets the upload in flight (the files and their finished uploads stay) and drops its chunk
     /// file, so a transfer that never completes leaves nothing behind.
