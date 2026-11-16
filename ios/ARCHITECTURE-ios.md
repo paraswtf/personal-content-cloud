@@ -21,16 +21,16 @@ Each area replaces its placeholder files (keep the type names and initializers, 
 
 | Area | Folder | Entry points others call (names and signatures stay) | Website reference |
 |---|---|---|---|
-| Library | `Features/Library/` | `LibraryScreen()` | `pages/LibraryPage.tsx`, `components/library`, `components/timeline`, `components/MediaGrid.tsx` |
+| Library | `Features/Library/` | `LibraryScreen()`, `LibraryBrowser(scope:header:)` with `LibraryScope` (`.all`, `.album(id:)`, `.vault`; the album and vault screens show it), `LibraryFilters` and `LibraryFilterBar(filters:scope:)` (the map uses them) | `pages/LibraryPage.tsx`, `components/library`, `components/timeline`, `components/MediaGrid.tsx` |
 | Viewer | `Features/Viewer/` | `ViewerScreen(request:)`, which wires `ViewerInfoPanel`, `ViewerToolbar` and `ViewerStages` into `ViewerHooks` | `components/Viewer.tsx`, `components/viewer` (InfoPanel, TagsPanel, TextPanel, DownloadMenu, RelatedSuggest, VideoStage, DocumentStage, LiveButton) |
 | Viewer boxes | `Features/ViewerBoxes/`, and `UI/Viewer/` for the stage | `ViewerBoxesModel` (`tap(_:in:)`, `selectedBoxId`), `ViewerBoxesToolbarItems(model:context:)`, `ViewerBoxesInfoSection(model:context:)`, `.viewerBoxEditors(_:)` | `components/viewer` (FaceEditor, PersonEdit, AnimalEditor, BoxAdjuster, PersonBoxCard, GuessChip, PhotoStage) |
-| People | `Features/People/` | `PeopleScreen()`, `PersonScreen(personId:)` | `pages/PeoplePage.tsx`, `pages/PersonPage.tsx`, `components/people` |
+| People | `Features/People/` | `PeopleScreen()`, `PersonScreen(personId:)`, `PeopleSelectionSheet(uids:vault:fromPersonId:onDone:)` ("People" on the library's selection) | `pages/PeoplePage.tsx`, `pages/PersonPage.tsx`, `components/people` |
 | 3D heads | `Features/Heads/` | `HeadsPersonTab(personId:name:)` (the person page's 3D tab) | `components/people/Model3dTab.tsx`, `Head3dViewer.tsx` |
-| Review | `Features/Review/` | `ReviewScreen()`, `ReviewGuessCard(guess:onDecided:)` (also on the person page's Guesses tab) | `pages/ReviewPage.tsx`, `components/people/GuessCard.tsx` |
+| Review | `Features/Review/` | `ReviewScreen()`, `ReviewGuessCard(guess:onDecided:)` (also on the person page's Guesses tab), `ReviewGuessEvidence(guess:)` (the boxes area's guess chip and editor show it) | `pages/ReviewPage.tsx`, `components/people/GuessCard.tsx` |
 | Albums and sharing | `Features/Albums/` | `AlbumsScreen()`, `AlbumScreen(albumId:)`, `AlbumsAddSheet(uids:onDone:)`, `SharingCreateSheet(target:)`, `SharingLinksScreen()` | `pages/AlbumsPage.tsx`, `pages/AlbumPage.tsx`, `components/albums`, `components/share`, `components/shell/settings/SharingTab.tsx` |
 | Map | `Features/Map/` | `MapScreen()` | `pages/MapPage.tsx`, `components/map` |
 | Documents | `Features/Documents/` | `DocumentsScreen()` | `pages/DocumentsPage.tsx`, `components/documents` |
-| Vault | `Features/Vault/` | `VaultScreen()` | `pages/VaultPage.tsx`, `components/vault`, `components/shell/VaultBadge.tsx` |
+| Vault | `Features/Vault/` | `VaultScreen()`, `VaultUnlockSheet(onUnlocked:)` (Settings opens the vault with it) | `pages/VaultPage.tsx`, `components/vault`, `components/shell/VaultBadge.tsx` |
 | Trash | `Features/Trash/` | `TrashScreen()` | `pages/TrashPage.tsx`, `components/trash` |
 | Upload | `Features/Upload/`, `Views/`, `Services/`, `Models/` | `UploadScreen()` (keeps its links to SyncView, DeleteSyncedView and SettingsView) | `pages/UploadPage.tsx`, `components/upload` |
 | Settings: account | `Features/Settings/Account/` | `SettingsAccountScreen()`, `SettingsPasskeysScreen()`, `SettingsSessionsScreen()`, `SettingsWalletScreen()`, `SettingsAppearanceScreen()` | `components/shell/settings` (AccountTab, PasskeysTab, SessionsTab, WalletTab, AppearanceTab) |
@@ -97,6 +97,8 @@ the core in its own change.
 
 ## People
 
+- Who put a person on a box: `BoxOrigin.of(...)` and `OriginIcon(origin:)` (UI/Origin.swift, the website's
+  lib/origin.ts and OriginIcon), a person icon for the owner's and the system's icon for the rest.
 - Only named people are shown anywhere in the app: the server already leaves unnamed groups out (a box of one
   arrives with `person` nil, a guess for one arrives as nil). Use `PersonOption(person)`, which is nil for an
   unnamed person, and `Fmt.isNamed(_:)` where a list could still hold one.
