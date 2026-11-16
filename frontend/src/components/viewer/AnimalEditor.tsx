@@ -8,9 +8,9 @@ import { Ban, Move, PawPrint, Shuffle, UserX, X } from 'lucide-react'
 import { api } from '../../lib/api'
 import { aSpecies, formatCount, personName, speciesLabel } from '../../lib/format'
 import { boxOrigin, mergeOrigins } from '../../lib/origin'
-import { SPECIES, type PersonOut, type Species } from '../../lib/types'
+import { SPECIES, type Species } from '../../lib/types'
 import OriginIcon from '../people/OriginIcon'
-import PersonPicker, { choiceBody, type PersonChoice } from '../people/PersonPicker'
+import PersonPicker, { choiceBody, type PersonChoice, type PickedPerson } from '../people/PersonPicker'
 import { Button } from '../ui'
 import type { AnimalBox } from './boxes'
 import { placement } from './FaceEditor'
@@ -38,7 +38,7 @@ export default function AnimalEditor({ uid, box, anchor, onClose, onDone, tracks
   const [style, setStyle] = useState<CSSProperties>(() => placement(anchor))
   const [picking, setPicking] = useState(false)
   // a pet of another species was picked: the move needs that pet to become this species first
-  const [mismatch, setMismatch] = useState<PersonOut | null>(null)
+  const [mismatch, setMismatch] = useState<PickedPerson | null>(null)
   const invalidate = useInvalidateItem(uid)
   const sheet = style.bottom === 0 && style.left === 0
   const species = speciesLabel(box.species)
@@ -103,7 +103,7 @@ export default function AnimalEditor({ uid, box, anchor, onClose, onDone, tracks
   const busy = assign.isPending || remove.isPending || setSpecies.isPending
   const error = assign.error ?? remove.error ?? setSpecies.error
 
-  const pick = (choice: PersonChoice, person?: PersonOut) => {
+  const pick = (choice: PersonChoice, person?: PickedPerson) => {
     if (busy) return
     if (person && person.species && person.species !== box.species) {
       setMismatch(person)
@@ -154,6 +154,7 @@ export default function AnimalEditor({ uid, box, anchor, onClose, onDone, tracks
           autoFocus={!sheet}
           placeholder={box.person ? 'Move to another pet' : 'Search pets or type a new name'}
           excludeIds={box.person ? [box.person.id] : undefined}
+          like={{ animal_ids: ids }}
           onPick={pick}
         />
         <p className="mt-2 text-xs text-ink-soft">Pets of the same species come first. A pet of another species can take this box once it becomes {aSpecies(box.species)} too.</p>

@@ -1,5 +1,6 @@
-// People (/people): everyone found in the library, named or not, with search, filters, merge
-// suggestions, a multi-select merge, and the drawer of faces that belong to nobody yet.
+// People (/people): the people the owner named, with search, sorting, merge suggestions, a multi-select merge, and
+// the drawer of faces to name. Faces nobody is named for are still grouped, but in the background (section 10):
+// those groups are never shown as people, and their faces wait in the drawer, a group's faces side by side.
 import { useCallback, useMemo, useState } from 'react'
 import { useSearchParams } from 'react-router'
 import { useMutation } from '@tanstack/react-query'
@@ -16,10 +17,9 @@ import UnassignedFaces from '../components/people/UnassignedFaces'
 import Select from '../components/Select'
 import { useToast } from '../components/Toast'
 import { errorMessage, useSelection } from '../components/admin/adminHooks'
-import { LoadMore, SearchInput, Segmented, SelectionBar } from '../components/admin/fields'
+import { LoadMore, SearchInput, SelectionBar } from '../components/admin/fields'
 import { Button, EmptyState, ErrorState, buttonClasses } from '../components/ui'
 
-type Filter = 'all' | 'named' | 'unnamed'
 type Sort = 'items' | 'name' | 'recent'
 
 /** Pets found in the library, below the people. Search and filters above apply to people only. */
@@ -68,7 +68,6 @@ export default function PeoplePage() {
   const toast = useToast()
   const refresh = useRefreshLibrary()
   const [params, setParams] = useSearchParams()
-  const filter: Filter = params.get('filter') === 'named' || params.get('filter') === 'unnamed' ? (params.get('filter') as Filter) : 'all'
   const sort: Sort = params.get('sort') === 'name' || params.get('sort') === 'recent' ? (params.get('sort') as Sort) : 'items'
   const [text, setText] = useState(params.get('q') ?? '')
   const q = useDebounced(text.trim(), 300)
@@ -77,7 +76,7 @@ export default function PeoplePage() {
   const sel = useSelection<number>()
   const [merging, setMerging] = useState(false)
 
-  const query = useMemo(() => ({ q: q || undefined, kind: 'person' as const, filter, sort }), [q, filter, sort])
+  const query = useMemo(() => ({ q: q || undefined, kind: 'person' as const, sort }), [q, sort])
   const fetchPage = useCallback((cursor: string | null) => api.people.list({ ...query, cursor, limit: 60 }), [query])
   const list = useItemList<PersonOut>(['people', 'list', query], fetchPage, { keyOf: (p) => p.id })
   const sentinel = useInfiniteSentinel(list.loadMore, list.hasMore && !list.loading)
@@ -114,7 +113,7 @@ export default function PeoplePage() {
         <div className="flex flex-wrap gap-2">
           <button type="button" className={buttonClasses('secondary', 'md')} onClick={() => setDrawer(true)}>
             <ScanFace className="size-4" aria-hidden />
-            Unassigned faces
+            Faces to name
           </button>
           <button
             type="button"
@@ -138,16 +137,6 @@ export default function PeoplePage() {
           setText(v)
           setParam('q', v.trim() || null)
         }} label="Search people by name" className="w-full sm:w-72" />
-        <Segmented<Filter>
-          label="Show"
-          value={filter}
-          onChange={(v) => setParam('filter', v === 'all' ? null : v)}
-          options={[
-            { value: 'all', label: 'All' },
-            { value: 'named', label: 'Named' },
-            { value: 'unnamed', label: 'Unnamed' },
-          ]}
-        />
         <Select
           label="Sort"
           value={sort}
@@ -172,7 +161,7 @@ export default function PeoplePage() {
         </ul>
       ) : list.items.length === 0 ? (
         <EmptyState icon={<Users className="size-8" aria-hidden />} title={q ? 'No one matches that name' : 'No people yet'}>
-          {q ? 'Try another spelling.' : 'Faces found in your photos and videos are grouped into people here. Name them to find them later.'}
+          {q ? 'Try another spelling.' : 'Name a face in a photo or in Faces to name, and the person shows here.'}
         </EmptyState>
       ) : (
         <ul className="grid grid-cols-3 gap-2 sm:grid-cols-4 sm:gap-3 md:grid-cols-5 lg:grid-cols-6">

@@ -58,6 +58,7 @@ backend/
       auth.py          /api/auth/*
       library.py       /api/items, /api/trash, /api/review, /api/duplicates, /api/stats
       people.py        /api/people, /api/faces, /api/bodies, /api/guesses, /api/suggestions, tags
+      similar.py       /api/people/similar (the name picker's order, section 10)
       documents.py     /api/documents/*
       search.py        /api/search
       uploads.py       /api/uploads/*
@@ -87,6 +88,7 @@ backend/
       place*.py        photos taken moments apart lined up, people followed between them (section 35)
       cluster.py       face clustering, merge, suggestions (from hub faces/cluster.py)
       index.py         in-memory face index (from hub faces/index.py)
+      similar.py       who a box or a person looks most like: the name picker's order (section 10)
     documents/
       extract.py       text extraction (pdf text layer, OCR, office, plain text) -> pages + item_text + FTS
       detect.py        document type detection (keywords, id patterns, layout)
@@ -826,8 +828,9 @@ found or in the trash are skipped; a selection holding a vault item while the va
   owner put them there: a face, person box or pet box with `assigned_by = 'user'` that is not a confirmed guess
   (`by_guess`), a box the owner drew (`source = 'user'`), or a tag added by hand (a tag a confirmed
   guess on a faceless body made, `source 'guess'`, is the system's find). Sorted by
-  `items` (most first), then named before unnamed, then by name. `unnamed_faces` counts the faces in the selection
-  that nobody is named for.
+  `items` (most first), then named before unnamed (pets), then by name. `unnamed_faces` counts the faces in the
+  selection that nobody is named for, the faces of unnamed groups among them (section 10: those groups are not
+  listed).
 - `POST /api/items/people/move` `{uids, from_person_id, person_id | new_person_name}` ->
   `PeopleBulkOut{updated, person, followed}`. In those items every face, body and pet box of `from` goes to
   the target, locked as the owner's (`assigned_by = 'user'`, as `/faces/assign`), and every tag of `from`
@@ -976,20 +979,70 @@ sampled faces in the adult groups and found every baby and child that could be s
   'childhood'` with childhood photos as samples (a pair in both lists shows as a childhood one; a pair whose
   childhood photos are all in the vault or the trash shows no card). Accepting one is a merge. Two cards on the
   owner's library.
-- "Who is this as a child?" (`cluster.childhood_candidates`, `GET /api/people/{id}/childhood -> {candidates:
-  [{person, similarity}]}`): for an unnamed group with at least half its face weight in the child band, up to 3
-  named people: first those whose own childhood photos look like the group's (>= 0.40), then the rest by the group's
-  childhood centroid against their adult centroid. No bar and no percentage shown: the face model links a young
-  child to their adult self only weakly (0.2 to 0.35; on the library the right person still ranked first), so the
-  owner decides. Empty for anyone else.
+- "Who is this as a child?" ranked named people for an unnamed group of childhood photos. It went on 2026-11-17 with
+  the unnamed groups themselves ("Unnamed groups stay in the background" below): such faces wait with the faces to
+  name, and naming one turns the rest of its group into guesses. "Same child?" pairs named people only since then.
 - UI: `SuggestionsPanel` shows a childhood pair with the badge "Same child?" and, when one side is named, "Compared
-  with the childhood photos already on NAME."; `PersonPage` shows an unnamed childhood group the card "These look like
-  childhood photos." with "Who is this as a child?" (the candidates, the first marked "Most alike", and "Someone
-  else" for the usual picker); picking one opens the usual merge confirm. No ages are shown anywhere.
+  with the childhood photos already on NAME."; accepting it opens the usual merge confirm. No ages are shown anywhere.
 - Tests: `tests/test_face_ages.py` (storage, backfill, readiness, drawn and moved boxes, undo),
   `tests/test_age_matching.py` (adults bit-identical, the mask, cut, lead and strict-only learned thresholds,
   cross-age and below-floor merges, old merges under the floor, the learner, childhood follow, suggestions and
   candidates, the off switch).
+
+### Unnamed groups stay in the background (2026-11-17)
+
+The owner asked: "Do not show grouped (you can maybe group them in the bg but don't show) people unless they are
+named. Do not show guesses for unnamed people." So the matching still gathers the faces nobody is named for into
+unnamed persons, as before (clustering, merges pulling look-alikes, recognition, guessing, position and traits all
+use them), but no answer of the API shows such a group:
+- The rule is one function, `api.common.shown(ref)`: a person without a name who is not a pet is not shown. Pets keep
+  their unnamed ones (an unnamed dog is still listed).
+- A face or person box of an unnamed group reads as a box nobody is named for (`common.box_person`): `person` null,
+  `assigned_by` 'auto', `by_guess` false, in `FaceOut`, `BodyOut` and `FaceListItem` (`person_id` null). The row
+  keeps its group in the database.
+- A guess for an unnamed person is never shown: `guess_out` gives none, and `GET /review/guesses` and
+  `Stats.guesses` count the guesses for named people only. Such guesses are still made, and once that person has a
+  name (a merge into a named person, for one) they show on their own.
+- `GET /people` lists named people and pets only (`filter=unnamed` now lists pets without a name, and nothing with
+  `kind=person`); `Stats.people` counts what the API shows. Every route by id answers 404 for an unnamed group
+  (`people._hidden_person`): `GET|PATCH|DELETE /people/{id}` and its faces, items, traits, recognition, related
+  suggestions and 3D, a merge naming one, `/items/people/move` and `/remove` from one, and an assign to one.
+- An item's `people` and `tags` leave unnamed groups out; the selection's People sheet (`POST /items/people`) lists
+  named people and pets, and counts the faces of unnamed groups in `unnamed_faces`.
+- Merge suggestions pair named people only (`cluster.merge_suggestions(keep=)`, `childhood_suggestions(keep=)`).
+  "Who is this as a child?" served unnamed childhood groups only and went with them (`GET /people/{id}/childhood`,
+  `cluster.childhood_candidates` and the card on the person page).
+- The faces to name (`GET /faces/unassigned`, "Faces to name" on the People page): faces of nobody and the faces of
+  unnamed groups in live photos, a group's faces side by side, the larger groups first (by the group's live faces),
+  each group's best faces first; a face of nobody is a group of one. The cursor is a keyset over (group size, group,
+  quality, id), all descending. No group label is shown.
+- Naming such a face (`hidden_groups.rest_to_guesses`, behind `POST /faces/assign`, `POST /people {face_ids}` and
+  `POST /guesses/correct`; the owner chose "Guesses to review" on 2026-11-17): only the faces the owner named take
+  the name, and no look-alikes follow from an unnamed group (`_follow_lookalikes` still runs for faces leaving a named
+  person). Each group's other automatic faces become open guesses for that person, taken out of the group
+  (`person_id` NULL, `assigned_by 'guess'`, evidence `{basis: 'group', score, face, ref_face_id, ref_item_uid,
+  was_person_id}`; the score is the cosine to the mean of the faces just named, 0 to 1; the reference face is the best
+  of them outside the vault and the trash, and with none there the evidence has no reference, so a locked session's
+  Review never names a vault photo), the person box around each following it. Left in the group: faces in trashed or vault photos, in a photo where the person is already, faces
+  the owner turned down for the person, all of a group the owner dismissed against the person (`merge_dismissals`),
+  and all but the most alike of a group's faces in one photo (videos may show the person several times). The faces
+  named are remembered as not the group (`guess_rejections`); a group left empty goes. `AssignOut.guessed` counts the
+  new guesses, and the toasts say "2 faces that look alike wait in Review." "Nobody" for a face of a group changes
+  that face only.
+- These guesses wait for the owner. Yes names the face (`guess.confirm`); No puts it back into its group, or into a
+  new unnamed person when the group went (`person_scan.regroup`, through `guess.reject`). `guess_item` keeps such a
+  guess until the owner answers it while it still stands: the person has a name, is not in the photo, and was not
+  turned down for the face (`hidden_groups.hold`, after the trained models' merge; another box of the photo guessed
+  as the same person loses that guess). They have no time window (`apply_window_change` keeps them), and their
+  outcome is learned with its own terms, outside the clothes fit (`learning.people.NOT_CLOTHES`). Review has a
+  "Grouped" filter (`basis=group`); the evidence reads "Grouped, face 0.62" and "grouped with the face you named
+  NAME".
+- The web app: the People page has no Named/Unnamed filter; "Unassigned faces" is "Faces to name" ("Match again"
+  runs the automatic matching on them); the face editor no longer names a whole group ("Only change this face" went);
+  removing a person's name sends the page back to People ("Their faces are back with the faces to name").
+- Tests: `tests/test_hidden_groups.py` (the list, routes by id, boxes, guesses, suggestions, the faces to name and
+  their order and pages, the selection sheet, the naming rule and each face it leaves in the group, a group the move
+  empties, "Nobody", a new person and "Someone else" from a group face, `guess_item`, the window, `hold`).
 
 ### Recognition trained on one person (2026-11-13)
 
@@ -1191,6 +1244,78 @@ faces count as negatives). A logistic regression on the 512 values, trained with
   trained but the look stopped), and the next run replaces the mark.
 - Tests: `tests/test_person_model.py`.
 
+### Naming by likeness (2026-11-17)
+
+Every name picker lists the named people most like what is being named before everyone else
+(`app/analysis/similar.py`, `POST /api/people/similar`, `PersonPicker`'s `like`). What is being named:
+
+- a face, a person box, a pet box, or several of them (the face editor, also for all tracks of a video group; "Someone
+  else" on a guess; the pet editor; "Tag as" in the unassigned faces; moving selected faces or crops on a person's
+  page);
+- a person's boxes on some items (`uids` with `person_id`: "Change to..." in the selection's People sheet and in the
+  viewer's info panel);
+- the whole person (`person_id` alone: "Merge into");
+- an item (`around_uid`: a box being drawn, which has no vector yet, and "Tag someone" on one item).
+
+How it scores, with the matching's own parts and nothing that writes:
+
+- A face: its top-k mean against each person's faces from the face index (`person_scores_many`, the child band
+  against childhood photos only) is the score and the order. "Likely" (shown, it does not reorder) is the matching's
+  own test: the score reaches the cut the matching would use for that face and that person (`cluster.option_cut`,
+  the same function `_score` now calls, with the learned threshold; a child needs the child lead), unless faces the
+  owner took off that person look more like it than their own faces do (`cluster.rejected_examples`). A model
+  trained on one person makes its person likely from its guess level and not likely under its gate (basis `model`).
+- A person box without a face: the clothes path of the guess (`guess.score_box` on the photos of the hour in the same
+  scene or place), the winner likely, the others at 0.75 of their score. One face alone gets the clothes path too (a
+  face that matches someone at 0.40 keeps the others out, as in guessing). Traits and position are not run (their
+  verification takes seconds): they count through the box's open guess.
+- A box's open guess comes first ("The current guess"). Left out: the people the owner said a box is not, the people
+  already on the photo's other boxes or tagged in it (not for a video), and the people the boxes belong to now.
+- A pet box: the cosine to each pet of its species' centroid, likely from the pet's threshold unless the crop looks
+  like one the owner took off that pet.
+- One box, or an item, also lists who is in the photos of the same hour (never a vault or trashed photo) and not in
+  this one, weakly (0.06 to 0.12, by how many of those photos show them): under any face that matches.
+- Several boxes: the score per person averaged over the boxes that name anyone, each weighed (a face by its face
+  weight, at least 0.15; a person box 0.5; a pet box 1); a box that names nobody (a face past the 12 best weighted
+  that are scored, a person box with no guess) takes no part. Likely and first when that holds for half the weight.
+- The whole person: the cosine of the two centroids (as merge suggestions), likely from `suggest_threshold`; people
+  seen with them in one photo and dismissed pairs are left out. A pet: against the pets of its species.
+
+The route keeps the named people the People page would list (not people only in the vault or the trash) of the kinds
+the source can be, and answers the best `limit` (the picker asks for 6) with a light person (`id, name, kind,
+species, cover_url`: counting a person's photos costs more than the ranking, about 130 ms for eight of the largest),
+`score`, `likely`, `basis`, a plain `reason` and `first`, plus `scores` for every person ranked so the names that
+typing finds come in order of likeness. A box or item in the vault needs the vault open (403 `vault_locked`).
+
+In the picker: with an empty box, "Most alike" lists those people (each with its reason and "Likely" when it holds),
+then "Everyone else" in the usual order; typing filters by name as before, the matches ordered by likeness within
+people and pets. The list waits for the likeness answer before it shows (a spinner says "Finding who looks alike"),
+and the answer is read once per source under its own query key (`likeness`), not under `people`, so nothing moves
+under the pointer or the arrow keys once the list is there. If the answer fails, the picker is the plain one. A
+people picker asks the list for named people only; pets without a name are still listed.
+
+Measured on a snapshot of the owner's library (2026-11-17: 37,970 faces, 144 named people, 3,889 unnamed groups;
+read only, the copy deleted after; times inside the server, without the network):
+
+- One face, the whole route: 13 ms median, 25 ms p90, 54 ms at most (60 faces). One person box 2 ms median (13 ms
+  p90), one pet box 6 ms, an item 0.4 ms. A person's boxes on 200 items 55 ms median, 81 ms p90, 141 ms at most (it
+  was 118 ms median scoring 24 faces and reading the rejected faces once per face). Merge into 28 ms median, 51 ms
+  p90, and about 280 ms once after the faces change (the centroids are worked out again, then kept in the face
+  index's cache).
+- Order, for faces of named people scored as if they were new (their own face left out of the reference; 2,500 at
+  random): the right person first for 99.9% of the clear faces (face weight 0.7 or more, n = 2,141), 97.2% of the
+  middling ones (n = 145) and 88.8% of the blurred or turned ones (n = 214); in the first three 100%, 97.9% and
+  94.4%. Most of those faces were put on their person by the matching itself, which flatters the numbers; for the
+  438 photo faces the owner named by hand (the hard ones) the right person is first for 74% and in the first three
+  for 83%, and when the first is marked "Likely" it is right 89% of the time.
+- Other orders, tried on the same kind of sample: a logistic of the distance to each person's cut put the right
+  person first for 95.9% of the clear faces (its ties at the top fell back to the person id), and listing the likely
+  ones first for 99.0%, against 99.5% for the plain similarity. So the order is the plain similarity and the cut only
+  says "Likely".
+
+Not verified: the trained model's part on the live library (the snapshot had no trained model file); the timing of a
+whole request through the network and the browser; pets on the live library beyond the timing.
+
 ## 11. Documents (`app/documents`)
 
 Text extraction order: text layer (pdf) -> OCR (rapidocr; English, Hindi and Marathi: each detected line is
@@ -1325,7 +1450,8 @@ body's trait rows, hidden ones too with `hidden: true`; never a BLOB column, sec
 `ref_crop_url`, built from the ids without a query); `PersonRef = {id, name, cover_url, kind, relation}` (`relation`
 `in` | `related` in an item's `people` and `tags`, section 10; a reference from a box is always `in`).
 
-People (`/api`): `GET people?q&filter=all|named|unnamed&sort=items|name|recent&cursor&limit` -> `PersonPage`;
+People (`/api`): `GET people?q&filter=all|named|unnamed&sort=items|name|recent&cursor&limit` -> `PersonPage` (named
+people and pets: an unnamed group of faces stays in the background and is 404 by id, section 10);
 `POST people {name, face_ids?}`; `GET|PATCH|DELETE people/{id}` (`PATCH {name?, cover_face_id?}`; 422 when the
 cover face's photo is in the trash or the vault; `PersonRef.cover_url` skips such a chosen cover and uses the
 automatic one);
@@ -1353,6 +1479,11 @@ say yes then change it, which taught the guess learner a wrong yes, or no then t
 button that opens the box editor at its name field (an editor already open for that box stays open and moves to
 the field); in the box editor a name picked for boxes holding an open guess (the box, or any track of a whole-video
 group) goes through this route instead of a plain assignment);
+Naming by likeness (section 10): `POST people/similar {face_ids?, body_ids?, animal_ids?, uids? with person_id,
+person_id?, around_uid?, limit 1..30 = 8}` -> `SimilarOut{items: [{person: {id, name, kind, species, cover_url}, score,
+likely, basis: guess|model|face|clothes|look|person|hour, reason, first}], scores: {person_id: score}}` (a read sent as
+POST, the ids can be many; it records no undo action; 400 for `uids` without `person_id`, 403 `vault_locked`, 404
+for a person the People page hides; unknown ids are skipped);
 Recognition trained on one person (section 10; people only, 404 for a pet): `GET people/{id}/recognition` ->
 `RecognitionOut {available, reason, learning, trained, trained_at, counts, check{folds: day|photo, ..., claim}, guess_p,
 sure_p, conflicts, elsewhere, guesses, withdrawn, scan{at, looked, guesses, sure, detached, elsewhere}, running:
@@ -1523,6 +1654,14 @@ for videos: draw mode pauses the player and keeps it paused, the box is drawn ov
 screen ("Whole frame" takes it all) and is posted with `t`, the viewer's `currentFrameTime`; the new box shows as a
 track chip under the video.
 
+Naming by likeness (2026-11-17, section 10): every `PersonPicker` that names something passes `like` (the face editor
+its face or person boxes, the pet editor its pet boxes, "Someone else" its box, the drawn box's card and the "Tag
+someone" form their item, "Change to..." the person's boxes on the item or the selection, the person page's moves
+the selected faces or crops and "Merge into" the person, "Tag as" the selected unassigned faces). With an empty box
+the list opens with "Most alike" (the reason under the name, "Likely" at the end of the row), then "Everyone else";
+typed names come in order of likeness. `PersonChoiceModal` passes `like` through while it is open. The second
+argument of `onPick` is a `PickedPerson` (an alike person comes without counts).
+
 People in the info panel (2026-11-08, `viewer/InfoPanel.tsx`, `viewer/PersonEdit.tsx`): a person's badge does three
 things (2026-11-09). A tap on the face and name shows them on the stage (`onShowPerson`, the viewer's `showPerson`): on
 a video it jumps to them exactly as their chip under the video does (the first of their tracks, the box drawn on the
@@ -1569,8 +1708,8 @@ learning (`assigned_by 'user'`) but marked `by_guess` (`FaceOut`, `BodyOut`, `Fa
 faceless guess made carries `by_guess` in `ItemDetail.tags`), and shows the bot with "Guessed automatically,
 confirmed by you" (origin 'confirmed'); tagging that box by hand afterwards makes it the owner's. A box the detector
 found with nobody on it has no icon (the
-person page keeps a lock on a face the owner took off someone, "Kept unassigned by you"). Naming an unnamed group
-or merging people does not make the faces the owner's: the system grouped them, so they keep the bot until the
+person page keeps a lock on a face the owner took off someone, "Kept unassigned by you"). Merging people does not
+make the faces the owner's: the system grouped them, so they keep the bot until the
 owner tags one. A badge that stands for several boxes takes one answer: a person on an item (`itemOrigins`, used
 by every section of the info panel so their chips agree) is the owner's when a tag or any box of theirs there is
 (then drawn by them, then a confirmed guess, then the system's),
@@ -1614,6 +1753,20 @@ them on screen). Adjust mode ends when its box can no longer show: the boxes hid
 started, or a badge in the details jumping elsewhere. Save sends `PUT .../box` and shows "Face box moved" (person box, pet box) with Undo; nothing moved closes
 without a request; `no_face` keeps the handles with "No face there. For someone whose face does not show, use
 Add a person box instead." The focus then goes back to the box's own button (on a video, its chip).
+
+Overlapping boxes (2026-11-17, `stackLayers` in `viewer/boxes.ts`, used by `viewer/PhotoStage.tsx`): where boxes on a
+photo overlap, the smaller one is drawn above and gets the tap or click, so a face inside a person box, a child in
+front of a grown-up or a person on a pet's box can always be picked. The layer comes from the box's area alone (its
+share of the width times its share of the height, the same order as the area on screen), 1 for the largest; equal
+areas keep the list's order, the later box above. Nothing else raises a box: the one being edited, hovered,
+focused, lit from a badge or picked by the guess keys shows it by its border and ring only. The boxes sit in a
+layer of their own (`isolate`, under the draw and adjust layers) that lets taps between boxes through to the
+photo; the names and guess chips take the layers above every box, a smaller box's name above a larger box's, so a
+chip is never hidden under a neighbouring box, and a plain name lets taps through to the box under it. The page
+keeps the boxes in their list order (faces, then person boxes without a face, then pets), so Tab moves through
+them as before rather than from the largest to the smallest. A video draws one box at a time (the picked chip's),
+so nothing overlaps there. `frontend/scripts/check-boxes.mjs` (run by `tests/test_viewer_boxes.py`) checks the
+rule in node.
 
 Header (2026-11-08, `components/shell/Header.tsx`, `Nav.tsx`, `HeaderMenu.tsx`): on md and up the bar
 holds the site name (from lg), Library and People as links, a Documents menu (All documents and the six
@@ -1952,6 +2105,12 @@ picture named by an address in place of the bytes in the file, and with its pict
 is named by an address (three.js asks for a picture and for a buffer in two different ways): a 19th group checks
 that the page asks for neither address. All 19 groups run in the suite; the test skips when node or the frontend's
 packages are missing. What the pictures look like is not something it can tell: that takes a browser.
+
+`frontend/scripts/check-boxes.mjs` checks the stacking of overlapping boxes on a photo (section 14) the same way: it
+bundles `viewer/boxes.ts` and runs `stackLayers` on a face inside a person box, a person and a face on a pet's box,
+every order of five boxes, a crowd of 40, equal areas, boxes of no size or a broken size, tall and wide photos, and
+the boxes of a photo as the stage lists them: 9 groups, run by `tests/test_viewer_boxes.py` (skipped without node or
+the frontend's packages). That a tap really reaches the smaller box is checked in a browser.
 
 ## 17. Build notes
 

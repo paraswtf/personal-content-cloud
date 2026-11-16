@@ -300,6 +300,21 @@ def _threshold(row: sqlite3.Row) -> float:
     return max(good, low - (low - good) * w)
 
 
+def option_cut(thr: float, young: bool, learned: float | None, threshold: float | None = None) -> float:
+    """The score a face must reach to take a person as an option (_score): `thr` is the face's own cut
+    (_threshold), `young` whether it is in the child band, `learned` the person's learned threshold (_learned, None
+    when nothing was learned or when `threshold` is given), `threshold` a caller's fixed cut. The name picker
+    (app.analysis.similar) asks the same question, so it ranks people the way the matching would take them."""
+    margin = thr - float(settings.cluster_match_threshold)  # 0 for a good face, the low-quality extra otherwise
+    if young:
+        child_cut = float(settings.cluster_child_threshold) + margin
+        cut = child_cut if threshold is None else max(float(threshold), child_cut)
+        return max(cut, learned + margin) if learned is not None else cut
+    if threshold is not None:
+        return float(threshold)
+    return thr if learned is None else learned + margin
+
+
 def _score(idx: FaceIndex, faces: list[sqlite3.Row], exclude: frozenset[int],
            conn: sqlite3.Connection | None = None, threshold: float | None = None,
            claimed: dict[int, Kept] | None = None) -> list[list[tuple[int, float]]]:
@@ -326,24 +341,13 @@ def _score(idx: FaceIndex, faces: list[sqlite3.Row], exclude: frozenset[int],
     child = idx.child_flags(ids)
     out: list[list[tuple[int, float]]] = []
     scored: list[list[tuple[int, float]]] = []
-    good = float(settings.cluster_match_threshold)
     for r, scores, young in zip(faces, idx.person_scores_many(embs, settings.cluster_topk, exclude, child=child),
                                 child):
         thr = _threshold(r)
-        margin = thr - good  # 0 for a good face, the low-quality extra otherwise
         kept: list[tuple[int, float]] = []
-        child_cut = float(settings.cluster_child_threshold) + margin
         for pid, score in scores:
             learned = _learned(pid) if threshold is None else None
-            if young:
-                cut = child_cut if threshold is None else max(float(threshold), child_cut)
-                if learned is not None:
-                    cut = max(cut, learned + margin)
-            elif threshold is not None:
-                cut = float(threshold)
-            else:
-                cut = thr if learned is None else learned + margin
-            if score >= cut:
+            if score >= option_cut(thr, bool(young), learned, threshold):
                 kept.append((pid, score))
         out.append(kept)
         scored.append(scores)
@@ -1419,10 +1423,12 @@ def _co_occurring(conn: sqlite3.Connection) -> set[tuple[int, int]]:
     }
 
 
-def merge_suggestions(conn: sqlite3.Connection, limit: int = 30) -> list[tuple[int, int, float]]:
+def merge_suggestions(conn: sqlite3.Connection, limit: int = 30,
+                      keep: set[int] | None = None) -> list[tuple[int, int, float]]:
     """Pairs (a_id, b_id, similarity) with a_id < b_id, sorted by centroid cosine similarity desc,
     similarity >= settings.suggest_threshold. Excludes dismissed pairs (merge_dismissals) and pairs
-    that appear together in one photo (they are different people)."""
+    that appear together in one photo (they are different people). With `keep`, only pairs of two of those
+    people (the suggestions route keeps named people, section 10)."""
     if limit <= 0:
         return []
     idx = get_index()
@@ -1459,7 +1465,7 @@ def merge_suggestions(conn: sqlite3.Connection, limit: int = 30) -> list[tuple[i
             if len(heap) >= limit and sv <= heap[0][0]:
                 break  # sorted desc: nothing later in this block can enter the heap
             a, b = int(pids[abs_rows[k]]), int(pids[cols[k]])
-            if (a, b) in excluded:
+            if (a, b) in excluded or (keep is not None and (a not in keep or b not in keep)):
                 continue
             item = (sv, -a, -b)
             if len(heap) < limit:
@@ -1470,12 +1476,13 @@ def merge_suggestions(conn: sqlite3.Connection, limit: int = 30) -> list[tuple[i
     return [(-a, -b, float(sv)) for sv, a, b in best]
 
 
-def childhood_suggestions(conn: sqlite3.Connection, limit: int = 30) -> list[tuple[int, int, float]]:
+def childhood_suggestions(conn: sqlite3.Connection, limit: int = 30,
+                          keep: set[int] | None = None) -> list[tuple[int, int, float]]:
     """Pairs (a_id, b_id, similarity), a_id < b_id, of people whose childhood photos (faces in the child band,
     section 10) look alike: the cosine of their child-band centroids >= settings.child_suggest_threshold (0.40,
     below the child cut as the adult suggestions sit below theirs). Leaves out dismissed pairs and pairs seen in
     one photo. Best first. (The suggestions route shows such a pair as a childhood one even when
-    merge_suggestions has it too.)"""
+    merge_suggestions has it too.) With `keep`, only pairs of two of those people."""
     if limit <= 0:
         return []
     idx = get_index()
@@ -1493,54 +1500,8 @@ def childhood_suggestions(conn: sqlite3.Connection, limit: int = 30) -> list[tup
     sims = C @ C.T
     rows, cols = np.nonzero(np.triu(sims >= float(settings.child_suggest_threshold), k=1))
     pairs = [(int(pids[i]), int(pids[j]), float(sims[i, j])) for i, j in zip(rows.tolist(), cols.tolist())]
-    pairs = [t for t in pairs if (t[0], t[1]) not in excluded and kinds.get(t[0]) == "person" and kinds.get(t[1]) == "person"]
+    pairs = [t for t in pairs if (t[0], t[1]) not in excluded and kinds.get(t[0]) == "person" and kinds.get(t[1]) == "person"
+             and (keep is None or (t[0] in keep and t[1] in keep))]
     pairs.sort(key=lambda t: (-t[2], t[0], t[1]))
     return pairs[:limit]
 
-
-CHILDHOOD_SHARE = 0.5  # a group is a childhood group when this much of its face weight is in the child band
-
-
-def childhood_candidates(conn: sqlite3.Connection, person_id: int, limit: int = 3) -> list[tuple[int, float]]:
-    """For an unnamed group of childhood photos (CHILDHOOD_SHARE of its face weight in the child band, section
-    10): the named people it may be as a child, best first. First those whose own childhood photos look like the
-    group's (child-band centroids at >= settings.child_suggest_threshold), by that; then the rest by the cosine of
-    the group's child-band centroid and the person's adult centroid. No bar: the face model links a young child to
-    their adult self only weakly (about 0.2 to 0.35), so this ranks for the owner, who decides. Leaves out people
-    seen in one photo with the group and pairs the owner dismissed. [] for a named person or a group that is not
-    mostly childhood photos."""
-    person_id = int(person_id)
-    row = conn.execute("SELECT name, kind FROM persons WHERE id = ?", (person_id,)).fetchone()
-    if row is None or row["name"] or row["kind"] != "person" or limit <= 0:
-        return []
-    idx = get_index()
-    with idx.lock:
-        idx.sync(conn)
-        ids = _person_face_ids(conn, person_id)
-        if not ids:
-            return []
-        flags = idx.child_flags(ids)
-        weights = idx.weights_of(ids)
-        total = float(weights.sum())
-        if total <= 0 or float(weights[flags].sum()) / total < CHILDHOOD_SHARE:
-            return []
-        gp, gc = idx.centroids([person_id], child=True)
-        ap, ac = idx.centroids(child=False)
-        cp, cc = idx.centroids(child=True)
-    if gp.size == 0 or (ap.size == 0 and cp.size == 0):
-        return []
-    named = {int(r[0]) for r in conn.execute("SELECT id FROM persons WHERE kind = 'person' AND name IS NOT NULL")}
-    dismissed = {int(r[0]) for r in conn.execute(
-        "SELECT CASE WHEN person_a = ? THEN person_b ELSE person_a END FROM merge_dismissals "
-        "WHERE person_a = ? OR person_b = ?", (person_id, person_id, person_id))}
-    together = {b if a == person_id else a for a, b in _co_occurring(conn) if person_id in (a, b)}
-    def fits(pid: int) -> bool:
-        return pid in named and pid not in dismissed and pid not in together and pid != person_id
-
-    young = {int(p): float(sv) for p, sv in zip(cp.tolist(), (cc @ gc[0]).tolist())
-             if fits(int(p)) and float(sv) >= float(settings.child_suggest_threshold)}
-    grown = {int(p): float(sv) for p, sv in zip(ap.tolist(), (ac @ gc[0]).tolist()) if fits(int(p))}
-    ranked = [(1, sv, pid) for pid, sv in young.items()]
-    ranked += [(0, sv, pid) for pid, sv in grown.items() if pid not in young]
-    ranked.sort(reverse=True)
-    return [(pid, sv) for _, sv, pid in ranked[:limit]]
