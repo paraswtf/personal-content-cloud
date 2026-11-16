@@ -327,6 +327,7 @@ export default function FaceEditor({ uid, target, anchor, onClose, onDone, track
             box.person ? 'Move to someone else' : guess ? `Not ${personName(guess.person)}? Type who it is` : 'Search or type a new name'
           }
           excludeIds={box.person ? [box.person.id] : guess ? [guess.person.id] : undefined}
+          like={{ face_ids: faceIds, body_ids: bodyIds }}
           onPick={(choice) => {
             if (busy) return
             if (anyGuess) correct.mutate(choice) // the guesses are learned as wrong, not silently overwritten

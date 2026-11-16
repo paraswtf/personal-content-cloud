@@ -1,5 +1,5 @@
 // Modal that asks "which person?" with PersonPicker (an existing person or a new name).
-import type { Species } from '../../lib/types'
+import type { SimilarSource, Species } from '../../lib/types'
 import { Spinner } from '../ui'
 import { AdminModal } from '../admin/AdminModal'
 import PersonPicker, { type PersonChoice } from './PersonPicker'
@@ -16,6 +16,7 @@ export default function PersonChoiceModal({
   kind,
   species,
   speciesOnly,
+  like,
   onPick,
   onClose,
 }: {
@@ -29,6 +30,8 @@ export default function PersonChoiceModal({
   kind?: 'person' | 'pet'
   species?: Species
   speciesOnly?: boolean
+  /** What is being named: the most alike named people are listed first (section 10). */
+  like?: SimilarSource | null
   onPick: (choice: PersonChoice) => void
   onClose: () => void
 }) {
@@ -48,6 +51,7 @@ export default function PersonChoiceModal({
             kind={kind}
             species={species}
             speciesOnly={speciesOnly}
+            like={open ? like : null}
             placeholder={kind === 'pet' ? 'Search pets by name' : 'Search people by name'}
             onPick={onPick}
           />

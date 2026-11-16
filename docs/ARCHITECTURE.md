@@ -58,6 +58,7 @@ backend/
       auth.py          /api/auth/*
       library.py       /api/items, /api/trash, /api/review, /api/duplicates, /api/stats
       people.py        /api/people, /api/faces, /api/bodies, /api/guesses, /api/suggestions, tags
+      similar.py       /api/people/similar (the name picker's order, section 10)
       documents.py     /api/documents/*
       search.py        /api/search
       uploads.py       /api/uploads/*
@@ -87,6 +88,7 @@ backend/
       place*.py        photos taken moments apart lined up, people followed between them (section 35)
       cluster.py       face clustering, merge, suggestions (from hub faces/cluster.py)
       index.py         in-memory face index (from hub faces/index.py)
+      similar.py       who a box or a person looks most like: the name picker's order (section 10)
     documents/
       extract.py       text extraction (pdf text layer, OCR, office, plain text) -> pages + item_text + FTS
       detect.py        document type detection (keywords, id patterns, layout)
@@ -1241,6 +1243,78 @@ faces count as negatives). A logistic regression on the 512 values, trained with
   trained but the look stopped), and the next run replaces the mark.
 - Tests: `tests/test_person_model.py`.
 
+### Naming by likeness (2026-11-17)
+
+Every name picker lists the named people most like what is being named before everyone else
+(`app/analysis/similar.py`, `POST /api/people/similar`, `PersonPicker`'s `like`). What is being named:
+
+- a face, a person box, a pet box, or several of them (the face editor, also for all tracks of a video group; "Someone
+  else" on a guess; the pet editor; "Tag as" in the unassigned faces; moving selected faces or crops on a person's
+  page);
+- a person's boxes on some items (`uids` with `person_id`: "Change to..." in the selection's People sheet and in the
+  viewer's info panel);
+- the whole person (`person_id` alone: "Merge into");
+- an item (`around_uid`: a box being drawn, which has no vector yet, and "Tag someone" on one item).
+
+How it scores, with the matching's own parts and nothing that writes:
+
+- A face: its top-k mean against each person's faces from the face index (`person_scores_many`, the child band
+  against childhood photos only) is the score and the order. "Likely" (shown, it does not reorder) is the matching's
+  own test: the score reaches the cut the matching would use for that face and that person (`cluster.option_cut`,
+  the same function `_score` now calls, with the learned threshold; a child needs the child lead), unless faces the
+  owner took off that person look more like it than their own faces do (`cluster.rejected_examples`). A model
+  trained on one person makes its person likely from its guess level and not likely under its gate (basis `model`).
+- A person box without a face: the clothes path of the guess (`guess.score_box` on the photos of the hour in the same
+  scene or place), the winner likely, the others at 0.75 of their score. One face alone gets the clothes path too (a
+  face that matches someone at 0.40 keeps the others out, as in guessing). Traits and position are not run (their
+  verification takes seconds): they count through the box's open guess.
+- A box's open guess comes first ("The current guess"). Left out: the people the owner said a box is not, the people
+  already on the photo's other boxes or tagged in it (not for a video), and the people the boxes belong to now.
+- A pet box: the cosine to each pet of its species' centroid, likely from the pet's threshold unless the crop looks
+  like one the owner took off that pet.
+- One box, or an item, also lists who is in the photos of the same hour (never a vault or trashed photo) and not in
+  this one, weakly (0.06 to 0.12, by how many of those photos show them): under any face that matches.
+- Several boxes: the score per person averaged over the boxes that name anyone, each weighed (a face by its face
+  weight, at least 0.15; a person box 0.5; a pet box 1); a box that names nobody (a face past the 12 best weighted
+  that are scored, a person box with no guess) takes no part. Likely and first when that holds for half the weight.
+- The whole person: the cosine of the two centroids (as merge suggestions), likely from `suggest_threshold`; people
+  seen with them in one photo and dismissed pairs are left out. A pet: against the pets of its species.
+
+The route keeps the named people the People page would list (not people only in the vault or the trash) of the kinds
+the source can be, and answers the best `limit` (the picker asks for 6) with a light person (`id, name, kind,
+species, cover_url`: counting a person's photos costs more than the ranking, about 130 ms for eight of the largest),
+`score`, `likely`, `basis`, a plain `reason` and `first`, plus `scores` for every person ranked so the names that
+typing finds come in order of likeness. A box or item in the vault needs the vault open (403 `vault_locked`).
+
+In the picker: with an empty box, "Most alike" lists those people (each with its reason and "Likely" when it holds),
+then "Everyone else" in the usual order; typing filters by name as before, the matches ordered by likeness within
+people and pets. The list waits for the likeness answer before it shows (a spinner says "Finding who looks alike"),
+and the answer is read once per source under its own query key (`likeness`), not under `people`, so nothing moves
+under the pointer or the arrow keys once the list is there. If the answer fails, the picker is the plain one. A
+people picker asks the list for named people only; pets without a name are still listed.
+
+Measured on a snapshot of the owner's library (2026-11-17: 37,970 faces, 144 named people, 3,889 unnamed groups;
+read only, the copy deleted after; times inside the server, without the network):
+
+- One face, the whole route: 13 ms median, 25 ms p90, 54 ms at most (60 faces). One person box 2 ms median (13 ms
+  p90), one pet box 6 ms, an item 0.4 ms. A person's boxes on 200 items 55 ms median, 81 ms p90, 141 ms at most (it
+  was 118 ms median scoring 24 faces and reading the rejected faces once per face). Merge into 28 ms median, 51 ms
+  p90, and about 280 ms once after the faces change (the centroids are worked out again, then kept in the face
+  index's cache).
+- Order, for faces of named people scored as if they were new (their own face left out of the reference; 2,500 at
+  random): the right person first for 99.9% of the clear faces (face weight 0.7 or more, n = 2,141), 97.2% of the
+  middling ones (n = 145) and 88.8% of the blurred or turned ones (n = 214); in the first three 100%, 97.9% and
+  94.4%. Most of those faces were put on their person by the matching itself, which flatters the numbers; for the
+  438 photo faces the owner named by hand (the hard ones) the right person is first for 74% and in the first three
+  for 83%, and when the first is marked "Likely" it is right 89% of the time.
+- Other orders, tried on the same kind of sample: a logistic of the distance to each person's cut put the right
+  person first for 95.9% of the clear faces (its ties at the top fell back to the person id), and listing the likely
+  ones first for 99.0%, against 99.5% for the plain similarity. So the order is the plain similarity and the cut only
+  says "Likely".
+
+Not verified: the trained model's part on the live library (the snapshot had no trained model file); the timing of a
+whole request through the network and the browser; pets on the live library beyond the timing.
+
 ## 11. Documents (`app/documents`)
 
 Text extraction order: text layer (pdf) -> OCR (rapidocr; English, Hindi and Marathi: each detected line is
@@ -1404,6 +1478,11 @@ say yes then change it, which taught the guess learner a wrong yes, or no then t
 button that opens the box editor at its name field (an editor already open for that box stays open and moves to
 the field); in the box editor a name picked for boxes holding an open guess (the box, or any track of a whole-video
 group) goes through this route instead of a plain assignment);
+Naming by likeness (section 10): `POST people/similar {face_ids?, body_ids?, animal_ids?, uids? with person_id,
+person_id?, around_uid?, limit 1..30 = 8}` -> `SimilarOut{items: [{person: {id, name, kind, species, cover_url}, score,
+likely, basis: guess|model|face|clothes|look|person|hour, reason, first}], scores: {person_id: score}}` (a read sent as
+POST, the ids can be many; it records no undo action; 400 for `uids` without `person_id`, 403 `vault_locked`, 404
+for a person the People page hides; unknown ids are skipped);
 Recognition trained on one person (section 10; people only, 404 for a pet): `GET people/{id}/recognition` ->
 `RecognitionOut {available, reason, learning, trained, trained_at, counts, check{folds: day|photo, ..., claim}, guess_p,
 sure_p, conflicts, elsewhere, guesses, withdrawn, scan{at, looked, guesses, sure, detached, elsewhere}, running:
@@ -1573,6 +1652,14 @@ count `related_count`; the Items tab keeps sending no relation). "Add a pet box"
 for videos: draw mode pauses the player and keeps it paused, the box is drawn over the picture area of the frame on
 screen ("Whole frame" takes it all) and is posted with `t`, the viewer's `currentFrameTime`; the new box shows as a
 track chip under the video.
+
+Naming by likeness (2026-11-17, section 10): every `PersonPicker` that names something passes `like` (the face editor
+its face or person boxes, the pet editor its pet boxes, "Someone else" its box, the drawn box's card and the "Tag
+someone" form their item, "Change to..." the person's boxes on the item or the selection, the person page's moves
+the selected faces or crops and "Merge into" the person, "Tag as" the selected unassigned faces). With an empty box
+the list opens with "Most alike" (the reason under the name, "Likely" at the end of the row), then "Everyone else";
+typed names come in order of likeness. `PersonChoiceModal` passes `like` through while it is open. The second
+argument of `onPick` is a `PickedPerson` (an alike person comes without counts).
 
 People in the info panel (2026-11-08, `viewer/InfoPanel.tsx`, `viewer/PersonEdit.tsx`): a person's badge does three
 things (2026-11-09). A tap on the face and name shows them on the stage (`onShowPerson`, the viewer's `showPerson`): on

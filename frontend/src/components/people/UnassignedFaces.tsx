@@ -105,6 +105,7 @@ export default function UnassignedFaces({ open, onClose }: { open: boolean; onCl
         open={picking}
         title={`Tag ${formatCount(sel.count, 'face')} as`}
         busy={assign.isPending}
+        like={{ face_ids: [...sel.selected] }}
         onPick={(c) => assign.mutate(c)}
         onClose={() => setPicking(false)}
       />

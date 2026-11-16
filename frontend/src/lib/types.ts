@@ -1161,3 +1161,46 @@ export interface AddAnimalIn {
   t?: number
 }
 /** The boxes a second detector run added (section 22). */
+
+// ------------------------------------------------------------------ naming by likeness (section 10)
+/** What the name picker is naming (POST /api/people/similar): boxes; a person's boxes on some items (`uids` with
+ *  `person_id`); the whole person (`person_id` alone, Merge into); or an item (`around_uid`: who was in the photos of
+ *  the same hour and is not in it, for a box being drawn or a tag on the item). */
+export interface SimilarSource {
+  face_ids?: number[]
+  body_ids?: number[]
+  animal_ids?: number[]
+  uids?: string[]
+  person_id?: number
+  around_uid?: string
+}
+/** What says most that they look alike: the box's open guess, a model trained on the person, the face, the clothes
+ *  of the hour, a pet's look, the whole person's look, or being in the photos of the same hour. */
+export type SimilarBasis = 'guess' | 'model' | 'face' | 'clothes' | 'look' | 'person' | 'hour'
+/** Who an alike person is, as the picker shows them (no counts: counting takes longer than the ranking). */
+export interface SimilarPerson {
+  id: number
+  name: string | null
+  kind: PersonKind
+  /** Set for a pet, null for a person. */
+  species: Species | null
+  cover_url: string | null
+}
+export interface SimilarOption {
+  person: SimilarPerson
+  /** 0 to 1, higher is more alike (a face's own similarity; the order to list them in). */
+  score: number
+  /** The matching or the guess path would take them. */
+  likely: boolean
+  basis: SimilarBasis
+  /** The basis in plain words ("Looks like them", "Same clothes within the hour"). */
+  reason: string
+  /** The box's own open guess: listed before everyone else. */
+  first: boolean
+}
+export interface SimilarOut {
+  /** The most alike named people (pets for pet boxes), best first. */
+  items: SimilarOption[]
+  /** Person id -> score for every person ranked, to order the names typing finds. */
+  scores: Record<string, number>
+}

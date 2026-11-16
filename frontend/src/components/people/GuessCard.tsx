@@ -231,6 +231,7 @@ export default function GuessCard({
             autoFocus
             kind="person"
             excludeIds={[g.guess.person.id]}
+            like={g.kind === 'face' ? { face_ids: [g.id] } : { body_ids: [g.id] }}
             placeholder={`Not ${name}? Type who it is`}
             onPick={(choice) => {
               if (busy) return

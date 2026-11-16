@@ -81,6 +81,7 @@ import type {
   PeopleRemoveIn,
   PeopleTagIn,
 } from './types'
+import type { SimilarOut, SimilarSource } from './types'
 import { actionIdForRequest, recordAction } from './undo'
 
 export const CSRF_HEADER = 'X-Requested-With'
@@ -555,6 +556,11 @@ export const api = {
    *  photo. An owner action, undoable like the others. */
   traits: {
     hide: (id: number, body: TraitHideIn) => put<TraitOut>(`/api/traits/${id}`, body),
+  },
+  /** Naming by likeness (section 10): the named people most like what the picker is naming, best first. A read sent
+   *  as POST (the ids can be many); it changes nothing, so it records no undo entry. */
+  likeness: {
+    people: (source: SimilarSource, limit = 8) => post<SimilarOut>('/api/people/similar', { ...source, limit }),
   },
   /** Undo (section 33): put back what an action changed. Undoing the answer's undo_id is a redo. */
   actions: {

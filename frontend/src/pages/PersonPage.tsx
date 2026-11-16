@@ -409,6 +409,7 @@ function FacesTab({ id, name, coverId }: { id: number; name: string; coverId: nu
         title={`Move ${formatCount(sel.count, 'face')} to`}
         busy={assign.isPending}
         excludeIds={[id]}
+        like={{ face_ids: [...sel.selected] }}
         onPick={(c) => assign.mutate(c)}
         onClose={() => setMoving(false)}
       />
@@ -513,6 +514,7 @@ function AnimalsTab({ id, name, species }: { id: number; name: string; species: 
         title={`Move ${formatCount(sel.count, 'crop')} to`}
         busy={assign.isPending}
         excludeIds={[id]}
+        like={{ animal_ids: [...sel.selected] }}
         kind="pet"
         species={species ?? undefined}
         onPick={(c) => assign.mutate(c)}
@@ -756,6 +758,7 @@ function PersonView({ id }: { id: number }) {
         }
         allowCreate={false}
         excludeIds={[id]}
+        like={{ person_id: id }}
         kind={pet ? 'pet' : undefined}
         species={p.species ?? undefined}
         speciesOnly={pet}
