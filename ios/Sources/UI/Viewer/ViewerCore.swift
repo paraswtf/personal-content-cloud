@@ -3,15 +3,27 @@ import AVKit
 
 /// The item on screen in the viewer: the core's view of it (what the stage draws), the whole generated
 /// `API.ItemDetail` (nil only if it could not be decoded; `json` holds the raw answer), and a way to load it
-/// again after a change.
+/// again after a change. `vault` is true when the viewer was opened from the vault: wrap the item's calls in
+/// `APIContext.$vault.withValue(context.vault) { ... }` and pass `vault: context.vault` to pictures and players.
 struct ViewerPageContext: Identifiable {
     let uid: String
     let detail: CoreItemDetail
     let item: API.ItemDetail?
     let json: Data
     let reload: () -> Void
+    var vault = false
 
     var id: String { uid }
+}
+
+/// What a page the viewer area draws itself (`ViewerHooks.stage`) gets besides the item.
+struct ViewerStageEnvironment {
+    /// The page on screen: play only then.
+    let isCurrent: Bool
+    /// Shows or hides the viewer's bars, as a single tap on the core's picture does.
+    let toggleChrome: () -> Void
+    /// Tells the viewer the page is zoomed in, so a swipe pans the page instead of going to the next one.
+    let setZoomed: (Bool) -> Void
 }
 
 /// What the viewer area adds to the core viewer (Features/Viewer/ViewerScreen.swift fills these).
@@ -22,16 +34,21 @@ struct ViewerHooks {
     var infoPanel: ((ViewerPageContext) -> AnyView)?
     /// Extra buttons for the bottom bar (favourite, share, delete, albums).
     var toolbar: ((ViewerPageContext) -> AnyView)?
+    /// A page the viewer area draws itself (a document's pages, a note, its own video player). Return nil to keep
+    /// the core's picture, video or Live Photo for that item.
+    var stage: ((ViewerPageContext, ViewerStageEnvironment) -> AnyView?)?
     /// The box being edited, drawn selected (never raised above a smaller one).
     var selectedBoxId: String?
 
     init(onBoxTap: ((StageBox, ViewerPageContext) -> Void)? = nil,
          infoPanel: ((ViewerPageContext) -> AnyView)? = nil,
          toolbar: ((ViewerPageContext) -> AnyView)? = nil,
+         stage: ((ViewerPageContext, ViewerStageEnvironment) -> AnyView?)? = nil,
          selectedBoxId: String? = nil) {
         self.onBoxTap = onBoxTap
         self.infoPanel = infoPanel
         self.toolbar = toolbar
+        self.stage = stage
         self.selectedBoxId = selectedBoxId
     }
 }
@@ -108,7 +125,9 @@ struct ViewerCore: View {
                                zoomed: zoomBinding(entry.uid),
                                onTap: { withAnimation(.easeInOut(duration: 0.2)) { chrome.toggle() } },
                                onBoxTap: { box, ctx in hooks.onBoxTap?(box, ctx) },
-                               onContext: { ctx in contexts[ctx.uid] = ctx })
+                               onContext: { ctx in contexts[ctx.uid] = ctx },
+                               stage: hooks.stage,
+                               vault: request.vault)
                         .containerRelativeFrame([.horizontal, .vertical])
                         .id(entry.uid)
                 }
@@ -223,6 +242,10 @@ struct ViewerPage: View {
     let onTap: () -> Void
     let onBoxTap: (StageBox, ViewerPageContext) -> Void
     let onContext: (ViewerPageContext) -> Void
+    /// The viewer area's own page for an item (ViewerHooks.stage).
+    var stage: ((ViewerPageContext, ViewerStageEnvironment) -> AnyView?)? = nil
+    /// Opened from the vault: the item, its pictures and its videos are asked for with `vault=1`.
+    var vault = false
 
     @State private var detail: CoreItemDetail?
     @State private var item: API.ItemDetail?
@@ -235,9 +258,12 @@ struct ViewerPage: View {
     private var kind: MediaKind { MediaKind(detail?.kind ?? entry.kind) }
 
     var body: some View {
+        let custom = customStage
         ZStack {
-            if kind == .video, let detail, let video = detail.urls.video {
-                ViewerVideo(ref: video, posterRef: detail.urls.previewSmall, isCurrent: isCurrent)
+            if let custom {
+                custom
+            } else if kind == .video, let detail, let video = detail.urls.video {
+                ViewerVideo(ref: video, posterRef: detail.urls.previewSmall, isCurrent: isCurrent, vault: vault)
             } else {
                 ZoomableStage(image: image,
                               pixelSize: pixelSize,
@@ -261,12 +287,12 @@ struct ViewerPage: View {
                 }
                 .foregroundStyle(.white)
                 .padding(24)
-            } else if image == nil && kind != .video {
+            } else if image == nil && kind != .video && custom == nil {
                 ProgressView().tint(.white)
             }
         }
         .overlay(alignment: .topLeading) {
-            if let liveRef, kind == .image {
+            if let liveRef, kind == .image, custom == nil {
                 Button {
                     playLive(liveRef)
                 } label: {
@@ -306,7 +332,16 @@ struct ViewerPage: View {
 
     private var context: ViewerPageContext? {
         guard let detail, let json else { return nil }
-        return ViewerPageContext(uid: entry.uid, detail: detail, item: item, json: json, reload: { reloadToken += 1 })
+        return ViewerPageContext(uid: entry.uid, detail: detail, item: item, json: json, reload: { reloadToken += 1 },
+                                 vault: vault)
+    }
+
+    /// The viewer area's own page for this item, when it draws one.
+    private var customStage: AnyView? {
+        guard let stage, let ctx = context else { return nil }
+        let zoom = $zoomed
+        return stage(ctx, ViewerStageEnvironment(isCurrent: isCurrent, toggleChrome: onTap,
+                                                 setZoomed: { zoom.wrappedValue = $0 }))
     }
 
     private var accessibilityText: String {
@@ -315,19 +350,20 @@ struct ViewerPage: View {
     }
 
     private func playLive(_ ref: String) {
-        guard let player = AuthorizedPlayer.player(for: ref) else { return }
+        guard let player = AuthorizedPlayer.player(for: ref, vault: vault) else { return }
         livePlayer = player
         player.play()
     }
 
     private func load() async {
         if image == nil, let thumb = entry.thumb {
-            image = ImageLoader.shared.cached(thumb, maxPixel: 512)
-            if image == nil { image = try? await ImageLoader.shared.image(thumb, maxPixel: 512) }
+            image = ImageLoader.shared.cached(thumb, maxPixel: 512, vault: vault)
+            if image == nil { image = try? await ImageLoader.shared.image(thumb, maxPixel: 512, vault: vault) }
         }
         guard let server = APIConnection.current else { return }
         do {
-            let (data, _) = try await CoreHTTP.raw(server, "GET", "/api/items/\(entry.uid)")
+            let query = vault ? [URLQueryItem(name: "vault", value: "1")] : []
+            let (data, _) = try await CoreHTTP.raw(server, "GET", "/api/items/\(entry.uid)", query: query)
             let decoded = try CoreHTTP.decoder.decode(CoreItemDetail.self, from: data)
             detail = decoded
             item = try? JSONDecoder().decode(API.ItemDetail.self, from: data)
@@ -335,10 +371,10 @@ struct ViewerPage: View {
             loadError = nil
             if let ctx = context { onContext(ctx) }
             if image == nil {
-                image = try? await ImageLoader.shared.image(decoded.urls.thumb, maxPixel: 512)
+                image = try? await ImageLoader.shared.image(decoded.urls.thumb, maxPixel: 512, vault: vault)
             }
             if decoded.mediaKind != .video {
-                let preview = try await ImageLoader.shared.image(decoded.urls.preview, maxPixel: 2560)
+                let preview = try await ImageLoader.shared.image(decoded.urls.preview, maxPixel: 2560, vault: vault)
                 image = preview
             }
         } catch {
@@ -353,6 +389,7 @@ struct ViewerVideo: View {
     let ref: String
     let posterRef: String
     let isCurrent: Bool
+    var vault = false
 
     @State private var player: AVPlayer?
 
@@ -361,12 +398,12 @@ struct ViewerVideo: View {
             if let player {
                 VideoPlayer(player: player)
             } else {
-                RemoteImage(ref: posterRef, maxPixel: 1600, contentMode: .fit)
+                RemoteImage(ref: posterRef, maxPixel: 1600, contentMode: .fit, vault: vault)
             }
         }
         .onChange(of: isCurrent, initial: true) { _, nowCurrent in
             if nowCurrent {
-                if player == nil { player = AuthorizedPlayer.player(for: ref) }
+                if player == nil { player = AuthorizedPlayer.player(for: ref, vault: vault) }
             } else {
                 player?.pause()
             }

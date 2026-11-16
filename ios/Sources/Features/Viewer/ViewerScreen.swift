@@ -1,47 +1,21 @@
 import SwiftUI
 
-/// The viewer. Placeholder of the core (the viewer area replaces this file and fills ViewerHooks: the face,
-/// person and pet editors for a tapped box, the info panel, the toolbar). Here a tapped box says whose it is and
-/// opens the person picker ranked by likeness to that box, without saving anything.
+/// The viewer: the core viewer (UI/Viewer) with the viewer area's info panel, toolbar and own pages, and the boxes
+/// area's editors (Features/ViewerBoxes). The viewer area owns this file and the files next to it; the lines that
+/// hand the boxes area its part (`boxes`, `ViewerBoxesToolbarItems`, `ViewerBoxesInfoSection`,
+/// `.viewerBoxEditors`) stay, whatever else changes.
 struct ViewerScreen: View {
     let request: ViewerRequest
 
-    @State private var tapped: StageBox?
-    @State private var picking: StageBox?
-    /// The box whose picker opens once the first sheet has gone (two sheets cannot change places at once).
-    @State private var pickNext: StageBox?
+    @State private var boxes = ViewerBoxesModel()
 
     var body: some View {
         ViewerCore(request: request,
-                   hooks: ViewerHooks(onBoxTap: { box, _ in tapped = box }, selectedBoxId: tapped?.id))
-            .sheet(item: $tapped, onDismiss: {
-                picking = pickNext
-                pickNext = nil
-            }) { box in
-                VStack(spacing: 12) {
-                    Text(box.accessibilityText)
-                        .font(.title3.weight(.semibold))
-                        .accessibilityIdentifier("viewer.box.title")
-                    Button("Who is this?") {
-                        pickNext = box
-                        tapped = nil
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .accessibilityIdentifier("viewer.box.who")
-                    Text("Saving a name comes with the viewer's editors.")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                }
-                .padding(24)
-                .presentationDetents([.height(200)])
-            }
-            .sheet(item: $picking) { box in
-                PersonPickerSheet(kind: box.kind == .animal ? .pet : .person, like: .box(box)) { pick in
-                    switch pick {
-                    case .existing(let option): Toaster.shared.ok("Picked \(option.name). Nothing was saved.")
-                    case .new(let name, _): Toaster.shared.ok("Picked a new name, \(name). Nothing was saved.")
-                    }
-                }
-            }
+                   hooks: ViewerHooks(onBoxTap: { box, context in boxes.tap(box, in: context) },
+                                      infoPanel: { context in AnyView(ViewerInfoPanel(context: context, boxes: boxes)) },
+                                      toolbar: { context in AnyView(ViewerToolbar(context: context, boxes: boxes)) },
+                                      stage: { context, environment in ViewerStages.stage(for: context, environment) },
+                                      selectedBoxId: boxes.selectedBoxId))
+            .viewerBoxEditors(boxes)
     }
 }

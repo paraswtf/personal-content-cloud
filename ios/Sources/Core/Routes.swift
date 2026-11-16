@@ -54,17 +54,20 @@ struct ViewerEntry: Identifiable, Hashable {
 }
 
 /// A request to show the viewer: the items to page through, where to start, and how to load more when the
-/// owner pages past the last one (the list behind it continues).
+/// owner pages past the last one (the list behind it continues). `vault` opens vault items (the vault screen):
+/// the viewer then asks for everything with `vault=1`.
 struct ViewerRequest: Identifiable {
     let id = UUID()
     let entries: [ViewerEntry]
     let start: Int
     var loadMore: (() async -> [ViewerEntry])?
+    var vault = false
 
-    init(entries: [ViewerEntry], start: Int, loadMore: (() async -> [ViewerEntry])? = nil) {
+    init(entries: [ViewerEntry], start: Int, loadMore: (() async -> [ViewerEntry])? = nil, vault: Bool = false) {
         self.entries = entries
         self.start = min(max(0, start), max(0, entries.count - 1))
         self.loadMore = loadMore
+        self.vault = vault
     }
 }
 
@@ -92,11 +95,12 @@ final class AppRouter {
         }
     }
 
-    /// Opens the viewer on `items`, starting at `start`.
-    func show<Item: MediaItem>(_ items: [Item], start: Item, loadMore: (() async -> [ViewerEntry])? = nil) {
+    /// Opens the viewer on `items`, starting at `start` (`vault: true` from the vault screen).
+    func show<Item: MediaItem>(_ items: [Item], start: Item, vault: Bool = false,
+                               loadMore: (() async -> [ViewerEntry])? = nil) {
         let entries = items.map(\.viewerEntry)
         let index = items.firstIndex(where: { $0.uid == start.uid }) ?? 0
-        viewer = ViewerRequest(entries: entries, start: index, loadMore: loadMore)
+        viewer = ViewerRequest(entries: entries, start: index, loadMore: loadMore, vault: vault)
     }
 
     /// Back to the root of a tab (tapping the selected tab again).

@@ -17,6 +17,13 @@ owner account, opens the vault, creates a device token (Settings > Sessions > De
 photos with the app's resumable protocol and a text note, makes an album, shares it, and writes what the
 tests need (server, token, counts) to --out and to stdout.
 
+An area of the app that needs more in the library adds a file of its own, ci/seeds/<area>.py, instead of
+changing this one. Each such file may define `library(kit)`, run at the end of step 1 with the database
+connection and the drawing helpers in `kit` (see `area_kit` below), and `api(kit)`, run at the end of step 2
+with a signed-in client. What they return lands under "areas" in the output. Files run in name order; their
+items are dated before 1 May 2026 (older than the core's, so the core's tests find theirs on the first screen),
+and their names start with the area's, so no two areas' data collide.
+
 Everything is generated: no real people, no real photos, nothing from any owner's library.
 """
 from __future__ import annotations
@@ -53,6 +60,19 @@ def uploads_dir() -> Path:
     """Where "library" leaves the photos "api" uploads: next to DATA_DIR, outside what the server reads."""
     data = Path(os.environ["DATA_DIR"]).resolve()
     return data.parent / "seed-uploads"
+
+
+def area_seeds():
+    """The areas' own seed files (ci/seeds/<area>.py), in name order, as (area, module)."""
+    import importlib.util
+
+    for path in sorted((HERE / "seeds").glob("*.py")):
+        if path.name.startswith("_"):
+            continue
+        spec = importlib.util.spec_from_file_location(f"pcc_seed_{path.stem}", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        yield path.stem, module
 
 
 # ------------------------------------------------------------------ step 1: rows and files
@@ -216,6 +236,25 @@ def library() -> dict:
     (out / "notes.txt").write_text(
         "Packing list for the weekend\n\nCamera, charger, two lenses, a rain jacket, the train tickets.\n"
         "Leave on Friday at 7, back on Sunday evening.\n", encoding="utf-8")
+
+    def previews(item: dict, img: Image.Image) -> None:
+        """Writes an item's thumb and previews from its picture (the helper keeps a downscaled copy)."""
+        for path, side in ((storage.thumb_path(item["uid"], 1), 480), (storage.preview_path(item["uid"], 1), 2048),
+                           (storage.preview_small_path(item["uid"], 1), 1280)):
+            copy = img.copy()
+            copy.thumbnail((side, side))
+            copy.save(path, "WEBP", quality=80)
+
+    # the areas' own rows (ci/seeds/<area>.py)
+    import types
+
+    area_kit = types.SimpleNamespace(
+        conn=conn, db=db, storage=storage, tx=tx, W=W, H=H, end=end, PEOPLE=PEOPLE, PLACES=PLACES,
+        person_ids=person_ids, scene=scene, jpeg=jpeg, crop=crop, previews=previews, uploads_dir=out,
+        make_item=make_item, make_face=make_face, make_person=make_person, make_body=make_body)
+    for area, module in area_seeds():
+        if hasattr(module, "library"):
+            counts.setdefault("areas", {})[area] = module.library(area_kit) or {}
     conn.close()
     counts["people"] = len(person_ids)
     counts["upload_files"] = UPLOADS + 1
@@ -297,6 +336,17 @@ def api(server: str, out: Path | None) -> dict:
     c.call("POST", "/api/albums", {"name": "Hills", "item_uids": uids[8:14]})
     share = c.call("POST", "/api/shares", {"kind": "album", "album_id": album["id"], "title": "Weekend trip"})
 
+    # the areas' own steps (ci/seeds/<area>.py), signed in as the owner with the vault open
+    import types
+
+    areas = {}
+    for area, module in area_seeds():
+        if hasattr(module, "api"):
+            area_kit = types.SimpleNamespace(client=c, server=c.server, items=items, uids=uids, album=album,
+                                             share=share, uploaded=uploaded, note=note, uploads_dir=uploads_dir(),
+                                             username=USERNAME, password=PASSWORD)
+            areas[area] = module.api(area_kit) or {}
+
     # what the tests check against, read back as the app will see it (the device token, not the cookie)
     bearer = {"Authorization": f"Bearer {device['token']}"}
     tokened = Client(server)
@@ -312,6 +362,7 @@ def api(server: str, out: Path | None) -> dict:
         "share_path": share.get("path"),
         "people": [p.get("name") for p in people.get("items", [])],
         "items": library_items.get("total", len(library_items.get("items", []))),
+        "areas": areas,
     }
     text = json.dumps(result, indent=2)
     if out:

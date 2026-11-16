@@ -19,19 +19,29 @@ contract is `docs/ARCHITECTURE.md`; the website (`frontend/src`) is the referenc
 
 Each area replaces its placeholder files (keep the type names and initializers, the shell calls them):
 
-| Area | Files the shell calls | Website reference |
-|---|---|---|
-| Library | `Features/Library/LibraryScreen.swift`: `LibraryScreen()` | `pages/LibraryPage.tsx`, `components/library`, `components/timeline` |
-| Viewer | `Features/Viewer/ViewerScreen.swift`: `ViewerScreen(request:)` | `components/Viewer.tsx`, `components/viewer` |
-| People | `Features/People/PeopleScreen.swift`: `PeopleScreen()`; `PersonScreen.swift`: `PersonScreen(personId:)` | `pages/PeoplePage.tsx`, `pages/PersonPage.tsx`, `components/people` |
-| Review | `Features/Review/ReviewScreen.swift`: `ReviewScreen()` | `pages/ReviewPage.tsx` |
-| Albums | `Features/Albums/AlbumsScreen.swift`: `AlbumsScreen()`; `AlbumScreen.swift`: `AlbumScreen(albumId:)` | `pages/AlbumsPage.tsx`, `pages/AlbumPage.tsx`, `components/albums`, `components/share` |
-| Map | `Features/Map/MapScreen.swift`: `MapScreen()` | `pages/MapPage.tsx`, `components/map` |
-| Documents | `Features/Documents/DocumentsScreen.swift`: `DocumentsScreen()` | `pages/DocumentsPage.tsx`, `components/documents` |
-| Vault | `Features/Vault/VaultScreen.swift`: `VaultScreen()` | `pages/VaultPage.tsx`, `components/vault` |
-| Upload | `Features/Upload/UploadScreen.swift`: `UploadScreen()` (keep its links to SyncView, DeleteSyncedView and SettingsView) | `pages/UploadPage.tsx`, `components/upload` |
-| Trash | `Features/Trash/TrashScreen.swift`: `TrashScreen()` | `pages/TrashPage.tsx`, `components/trash` |
-| Settings | `Features/Settings/SettingsScreen.swift`: `SettingsScreen()` | `pages/SettingsPage.tsx`, `components/shell/settings`, `components/admin` |
+| Area | Folder | Entry points others call (names and signatures stay) | Website reference |
+|---|---|---|---|
+| Library | `Features/Library/` | `LibraryScreen()` | `pages/LibraryPage.tsx`, `components/library`, `components/timeline`, `components/MediaGrid.tsx` |
+| Viewer | `Features/Viewer/` | `ViewerScreen(request:)`, which wires `ViewerInfoPanel`, `ViewerToolbar` and `ViewerStages` into `ViewerHooks` | `components/Viewer.tsx`, `components/viewer` (InfoPanel, TagsPanel, TextPanel, DownloadMenu, RelatedSuggest, VideoStage, DocumentStage, LiveButton) |
+| Viewer boxes | `Features/ViewerBoxes/`, and `UI/Viewer/` for the stage | `ViewerBoxesModel` (`tap(_:in:)`, `selectedBoxId`), `ViewerBoxesToolbarItems(model:context:)`, `ViewerBoxesInfoSection(model:context:)`, `.viewerBoxEditors(_:)` | `components/viewer` (FaceEditor, PersonEdit, AnimalEditor, BoxAdjuster, PersonBoxCard, GuessChip, PhotoStage) |
+| People | `Features/People/` | `PeopleScreen()`, `PersonScreen(personId:)` | `pages/PeoplePage.tsx`, `pages/PersonPage.tsx`, `components/people` |
+| 3D heads | `Features/Heads/` | `HeadsPersonTab(personId:name:)` (the person page's 3D tab) | `components/people/Model3dTab.tsx`, `Head3dViewer.tsx` |
+| Review | `Features/Review/` | `ReviewScreen()`, `ReviewGuessCard(guess:onDecided:)` (also on the person page's Guesses tab) | `pages/ReviewPage.tsx`, `components/people/GuessCard.tsx` |
+| Albums and sharing | `Features/Albums/` | `AlbumsScreen()`, `AlbumScreen(albumId:)`, `AlbumsAddSheet(uids:onDone:)`, `SharingCreateSheet(target:)`, `SharingLinksScreen()` | `pages/AlbumsPage.tsx`, `pages/AlbumPage.tsx`, `components/albums`, `components/share`, `components/shell/settings/SharingTab.tsx` |
+| Map | `Features/Map/` | `MapScreen()` | `pages/MapPage.tsx`, `components/map` |
+| Documents | `Features/Documents/` | `DocumentsScreen()` | `pages/DocumentsPage.tsx`, `components/documents` |
+| Vault | `Features/Vault/` | `VaultScreen()` | `pages/VaultPage.tsx`, `components/vault`, `components/shell/VaultBadge.tsx` |
+| Trash | `Features/Trash/` | `TrashScreen()` | `pages/TrashPage.tsx`, `components/trash` |
+| Upload | `Features/Upload/`, `Views/`, `Services/`, `Models/` | `UploadScreen()` (keeps its links to SyncView, DeleteSyncedView and SettingsView) | `pages/UploadPage.tsx`, `components/upload` |
+| Settings: account | `Features/Settings/Account/` | `SettingsAccountScreen()`, `SettingsPasskeysScreen()`, `SettingsSessionsScreen()`, `SettingsWalletScreen()`, `SettingsAppearanceScreen()` | `components/shell/settings` (AccountTab, PasskeysTab, SessionsTab, WalletTab, AppearanceTab) |
+| Settings: system | `Features/Settings/System/` | `SettingsSystemScreen()`, `SettingsLearningScreen()`, `SettingsUndoHistoryScreen()` | `components/shell/settings` (SystemTab, StorageCards, ThroughputCard, VideoCard, LearningTab), `components/admin`, `components/undo` |
+
+`Features/Settings/SettingsScreen.swift` (the list of settings screens) is shared and stays as it is.
+
+Each entry point starts as a placeholder in its area's folder, so an area that uses another's (the library's
+selection presents `AlbumsAddSheet`, the person page shows `HeadsPersonTab` and `ReviewGuessCard`, the viewer's
+toolbar shows `ViewerBoxesToolbarItems`) compiles and runs before that area is done. The area that owns an entry
+point replaces its body and keeps its name and parameters.
 
 Type names must be unique across the app: prefix an area's own types with the area (`PeopleFilterBar`,
 `AlbumRow`), and do not add types to `Core`, `UI` or `Shell` from an area. Something two areas need goes to
@@ -77,9 +87,13 @@ the core in its own change.
 - Items open in the viewer over everything: `router.show(items, start: item, loadMore: { ... })` with the list the
   item came from, so the owner can page through it. `router.open(.item(uid:))` opens a single item.
 - The viewer core (`ViewerCore(request:hooks:)`) pages, zooms and plays; the viewer area fills `ViewerHooks`:
-  `onBoxTap` (the box under the finger, always the smallest one there), `infoPanel`, `toolbar`, and
+  `onBoxTap` (the box under the finger, always the smallest one there), `infoPanel`, `toolbar`, `stage` (a page
+  the viewer area draws itself, such as a document's pages; nil keeps the core's picture or video), and
   `selectedBoxId` (drawn selected, never raised above a smaller box). `ViewerPageContext.item` is the whole
   `API.ItemDetail`; call `context.reload()` after a change to the item.
+- Vault items open with `router.show(items, start: item, vault: true)`: the viewer then asks for the item, its
+  pictures and its videos with `vault=1`, and `context.vault` tells the viewer's areas to wrap their calls in
+  `APIContext.$vault.withValue(context.vault) { ... }`.
 
 ## People
 
@@ -130,6 +144,10 @@ photo and one in the trash).
   `try launchSignedIn()`, goes to its screen (`tab("Albums")`, `app.buttons["more.map"].tap()`), checks what the
   seed put there and calls `snap("albums")` (unique names: they become the PNG files of the "screenshots"
   artifact). The core's own are `CoreScreens.swift` and `SmokeScreens.swift`.
+- An area's seed data goes in its own file, `ci/seeds/<area>.py` (`library(kit)` and `api(kit)`, described at the
+  top of `ci/seed_server.py`), and its decoding checks in `UnitTests/<Area>DecodingTests.swift`, so areas never
+  edit the same file. Seeded items are dated before 1 May 2026 and named after the area; tests never count the
+  whole library, since other areas add to it.
 - Unit tests: `UnitTests/`, hosted by the app; pure logic (`BoxStackTests`, `PickerOptionsTests`) and
   `APIDecodingTests`, which decodes the seeded server's answers into the generated types. An area that adds data
   to the seed adds the matching decoding check there.
