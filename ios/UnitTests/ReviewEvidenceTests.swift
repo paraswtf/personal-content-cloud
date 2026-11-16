@@ -157,7 +157,7 @@ final class ReviewEvidenceTests: XCTestCase {
          "category": "misc", "nsfw": true, "urls": {"thumb": "/files/thumb/abc", "preview": "/p", "preview_small": "/ps"}}
         """
         let item = try JSONDecoder().decode(API.ItemCard.self, from: Data(json.utf8))
-        XCTAssertEqual(ReviewGuessCard.frameRef(item, t: 12.3456), "/files/frame/abc?t=12.345&size=preview&v=3n")
-        XCTAssertEqual(ReviewGuessCard.frameRef(item, t: -1), "/files/frame/abc?t=0.000&size=preview&v=3n")
+        XCTAssertEqual(ReviewBox.frameRef(item, t: 12.3456), "/files/frame/abc?t=12.345&size=preview&v=3n")
+        XCTAssertEqual(ReviewBox.frameRef(item, t: -1), "/files/frame/abc?t=0.000&size=preview&v=3n")
     }
 }

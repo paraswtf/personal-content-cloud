@@ -116,9 +116,9 @@ struct ReviewGuessCard: View {
     @ViewBuilder
     private var sceneThumb: some View {
         if let t = frameTime {
-            let aspect = Self.aspect(guess.item)
+            let aspect = ReviewBox.aspect(guess.item)
             let width = min(144, 72 * aspect)
-            RemoteImage(ref: Self.frameRef(guess.item, t: t), maxPixel: 480)
+            RemoteImage(ref: ReviewBox.frameRef(guess.item, t: t), maxPixel: 480)
                 .frame(width: width, height: 72)
                 .overlay(alignment: .topLeading) {
                     Rectangle()
@@ -190,7 +190,8 @@ struct ReviewGuessCard: View {
             case .correct:
                 guard let pick else { return }
                 let out = try await ReviewDecisions.correct([guess], to: pick)
-                outcome = "Tagged as \(out.person.map { Fmt.personName($0.name) } ?? Self.name(of: pick))"
+                let shown = out.person.map { Fmt.personName($0.name) } ?? Self.name(of: pick)
+                outcome = "Tagged as \(shown)"
             }
             CloudEvents.post(items: [guess.item.uid])
             onDecided?()
@@ -216,20 +217,6 @@ struct ReviewGuessCard: View {
         }
     }
 
-    /// Width over height of an item, 16:9 when the server did not say.
-    static func aspect(_ item: API.ItemCard) -> CGFloat {
-        guard let w = item.width, let h = item.height, w > 0, h > 0 else { return 16.0 / 9.0 }
-        return CGFloat(w) / CGFloat(h)
-    }
-
-    /// The address of a video's frame at `t` seconds, preview size (the website's frameUrl): whole milliseconds,
-    /// and the version key with an "n" for a vault item.
-    static func frameRef(_ item: API.ItemCard, t: Double) -> String {
-        let ms = t.isFinite && t > 0 ? (t * 1000).rounded(.down) : 0
-        let seconds = String(format: "%.3f", ms / 1000)
-        let version = item.nsfw ? "\(item.version)n" : "\(item.version)"
-        return "/files/frame/\(APIPath.segment(item.uid))?t=\(seconds)&size=preview&v=\(version)"
-    }
 }
 
 /// The parts of a guess's box the card needs, from either kind of box.
@@ -248,5 +235,20 @@ struct ReviewBox {
         case .bodyOut(let b):
             url = b.url; x = b.x; y = b.y; w = b.w; h = b.h; frameTime = b.frameTimeS
         }
+    }
+
+    /// Width over height of an item, 16:9 when the server did not say.
+    static func aspect(_ item: API.ItemCard) -> CGFloat {
+        guard let w = item.width, let h = item.height, w > 0, h > 0 else { return 16.0 / 9.0 }
+        return CGFloat(w) / CGFloat(h)
+    }
+
+    /// The address of a video's frame at `t` seconds, preview size (the website's frameUrl): whole milliseconds,
+    /// and the version key with an "n" for a vault item.
+    static func frameRef(_ item: API.ItemCard, t: Double) -> String {
+        let ms = t.isFinite && t > 0 ? (t * 1000).rounded(.down) : 0
+        let seconds = String(format: "%.3f", ms / 1000)
+        let version = item.nsfw ? "\(item.version)n" : "\(item.version)"
+        return "/files/frame/\(APIPath.segment(item.uid))?t=\(seconds)&size=preview&v=\(version)"
     }
 }
