@@ -95,7 +95,6 @@ struct ViewerCore: View {
             }
             .presentationDetents([.medium, .large])
         }
-        .accessibilityIdentifier("viewer")
     }
 
     private var pages: some View {
@@ -121,6 +120,8 @@ struct ViewerCore: View {
         .scrollIndicators(.hidden)
         .scrollDisabled(zoomedUid != nil)
         .ignoresSafeArea()
+        // On the scroll view itself: on the whole viewer it would replace the identifiers of its buttons.
+        .accessibilityIdentifier("viewer")
     }
 
     private func zoomBinding(_ uid: String) -> Binding<Bool> {
