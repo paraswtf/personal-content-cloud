@@ -57,6 +57,7 @@ from app.api.common import (
     live_video_out,
     page_sql,
     person_refs,
+    shown,
     url_version,
     valid_cursor_scalar,
     visible_sql, video_groups,
@@ -251,8 +252,9 @@ def item_detail(conn: sqlite3.Connection, row: sqlite3.Row) -> ItemDetail:
         faces=[_grouped(face_out(conn, f, refs), groups, "face") for f in faces],
         bodies=[_grouped(body_out(conn, b, refs, traits.get(int(b["id"]))), groups, "body") for b in bodies],
         animals=[_grouped(animal_out(conn, a, refs), groups, "animal") for a in animals],
-        tags=[_tag_ref(refs[int(t["id"])], t["relation"], t["source"]) for t in tags if int(t["id"]) in refs],
-        people=[_related(refs[p], rel) for p, rel in people if p in refs],
+        # an unnamed group stays in the background (section 10): not among the item's people or tags
+        tags=[_tag_ref(refs[int(t["id"])], t["relation"], t["source"]) for t in tags if shown(refs.get(int(t["id"])))],
+        people=[_related(refs[p], rel) for p, rel in people if shown(refs.get(p))],
         document=document_out(doc, row, wallet_configured=_wallet_configured()) if doc is not None else None,
         text_status=row["text_status"], analysis_status=row["analysis_status"], preview_status=row["preview_status"],
         deleted_at=row["deleted_at"], updated_at=row["updated_at"], urls=item_urls(row, full=True),
@@ -834,16 +836,20 @@ def stats(conn: sqlite3.Connection = Depends(get_db)) -> Stats:
         items=n(f"SELECT COUNT(*) FROM items WHERE {live}"),
         by_kind=by_kind,
         by_category=by_category,
-        people=n("SELECT COUNT(*) FROM persons"),
+        # the people and pets the API shows: an unnamed group of faces stays in the background (section 10)
+        people=n("SELECT COUNT(*) FROM persons WHERE kind = 'pet' OR (name IS NOT NULL AND name != '')"),
         named_people=n("SELECT COUNT(*) FROM persons WHERE name IS NOT NULL"),
         documents=n("SELECT COUNT(*) FROM documents d JOIN items i ON i.id = d.item_id "
                     "WHERE i.deleted_at IS NULL AND i.nsfw = 0"),
         misclicks=n(f"SELECT COUNT(*) FROM items WHERE {live} AND misclick = 1"),
         forwards=n(f"SELECT COUNT(*) FROM items WHERE {live} AND forward = 1"),
+        # open guesses for named people (a guess for an unnamed group is never shown, section 10)
         guesses=n("SELECT (SELECT COUNT(*) FROM faces f JOIN items i ON i.id = f.item_id "
-                  "WHERE f.person_id IS NULL AND f.guess_person_id IS NOT NULL AND i.deleted_at IS NULL AND i.nsfw = 0) + "
+                  "JOIN persons gp ON gp.id = f.guess_person_id AND gp.name IS NOT NULL AND gp.name != '' "
+                  "WHERE f.person_id IS NULL AND i.deleted_at IS NULL AND i.nsfw = 0) + "
                   "(SELECT COUNT(*) FROM bodies b JOIN items i ON i.id = b.item_id "
-                  "WHERE b.person_id IS NULL AND b.guess_person_id IS NOT NULL AND i.deleted_at IS NULL AND i.nsfw = 0)"),
+                  "JOIN persons gp ON gp.id = b.guess_person_id AND gp.name IS NOT NULL AND gp.name != '' "
+                  "WHERE b.person_id IS NULL AND i.deleted_at IS NULL AND i.nsfw = 0)"),
         duplicates=n(f"SELECT COUNT(*) FROM items WHERE {live} AND dup_role = 'copy'"),
         trash=n("SELECT COUNT(*) FROM items WHERE deleted_at IS NOT NULL"),
         nsfw=n("SELECT COUNT(*) FROM items WHERE deleted_at IS NULL AND nsfw = 1"),

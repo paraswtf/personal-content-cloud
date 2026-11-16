@@ -477,7 +477,7 @@ def test_stats_and_config(client):
     assert s["items"] == 3 and s["trash"] == 1 and s["nsfw"] == 1 and s["misclicks"] == 1
     assert s["by_kind"]["image"] == 2 and s["by_kind"]["pdf"] == 1
     assert s["by_category"]["food"] == 1 and "nsfw" not in s["by_category"]
-    assert s["people"] == 2 and s["named_people"] == 1
+    assert s["people"] == 1 and s["named_people"] == 1  # an unnamed group stays in the background (section 10)
     assert len(s["recent"]) == 2  # mis-clicks, NSFW and trashed items are not shown
     assert s["disk"]["free_bytes"] > 0 and s["queue"]["failed"] == 0
     cfg = client.get("/api/config").json()

@@ -241,7 +241,10 @@ def test_a_child_to_child_merge_pulls_childhood_groups_only(conn):
 
 
 # ------------------------------------------------------------------ suggestions
-def test_childhood_suggestions_and_who_is_this_as_a_child(client, conn):
+def test_childhood_suggestions_pair_named_people(client, conn):
+    """"Same child?" between two named people. A pair with an unnamed group of childhood photos is found by the
+    matching but not shown, and "Who is this as a child?" went with the unnamed groups (section 10): such faces
+    are named from the faces to name, where the rest of their group become guesses."""
     asha = make_person(conn, "Asha")
     for k in range(3):
         face(conn, asha, at(0.30, 0, 10 + k), ADULT, user=True)
@@ -255,14 +258,12 @@ def test_childhood_suggestions_and_who_is_this_as_a_child(client, conn):
     ready(conn)
     pairs = cluster.childhood_suggestions(conn)
     assert [(a, b) for a, b, _ in pairs] == [tuple(sorted((asha, group)))]
-    r = client.get("/api/suggestions?limit=10").json()["items"]
-    young = [s for s in r if s["kind"] == "childhood"]
+    assert [s for s in client.get("/api/suggestions?limit=10").json()["items"] if s["kind"] == "childhood"] == []
+    assert client.get(f"/api/people/{group}/childhood").status_code in (404, 405)
+    with tx(conn):  # once the group has a name, the pair is shown
+        conn.execute("UPDATE persons SET name = 'Kid', name_key = 'kid' WHERE id = ?", (group,))
+    young = [s for s in client.get("/api/suggestions?limit=10").json()["items"] if s["kind"] == "childhood"]
     assert len(young) == 1 and len(young[0]["a_samples"]) >= 1 and len(young[0]["b_samples"]) >= 1
-    ranked = cluster.childhood_candidates(conn, group)
-    assert [p for p, _ in ranked] == [asha, ravi]
-    out = client.get(f"/api/people/{group}/childhood").json()["candidates"]
-    assert [c["person"]["id"] for c in out] == [asha, ravi]
-    assert client.get(f"/api/people/{asha}/childhood").json() == {"candidates": []}  # named: not a childhood group
 
 
 def test_nothing_changes_while_age_matching_is_off(conn, monkeypatch):
@@ -297,26 +298,11 @@ def test_a_bulk_move_of_childhood_photos_is_learned_as_cross_age(conn):
     assert ev["cross_age"] is True and ev["faces"] == 2
 
 
-def test_who_is_this_ranks_matching_childhood_photos_first(conn):
-    asha = make_person(conn, "Asha")
-    for k in range(3):
-        face(conn, asha, at(0.10, 0, 10 + k), ADULT, user=True)   # her adult photos: unlike the group
-    face(conn, asha, at(0.9, 1, 20), CHILD, user=True)           # her childhood photo: like the group
-    ravi = make_person(conn, "Ravi")
-    for k in range(3):
-        face(conn, ravi, at(0.6, 0, 30 + k), ADULT, user=True)    # his adult photos: closer to the group than hers
-    group = make_person(conn, None)
-    face(conn, group, vec((0, 0.5), (1, 0.8)), CHILD)
-    face(conn, group, vec((0, 0.5), (1, 0.85)), CHILD)
-    ready(conn)
-    assert [p for p, _ in cluster.childhood_candidates(conn, group)] == [asha, ravi]
-
-
 def test_the_suggestions_route_adds_childhood_pairs_beyond_the_limit(client, conn):
     a, b = make_person(conn, "Asha"), make_person(conn, "Meera")      # look alike as adults: a usual pair
     face(conn, a, at(0.9, 0, 10), ADULT, user=True)
     face(conn, b, at(0.9, 0, 11), ADULT, user=True)
-    c, d = make_person(conn, None), make_person(conn, None)           # their childhood photos look alike
+    c, d = make_person(conn, "Kiran"), make_person(conn, "Dev")       # their childhood photos look alike
     face(conn, c, at(0.9, 5, 12), CHILD)
     face(conn, d, at(0.9, 5, 13), CHILD)
     ready(conn)

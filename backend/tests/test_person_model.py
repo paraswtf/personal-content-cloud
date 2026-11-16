@@ -819,6 +819,11 @@ def test_a_group_the_owner_deleted_is_not_remembered(client, conn):
     face = w.face(w.photo(), w.like_me(), group)
     person_scan.scan(conn, w.me)
     assert guessed(conn, face)[2]["was_person_id"] == group
+    # an unnamed group is not found by id (section 10, unnamed groups stay in the background): the owner deletes
+    # it only once it has a name
+    assert client.delete(f"/api/people/{group}").status_code == 404
+    with tx(conn):
+        conn.execute("UPDATE persons SET name = 'Group', name_key = 'group' WHERE id = ?", (group,))
     assert client.delete(f"/api/people/{group}").status_code == 200
     pid, _, ev = guessed(conn, face)
     assert pid == w.me and "was_person_id" not in ev
