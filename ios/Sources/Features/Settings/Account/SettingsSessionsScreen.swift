@@ -177,12 +177,10 @@ struct SettingsSessionsScreen: View {
                 .frame(width: 28)
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 3) {
-                HStack(spacing: 6) {
-                    Text(agent)
-                        .fontWeight(.semibold)
-                    if s.current {
-                        Chip(text: "This device", tint: .green)
-                    }
+                Text(agent)
+                    .fontWeight(.semibold)
+                if s.current {
+                    Chip(text: "This device", tint: .green)
                 }
                 Text(SettingsAccountText.sessionLine(s))
                     .font(.caption)
@@ -207,13 +205,11 @@ struct SettingsSessionsScreen: View {
                 .frame(width: 28)
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 3) {
-                HStack(spacing: 6) {
-                    Text(label)
-                        .fontWeight(.semibold)
-                        .lineLimit(1)
-                    if d.current {
-                        Chip(text: "This device", tint: .green)
-                    }
+                Text(label)
+                    .fontWeight(.semibold)
+                    .lineLimit(2)
+                if d.current {
+                    Chip(text: "This device", tint: .green)
                 }
                 Text(SettingsAccountText.deviceLine(d))
                     .font(.caption)

@@ -94,7 +94,7 @@ struct SettingsPasskeysScreen: View {
         let host = home?.host() ?? session.serverURL?.host() ?? "your server"
         VStack(alignment: .leading, spacing: 10) {
             Label {
-                Text("This app can't make passkeys for \(host). To add one, sign in on the website at \(host).")
+                Text("This app can't make passkeys. To add one, sign in on the website at \(host).")
             } icon: {
                 Image(systemName: "info.circle")
             }

@@ -25,7 +25,7 @@ final class SettingsAccountScreens: ScreenTestCase {
     }
 
     private func waitGone(_ element: XCUIElement, timeout: TimeInterval = 15) -> Bool {
-        let gone = expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: element)
+        let gone = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: element)
         return XCTWaiter.wait(for: [gone], timeout: timeout) == .completed
     }
 
@@ -43,9 +43,8 @@ final class SettingsAccountScreens: ScreenTestCase {
         XCTAssertTrue(app.navigationBars["Account"].waitForExistence(timeout: 15))
         let username = app.staticTexts["account.username"]
         XCTAssertTrue(username.waitForExistence(timeout: 15), "no username row")
-        let shown = NSPredicate(format: "label == 'owner'")
-        XCTAssertEqual(XCTWaiter.wait(for: [expectation(for: shown, evaluatedWith: username)], timeout: 15), .completed,
-                       "the username did not show")
+        let shown = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label == 'owner'"), object: username)
+        XCTAssertEqual(XCTWaiter.wait(for: [shown], timeout: 15), .completed, "the username did not show")
         snap("setacct-account")
 
         // The form's own checks run before anything is sent: a short new password and a mismatch never reach the

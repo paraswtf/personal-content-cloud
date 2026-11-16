@@ -77,6 +77,7 @@ struct SettingsAppearanceScreen: View {
                         }
                         .contentShape(Rectangle())
                     }
+                    .buttonStyle(.plain)
                     .accessibilityAddTraits(selected ? .isSelected : [])
                     .accessibilityIdentifier("appearance.\(option.rawValue)")
                 }
