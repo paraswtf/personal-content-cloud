@@ -1,6 +1,8 @@
-# Builds the iPhone app (ios/) on GitHub's macOS machines: the server this project is developed on has no
-# Xcode. Every push that touches the app compiles it for the simulator. The TestFlight upload runs only on
-# main and on a manual run, and only when the repository has its signing secrets (see ios/README.md).
+# Builds and tests the iPhone app (ios/) on GitHub's macOS machines: the server this project is developed
+# on has no Xcode. Every push that touches the app compiles it, starts the backend on the runner with the
+# models off and a made-up library (ios/ci/seed_server.py), runs the unit tests and the screen tests
+# against it on a simulator, and keeps the screenshots as the "screenshots" artifact (ios/README.md,
+# "Tests on GitHub"). Nothing here talks to a real server or to anyone's photos.
 name: iOS
 
 on:
@@ -8,12 +10,10 @@ on:
     paths:
       - "ios/**"
       - ".github/workflows/ios.yml"
+      # the screen tests run against this backend, so a server change runs them too
+      - "backend/**"
+      - "scripts/gen_swift_api.py"
   workflow_dispatch:
-    inputs:
-      upload:
-        description: "Upload the build to TestFlight"
-        type: boolean
-        default: false
 
 permissions:
   contents: read
@@ -27,6 +27,8 @@ jobs:
     name: Build and test
     runs-on: macos-15
     timeout-minutes: 60
+    env:
+      PCC_PORT: "8765"
     steps:
       - uses: actions/checkout@v4
 
@@ -36,24 +38,113 @@ jobs:
           brew install xcodegen
           xcodegen --version
 
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+
       - name: Generate the project
         working-directory: ios
         run: xcodegen generate
 
-      - name: Build for the simulator
+      # The first simctl call on a fresh machine takes about two minutes: it runs while the app builds.
+      - name: Start a simulator in the background
+        run: |
+          SDK="$(xcrun --sdk iphonesimulator --show-sdk-version)"
+          (
+            set -e
+            echo "$(date -u +%T) listing simulators (SDK $SDK)"
+            xcrun simctl list devices available -j > "$RUNNER_TEMP/simulators.json"
+            python3 ios/ci/pick_simulator.py "$SDK" < "$RUNNER_TEMP/simulators.json" > "$RUNNER_TEMP/simulator.next"
+            echo "$(date -u +%T) booting $(cat "$RUNNER_TEMP/simulator.next")"
+            xcrun simctl boot "$(cut -d ' ' -f 1 "$RUNNER_TEMP/simulator.next")"
+            xcrun simctl bootstatus "$(cut -d ' ' -f 1 "$RUNNER_TEMP/simulator.next")" -b > /dev/null
+            echo "$(date -u +%T) booted"
+            mv "$RUNNER_TEMP/simulator.next" "$RUNNER_TEMP/simulator.txt"
+          ) > "$RUNNER_TEMP/simulator.log" 2>&1 &
+
+      - name: Build for testing
         working-directory: ios
         run: |
-          set -o pipefail
           mkdir -p build
           xcodebuild -project PersonalContentCloud.xcodeproj -scheme PersonalContentCloud \
-            -destination 'generic/platform=iOS Simulator' -derivedDataPath build/dd \
-            CODE_SIGNING_ALLOWED=NO build 2>&1 | tee build/build.log | xcbeautify --renderer github-actions
+            -destination 'generic/platform=iOS Simulator' -derivedDataPath build/dd ARCHS=arm64 ONLY_ACTIVE_ARCH=NO \
+            build-for-testing 2>&1 | tee build/build.log | xcbeautify --renderer github-actions
 
-      - name: Keep the build log
+      - name: Install the backend
+        run: ios/ci/install_backend.sh "$RUNNER_TEMP/pcc-venv"
+
+      - name: Seed and start the backend
+        run: |
+          P="$RUNNER_TEMP/pcc"
+          mkdir -p "$P/data" "$P/originals" "$P/backup" "$P/models" "$P/no-frontend"
+          export DATA_DIR="$P/data" ORIGINALS_DIR="$P/originals" BACKUP_DIR="$P/backup" MODELS_DIR="$P/models" \
+            FRONTEND_DIST="$P/no-frontend" PCC_NO_MODELS=1 MIN_FREE_DISK_MB=64
+          echo "PCC_DIR=$P" >> "$GITHUB_ENV"
+          cd backend
+          "$RUNNER_TEMP/pcc-venv/bin/python" ../ios/ci/seed_server.py library
+          nohup "$RUNNER_TEMP/pcc-venv/bin/uvicorn" --factory app.main:create_app --host 127.0.0.1 --port "$PCC_PORT" \
+            > "$P/backend.log" 2>&1 &
+          echo $! > "$P/backend.pid"
+          "$RUNNER_TEMP/pcc-venv/bin/python" ../ios/ci/seed_server.py api --server "http://127.0.0.1:$PCC_PORT" \
+            --out "$P/seed.json" | grep -v '"token"'
+
+      - name: Run the tests
+        working-directory: ios
+        run: |
+          SERVER="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["server"])' "$PCC_DIR/seed.json")"
+          TOKEN="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["token"])' "$PCC_DIR/seed.json")"
+          echo "::add-mask::$TOKEN"
+          echo "$(date -u +%T) waiting for the simulator"
+          for _ in $(seq 1 450); do [ -s "$RUNNER_TEMP/simulator.txt" ] && break; sleep 2; done
+          cat "$RUNNER_TEMP/simulator.log"
+          test -s "$RUNNER_TEMP/simulator.txt"
+          read -r SIM_ID SIM_NAME SIM_OS < "$RUNNER_TEMP/simulator.txt"
+          echo "Simulator: $SIM_NAME on $SIM_OS ($SIM_ID)"
+          # Installed and given Photos access first, so the permission prompt does not cover the screens.
+          xcrun simctl install "$SIM_ID" build/dd/Build/Products/Debug-iphonesimulator/PersonalContentCloud.app
+          xcrun simctl privacy "$SIM_ID" grant photos in.rivant.pcc
+          echo "$(date -u +%T) installed, starting the tests"
+          TEST_RUNNER_PCC_TEST_SERVER="$SERVER" TEST_RUNNER_PCC_TEST_TOKEN="$TOKEN" \
+          xcodebuild -project PersonalContentCloud.xcodeproj -scheme PersonalContentCloud \
+            -destination "id=$SIM_ID" -derivedDataPath build/dd -resultBundlePath build/Tests.xcresult \
+            test-without-building 2>&1 | tee build/test.log | xcbeautify --renderer github-actions
+
+      - name: Export the screenshots
+        if: always()
+        run: python3 ios/ci/export_screenshots.py ios/build/Tests.xcresult ios/build/screenshots
+
+      - name: Stop the backend
+        if: always()
+        run: |
+          if [ -f "${PCC_DIR:-/nonexistent}/backend.pid" ]; then kill "$(cat "$PCC_DIR/backend.pid")" || true; fi
+
+      - name: Keep the screenshots
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: build-log
-          path: ios/build/build.log
+          name: screenshots
+          path: ios/build/screenshots
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Keep the logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs
+          path: |
+            ios/build/build.log
+            ios/build/test.log
+            ${{ runner.temp }}/pcc/backend.log
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Keep the test results
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xcresult
+          path: ios/build/Tests.xcresult
           if-no-files-found: ignore
           retention-days: 7

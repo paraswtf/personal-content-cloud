@@ -47,12 +47,47 @@ targets:
         NSAppTransportSecurity:
           NSAllowsLocalNetworking: true
         ITSAppUsesNonExemptEncryption: false
+  # Unit tests, hosted by the app (decoding tests for the API models go here).
+  PersonalContentCloudTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: UnitTests
+    dependencies:
+      - target: PersonalContentCloud
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: in.rivant.pcc.tests
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/PersonalContentCloud.app/PersonalContentCloud"
+        BUNDLE_LOADER: "$(TEST_HOST)"
+  # Screen tests against a seeded backend (ios/README.md, "Tests on GitHub").
+  PersonalContentCloudUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - path: UITests
+    dependencies:
+      - target: PersonalContentCloud
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: in.rivant.pcc.uitests
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_TARGET_NAME: PersonalContentCloud
 schemes:
   PersonalContentCloud:
     build:
       targets:
         PersonalContentCloud: all
+        PersonalContentCloudTests: [test]
+        PersonalContentCloudUITests: [test]
     run:
       config: Debug
+    test:
+      config: Debug
+      gatherCoverageData: false
+      targets:
+        - PersonalContentCloudTests
+        - PersonalContentCloudUITests
     archive:
       config: Release
