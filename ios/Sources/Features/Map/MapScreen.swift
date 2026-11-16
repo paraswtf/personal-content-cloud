@@ -35,6 +35,8 @@ struct MapScreen: View {
         }
         .navigationTitle("Map")
         .navigationBarTitleDisplayMode(.inline)
+        // the tab bar keeps its background over the map instead of turning see-through
+        .toolbarBackground(.visible, for: .tabBar)
         .sheet(isPresented: $placesOpen) {
             MapPlacesSheet(places: places, active: activePlace) { place in pick(place) }
         }
@@ -68,22 +70,18 @@ struct MapScreen: View {
         if let pointsError, points == nil {
             ErrorState(error: pointsError) { Task { await load() } }
         } else {
-            ZStack(alignment: .bottomLeading) {
+            // The places button sits at the top: at the bottom it would cover the map's Apple Maps and Legal marks.
+            ZStack(alignment: .topLeading) {
                 MapClusterMap(points: points?.points ?? [], flyTo: flyTo) { area in picked = area }
-                    .ignoresSafeArea(edges: .bottom)
                 if let points, points.withGps == 0 {
-                    VStack {
-                        Text(points.total == 0 ? "Nothing matches these filters." : "None of these items has a location yet.")
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
-                            .padding(.horizontal, 14)
-                            .padding(.vertical, 8)
-                            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
-                            .padding(.top, 12)
-                        Spacer()
-                    }
-                    .frame(maxWidth: .infinity)
-                    .allowsHitTesting(false)
+                    Text(points.total == 0 ? "Nothing matches these filters." : "None of these items has a location yet.")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 8)
+                        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .allowsHitTesting(false)
                 }
                 Button {
                     placesOpen = true

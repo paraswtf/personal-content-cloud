@@ -77,6 +77,23 @@ final class MapDocsScreens: ScreenTestCase {
         // zoomed in on Panaji: the two photos there show as thumbnails or a small cluster
         XCTAssertTrue(markers.firstMatch.waitForExistence(timeout: 20), "nothing on the map at the chosen place")
         snap("mapdocs-place-picked")
+
+        // closer in, the two seeded photos (about 250 m apart, the place's centre between them) come apart and show
+        // their thumbnails
+        let thumb = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "identifier == 'map.point' AND label == 'Open this photo'")).firstMatch
+        let map = app.maps.firstMatch
+        XCTAssertTrue(map.exists, "the map is not on screen")
+        for _ in 0..<3 where !thumb.exists {
+            map.pinch(withScale: 6, velocity: 4)
+            _ = thumb.waitForExistence(timeout: 6)
+        }
+        XCTAssertTrue(thumb.exists, "zoomed in, no photo showed its thumbnail")
+        snap("mapdocs-thumbs")
+        thumb.tap()
+        let title = app.staticTexts["map.panel.title"]
+        XCTAssertTrue(title.waitForExistence(timeout: 10), "a thumbnail did not open the panel")
+        XCTAssertEqual(title.label, "1 item here")
     }
 
     func testDocumentsFilterAndSearch() throws {

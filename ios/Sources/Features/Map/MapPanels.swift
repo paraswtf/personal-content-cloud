@@ -121,6 +121,7 @@ struct MapPlacesSheet: View {
                     } label: {
                         row(place)
                     }
+                    .buttonStyle(.plain)
                     .accessibilityIdentifier("map.place")
                     .accessibilityAddTraits(active == place.place ? .isSelected : [])
                 }
