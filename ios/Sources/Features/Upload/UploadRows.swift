@@ -9,31 +9,32 @@ struct UploadSummaryRow: View {
 
     var body: some View {
         let busy = summary.sending > 0 || summary.processing > 0
-        HStack(alignment: .top, spacing: 10) {
-            if busy {
-                ProgressView().padding(.top, 2)
-            } else {
-                Image(systemName: "checkmark.circle.fill").foregroundStyle(.green).font(.title3)
-            }
-            VStack(alignment: .leading, spacing: 3) {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 10) {
+                if busy {
+                    ProgressView()
+                } else {
+                    Image(systemName: "checkmark.circle.fill").foregroundStyle(.green).font(.title3)
+                }
                 Text(summary.headline(progress: progress))
                     .font(.subheadline.weight(.semibold))
                     .accessibilityIdentifier("upload.headline")
-                if !summary.outcomes.isEmpty {
-                    Text(summary.outcomes).font(.subheadline).foregroundStyle(.secondary)
-                        .accessibilityIdentifier("upload.outcomes")
-                }
-                if summary.sending > 0 {
-                    Text("Uploads keep going in the background once they have started. Analysis and indexing continue on the server after that.")
-                        .font(.caption).foregroundStyle(.secondary)
+                Spacer(minLength: 8)
+                if summary.finished > 0 {
+                    Button("Clear finished", action: onClearFinished)
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                        .accessibilityIdentifier("upload.clearFinished")
                 }
             }
-            Spacer(minLength: 0)
-            if summary.finished > 0 {
-                Button("Clear finished", action: onClearFinished)
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-                    .accessibilityIdentifier("upload.clearFinished")
+            // only the outcome counts change when a file settles, not on every progress tick
+            if !summary.outcomes.isEmpty {
+                Text(summary.outcomes).font(.subheadline).foregroundStyle(.secondary)
+                    .accessibilityIdentifier("upload.outcomes")
+            }
+            if summary.sending > 0 {
+                Text("Uploads keep going in the background once they have started. Analysis and indexing continue on the server after that.")
+                    .font(.caption).foregroundStyle(.secondary)
             }
         }
         .padding(.vertical, 2)
@@ -77,7 +78,7 @@ struct UploadQueueRow: View {
                     Label(problem, systemImage: "wifi.exclamationmark").font(.caption).foregroundStyle(.orange)
                 }
                 if let badge = UploadText.badge(phase: info.phase, serverStatus: rec.serverStatus, skipped: info.skipped) {
-                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    VStack(alignment: .leading, spacing: 4) {
                         UploadBadge(text: badge, tone: tone)
                         if info.phase != .cancelled, let message = rec.error, !message.isEmpty {
                             Text(message).font(.caption).foregroundStyle(.secondary)
@@ -156,6 +157,8 @@ struct UploadBadge: View {
             Text(text).accessibilityIdentifier("upload.status")
         }
         .font(.caption.weight(.medium))
+        .lineLimit(1)
+        .fixedSize()
         .foregroundStyle(color)
         .padding(.horizontal, 8)
         .padding(.vertical, 3)
