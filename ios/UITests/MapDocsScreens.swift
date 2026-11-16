@@ -16,8 +16,13 @@ final class MapDocsScreens: ScreenTestCase {
     }
 
     private func waitUntilGone(_ element: XCUIElement, timeout: TimeInterval = 10) -> Bool {
-        let gone = expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: element)
-        return XCTWaiter().wait(for: [gone], timeout: timeout) == .completed
+        wait(element, NSPredicate(format: "exists == false"), timeout: timeout)
+    }
+
+    /// Waits until `predicate` holds for `element`.
+    private func wait(_ element: XCUIElement, _ predicate: NSPredicate, timeout: TimeInterval) -> Bool {
+        let expectation = XCTNSPredicateExpectation(predicate: predicate, object: element)
+        return XCTWaiter().wait(for: [expectation], timeout: timeout) == .completed
     }
 
     func testMapClustersOpenTheirItems() throws {
@@ -25,8 +30,8 @@ final class MapDocsScreens: ScreenTestCase {
         openMore("more.map", title: "Map")
         let count = app.staticTexts["map.count"]
         XCTAssertTrue(count.waitForExistence(timeout: 20))
-        let loaded = expectation(for: NSPredicate(format: "label CONTAINS 'location'"), evaluatedWith: count)
-        XCTAssertEqual(XCTWaiter().wait(for: [loaded], timeout: 30), .completed, "the count line never said how many have a location")
+        XCTAssertTrue(wait(count, NSPredicate(format: "label CONTAINS 'location'"), timeout: 30),
+                      "the count line never said how many have a location")
         XCTAssertTrue(markers.firstMatch.waitForExistence(timeout: 30), "no cluster or point on the map")
         XCTAssertTrue(app.staticTexts["Place names are off: the GeoNames files are missing from the models folder (see the README)."].waitForExistence(timeout: 10),
                       "the status line about place names did not show (the CI server has no gazetteer)")
@@ -60,8 +65,7 @@ final class MapDocsScreens: ScreenTestCase {
         openMore("more.map", title: "Map")
         let places = app.buttons["map.places"]
         XCTAssertTrue(places.waitForExistence(timeout: 20))
-        let counted = expectation(for: NSPredicate(format: "label BEGINSWITH 'Places ('"), evaluatedWith: places)
-        XCTAssertEqual(XCTWaiter().wait(for: [counted], timeout: 30), .completed, "the places never loaded")
+        XCTAssertTrue(wait(places, NSPredicate(format: "label BEGINSWITH 'Places ('"), timeout: 30), "the places never loaded")
         places.tap()
         XCTAssertTrue(app.navigationBars["Places"].waitForExistence(timeout: 10))
         let panaji = app.buttons.matching(NSPredicate(format: "identifier == 'map.place' AND label BEGINSWITH 'Panaji'")).firstMatch
