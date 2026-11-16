@@ -40,26 +40,29 @@ struct ViewerInfoPanel: View {
 
     private func panel(_ item: API.ItemDetail) -> some View {
         let kind = MediaKind(item.kind.rawValue)
+        let taken = item.takenAt != nil ? "Taken \(Fmt.date(item.takenAt, withTime: true))"
+                                        : "Added \(Fmt.date(item.createdAt))"
         return List {
-            Section {
-                Text(item.takenAt != nil ? "Taken \(Fmt.date(item.takenAt, withTime: true))"
-                                         : "Added \(Fmt.date(item.createdAt))")
-                    .foregroundStyle(.secondary)
-                if item.nsfw {
-                    Label("Private. Only shown in the vault.", systemImage: "eye.slash")
+            Group {
+                Section {
+                    Text(taken).foregroundStyle(.secondary)
+                    if item.nsfw {
+                        Label("Private. Only shown in the vault.", systemImage: "eye.slash")
+                    }
+                }
+                if item.misclick { misclickSection(item) }
+                if ViewerFormat.receivedLabel(item.receivedVia) != nil || item.forward { forwardSection(item) }
+                processingSection(item, kind: kind)
+                ViewerBoxesInfoSection(model: boxes, context: ctx)
+                ViewerRelatedSection(context: ctx)
+                ViewerTagsSection(context: ctx, item: item)
+                if let document = item.document {
+                    Section("Document") {
+                        ViewerDocumentCard(context: ctx, document: document)
+                    }
                 }
             }
-            if item.misclick { misclickSection(item) }
-            if ViewerFormat.receivedLabel(item.receivedVia) != nil || item.forward { forwardSection(item) }
-            processingSection(item, kind: kind)
-            ViewerBoxesInfoSection(model: boxes, context: ctx)
-            ViewerRelatedSection(context: ctx)
-            ViewerTagsSection(context: ctx, item: item)
-            if let document = item.document {
-                Section("Document") {
-                    ViewerDocumentCard(context: ctx, document: document)
-                }
-            }
+            Group {
             if !item.nsfw { categorySection(item) }
             if !item.labels.isEmpty {
                 Section("Labels") {
@@ -80,6 +83,7 @@ struct ViewerInfoPanel: View {
             }
             detailsSection(item, kind: kind)
             actionsSection(item, kind: kind)
+            }
         }
         .accessibilityIdentifier("viewer.info.list")
         .navigationTitle(ViewerFormat.detailsTitle(kind))

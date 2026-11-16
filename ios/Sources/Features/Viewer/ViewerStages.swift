@@ -306,11 +306,12 @@ struct ViewerVideoStage: View {
                 if let shown {
                     GeometryReader { geo in
                         let rect = fitted(in: geo.size)
+                        let x = CGFloat(shown.box.x), y = CGFloat(shown.box.y)
+                        let w = CGFloat(shown.box.w), h = CGFloat(shown.box.h)
                         RoundedRectangle(cornerRadius: 4)
                             .stroke(Color.yellow, lineWidth: 2)
-                            .frame(width: shown.box.w * rect.width, height: shown.box.h * rect.height)
-                            .position(x: rect.minX + (shown.box.x + shown.box.w / 2) * rect.width,
-                                      y: rect.minY + (shown.box.y + shown.box.h / 2) * rect.height)
+                            .frame(width: w * rect.width, height: h * rect.height)
+                            .position(x: rect.minX + (x + w / 2) * rect.width, y: rect.minY + (y + h / 2) * rect.height)
                     }
                     .allowsHitTesting(false)
                     .accessibilityHidden(true)
