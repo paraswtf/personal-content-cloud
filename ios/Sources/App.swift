@@ -7,6 +7,12 @@ struct PersonalContentCloudApp: App {
     @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var session = AppSession()
 
+    init() {
+        #if DEBUG
+        TestLaunch.apply()  // UI tests sign in from the launch environment (ios/README.md)
+        #endif
+    }
+
     var body: some Scene {
         WindowGroup {
             RootView()

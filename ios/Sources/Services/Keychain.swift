@@ -8,6 +8,9 @@ enum Keychain {
     private static let account = "device-token"
 
     static func token() -> String? {
+        #if DEBUG
+        if let token = TestLaunch.token { return token }  // UI tests (TestLaunch); never in Release
+        #endif
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
