@@ -15,7 +15,8 @@ struct DeleteSyncedView: View {
     private var allRows: [SyncEngine.SyncedRow] { rows + trashedRows }
 
     var body: some View {
-        NavigationStack {
+        // Shown inside the Upload and sync screen's navigation stack.
+        Group {
             Group {
                 if loading {
                     ProgressView("Checking with the server")

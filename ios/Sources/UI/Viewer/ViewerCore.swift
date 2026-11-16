@@ -1,0 +1,398 @@
+import SwiftUI
+import AVKit
+
+/// The item on screen in the viewer: the core's view of it (what the stage draws), the whole generated
+/// `API.ItemDetail` (nil only if it could not be decoded; `json` holds the raw answer), and a way to load it
+/// again after a change.
+struct ViewerPageContext: Identifiable {
+    let uid: String
+    let detail: CoreItemDetail
+    let item: API.ItemDetail?
+    let json: Data
+    let reload: () -> Void
+
+    var id: String { uid }
+}
+
+/// What the viewer area adds to the core viewer (Features/Viewer/ViewerScreen.swift fills these).
+struct ViewerHooks {
+    /// A tapped box (the smallest under the finger): open the face, person or pet editor.
+    var onBoxTap: ((StageBox, ViewerPageContext) -> Void)?
+    /// The info panel's content for the item on screen.
+    var infoPanel: ((ViewerPageContext) -> AnyView)?
+    /// Extra buttons for the bottom bar (favourite, share, delete, albums).
+    var toolbar: ((ViewerPageContext) -> AnyView)?
+    /// The box being edited, drawn selected (never raised above a smaller one).
+    var selectedBoxId: String?
+
+    init(onBoxTap: ((StageBox, ViewerPageContext) -> Void)? = nil,
+         infoPanel: ((ViewerPageContext) -> AnyView)? = nil,
+         toolbar: ((ViewerPageContext) -> AnyView)? = nil,
+         selectedBoxId: String? = nil) {
+        self.onBoxTap = onBoxTap
+        self.infoPanel = infoPanel
+        self.toolbar = toolbar
+        self.selectedBoxId = selectedBoxId
+    }
+}
+
+/// The viewer: pages through items left and right, zooms photos, plays videos and Live Photo clips, and draws the
+/// boxes of faces, people and pets with the smallest on top.
+struct ViewerCore: View {
+    let request: ViewerRequest
+    var hooks: ViewerHooks
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var entries: [ViewerEntry]
+    @State private var current: String?
+    @State private var chrome = true
+    @State private var showBoxes = true
+    @State private var zoomedUid: String?
+    @State private var contexts: [String: ViewerPageContext] = [:]
+    @State private var info: ViewerPageContext?
+    @State private var loadingMore = false
+    @State private var noMore = false
+
+    init(request: ViewerRequest, hooks: ViewerHooks = ViewerHooks()) {
+        self.request = request
+        self.hooks = hooks
+        _entries = State(initialValue: request.entries)
+        let start = request.entries.indices.contains(request.start) ? request.entries[request.start].uid : request.entries.first?.uid
+        _current = State(initialValue: start)
+    }
+
+    private var currentContext: ViewerPageContext? { current.flatMap { contexts[$0] } }
+    private var currentIndex: Int? { current.flatMap { uid in entries.firstIndex(where: { $0.uid == uid }) } }
+
+    var body: some View {
+        ScrollViewReader { proxy in
+            pages
+                .onAppear {
+                    // Start at the opened item (the scroll position alone may not move a lazy stack on its first layout).
+                    if let current { proxy.scrollTo(current, anchor: .leading) }
+                }
+        }
+        .background(Color.black.ignoresSafeArea())
+        .overlay(alignment: .top) { if chrome { topBar } }
+        .overlay(alignment: .bottom) { if chrome { bottomBar } }
+        .statusBarHidden(!chrome)
+        .preferredColorScheme(.dark)
+        .onChange(of: current) { _, _ in
+            Task { await loadMoreIfNeeded() }
+        }
+        .sheet(item: $info) { ctx in
+            NavigationStack {
+                Group {
+                    if let panel = hooks.infoPanel {
+                        panel(ctx)
+                    } else {
+                        DefaultInfoPanel(context: ctx)
+                    }
+                }
+                .toolbar {
+                    ToolbarItem(placement: .confirmationAction) { Button("Done") { info = nil } }
+                }
+            }
+            .presentationDetents([.medium, .large])
+        }
+        .accessibilityIdentifier("viewer")
+    }
+
+    private var pages: some View {
+        ScrollView(.horizontal) {
+            LazyHStack(spacing: 0) {
+                ForEach(entries) { entry in
+                    ViewerPage(entry: entry,
+                               isCurrent: entry.uid == current,
+                               showBoxes: showBoxes,
+                               selectedBoxId: hooks.selectedBoxId,
+                               zoomed: zoomBinding(entry.uid),
+                               onTap: { withAnimation(.easeInOut(duration: 0.2)) { chrome.toggle() } },
+                               onBoxTap: { box, ctx in hooks.onBoxTap?(box, ctx) },
+                               onContext: { ctx in contexts[ctx.uid] = ctx })
+                        .containerRelativeFrame([.horizontal, .vertical])
+                        .id(entry.uid)
+                }
+            }
+            .scrollTargetLayout()
+        }
+        .scrollTargetBehavior(.paging)
+        .scrollPosition(id: $current)
+        .scrollIndicators(.hidden)
+        .scrollDisabled(zoomedUid != nil)
+        .ignoresSafeArea()
+    }
+
+    private func zoomBinding(_ uid: String) -> Binding<Bool> {
+        Binding(get: { zoomedUid == uid },
+                set: { isZoomed in
+                    if isZoomed { zoomedUid = uid } else if zoomedUid == uid { zoomedUid = nil }
+                })
+    }
+
+    private var topBar: some View {
+        HStack(spacing: 12) {
+            Button {
+                dismiss()
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 17, weight: .semibold))
+                    .frame(width: 44, height: 44)
+            }
+            .accessibilityLabel("Close")
+            .accessibilityIdentifier("viewer.close")
+            VStack(alignment: .leading, spacing: 2) {
+                if let ctx = currentContext {
+                    Text(Fmt.date(ctx.detail.takenAt ?? ctx.detail.createdAt, withTime: true))
+                        .font(.subheadline.weight(.semibold))
+                    if let place = ctx.detail.place, !place.isEmpty {
+                        Text(place).font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+            }
+            .lineLimit(1)
+            Spacer()
+            if let i = currentIndex, entries.count > 1 {
+                Text("\(i + 1) of \(entries.count)\(noMore || request.loadMore == nil ? "" : "+")")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                    .padding(.trailing, 12)
+            }
+        }
+        .foregroundStyle(.white)
+        .padding(.horizontal, 4)
+        .background(LinearGradient(colors: [.black.opacity(0.65), .clear], startPoint: .top, endPoint: .bottom)
+            .ignoresSafeArea())
+    }
+
+    private var bottomBar: some View {
+        HStack(spacing: 20) {
+            if let ctx = currentContext {
+                if !ctx.detail.stillBoxes.isEmpty {
+                    Button {
+                        showBoxes.toggle()
+                    } label: {
+                        Image(systemName: showBoxes ? "person.crop.rectangle.fill" : "person.crop.rectangle")
+                            .frame(width: 44, height: 44)
+                    }
+                    .accessibilityLabel(showBoxes ? "Hide boxes" : "Show boxes")
+                    .accessibilityIdentifier("viewer.boxes")
+                }
+                if let extra = hooks.toolbar {
+                    extra(ctx)
+                }
+                Spacer()
+                Button {
+                    info = ctx
+                } label: {
+                    Image(systemName: "info.circle").frame(width: 44, height: 44)
+                }
+                .accessibilityLabel("Details")
+                .accessibilityIdentifier("viewer.info")
+            } else {
+                Spacer()
+            }
+        }
+        .font(.system(size: 20))
+        .foregroundStyle(.white)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 6)
+        .background(LinearGradient(colors: [.clear, .black.opacity(0.65)], startPoint: .top, endPoint: .bottom)
+            .ignoresSafeArea())
+    }
+
+    private func loadMoreIfNeeded() async {
+        guard let more = request.loadMore, !loadingMore, !noMore, let i = currentIndex, i >= entries.count - 3 else { return }
+        loadingMore = true
+        let next = await more()
+        loadingMore = false
+        let known = Set(entries.map(\.uid))
+        let fresh = next.filter { !known.contains($0.uid) }
+        if fresh.isEmpty { noMore = true } else { entries.append(contentsOf: fresh) }
+    }
+}
+
+/// One page of the viewer: the item's picture (zoomable, with boxes), its video, or its Live Photo clip.
+struct ViewerPage: View {
+    let entry: ViewerEntry
+    let isCurrent: Bool
+    let showBoxes: Bool
+    let selectedBoxId: String?
+    @Binding var zoomed: Bool
+    let onTap: () -> Void
+    let onBoxTap: (StageBox, ViewerPageContext) -> Void
+    let onContext: (ViewerPageContext) -> Void
+
+    @State private var detail: CoreItemDetail?
+    @State private var item: API.ItemDetail?
+    @State private var json: Data?
+    @State private var image: UIImage?
+    @State private var loadError: Error?
+    @State private var reloadToken = 0
+    @State private var livePlayer: AVPlayer?
+
+    private var kind: MediaKind { MediaKind(detail?.kind ?? entry.kind) }
+
+    var body: some View {
+        ZStack {
+            if kind == .video, let detail, let video = detail.urls.video {
+                ViewerVideo(ref: video, posterRef: detail.urls.previewSmall, isCurrent: isCurrent)
+            } else {
+                ZoomableStage(image: image,
+                              pixelSize: pixelSize,
+                              boxes: detail?.stillBoxes ?? [],
+                              showBoxes: showBoxes && livePlayer == nil,
+                              selectedBoxId: selectedBoxId,
+                              zoomed: $zoomed,
+                              onBoxTap: { box in if let ctx = context { onBoxTap(box, ctx) } },
+                              onTap: onTap)
+                if let livePlayer {
+                    PlayerSurface(player: livePlayer)
+                        .allowsHitTesting(false)
+                        .accessibilityHidden(true)
+                }
+            }
+            if detail == nil, let loadError {
+                VStack(spacing: 12) {
+                    Text(ErrorText.describe(loadError)).multilineTextAlignment(.center)
+                    Button("Try again") { reloadToken += 1 }
+                        .buttonStyle(.bordered)
+                }
+                .foregroundStyle(.white)
+                .padding(24)
+            } else if image == nil && kind != .video {
+                ProgressView().tint(.white)
+            }
+        }
+        .overlay(alignment: .topLeading) {
+            if let liveRef, kind == .image {
+                Button {
+                    playLive(liveRef)
+                } label: {
+                    Label("LIVE", systemImage: "livephoto")
+                        .font(.caption.weight(.semibold))
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(.ultraThinMaterial, in: Capsule())
+                }
+                .foregroundStyle(.white)
+                .padding(.top, 104)
+                .padding(.leading, 12)
+                .accessibilityLabel("Play the Live Photo")
+            }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(accessibilityText)
+        .task(id: "\(entry.uid)#\(reloadToken)") { await load() }
+        .onCloudChange(uid: entry.uid) { reloadToken += 1 }
+        .onReceive(NotificationCenter.default.publisher(for: .AVPlayerItemDidPlayToEndTime)) { note in
+            if let item = note.object as? AVPlayerItem, item === livePlayer?.currentItem { livePlayer = nil }
+        }
+        .onChange(of: isCurrent) { _, nowCurrent in
+            if !nowCurrent { livePlayer?.pause(); livePlayer = nil }
+        }
+    }
+
+    private var pixelSize: CGSize? {
+        guard let w = detail?.width, let h = detail?.height, w > 0, h > 0 else { return nil }
+        return CGSize(width: w, height: h)
+    }
+
+    private var liveRef: String? {
+        guard let detail, detail.live == true else { return nil }
+        return detail.urls.live ?? detail.liveVideo?.url
+    }
+
+    private var context: ViewerPageContext? {
+        guard let detail, let json else { return nil }
+        return ViewerPageContext(uid: entry.uid, detail: detail, item: item, json: json, reload: { reloadToken += 1 })
+    }
+
+    private var accessibilityText: String {
+        let date = Fmt.date(detail?.takenAt ?? detail?.createdAt, withTime: true)
+        return [kind.label, date].filter { !$0.isEmpty }.joined(separator: ", ")
+    }
+
+    private func playLive(_ ref: String) {
+        guard let player = AuthorizedPlayer.player(for: ref) else { return }
+        livePlayer = player
+        player.play()
+    }
+
+    private func load() async {
+        if image == nil, let thumb = entry.thumb {
+            image = ImageLoader.shared.cached(thumb, maxPixel: 512)
+            if image == nil { image = try? await ImageLoader.shared.image(thumb, maxPixel: 512) }
+        }
+        guard let server = APIConnection.current else { return }
+        do {
+            let (data, _) = try await CoreHTTP.raw(server, "GET", "/api/items/\(entry.uid)")
+            let decoded = try CoreHTTP.decoder.decode(CoreItemDetail.self, from: data)
+            detail = decoded
+            item = try? JSONDecoder().decode(API.ItemDetail.self, from: data)
+            json = data
+            loadError = nil
+            if let ctx = context { onContext(ctx) }
+            if image == nil {
+                image = try? await ImageLoader.shared.image(decoded.urls.thumb, maxPixel: 512)
+            }
+            if decoded.mediaKind != .video {
+                let preview = try await ImageLoader.shared.image(decoded.urls.preview, maxPixel: 2560)
+                image = preview
+            }
+        } catch {
+            if error is CancellationError || Task.isCancelled { return }
+            if detail == nil { loadError = error }
+        }
+    }
+}
+
+/// A video page: the poster until the page is the current one, then the system player (it does not start by itself).
+struct ViewerVideo: View {
+    let ref: String
+    let posterRef: String
+    let isCurrent: Bool
+
+    @State private var player: AVPlayer?
+
+    var body: some View {
+        ZStack {
+            if let player {
+                VideoPlayer(player: player)
+            } else {
+                RemoteImage(ref: posterRef, maxPixel: 1600, contentMode: .fit)
+            }
+        }
+        .onChange(of: isCurrent, initial: true) { _, nowCurrent in
+            if nowCurrent {
+                if player == nil { player = AuthorizedPlayer.player(for: ref) }
+            } else {
+                player?.pause()
+            }
+        }
+        .onDisappear {
+            player?.pause()
+            player = nil
+        }
+    }
+}
+
+/// The info panel when the viewer area has not given one: what the item is and when it was taken.
+struct DefaultInfoPanel: View {
+    let context: ViewerPageContext
+
+    var body: some View {
+        let d = context.detail
+        List {
+            LabeledContent("Name", value: d.filename)
+            LabeledContent("Kind", value: d.mediaKind.label)
+            if let taken = d.takenAt { LabeledContent("Taken", value: Fmt.date(taken, withTime: true)) }
+            LabeledContent("Added", value: Fmt.date(d.createdAt, withTime: true))
+            let size = Fmt.resolution(d.width, d.height)
+            if !size.isEmpty { LabeledContent("Size", value: size) }
+            if let place = d.place, !place.isEmpty { LabeledContent("Place", value: place) }
+        }
+        .navigationTitle("Details")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+}

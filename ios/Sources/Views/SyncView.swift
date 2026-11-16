@@ -30,7 +30,8 @@ struct SyncView: View {
 
     var body: some View {
         let syncedCount = count("synced"), failedCount = count("failed"), waitingCount = count("uploaded")
-        return NavigationStack {
+        // Shown inside the Upload and sync screen's navigation stack.
+        return Group {
             List {
                 Section {
                     HStack {

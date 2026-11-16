@@ -12,7 +12,8 @@ struct SettingsView: View {
     @State private var confirmSignOut = false
 
     var body: some View {
-        NavigationStack {
+        // Shown inside the Upload and sync screen's navigation stack.
+        Group {
             Form {
                 Section("Server") {
                     LabeledContent("Address", value: session.serverURL?.absoluteString ?? "")
@@ -38,7 +39,7 @@ struct SettingsView: View {
                         .font(.footnote).foregroundStyle(.secondary)
                 }
             }
-            .navigationTitle("Settings")
+            .navigationTitle("Sync settings")
             .confirmationDialog("Sign out of this server?", isPresented: $confirmSignOut, titleVisibility: .visible) {
                 Button("Sign out", role: .destructive) { session.signOut() }
             }
