@@ -300,6 +300,21 @@ def _threshold(row: sqlite3.Row) -> float:
     return max(good, low - (low - good) * w)
 
 
+def option_cut(thr: float, young: bool, learned: float | None, threshold: float | None = None) -> float:
+    """The score a face must reach to take a person as an option (_score): `thr` is the face's own cut
+    (_threshold), `young` whether it is in the child band, `learned` the person's learned threshold (_learned, None
+    when nothing was learned or when `threshold` is given), `threshold` a caller's fixed cut. The name picker
+    (app.analysis.similar) asks the same question, so it ranks people the way the matching would take them."""
+    margin = thr - float(settings.cluster_match_threshold)  # 0 for a good face, the low-quality extra otherwise
+    if young:
+        child_cut = float(settings.cluster_child_threshold) + margin
+        cut = child_cut if threshold is None else max(float(threshold), child_cut)
+        return max(cut, learned + margin) if learned is not None else cut
+    if threshold is not None:
+        return float(threshold)
+    return thr if learned is None else learned + margin
+
+
 def _score(idx: FaceIndex, faces: list[sqlite3.Row], exclude: frozenset[int],
            conn: sqlite3.Connection | None = None, threshold: float | None = None,
            claimed: dict[int, Kept] | None = None) -> list[list[tuple[int, float]]]:
@@ -326,24 +341,13 @@ def _score(idx: FaceIndex, faces: list[sqlite3.Row], exclude: frozenset[int],
     child = idx.child_flags(ids)
     out: list[list[tuple[int, float]]] = []
     scored: list[list[tuple[int, float]]] = []
-    good = float(settings.cluster_match_threshold)
     for r, scores, young in zip(faces, idx.person_scores_many(embs, settings.cluster_topk, exclude, child=child),
                                 child):
         thr = _threshold(r)
-        margin = thr - good  # 0 for a good face, the low-quality extra otherwise
         kept: list[tuple[int, float]] = []
-        child_cut = float(settings.cluster_child_threshold) + margin
         for pid, score in scores:
             learned = _learned(pid) if threshold is None else None
-            if young:
-                cut = child_cut if threshold is None else max(float(threshold), child_cut)
-                if learned is not None:
-                    cut = max(cut, learned + margin)
-            elif threshold is not None:
-                cut = float(threshold)
-            else:
-                cut = thr if learned is None else learned + margin
-            if score >= cut:
+            if score >= option_cut(thr, bool(young), learned, threshold):
                 kept.append((pid, score))
         out.append(kept)
         scored.append(scores)
