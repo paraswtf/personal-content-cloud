@@ -49,33 +49,33 @@ struct MediaGrid<Item: MediaItem, Header: View>: View {
         .accessibilityIdentifier("media.grid")
     }
 
-    private struct Group {
+    private struct GridGroup {
         let key: String
         let items: [Item]
     }
 
     /// Items in their order, cut where the month changes (or one group without headings).
-    private var groups: [Group] {
-        guard sections == .month else { return [Group(key: "", items: items)] }
-        var out: [Group] = []
+    private var groups: [GridGroup] {
+        guard sections == .month else { return [GridGroup(key: "", items: items)] }
+        var out: [GridGroup] = []
         var currentKey: String?
         var bucket: [Item] = []
         for item in items {
             let key = item.monthKey
             if key != currentKey, !bucket.isEmpty {
-                out.append(Group(key: currentKey ?? "", items: bucket))
+                out.append(GridGroup(key: currentKey ?? "", items: bucket))
                 bucket = []
             }
             currentKey = key
             bucket.append(item)
         }
-        if !bucket.isEmpty { out.append(Group(key: currentKey ?? "", items: bucket)) }
+        if !bucket.isEmpty { out.append(GridGroup(key: currentKey ?? "", items: bucket)) }
         // The same month may come back after another (items sorted by a different date): keep keys unique.
         var seen: [String: Int] = [:]
         return out.map { group in
             let n = seen[group.key, default: 0]
             seen[group.key] = n + 1
-            return n == 0 ? group : Group(key: "\(group.key)#\(n)", items: group.items)
+            return n == 0 ? group : GridGroup(key: "\(group.key)#\(n)", items: group.items)
         }
     }
 
