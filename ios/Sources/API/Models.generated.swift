@@ -359,11 +359,13 @@ extension API {
         var updated: Int
         var person: PersonOut?
         var followed: Int = 0
+        var guessed: Int = 0
 
         enum CodingKeys: String, CodingKey {
             case updated
             case person
             case followed
+            case guessed
         }
     }
 
@@ -468,10 +470,11 @@ extension API {
         case trait
         case face
         case place
+        case group
         /// A value this app does not know yet (a newer server).
         case unknown(String)
 
-        static let allCases: [Basis] = [.all, .clothes, .trait, .face, .place]
+        static let allCases: [Basis] = [.all, .clothes, .trait, .face, .place, .group]
 
         init(rawValue: String) {
             switch rawValue {
@@ -480,6 +483,7 @@ extension API {
             case "trait": self = .trait
             case "face": self = .face
             case "place": self = .place
+            case "group": self = .group
             default: self = .unknown(rawValue)
             }
         }
@@ -491,6 +495,7 @@ extension API {
             case .trait: return "trait"
             case .face: return "face"
             case .place: return "place"
+            case .group: return "group"
             case .unknown(let value): return value
             }
         }
@@ -695,25 +700,6 @@ extension API {
         enum CodingKeys: String, CodingKey {
             case challengeId = "challenge_id"
             case options
-        }
-    }
-
-    struct ChildhoodCandidate: Codable, Hashable, Sendable {
-        var person: PersonOut
-        var similarity: Double
-
-        enum CodingKeys: String, CodingKey {
-            case person
-            case similarity
-        }
-    }
-
-    /// Who an unnamed group of childhood photos may be as a child (section 10), best first; empty when the group is not mostly childhood photos.
-    struct ChildhoodOut: Codable, Hashable, Sendable {
-        var candidates: [ChildhoodCandidate]
-
-        enum CodingKeys: String, CodingKey {
-            case candidates
         }
     }
 
@@ -3290,6 +3276,122 @@ extension API {
         }
     }
 
+    struct SimilarIn: Codable, Hashable, Sendable {
+        var faceIds: [Int]?
+        var bodyIds: [Int]?
+        var animalIds: [Int]?
+        var uids: [String]?
+        var personId: Int?
+        var aroundUid: String?
+        var limit: Int?
+        /// Properties to send as an explicit null while they are nil (nil alone is not sent).
+        var nullKeys: Set<CodingKeys> = []
+
+        enum CodingKeys: String, CodingKey {
+            case faceIds = "face_ids"
+            case bodyIds = "body_ids"
+            case animalIds = "animal_ids"
+            case uids
+            case personId = "person_id"
+            case aroundUid = "around_uid"
+            case limit
+        }
+    }
+
+    struct SimilarOption: Codable, Hashable, Sendable {
+        var person: SimilarPerson
+        var score: Double
+        var likely: Bool
+        var basis: SimilarOptionBasis
+        var reason: String
+        var first: Bool = false
+
+        enum CodingKeys: String, CodingKey {
+            case person
+            case score
+            case likely
+            case basis
+            case reason
+            case first
+        }
+    }
+
+    enum SimilarOptionBasis: RawRepresentable, Codable, Hashable, Sendable, CaseIterable {
+        case guess
+        case model
+        case face
+        case clothes
+        case look
+        case person
+        case hour
+        /// A value this app does not know yet (a newer server).
+        case unknown(String)
+
+        static let allCases: [SimilarOptionBasis] = [.guess, .model, .face, .clothes, .look, .person, .hour]
+
+        init(rawValue: String) {
+            switch rawValue {
+            case "guess": self = .guess
+            case "model": self = .model
+            case "face": self = .face
+            case "clothes": self = .clothes
+            case "look": self = .look
+            case "person": self = .person
+            case "hour": self = .hour
+            default: self = .unknown(rawValue)
+            }
+        }
+
+        var rawValue: String {
+            switch self {
+            case .guess: return "guess"
+            case .model: return "model"
+            case .face: return "face"
+            case .clothes: return "clothes"
+            case .look: return "look"
+            case .person: return "person"
+            case .hour: return "hour"
+            case .unknown(let value): return value
+            }
+        }
+
+        init(from decoder: Decoder) throws {
+            self.init(rawValue: try decoder.singleValueContainer().decode(String.self))
+        }
+
+        func encode(to encoder: Encoder) throws {
+            var c = encoder.singleValueContainer()
+            try c.encode(rawValue)
+        }
+    }
+
+    struct SimilarOut: Codable, Hashable, Sendable {
+        var items: [SimilarOption]
+        var scores: [String: Double]
+
+        enum CodingKeys: String, CodingKey {
+            case items
+            case scores
+        }
+    }
+
+    /// Who they are, as the picker shows them: no counts (counting a person's photos takes longer than the ranking).
+    struct SimilarPerson: Codable, Hashable, Sendable {
+        var id: Int
+        var name: String?
+        var kind: ItemPersonOutKind = .person
+        var species: String?
+        var coverUrl: String?
+
+        enum CodingKeys: String, CodingKey {
+            case id
+            case name
+            case kind
+            case species
+            case coverUrl = "cover_url"
+        }
+    }
+
     enum Sort: RawRepresentable, Codable, Hashable, Sendable, CaseIterable {
         case taken
         case added
@@ -4356,6 +4458,7 @@ extension API.AssignOut {
         updated = try c.decode(Int.self, forKey: .updated)
         person = try c.decodeIfPresent(API.PersonOut.self, forKey: .person)
         followed = try c.decodeIfPresent(Int.self, forKey: .followed) ?? 0
+        guessed = try c.decodeIfPresent(Int.self, forKey: .guessed) ?? 0
     }
 }
 
@@ -5069,6 +5172,42 @@ extension API.ShareUpdate {
         if let value = password { try c.encode(value, forKey: .password) } else if nullKeys.contains(.password) { try c.encodeNil(forKey: .password) }
         if let value = expiresDays { try c.encode(value, forKey: .expiresDays) } else if nullKeys.contains(.expiresDays) { try c.encodeNil(forKey: .expiresDays) }
         if let value = allowDownload { try c.encode(value, forKey: .allowDownload) } else if nullKeys.contains(.allowDownload) { try c.encodeNil(forKey: .allowDownload) }
+    }
+}
+
+extension API.SimilarIn {
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encodeIfPresent(faceIds, forKey: .faceIds)
+        try c.encodeIfPresent(bodyIds, forKey: .bodyIds)
+        try c.encodeIfPresent(animalIds, forKey: .animalIds)
+        try c.encodeIfPresent(uids, forKey: .uids)
+        if let value = personId { try c.encode(value, forKey: .personId) } else if nullKeys.contains(.personId) { try c.encodeNil(forKey: .personId) }
+        if let value = aroundUid { try c.encode(value, forKey: .aroundUid) } else if nullKeys.contains(.aroundUid) { try c.encodeNil(forKey: .aroundUid) }
+        try c.encodeIfPresent(limit, forKey: .limit)
+    }
+}
+
+extension API.SimilarOption {
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        person = try c.decode(API.SimilarPerson.self, forKey: .person)
+        score = try c.decode(Double.self, forKey: .score)
+        likely = try c.decode(Bool.self, forKey: .likely)
+        basis = try c.decode(API.SimilarOptionBasis.self, forKey: .basis)
+        reason = try c.decode(String.self, forKey: .reason)
+        first = try c.decodeIfPresent(Bool.self, forKey: .first) ?? false
+    }
+}
+
+extension API.SimilarPerson {
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(Int.self, forKey: .id)
+        name = try c.decodeIfPresent(String.self, forKey: .name)
+        kind = try c.decodeIfPresent(API.ItemPersonOutKind.self, forKey: .kind) ?? .person
+        species = try c.decodeIfPresent(String.self, forKey: .species)
+        coverUrl = try c.decodeIfPresent(String.self, forKey: .coverUrl)
     }
 }
 
