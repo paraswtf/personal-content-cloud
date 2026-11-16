@@ -826,8 +826,9 @@ found or in the trash are skipped; a selection holding a vault item while the va
   owner put them there: a face, person box or pet box with `assigned_by = 'user'` that is not a confirmed guess
   (`by_guess`), a box the owner drew (`source = 'user'`), or a tag added by hand (a tag a confirmed
   guess on a faceless body made, `source 'guess'`, is the system's find). Sorted by
-  `items` (most first), then named before unnamed, then by name. `unnamed_faces` counts the faces in the selection
-  that nobody is named for.
+  `items` (most first), then named before unnamed (pets), then by name. `unnamed_faces` counts the faces in the
+  selection that nobody is named for, the faces of unnamed groups among them (section 10: those groups are not
+  listed).
 - `POST /api/items/people/move` `{uids, from_person_id, person_id | new_person_name}` ->
   `PeopleBulkOut{updated, person, followed}`. In those items every face, body and pet box of `from` goes to
   the target, locked as the owner's (`assigned_by = 'user'`, as `/faces/assign`), and every tag of `from`
@@ -976,20 +977,69 @@ sampled faces in the adult groups and found every baby and child that could be s
   'childhood'` with childhood photos as samples (a pair in both lists shows as a childhood one; a pair whose
   childhood photos are all in the vault or the trash shows no card). Accepting one is a merge. Two cards on the
   owner's library.
-- "Who is this as a child?" (`cluster.childhood_candidates`, `GET /api/people/{id}/childhood -> {candidates:
-  [{person, similarity}]}`): for an unnamed group with at least half its face weight in the child band, up to 3
-  named people: first those whose own childhood photos look like the group's (>= 0.40), then the rest by the group's
-  childhood centroid against their adult centroid. No bar and no percentage shown: the face model links a young
-  child to their adult self only weakly (0.2 to 0.35; on the library the right person still ranked first), so the
-  owner decides. Empty for anyone else.
+- "Who is this as a child?" ranked named people for an unnamed group of childhood photos. It went on 2026-11-17 with
+  the unnamed groups themselves ("Unnamed groups stay in the background" below): such faces wait with the faces to
+  name, and naming one turns the rest of its group into guesses. "Same child?" pairs named people only since then.
 - UI: `SuggestionsPanel` shows a childhood pair with the badge "Same child?" and, when one side is named, "Compared
-  with the childhood photos already on NAME."; `PersonPage` shows an unnamed childhood group the card "These look like
-  childhood photos." with "Who is this as a child?" (the candidates, the first marked "Most alike", and "Someone
-  else" for the usual picker); picking one opens the usual merge confirm. No ages are shown anywhere.
+  with the childhood photos already on NAME."; accepting it opens the usual merge confirm. No ages are shown anywhere.
 - Tests: `tests/test_face_ages.py` (storage, backfill, readiness, drawn and moved boxes, undo),
   `tests/test_age_matching.py` (adults bit-identical, the mask, cut, lead and strict-only learned thresholds,
   cross-age and below-floor merges, old merges under the floor, the learner, childhood follow, suggestions and
   candidates, the off switch).
+
+### Unnamed groups stay in the background (2026-11-17)
+
+The owner asked: "Do not show grouped (you can maybe group them in the bg but don't show) people unless they are
+named. Do not show guesses for unnamed people." So the matching still gathers the faces nobody is named for into
+unnamed persons, as before (clustering, merges pulling look-alikes, recognition, guessing, position and traits all
+use them), but no answer of the API shows such a group:
+- The rule is one function, `api.common.shown(ref)`: a person without a name who is not a pet is not shown. Pets keep
+  their unnamed ones (an unnamed dog is still listed).
+- A face or person box of an unnamed group reads as a box nobody is named for (`common.box_person`): `person` null,
+  `assigned_by` 'auto', `by_guess` false, in `FaceOut`, `BodyOut` and `FaceListItem` (`person_id` null). The row
+  keeps its group in the database.
+- A guess for an unnamed person is never shown: `guess_out` gives none, and `GET /review/guesses` and
+  `Stats.guesses` count the guesses for named people only. Such guesses are still made, and once that person has a
+  name (a merge into a named person, for one) they show on their own.
+- `GET /people` lists named people and pets only (`filter=unnamed` now lists pets without a name, and nothing with
+  `kind=person`); `Stats.people` counts what the API shows. Every route by id answers 404 for an unnamed group
+  (`people._hidden_person`): `GET|PATCH|DELETE /people/{id}` and its faces, items, traits, recognition, related
+  suggestions and 3D, a merge naming one, `/items/people/move` and `/remove` from one, and an assign to one.
+- An item's `people` and `tags` leave unnamed groups out; the selection's People sheet (`POST /items/people`) lists
+  named people and pets, and counts the faces of unnamed groups in `unnamed_faces`.
+- Merge suggestions pair named people only (`cluster.merge_suggestions(keep=)`, `childhood_suggestions(keep=)`).
+  "Who is this as a child?" served unnamed childhood groups only and went with them (`GET /people/{id}/childhood`,
+  `cluster.childhood_candidates` and the card on the person page).
+- The faces to name (`GET /faces/unassigned`, "Faces to name" on the People page): faces of nobody and the faces of
+  unnamed groups in live photos, a group's faces side by side, the larger groups first (by the group's live faces),
+  each group's best faces first; a face of nobody is a group of one. The cursor is a keyset over (group size, group,
+  quality, id), all descending. No group label is shown.
+- Naming such a face (`hidden_groups.rest_to_guesses`, behind `POST /faces/assign`, `POST /people {face_ids}` and
+  `POST /guesses/correct`; the owner chose "Guesses to review" on 2026-11-17): only the faces the owner named take
+  the name, and no look-alikes follow from an unnamed group (`_follow_lookalikes` still runs for faces leaving a named
+  person). Each group's other automatic faces become open guesses for that person, taken out of the group
+  (`person_id` NULL, `assigned_by 'guess'`, evidence `{basis: 'group', score, face, ref_face_id, ref_item_uid,
+  was_person_id}`; the score is the cosine to the mean of the faces just named, 0 to 1), the person box around each
+  following it. Left in the group: faces in trashed or vault photos, in a photo where the person is already, faces
+  the owner turned down for the person, all of a group the owner dismissed against the person (`merge_dismissals`),
+  and all but the most alike of a group's faces in one photo (videos may show the person several times). The faces
+  named are remembered as not the group (`guess_rejections`); a group left empty goes. `AssignOut.guessed` counts the
+  new guesses, and the toasts say "2 faces that look alike wait in Review." "Nobody" for a face of a group changes
+  that face only.
+- These guesses wait for the owner. Yes names the face (`guess.confirm`); No puts it back into its group, or into a
+  new unnamed person when the group went (`person_scan.regroup`, through `guess.reject`). `guess_item` keeps such a
+  guess until the owner answers it while it still stands: the person has a name, is not in the photo, and was not
+  turned down for the face (`hidden_groups.hold`, after the trained models' merge; another box of the photo guessed
+  as the same person loses that guess). They have no time window (`apply_window_change` keeps them), and their
+  outcome is learned with its own terms, outside the clothes fit (`learning.people.NOT_CLOTHES`). Review has a
+  "Grouped" filter (`basis=group`); the evidence reads "Grouped, face 0.62" and "grouped with the face you named
+  NAME".
+- The web app: the People page has no Named/Unnamed filter; "Unassigned faces" is "Faces to name" ("Match again"
+  runs the automatic matching on them); the face editor no longer names a whole group ("Only change this face" went);
+  removing a person's name sends the page back to People ("Their faces are back with the faces to name").
+- Tests: `tests/test_hidden_groups.py` (the list, routes by id, boxes, guesses, suggestions, the faces to name and
+  their order and pages, the selection sheet, the naming rule and each face it leaves in the group, a group the move
+  empties, "Nobody", a new person and "Someone else" from a group face, `guess_item`, the window, `hold`).
 
 ### Recognition trained on one person (2026-11-13)
 
@@ -1325,7 +1375,8 @@ body's trait rows, hidden ones too with `hidden: true`; never a BLOB column, sec
 `ref_crop_url`, built from the ids without a query); `PersonRef = {id, name, cover_url, kind, relation}` (`relation`
 `in` | `related` in an item's `people` and `tags`, section 10; a reference from a box is always `in`).
 
-People (`/api`): `GET people?q&filter=all|named|unnamed&sort=items|name|recent&cursor&limit` -> `PersonPage`;
+People (`/api`): `GET people?q&filter=all|named|unnamed&sort=items|name|recent&cursor&limit` -> `PersonPage` (named
+people and pets: an unnamed group of faces stays in the background and is 404 by id, section 10);
 `POST people {name, face_ids?}`; `GET|PATCH|DELETE people/{id}` (`PATCH {name?, cover_face_id?}`; 422 when the
 cover face's photo is in the trash or the vault; `PersonRef.cover_url` skips such a chosen cover and uses the
 automatic one);
@@ -1569,8 +1620,8 @@ learning (`assigned_by 'user'`) but marked `by_guess` (`FaceOut`, `BodyOut`, `Fa
 faceless guess made carries `by_guess` in `ItemDetail.tags`), and shows the bot with "Guessed automatically,
 confirmed by you" (origin 'confirmed'); tagging that box by hand afterwards makes it the owner's. A box the detector
 found with nobody on it has no icon (the
-person page keeps a lock on a face the owner took off someone, "Kept unassigned by you"). Naming an unnamed group
-or merging people does not make the faces the owner's: the system grouped them, so they keep the bot until the
+person page keeps a lock on a face the owner took off someone, "Kept unassigned by you"). Merging people does not
+make the faces the owner's: the system grouped them, so they keep the bot until the
 owner tags one. A badge that stands for several boxes takes one answer: a person on an item (`itemOrigins`, used
 by every section of the info panel so their chips agree) is the owner's when a tag or any box of theirs there is
 (then drawn by them, then a confirmed guess, then the system's),

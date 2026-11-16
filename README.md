@@ -18,9 +18,11 @@ What it does with each file:
   places, food, pets, things, other, or the private (NSFW) vault. Any category can be overridden.
 - **Mis-clicks.** Blurry, shaken, too dark, blown out, pocket and ground shots and burst duplicates
   are flagged into a review bin. Nothing is deleted on its own.
-- **Faces and people.** Faces are found in photos and in video frames (about one per second),
-  grouped into people, and named once. People are also guessed from earlier photos of the same day,
-  the same scene and the same clothes; guesses wait for a confirm or reject.
+- **Faces and people.** Faces are found in photos and in video frames (about one per second) and
+  matched to the people you named. Faces that match nobody are grouped in the background and wait under
+  "Faces to name", a group's faces side by side; only named people are shown. Name one face and the
+  faces grouped with it become guesses for that person. People are also guessed from earlier photos of
+  the same day, the same scene and the same clothes; guesses wait for a confirm or reject.
 - **Tattoos, nails and mehndi.** People boxes whose face does not show are also guessed from a tattoo
   seen in their other photos at any date (checked point by point, not just by look), and helped by the
   same nail polish or mehndi a few days apart. Each guess says why and shows the two crops side by side;
