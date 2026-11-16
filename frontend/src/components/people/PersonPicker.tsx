@@ -66,7 +66,7 @@ type Option =
   | { kind: 'person'; person: PickedPerson; alike: SimilarOption | null; section: 'alike' | 'rest' }
   | { kind: 'create'; name: string; as: PersonKind }
 
-/** "12 faces, 30 items" (a pet: "Dog, 30 items"), or null for an alike person, who comes without counts. */
+/** "12 faces, 30 items" (a pet: "Dog, 30 items"), or null for a person that came without counts. */
 function countsOf(p: PickedPerson, pet: boolean): string | null {
   if (!('item_count' in p)) return null
   return pet ? `${speciesLabel(p.species)}, ${formatCount(p.item_count, 'item')}` : `${formatCount(p.face_count, 'face')}, ${formatCount(p.item_count, 'item')}`
@@ -264,8 +264,13 @@ export default function PersonPicker({
           if (opt.kind === 'person' && opt.section === 'alike') heading = i === 0 ? 'Most alike' : null
           else if (opt.kind === 'person' && prev?.kind === 'person' && prev.section === 'alike') heading = both && petRow ? 'Pets' : 'Everyone else'
           else if (both && opt.kind === 'person' && petRow && prev?.kind === 'person' && prev.person.kind !== 'pet') heading = 'Pets'
-          const counts = opt.kind === 'person' ? countsOf(opt.person, petRow) : null
-          const detail = opt.kind !== 'person' ? '' : opt.alike ? [opt.alike.reason || 'Alike', counts].filter(Boolean).join(', ') : (counts ?? '')
+          // an alike row says why, and how many items when the list has them ("Looks like them, 4 items")
+          const detail =
+            opt.kind !== 'person'
+              ? ''
+              : opt.alike
+                ? [opt.alike.reason || 'Alike', 'item_count' in opt.person ? formatCount(opt.person.item_count, 'item') : null].filter(Boolean).join(', ')
+                : (countsOf(opt.person, petRow) ?? '')
           return (
           <Fragment key={opt.kind === 'person' ? opt.person.id : `create-${opt.as}`}>
           {heading && (
