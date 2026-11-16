@@ -276,7 +276,7 @@ export default function PersonPicker({
           return (
           <Fragment key={opt.kind === 'person' ? opt.person.id : `create-${opt.as}`}>
           {heading && (
-            <li role="presentation" className="px-2 pb-1 pt-2 text-[11px] font-semibold uppercase tracking-[0.1em] text-ink-faint">
+            <li role="presentation" className="px-2 pb-1 pt-2 text-[11px] font-semibold uppercase tracking-[0.1em] text-ink-soft">
               {heading}
             </li>
           )}
