@@ -30,7 +30,7 @@ private struct CreateBody: Encodable {
     let size: Int64
     let mime: String?
     let sha256: String
-    let source = "api"
+    let source: String          // api, or camera for the Upload screen's camera
     let client_id = "ios"
     let pair_key: String
     let resource: String
@@ -314,6 +314,27 @@ final class BackgroundUploader: NSObject, ObservableObject {
         return waiter?.byUploader ?? false
     }
 
+    /// The Upload screen's Cancel for one file: its requests stop, the server's upload is cancelled
+    /// (DELETE /api/uploads/{id}) and the record says cancelled. A queue file keeps its copy, so Retry can
+    /// send it again.
+    func cancel(_ assetId: String) {
+        guard let rec = record(assetId) else { return }
+        let inFlight = rec.uploadId
+        session.getAllTasks { tasks in
+            tasks.filter { UploadTaskTag.from($0.taskDescription)?.asset == assetId }.forEach { $0.cancel() }
+        }
+        rec.status = "cancelled"
+        rec.error = nil
+        rec.clearTransfer()
+        rec.files = rec.files.map { var f = $0; if !f.done { f.uploadId = nil }; return f }
+        rec.updatedAt = Date()
+        save()
+        ended(assetId)
+        if let inFlight, let api = APIClient.current() {
+            Task { try? await api.cancelUpload(id: inFlight) }
+        }
+    }
+
     /// The Stop button: cancels the tasks in flight. The records keep their state, and the next run
     /// continues them from the server's offset.
     func pause() {
@@ -423,6 +444,7 @@ final class BackgroundUploader: NSObject, ObservableObject {
                 }
             } else {
                 let body = CreateBody(filename: file.filename, size: file.bytes, mime: file.mime, sha256: file.sha256,
+                                      source: rec.origin == "camera" ? "camera" : "api",
                                       pair_key: rec.assetId, resource: file.resource)
                 bodyURL = UploadPaths.chunks.appendingPathComponent("create-\(UUID().uuidString).json")
                 try JSONEncoder().encode(body).write(to: bodyURL, options: .atomic)
@@ -592,7 +614,8 @@ final class BackgroundUploader: NSObject, ObservableObject {
             files[i].done = true
             files[i].uploadId = uploadId
             files[i].itemUid = itemUid
-            try? FileManager.default.removeItem(at: UploadPaths.url(files[i].path))   // the server has it
+            // the server has it; a queue file keeps its copy until the server's answer is final (Retry)
+            if !rec.isQueueFile { try? FileManager.default.removeItem(at: UploadPaths.url(files[i].path)) }
             if files[i].resource == "still" || files.count == 1 { rec.uid = itemUid ?? rec.uid } else { rec.clipUid = itemUid ?? rec.clipUid }
         }
         rec.files = files
@@ -608,7 +631,7 @@ final class BackgroundUploader: NSObject, ObservableObject {
         rec.error = nil
         rec.clearTransfer()
         rec.updatedAt = Date()
-        UploadPaths.removeAsset(rec.assetId)
+        if !rec.isQueueFile { UploadPaths.removeAsset(rec.assetId) }
         save()
         SyncStore.shared.log("Sent \(rec.filename)")
         ended(rec.assetId)
@@ -621,7 +644,7 @@ final class BackgroundUploader: NSObject, ObservableObject {
         rec.error = message
         rec.clearTransfer()
         rec.updatedAt = Date()
-        UploadPaths.removeAsset(rec.assetId)
+        if !rec.isQueueFile { UploadPaths.removeAsset(rec.assetId) }   // a queue file keeps its copy for Retry
         rec.files = rec.files.map { var f = $0; if !f.done { f.uploadId = nil }; return f }
         save()
         SyncStore.shared.log("\(rec.filename.isEmpty ? rec.assetId : rec.filename): \(message)", level: "error")
