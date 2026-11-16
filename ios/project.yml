@@ -44,3 +44,12 @@ targets:
         NSAppTransportSecurity:
           NSAllowsLocalNetworking: true
         ITSAppUsesNonExemptEncryption: false
+schemes:
+  PersonalContentCloud:
+    build:
+      targets:
+        PersonalContentCloud: all
+    run:
+      config: Debug
+    archive:
+      config: Release
