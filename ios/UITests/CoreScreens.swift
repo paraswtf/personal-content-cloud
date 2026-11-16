@@ -86,8 +86,14 @@ final class CoreScreens: ScreenTestCase {
         snap("core-picker")
         app.navigationBars["Who is this?"].buttons["Cancel"].tap()
 
-        // Hiding the boxes, then closing the viewer.
-        app.buttons["viewer.boxes"].tap()
+        // Hiding the boxes, then closing the viewer. A tap above a sheet can reach the photo and hide the controls;
+        // a tap on an empty part of the photo shows them again.
+        let boxesButton = app.buttons["viewer.boxes"]
+        if !boxesButton.waitForExistence(timeout: 3) {
+            app.windows.firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.08, dy: 0.5)).tap()
+        }
+        XCTAssertTrue(boxesButton.waitForExistence(timeout: 5), "the viewer's controls did not show")
+        boxesButton.tap()
         XCTAssertTrue(face.waitForNonExistence(timeout: 5), "the boxes did not hide")
         snap("core-viewer-no-boxes")
         app.buttons["viewer.close"].tap()
