@@ -77,11 +77,9 @@ struct LibraryMonthSection: View {
         let label = Fmt.monthHeading(bucket.key)
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 8) {
-                Text(label)
-                    .font(.headline)
-                + Text("  \(Fmt.count(bucket.count, "item"))")
-                    .font(.subheadline)
-                    .foregroundColor(.secondary)
+                (Text(label).font(.headline)
+                    + Text("  \(Fmt.count(bucket.count, "item"))").font(.subheadline).foregroundColor(.secondary))
+                    .accessibilityAddTraits(.isHeader)
                 Spacer(minLength: 8)
                 if model.selection.active && !cards.isEmpty {
                     let uids = cards.map(\.uid)
@@ -96,15 +94,13 @@ struct LibraryMonthSection: View {
             .padding(.horizontal, 12)
             .padding(.top, 14)
             .padding(.bottom, 8)
-            .accessibilityElement(children: .contain)
-            .accessibilityAddTraits(.isHeader)
             LazyVGrid(columns: gridColumns(columns), spacing: 2) {
                 ForEach(cards) { card in
                     LibraryTile(item: card, vault: vault, selection: model.selection, onOpen: onOpen)
                 }
-                ForEach(0..<missing, id: \.self) { _ in
+                ForEach(0..<missing, id: \.self) { i in
                     LibraryPlaceholderTile()
-                        .onAppear { model.ensureMonth(bucket.key) }
+                        .onAppear { model.ensureMonth(bucket.key, need: cards.count + i + 1) }
                 }
             }
             if month?.failed == true {
@@ -119,7 +115,8 @@ struct LibraryMonthSection: View {
                 .padding(.vertical, 12)
             }
         }
-        .onAppear { model.ensureMonth(bucket.key) }
+        // on screen, and again whenever the months start over (a month that was on screen during a load asks then)
+        .task(id: model.monthsToken) { model.ensureMonth(bucket.key) }
     }
 }
 

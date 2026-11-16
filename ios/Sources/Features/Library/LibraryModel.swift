@@ -36,6 +36,10 @@ final class LibraryModel {
     private(set) var buckets: [API.TimelineBucket] = []
     private(set) var total = 0
     private(set) var months: [String: LibraryMonth] = [:]
+    /// Changes whenever the months start over (a new load, a refresh): the months on screen ask for their pages again.
+    private(set) var monthsToken = 0
+    /// How many cards of each month the screen has asked for (the placeholders that came on screen).
+    @ObservationIgnored private var wanted: [String: Int] = [:]
 
     // the search
     private(set) var hits: [API.SearchHit] = []
@@ -128,6 +132,8 @@ final class LibraryModel {
                 buckets = result.buckets.filter { $0.count > 0 }
                 total = result.total
                 months = [:]
+                wanted = [:]
+                monthsToken += 1
                 // the newest month at once, the rest as they come on screen
                 if let first = buckets.first {
                     await loadMonth(first.key, gen: gen)
@@ -191,6 +197,7 @@ final class LibraryModel {
             buckets = fresh
             total = result.total
             months = next
+            monthsToken += 1
             if let first = fresh.first, next[first.key] == nil {
                 await loadMonth(first.key, gen: gen)
             }
@@ -200,21 +207,28 @@ final class LibraryModel {
         }
     }
 
-    /// A month's cells came on screen: loads its next page when it has one and nothing is loading.
-    func ensureMonth(_ key: String) {
+    /// A month came on screen, or its tile number `need` (counted from 1) did: loads its pages until that tile is
+    /// loaded, one page at a time.
+    func ensureMonth(_ key: String, need: Int = 1) {
+        guard !searching, buckets.contains(where: { $0.key == key }) else { return }
+        wanted[key] = max(wanted[key] ?? 0, need)
         let month = months[key] ?? LibraryMonth()
-        guard !month.loading, !month.complete, !month.failed, loaded, !searching else { return }
+        guard !month.loading, !month.complete, !month.failed, month.cards.count < need || month.cards.isEmpty else {
+            return
+        }
         let gen = generation
         Task { await loadMonth(key, gen: gen) }
     }
 
     /// After a failed page: tries the month again.
     func retryMonth(_ key: String) {
+        var count = 0
         if var month = months[key] {
             month.failed = false
             months[key] = month
+            count = month.cards.count
         }
-        ensureMonth(key)
+        ensureMonth(key, need: count + 1)
     }
 
     private func loadMonth(_ key: String, gen: Int) async {
@@ -233,6 +247,10 @@ final class LibraryModel {
             current.complete = page.nextCursor == nil || page.items.isEmpty
             current.loading = false
             months[key] = current
+            // tiles further down the month are on screen already: the next page follows
+            if !current.complete, let want = wanted[key], current.cards.count < want {
+                await loadMonth(key, gen: gen)
+            }
         } catch {
             guard gen == generation else { return }
             var current = months[key] ?? LibraryMonth()

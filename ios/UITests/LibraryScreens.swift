@@ -36,6 +36,8 @@ final class LibraryScreens: ScreenTestCase {
         XCTAssertTrue(count.label.hasSuffix("items"), "the count line reads \(count.label)")
         let november = app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH 'November 2026'")).firstMatch
         XCTAssertTrue(november.waitForExistence(timeout: 10), "the newest month has no heading")
+        // the newest month holds two items: tiles beyond them belong to the next month, which loads by itself
+        wait(for: [expectation(for: NSPredicate(format: "count >= 4"), evaluatedWith: cells)], timeout: 20)
         snap("library-timeline")
         let scrubber = app.descendants(matching: .any)["library.scrubber"]
         XCTAssertTrue(scrubber.waitForExistence(timeout: 10), "no scrubber beside the timeline")
