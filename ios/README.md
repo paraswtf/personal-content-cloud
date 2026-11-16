@@ -69,8 +69,9 @@ on your iPhone. A simulator has no real photo library to speak of, so test on a 
 The server this project is developed on has no Mac, so the app is compiled and tested by the iOS workflow
 (`.github/workflows/ios.yml`) on GitHub's macOS machines, on every push that touches `ios/`. One run:
 
-1. Generates the project with XcodeGen and builds the app and both test targets for an iPhone simulator
-   (the newest iOS runtime on the machine, picked by `ci/pick_simulator.py`).
+1. Generates the project with XcodeGen and builds the app and both test targets for the simulator, while an
+   iPhone simulator boots in the background (`ci/pick_simulator.py` takes the runtime of the SDK the app is
+   built with when the machine has it, else the newest one).
 2. Installs the backend into a virtual environment (`ci/install_backend.sh`: the versions of
    `backend/uv.lock`, with the CPU onnxruntime in place of the GPU one) and starts it on 127.0.0.1:8765 with
    the models off (`PCC_NO_MODELS=1`) and a fresh data folder.

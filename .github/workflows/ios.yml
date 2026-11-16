@@ -52,10 +52,17 @@ jobs:
       # The first simctl call on a fresh machine takes about two minutes: it runs while the app builds.
       - name: Start a simulator in the background
         run: |
+          SDK="$(xcrun --sdk iphonesimulator --show-sdk-version)"
           (
-            xcrun simctl list devices available -j > "$RUNNER_TEMP/simulators.json" &&
-            python3 ios/ci/pick_simulator.py < "$RUNNER_TEMP/simulators.json" > "$RUNNER_TEMP/simulator.txt" &&
-            xcrun simctl boot "$(cut -d ' ' -f 1 "$RUNNER_TEMP/simulator.txt")"
+            set -e
+            echo "$(date -u +%T) listing simulators (SDK $SDK)"
+            xcrun simctl list devices available -j > "$RUNNER_TEMP/simulators.json"
+            python3 ios/ci/pick_simulator.py "$SDK" < "$RUNNER_TEMP/simulators.json" > "$RUNNER_TEMP/simulator.next"
+            echo "$(date -u +%T) booting $(cat "$RUNNER_TEMP/simulator.next")"
+            xcrun simctl boot "$(cut -d ' ' -f 1 "$RUNNER_TEMP/simulator.next")"
+            xcrun simctl bootstatus "$(cut -d ' ' -f 1 "$RUNNER_TEMP/simulator.next")" -b > /dev/null
+            echo "$(date -u +%T) booted"
+            mv "$RUNNER_TEMP/simulator.next" "$RUNNER_TEMP/simulator.txt"
           ) > "$RUNNER_TEMP/simulator.log" 2>&1 &
 
       - name: Build for testing
@@ -90,14 +97,16 @@ jobs:
           SERVER="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["server"])' "$PCC_DIR/seed.json")"
           TOKEN="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["token"])' "$PCC_DIR/seed.json")"
           echo "::add-mask::$TOKEN"
-          for _ in $(seq 1 150); do [ -s "$RUNNER_TEMP/simulator.txt" ] && break; sleep 2; done
-          if [ ! -s "$RUNNER_TEMP/simulator.txt" ]; then cat "$RUNNER_TEMP/simulator.log"; exit 1; fi
+          echo "$(date -u +%T) waiting for the simulator"
+          for _ in $(seq 1 450); do [ -s "$RUNNER_TEMP/simulator.txt" ] && break; sleep 2; done
+          cat "$RUNNER_TEMP/simulator.log"
+          test -s "$RUNNER_TEMP/simulator.txt"
           read -r SIM_ID SIM_NAME SIM_OS < "$RUNNER_TEMP/simulator.txt"
           echo "Simulator: $SIM_NAME on $SIM_OS ($SIM_ID)"
-          xcrun simctl bootstatus "$SIM_ID" -b > /dev/null
           # Installed and given Photos access first, so the permission prompt does not cover the screens.
           xcrun simctl install "$SIM_ID" build/dd/Build/Products/Debug-iphonesimulator/PersonalContentCloud.app
           xcrun simctl privacy "$SIM_ID" grant photos in.rivant.pcc
+          echo "$(date -u +%T) installed, starting the tests"
           TEST_RUNNER_PCC_TEST_SERVER="$SERVER" TEST_RUNNER_PCC_TEST_TOKEN="$TOKEN" \
           xcodebuild -project PersonalContentCloud.xcodeproj -scheme PersonalContentCloud \
             -destination "id=$SIM_ID" -derivedDataPath build/dd -resultBundlePath build/Tests.xcresult \
