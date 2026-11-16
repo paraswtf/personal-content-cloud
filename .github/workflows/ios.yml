@@ -10,12 +10,10 @@ on:
     paths:
       - "ios/**"
       - ".github/workflows/ios.yml"
+      # the screen tests run against this backend, so a server change runs them too
+      - "backend/**"
+      - "scripts/gen_swift_api.py"
   workflow_dispatch:
-    inputs:
-      upload:
-        description: "Upload the build to TestFlight"
-        type: boolean
-        default: false
 
 permissions:
   contents: read
