@@ -163,8 +163,6 @@ final class StageView: UIScrollView, UIScrollViewDelegate {
             content.addSubview(view)
             boxViews[box.id] = view
         }
-        // VoiceOver reads the boxes in the item's own order: faces, then person boxes, then pets.
-        content.accessibilityElements = boxes.compactMap { boxViews[$0.id] }
         layoutBoxes()
         styleBoxes()
     }
@@ -186,6 +184,9 @@ final class StageView: UIScrollView, UIScrollViewDelegate {
             view.setSelected(id == selected)
             view.setZoom(zoomScale)
         }
+        // VoiceOver reads the shown boxes in the item's own order: faces, then person boxes, then pets. Hidden boxes
+        // leave the list (a listed element stays readable even when its view is hidden).
+        content.accessibilityElements = showBoxes ? boxes.compactMap { boxViews[$0.id] } : []
     }
 
     // MARK: gestures

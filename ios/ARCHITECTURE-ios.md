@@ -114,7 +114,9 @@ the core in its own change.
 ## Accessibility and words
 
 - Every control has a label (`accessibilityLabel`) and the controls tests use have an `accessibilityIdentifier`
-  of the form `area.thing` (`library.select`, `people.search`).
+  of the form `area.thing` (`library.select`, `people.search`). Put identifiers on the controls themselves or on a
+  view that is one element (a List, a ScrollView): on a plain stack or a whole screen, SwiftUI hands the
+  identifier to every element inside and replaces theirs.
 - Words follow the website: plain sentences, no exclamation marks, no em dashes.
 
 ## Tests
