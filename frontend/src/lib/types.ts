@@ -185,8 +185,9 @@ export type TraitKind = 'tattoo' | 'nails' | 'mehndi'
 /** What a guess rests on: 'trait' (tattoo or mehndi alone), 'clothes+trait' (clothes that traits agree with or
  *  broke a tie for), 'face' (recognition trained on that one person, section 10), 'place' (standing in the same
  *  spot as the person in a photo taken moments apart, section 35), 'clothes+place' (clothes that the position agrees
- *  with or broke a tie for), or clothes as before (no basis in the evidence). */
-export type GuessBasis = 'clothes' | 'trait' | 'clothes+trait' | 'face' | 'place' | 'clothes+place'
+ *  with or broke a tie for), 'group' (the app had grouped the face with one the owner named, section 10; `face` is
+ *  their similarity, also the score), or clothes as before (no basis in the evidence). */
+export type GuessBasis = 'clothes' | 'trait' | 'clothes+trait' | 'face' | 'place' | 'clothes+place' | 'group'
 /** evidence.place (section 35): the box the person was followed from, in another photo of the same sequence. */
 export interface PlaceEvidence {
   ref_item_uid?: string
@@ -470,6 +471,8 @@ export interface AssignOut {
   person: PersonOut | null
   /** Faces that looked like the ones taken away from a person and went the same way (section 10). */
   followed?: number
+  /** Section 10: the other faces of an unnamed group a named face came from, now guesses for that person. */
+  guessed?: number
 }
 export interface Suggestion {
   a: PersonOut
@@ -494,10 +497,6 @@ export interface RelatedSuggestionList {
 }
 export interface ItemRelatedSuggestions {
   people: { person: PersonRef; reason: RelatedReason; because_uid: string }[]
-}
-/** Who an unnamed group of childhood photos may be as a child, best first (no bar, section 10). */
-export interface ChildhoodOut {
-  candidates: { person: PersonOut; similarity: number }[]
 }
 export interface SuggestionList {
   items: Suggestion[]

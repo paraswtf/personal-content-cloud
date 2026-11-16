@@ -1,16 +1,17 @@
 // Popover for one face or body box: confirm or reject a guess, assign to a person (or a new one),
-// unassign, or delete it as "not a face" / "not a person". A face in an unnamed group names the
-// whole group (or merges it into the picked person) unless "Only change this face" is ticked.
+// unassign, or delete it as "not a face" / "not a person". Unnamed groups stay in the background (section 10): a
+// face of one reads as a face nobody is named for and is named alone, and the other faces of its group then wait
+// in Review as guesses for that person (the toast says how many).
 // Body traits (section 34): the guess panel shows why, with this photo's tattoo, nails or mehndi beside the
 // guessed person's; "Seen on this person" lists the trait regions of the box (or of the person box holding the
 // face), each with "Not a tattoo" (nails, mehndi), "Not this person's", and "Show again" once hidden (this photo
 // only). Those keep the editor open and offer Undo in the app's toast.
 import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from 'react'
-import { useMutation, useQuery, useQueryClient, type QueryClient } from '@tanstack/react-query'
+import { useMutation, useQueryClient, type QueryClient } from '@tanstack/react-query'
 import { Ban, Check, Eye, EyeOff, Move, UserX, X } from 'lucide-react'
 import { api } from '../../lib/api'
 import type { AssignOut, BodyOut, ItemDetail, TraitOut } from '../../lib/types'
-import { formatCount, personName } from '../../lib/format'
+import { formatCount, guessedTail, personName } from '../../lib/format'
 import { boxOrigin, mergeOrigins } from '../../lib/origin'
 import OriginIcon from '../people/OriginIcon'
 import PersonPicker, { choiceBody, type PersonChoice } from '../people/PersonPicker'
@@ -37,6 +38,11 @@ interface Props {
 }
 
 export const WIDTH = 320
+
+/** "Tagged as Asha. 2 faces that look alike wait in Review." when naming the face made guesses (section 10). */
+function withGuessed(message: string, guessed: number | undefined): string {
+  return guessed ? `${message}.${guessedTail(guessed)}` : message
+}
 
 export function placement(anchor: HTMLElement | null): CSSProperties {
   const vw = window.innerWidth
@@ -105,12 +111,6 @@ export default function FaceEditor({ uid, target, anchor, onClose, onDone, track
     onError: (msg) => appToast.error(msg),
   })
 
-  const group = isFace && box.person && !box.person.name ? box.person : null
-  const groupInfo = useQuery({ queryKey: ['person', group?.id], queryFn: () => api.people.get(group!.id), enabled: !!group })
-  const groupFaces = groupInfo.data?.face_count ?? 0
-  const [onlyThis, setOnlyThis] = useState(false)
-  const groupScope = !!group && !onlyThis
-
   // whole-video editing: the group's tracks unless the owner narrows it to this one
   const trackList = tracks && tracks.length > 1 ? tracks : null
   const [onlyTrack, setOnlyTrack] = useState(false)
@@ -134,21 +134,7 @@ export default function FaceEditor({ uid, target, anchor, onClose, onDone, track
       invalidate()
       const tail = res.followed ? `, with ${formatCount(res.followed, 'look-alike face')}` : ''
       if (!choice) onDone((box.person ? `Removed from ${personName(box.person)}${tail}` : 'Unassigned') + trackTail)
-      else onDone((res.person ? `Tagged as ${personName(res.person)}${tail}` : 'Saved') + trackTail)
-    },
-  })
-  const nameGroup = useMutation({
-    mutationFn: async (choice: PersonChoice) => {
-      if ('newName' in choice) {
-        // A name another person already has merges the group into them (the server returns that person).
-        const person = await api.people.update(group!.id, { name: choice.newName })
-        return { merged: person.id !== group!.id, person }
-      }
-      return { merged: true, person: await api.people.merge({ target_id: choice.personId, source_ids: [group!.id] }) }
-    },
-    onSuccess: ({ merged, person }) => {
-      invalidate()
-      onDone(merged ? `Merged into ${personName(person)}` : `Named ${personName(person)}${groupFaces > 1 ? ` (${formatCount(groupFaces, 'face')})` : ''}`)
+      else onDone(withGuessed((res.person ? `Tagged as ${personName(res.person)}${tail}` : 'Saved') + trackTail, res.guessed))
     },
   })
   // "Someone else" on a guess (section 10): learned as wrong and given to the person picked, in one step
@@ -156,7 +142,7 @@ export default function FaceEditor({ uid, target, anchor, onClose, onDone, track
     mutationFn: (choice: PersonChoice) => api.people.correctGuesses({ faces: faceIds, bodies: bodyIds, ...choiceBody(choice) }),
     onSuccess: (res) => {
       invalidate()
-      onDone((res.person ? `Tagged as ${personName(res.person)}` : 'Saved') + trackTail)
+      onDone(withGuessed((res.person ? `Tagged as ${personName(res.person)}` : 'Saved') + trackTail, res.guessed))
     },
   })
   const guessAct = useMutation({
@@ -185,8 +171,8 @@ export default function FaceEditor({ uid, target, anchor, onClose, onDone, track
       onDone(`Removed. It will not be shown as a ${noun} again.${more}${trackTail}`)
     },
   })
-  const busy = assign.isPending || remove.isPending || nameGroup.isPending || guessAct.isPending || correct.isPending
-  const error = assign.error ?? remove.error ?? nameGroup.error ?? guessAct.error ?? correct.error
+  const busy = assign.isPending || remove.isPending || guessAct.isPending || correct.isPending
+  const error = assign.error ?? remove.error ?? guessAct.error ?? correct.error
   const guess = !box.person ? box.guess : null
   const guessReasons = guess ? traitReasons(guess) : []
   const guessPlace = guess ? placeReason(guess) : null
@@ -210,14 +196,9 @@ export default function FaceEditor({ uid, target, anchor, onClose, onDone, track
       <div className="flex items-center gap-3">
         <img src={box.url} alt="" className="size-12 shrink-0 rounded-full bg-surface-2 object-cover ring-1 ring-line" />
         <div className="min-w-0 flex-1">
-          <p className="text-xs text-ink-faint">
-            {group ? 'Not named yet' : box.person ? 'Currently tagged as' : guess ? 'Our guess' : 'Not tagged yet'}
-          </p>
+          <p className="text-xs text-ink-faint">{box.person ? 'Currently tagged as' : guess ? 'Our guess' : 'Not tagged yet'}</p>
           <p className="flex min-w-0 items-center gap-1 text-sm font-semibold">
-            <span className="truncate">
-              {box.person ? personName(box.person) : guess ? `${personName(guess.person)}?` : 'Who is this?'}
-              {group && groupFaces > 0 && <span className="font-normal text-ink-soft">, {formatCount(groupFaces, 'face')}</span>}
-            </span>
+            <span className="truncate">{box.person ? personName(box.person) : guess ? `${personName(guess.person)}?` : 'Who is this?'}</span>
             {origin && <OriginIcon origin={origin} className="text-ink-soft" />}
           </p>
         </div>
@@ -343,35 +324,15 @@ export default function FaceEditor({ uid, target, anchor, onClose, onDone, track
           key={pickFirst ? 'pick' : 'plain'}
           autoFocus={pickFirst || (!sheet && !guess)}
           placeholder={
-            groupScope
-              ? 'Type their name, or pick someone'
-              : box.person
-                ? 'Move to someone else'
-                : guess
-                  ? `Not ${personName(guess.person)}? Type who it is`
-                  : 'Search or type a new name'
+            box.person ? 'Move to someone else' : guess ? `Not ${personName(guess.person)}? Type who it is` : 'Search or type a new name'
           }
           excludeIds={box.person ? [box.person.id] : guess ? [guess.person.id] : undefined}
           onPick={(choice) => {
             if (busy) return
-            if (groupScope) nameGroup.mutate(choice)
-            else if (anyGuess) correct.mutate(choice) // the guesses are learned as wrong, not silently overwritten
+            if (anyGuess) correct.mutate(choice) // the guesses are learned as wrong, not silently overwritten
             else assign.mutate(choice)
           }}
         />
-        {groupScope && (
-          <p className="mt-2 text-xs text-ink-soft">
-            {groupFaces > 1
-              ? `The name goes on all ${groupFaces} faces in this group. Picking someone already named merges the group into them.`
-              : 'Picking someone already named merges this face into them.'}
-          </p>
-        )}
-        {group && groupFaces > 1 && (
-          <label className="mt-2 flex min-h-10 cursor-pointer items-center gap-2 text-sm text-ink-soft">
-            <input type="checkbox" checked={onlyThis} onChange={(e) => setOnlyThis(e.target.checked)} />
-            Only change this face
-          </label>
-        )}
         {trackList && (
           <div className="mt-2 rounded-xl bg-surface-2 p-2 text-xs text-ink-soft" role="status">
             <p>{onlyTrack ? 'Applies to this track only.' : `Applies to all ${trackList.length} tracks of this person in the video.`}</p>

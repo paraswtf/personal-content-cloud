@@ -224,19 +224,31 @@ def cover_visible(conn: sqlite3.Connection, face_id: int | None) -> bool:
     ).fetchone() is not None
 
 
+def shown(ref: PersonRef | None) -> PersonRef | None:
+    """Section 10, unnamed groups stay in the background: a person without a name who is not a pet is a group the
+    matching keeps for itself, and no answer of the API shows it (not as a box's person, a guess, a tag or a list
+    entry). None for such a reference (and for None), the reference itself otherwise. Pets keep their unnamed ones."""
+    if ref is None or (ref.kind != "pet" and not ref.name):
+        return None
+    return ref
+
+
 def person_ref(conn: sqlite3.Connection, person_id: int | None, name: str | None = None,
                cover_face_id: int | None = None) -> PersonRef | None:
     """PersonRef with its cover; looks the person up when only the id is known. A chosen cover from
     a trashed or vault item is skipped for the automatic one. For many people use person_refs()."""
     if person_id is None:
         return None
+    kind = "person"
     if name is None and cover_face_id is None:
-        row = conn.execute("SELECT id, name, cover_face_id FROM persons WHERE id = ?", (person_id,)).fetchone()
+        row = conn.execute("SELECT id, name, cover_face_id, kind FROM persons WHERE id = ?", (person_id,)).fetchone()
         if row is None:
             return None
-        name, cover_face_id = row["name"], row["cover_face_id"]
+        name, cover_face_id, kind = row["name"], row["cover_face_id"], row["kind"] or "person"
+        if kind == "pet":
+            return person_refs(conn, [person_id]).get(int(person_id))  # a pet's cover is its best crop
     cover = cover_face_id if cover_visible(conn, cover_face_id) else auto_cover(conn, person_id)
-    return PersonRef(id=person_id, name=name, cover_url=face_url(cover) if cover else None)
+    return PersonRef(id=person_id, name=name, cover_url=face_url(cover) if cover else None, kind=kind)
 
 
 def person_refs(conn: sqlite3.Connection, person_ids: Iterable[int | None]) -> dict[int, PersonRef]:
@@ -351,16 +363,29 @@ def person_out(conn: sqlite3.Connection, row: sqlite3.Row) -> PersonOut:
 
 
 def _ref(conn: sqlite3.Connection, person_id: int | None, refs: dict[int, PersonRef] | None) -> PersonRef | None:
+    """The person to show for a box or a guess: None for nobody and for an unnamed group (shown())."""
     if person_id is None:
         return None
     if refs is not None:
-        return refs.get(int(person_id))
-    return person_ref(conn, int(person_id))
+        return shown(refs.get(int(person_id)))
+    return shown(person_ref(conn, int(person_id)))
+
+
+def box_person(conn: sqlite3.Connection, row: sqlite3.Row,
+               refs: dict[int, PersonRef] | None = None) -> tuple[PersonRef | None, str, bool]:
+    """(person, assigned_by, by_guess) of a face or body row as the API shows them. A box of an unnamed group
+    (section 10) reads as a box nobody is named for, which the matching put nowhere: no person, 'auto', not a
+    confirmed guess. The row keeps its group for the background."""
+    person = _ref(conn, row["person_id"], refs)
+    if person is None and row["person_id"] is not None:
+        return None, "auto", False
+    return person, row["assigned_by"], _by_guess(row)
 
 
 def guess_out(conn: sqlite3.Connection, row: sqlite3.Row, refs: dict[int, PersonRef] | None = None) -> GuessOut | None:
     """row needs guess_person_id, guess_score, guess_evidence, person_id. refs: from person_refs()
-    (covering box_person_ids of the rows), so a page of boxes looks people up once."""
+    (covering box_person_ids of the rows), so a page of boxes looks people up once. A guess for an unnamed group
+    is never shown (section 10): None, and it shows on its own once that person has a name."""
     if row["person_id"] is not None or row["guess_person_id"] is None:
         return None
     ref = _ref(conn, row["guess_person_id"], refs)
@@ -480,23 +505,25 @@ def video_groups(faces: list[sqlite3.Row], bodies: list[sqlite3.Row], animals: l
 
 def face_out(conn: sqlite3.Connection, row: sqlite3.Row, refs: dict[int, PersonRef] | None = None) -> FaceOut:
     """row from faces. refs: as for guess_out."""
+    person, assigned_by, by_guess = box_person(conn, row, refs)
     return FaceOut(
         id=row["id"], x=row["x"], y=row["y"], w=row["w"], h=row["h"], det_score=row["det_score"],
         size_px=row["size_px"], quality=row["quality"], frame_time_s=row["frame_time_s"],
-        spans=json_loads(row["spans"]), person=_ref(conn, row["person_id"], refs), assigned_by=row["assigned_by"],
+        spans=json_loads(row["spans"]), person=person, assigned_by=assigned_by,
         guess=guess_out(conn, row, refs), url=face_url(int(row["id"])), source=_box_source(row),
-        by_guess=_by_guess(row),
+        by_guess=by_guess,
     )
 
 
 def body_out(conn: sqlite3.Connection, row: sqlite3.Row, refs: dict[int, PersonRef] | None = None,
              traits: list[TraitOut] | None = None) -> BodyOut:
     """row from bodies. refs: as for guess_out. traits: the body's traits (item detail only, section 34)."""
+    person, assigned_by, by_guess = box_person(conn, row, refs)
     return BodyOut(
         id=row["id"], x=row["x"], y=row["y"], w=row["w"], h=row["h"], det_score=row["det_score"],
-        face_id=row["face_id"], person=_ref(conn, row["person_id"], refs), assigned_by=row["assigned_by"],
+        face_id=row["face_id"], person=person, assigned_by=assigned_by,
         guess=guess_out(conn, row, refs), frame_time_s=row["frame_time_s"], url=body_url(int(row["id"])),
-        source=_box_source(row), by_guess=_by_guess(row), traits=traits,
+        source=_box_source(row), by_guess=by_guess, traits=traits,
     )
 
 

@@ -10,9 +10,9 @@ import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState, type
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import clsx from 'clsx'
-import { ArrowLeft, Baby, Check, CheckCheck, GitMerge, Images, Link2, ListChecks, PawPrint, Pencil, ScanFace, Sparkles, Star, Trash2, UserMinus, X } from 'lucide-react'
+import { ArrowLeft, Check, CheckCheck, GitMerge, Images, Link2, ListChecks, PawPrint, Pencil, ScanFace, Sparkles, Star, Trash2, UserMinus, X } from 'lucide-react'
 import { ApiError, api } from '../lib/api'
-import { SPECIES, type AnimalListItem, type FaceListItem, type GuessItem, type PersonKind, type PersonOut, type RelatedReason, type RelatedSuggestionList, type Species } from '../lib/types'
+import { SPECIES, type AnimalListItem, type FaceListItem, type GuessItem, type PersonKind, type RelatedReason, type RelatedSuggestionList, type Species } from '../lib/types'
 import { followedTail, formatCount, personName, speciesLabel } from '../lib/format'
 import { useInfiniteSentinel, usePageTitle, useRefreshLibrary, useStableCallback } from '../lib/hooks'
 import { useItemList } from '../lib/useItemList'
@@ -62,8 +62,15 @@ function NameEditor({ id, name, kind, species }: { id: number; name: string | nu
         navigate(`/people/${p.id}`, { replace: true })
         return
       }
-      toast.success(p.name ? `Named ${p.name}.` : 'Name removed.')
       void refresh()
+      if (!p.name && kind !== 'pet') {
+        // a person without a name is a group the app keeps in the background (section 10): their faces are back
+        // with the faces to name, and this page is gone
+        toast.success('Name removed. Their faces are back with the faces to name.')
+        navigate('/people', { replace: true })
+        return
+      }
+      toast.success(p.name ? `Named ${p.name}.` : 'Name removed.')
     },
     onError: (e) => toast.error(errorMessage(e, 'Could not save the name.')),
   })
@@ -580,57 +587,8 @@ function GuessesTab({ id }: { id: number }) {
   )
 }
 
-/** An unnamed group of childhood photos (section 10): "Who is this as a child?" lists the named people it may be,
- *  best first (no bar: the face model links a young child to their adult self only weakly, so the owner decides).
- *  Picking one merges the group into them (learned as a cross-age link, nothing loosened). Nothing for other groups. */
-function ChildhoodCard({ id, onPick, onOther }: { id: number; onPick: (person: PersonOut) => void; onOther: () => void }) {
-  const [open, setOpen] = useState(false)
-  // under the 'person' key, so a merge, a dismissal or a rename (useRefreshLibrary) asks again
-  const q = useQuery({ queryKey: ['person', id, 'childhood'], queryFn: () => api.people.childhood(id), staleTime: 60_000 })
-  const candidates = q.data?.candidates ?? []
-  if (!candidates.length) return null
-  return (
-    <section aria-label="Childhood photos" className="mt-4 rounded-2xl bg-surface-2 p-3">
-      <p className="flex items-center gap-1.5 text-sm font-semibold text-ink">
-        <Baby className="size-4" aria-hidden />
-        These look like childhood photos.
-      </p>
-      <p className="mt-0.5 text-xs text-ink-soft">Pick who this is as a child. Later childhood photos of them can then be found.</p>
-      {open ? (
-        <ul className="mt-3 flex flex-wrap gap-2" aria-label="Who this may be as a child">
-          {candidates.map((c, i) => (
-            <li key={c.person.id}>
-              <button
-                type="button"
-                onClick={() => onPick(c.person)}
-                className="flex min-h-11 items-center gap-2 rounded-full border border-line bg-surface py-1 pl-1 pr-3 text-left text-sm font-semibold text-ink hover:bg-surface-2"
-              >
-                <Avatar src={c.person.cover_url} name={c.person.name} size={32} />
-                <span className="min-w-0">
-                  <span className="block truncate">{personName(c.person)}</span>
-                  {i === 0 && <span className="block text-xs font-normal text-ink-soft">Most alike</span>}
-                </span>
-              </button>
-            </li>
-          ))}
-          <li>
-            <Button variant="ghost" onClick={onOther}>
-              Someone else
-            </Button>
-          </li>
-        </ul>
-      ) : (
-        <Button className="mt-3" variant="secondary" onClick={() => setOpen(true)}>
-          Who is this as a child?
-        </Button>
-      )}
-    </section>
-  )
-}
-
 function PersonView({ id }: { id: number }) {
   const navigate = useNavigate()
-  const qc = useQueryClient()
   const toast = useToast()
   const refresh = useRefreshLibrary()
   const [search, setSearch] = useSearchParams()
@@ -753,16 +711,6 @@ function PersonView({ id }: { id: number }) {
         </div>
       </div>
 
-      {!pet && !p.name && (
-        <ChildhoodCard
-          id={p.id}
-          onPick={(target) => {
-            qc.setQueryData(['person', target.id], target) // the confirm names them at once
-            setMergeTarget(target.id)
-          }}
-          onOther={() => setMergeOpen(true)}
-        />
-      )}
       {!pet && !!p.name && <RecognitionCard id={p.id} name={name} faceCount={p.face_count} />}
 
       <div role="tablist" aria-label="Person sections" className="-mx-4 mb-4 mt-6 flex gap-1 overflow-x-auto border-b border-line px-4 sm:mx-0 sm:px-0">
