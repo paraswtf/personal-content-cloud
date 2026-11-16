@@ -44,7 +44,8 @@ export default function FaceGrid({
             by_guess: f.by_guess,
             guess: f.guess,
           })
-          const label = `Face ${f.id}, ${f.size_px} pixels${f.item_kind === 'video' ? ', from a video' : ''}${
+          // "px" as on the tile, so the name a screen reader or voice control uses holds the text people see
+          const label = `Face ${f.id}, ${f.size_px} px${f.item_kind === 'video' ? ', from a video' : ''}${
             f.guess
               ? `, maybe ${personName(f.guess.person)}`
               : origin
