@@ -80,8 +80,6 @@ struct SettingsLearningView: View {
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
-        } header: {
-            SettingsSectionHeader(title: "Learn from my choices") { EmptyView() }
         } footer: {
             Text("Every correction you make teaches small models that run on this server, so the next automatic decision of the same kind follows your choice. Nothing is sent anywhere.")
         }

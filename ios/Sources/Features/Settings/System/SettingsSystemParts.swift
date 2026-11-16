@@ -106,6 +106,7 @@ struct SettingsActionRow: View {
                 if busy { ProgressView() }
             }
         }
+        .tint(role == .destructive ? Color.red : Color.accentColor)
         .disabled(busy)
     }
 }

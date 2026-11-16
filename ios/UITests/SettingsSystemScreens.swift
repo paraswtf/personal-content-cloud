@@ -19,13 +19,22 @@ final class SettingsSystemScreens: ScreenTestCase {
         app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS %@", text)).firstMatch
     }
 
-    /// Scrolls the screen's list until `element` shows, at most `swipes` times.
-    private func scroll(to element: XCUIElement, swipes: Int = 8) -> Bool {
-        for _ in 0..<swipes {
+    /// Moves the screen's list up by about a third of its height. A slow drag held at its end, not a swipe: a
+    /// swipe flings the list on and can carry a row past the screen between two checks.
+    private func dragUp() {
+        let window = app.windows.firstMatch
+        let start = window.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.72))
+        let end = window.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.38))
+        start.press(forDuration: 0.05, thenDragTo: end, withVelocity: .slow, thenHoldForDuration: 0.2)
+    }
+
+    /// Scrolls the screen's list until `element` is on screen, at most `drags` times.
+    private func scroll(to element: XCUIElement, drags: Int = 30) -> Bool {
+        for _ in 0..<drags {
             if element.exists && element.isHittable { return true }
-            app.swipeUp()
+            dragUp()
         }
-        return element.exists
+        return element.exists && element.isHittable
     }
 
     func testSystem() throws {
@@ -51,7 +60,7 @@ final class SettingsSystemScreens: ScreenTestCase {
         let range = app.segmentedControls["system.throughput.range"]
         XCTAssertTrue(scroll(to: range), "no processing speed")
         // the seed's uploads were stored minutes ago
-        XCTAssertTrue(element(containing: "Files stored").waitForExistence(timeout: 30), "no throughput for the stored files")
+        XCTAssertTrue(scroll(to: element(containing: "Files stored")), "no throughput for the stored files")
         snap("setsys-system-speed")
         range.buttons["24 hours"].tap()
         XCTAssertTrue(element(containing: "in the last 24 hours").waitForExistence(timeout: 30), "the 24 hours view did not load")
