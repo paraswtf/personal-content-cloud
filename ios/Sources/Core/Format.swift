@@ -84,6 +84,20 @@ enum Fmt {
         "\(n.formatted()) \(n == 1 ? singular : (plural ?? singular + "s"))"
     }
 
+    /// The tail of a naming message when naming a face made guesses of the other faces the app had grouped with it
+    /// in the background (docs/ARCHITECTURE.md section 10): " 2 faces that look alike wait in Review." (or "").
+    static func guessedTail(_ guessed: Int?) -> String {
+        guard let guessed, guessed > 0 else { return "" }
+        let verb = guessed == 1 ? "looks alike waits" : "look alike wait"
+        return " \(count(guessed, "face")) that \(verb) in Review."
+    }
+
+    /// The tail of a merge message: " 3 look-alikes came along." (or "").
+    static func followedTail(_ followed: Int?) -> String {
+        guard let followed, followed > 0 else { return "" }
+        return " \(count(followed, "look-alike")) came along."
+    }
+
     /// "just now", "5 min ago", "3 h ago", "2 days ago", then a date.
     static func relative(_ iso: String?, now: Date = Date()) -> String {
         guard let t = ISODate.parse(iso) else { return "" }

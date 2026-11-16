@@ -211,23 +211,6 @@ struct CoreItemDetail: Decodable, Hashable {
     }
 }
 
-/// `PersonOut`, as the person picker lists it.
-struct CorePerson: Decodable, Hashable {
-    let id: Int
-    let name: String?
-    let coverUrl: String?
-    let kind: String?
-    let species: String?
-    let itemCount: Int?
-}
-
-/// `PersonPage`.
-struct CorePersonPage: Decodable {
-    let items: [CorePerson]
-    let nextCursor: String?
-    let total: Int
-}
-
 /// `DeviceCreated`: a new device token, shown once.
 struct CoreDeviceCreated: Decodable {
     let id: Int

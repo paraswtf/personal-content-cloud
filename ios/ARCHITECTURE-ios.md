@@ -83,11 +83,18 @@ the core in its own change.
 
 ## People
 
-- Only named people are shown anywhere in the app. Use `PersonOption(person)`, which is nil for an unnamed
-  person, and `Fmt.isNamed(_:)` to filter.
-- `PersonPickerSheet(title:source:excluding:allowCreate:createKind:onPick:)` picks a person or a new name. The
-  default source lists named people by item count and searches by name; a ranked source implements
-  `PersonOptionSource` (the people most alike a face or a box) and is passed as `source:`.
+- Only named people are shown anywhere in the app: the server already leaves unnamed groups out (a box of one
+  arrives with `person` nil, a guess for one arrives as nil). Use `PersonOption(person)`, which is nil for an
+  unnamed person, and `Fmt.isNamed(_:)` where a list could still hold one.
+- `PersonPickerSheet(title:kind:like:excluding:allowCreate:species:speciesOnly:onPick:)` picks a person (or pet)
+  or a new name, as the website's PersonPicker. Pass what is being named as `like:` (`.box(box)`,
+  `.faces(ids)`, `.bodies(ids)`, `.animals(ids)`, `.person(id, on: uids)`, `.item(uid)`): with nothing typed, the
+  most alike named people come first under "Most alike", each with why ("Looks like them") and "Likely" when the
+  matching would take them, then everyone else; typing filters by name and keeps the order of likeness. The list
+  waits for the likeness answer, so it never moves under the finger.
+- Naming a face of a group the app made in the background makes guesses of the group's other faces: end the
+  message with `Fmt.guessedTail(answer.guessed)` ("2 faces that look alike wait in Review."), and a merge's with
+  `Fmt.followedTail(answer.followed)`.
 
 ## Pictures and video
 
