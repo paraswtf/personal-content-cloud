@@ -342,9 +342,12 @@ def api(server: str, out: Path | None) -> dict:
     areas = {}
     for area, module in area_seeds():
         if hasattr(module, "api"):
+            # `client` is the owner's browser session; `token` is the app's device token (send it as
+            # {"Authorization": f"Bearer {kit.token}"} to act as the app, for example to open the vault for it)
             area_kit = types.SimpleNamespace(client=c, server=c.server, items=items, uids=uids, album=album,
                                              share=share, uploaded=uploaded, note=note, uploads_dir=uploads_dir(),
-                                             username=USERNAME, password=PASSWORD)
+                                             username=USERNAME, password=PASSWORD, token=device["token"],
+                                             device_name=DEVICE_NAME, Client=Client)
             areas[area] = module.api(area_kit) or {}
 
     # what the tests check against, read back as the app will see it (the device token, not the cookie)
