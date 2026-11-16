@@ -55,15 +55,10 @@ struct TrashScreen: View {
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 if !pager.items.isEmpty {
-                    Button(role: .destructive) {
-                        emptying = true
-                    } label: {
-                        Label("Empty trash", systemImage: "trash.slash")
-                    }
-                    .tint(.red)
-                    .disabled(emptyBusy)
-                    .accessibilityLabel("Empty trash")
-                    .accessibilityIdentifier("trash.empty")
+                    Button("Empty trash", role: .destructive) { emptying = true }
+                        .tint(.red)
+                        .disabled(emptyBusy)
+                        .accessibilityIdentifier("trash.empty")
                 }
             }
         }

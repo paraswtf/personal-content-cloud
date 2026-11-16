@@ -11,14 +11,11 @@ final class VaultTrashTests: XCTestCase {
         XCTAssertEqual(VaultClock.secondsLeft(until: now.addingTimeInterval(845.9), now: now), 845)
     }
 
-    func testOpenTextAndCountdown() {
+    func testOpenText() {
         XCTAssertEqual(VaultClock.openText(secondsLeft: nil), "Unlocked")
         XCTAssertEqual(VaultClock.openText(secondsLeft: 0), "Unlocked")
         XCTAssertEqual(VaultClock.openText(secondsLeft: 845), "Unlocked for 15 min")
         XCTAssertEqual(VaultClock.openText(secondsLeft: 60), "Unlocked for 1 min")
-        XCTAssertEqual(VaultClock.countdown(845), "14:05")
-        XCTAssertEqual(VaultClock.countdown(9), "0:09")
-        XCTAssertEqual(VaultClock.countdown(-3), "0:00")
     }
 
     func testUnlockErrors() {

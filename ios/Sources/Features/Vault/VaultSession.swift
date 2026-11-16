@@ -75,12 +75,6 @@ enum VaultClock {
         guard let s = secondsLeft, s > 0 else { return "Unlocked" }
         return "Unlocked for \(Fmt.minutes(Double(s) / 60))"
     }
-
-    /// "14:05": minutes and seconds left (the website's vault badge).
-    static func countdown(_ seconds: Int) -> String {
-        let s = max(0, seconds)
-        return "\(s / 60):" + String(format: "%02d", s % 60)
-    }
 }
 
 /// The vault's words that more than one screen shows.

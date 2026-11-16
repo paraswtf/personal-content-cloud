@@ -64,8 +64,8 @@ struct VaultScreen: View {
     }
 }
 
-/// The bar over the open vault: how long it stays open (the website's "Unlocked for 14 min" and its badge's
-/// countdown) and Lock now.
+/// The bar over the open vault: how long it stays open (the website's "Unlocked for 14 min", counted every second
+/// like its header badge) and Lock now.
 struct VaultOpenBar: View {
     let until: Date
     let locking: Bool
@@ -80,11 +80,9 @@ struct VaultOpenBar: View {
                         .foregroundStyle(.green)
                         .accessibilityHidden(true)
                     Text(VaultClock.openText(secondsLeft: left))
-                        .font(.subheadline.weight(.medium))
-                    Text(VaultClock.countdown(left))
-                        .font(.subheadline.monospacedDigit())
-                        .foregroundStyle(.secondary)
-                        .accessibilityHidden(true)
+                        .font(.subheadline.weight(.medium).monospacedDigit())
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.8)
                 }
                 .padding(.horizontal, 12)
                 .frame(height: 36)
