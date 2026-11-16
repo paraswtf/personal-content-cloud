@@ -42,6 +42,9 @@ def main() -> int:
                 # "sync_0_8F2C1E5A-....png": the name the test gave, an index, a UUID
                 name = re.sub(r"_\d+_[0-9A-Fa-f-]{36}(?=\.\w+$)", "", human)
                 stem, ext = Path(name).stem, Path(name).suffix or src.suffix
+                # Only what upload-artifact accepts in a file name (XCTest names its debug texts with quotes and colons).
+                stem = re.sub(r'[\\/"*:<>?|\r\n]+', "-", stem).strip("-. ") or "attachment"
+                ext = re.sub(r"[^A-Za-z0-9.]+", "", ext)
                 if stem in used:
                     stem = f"{stem}-{test_name}"
                 used[stem] = used.get(stem, 0) + 1

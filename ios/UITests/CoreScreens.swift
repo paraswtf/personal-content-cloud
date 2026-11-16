@@ -3,8 +3,15 @@ import XCTest
 /// The core's screens against the seeded server (ios/ci/seed_server.py): the tabs, the media grid, the viewer with
 /// overlapping boxes where the smaller box gets the tap, the ranked person picker, and signing in with the password.
 final class CoreScreens: ScreenTestCase {
-    /// The first cell of the library grid (the newest photo: the seed's photo with overlapping boxes).
+    /// The first cell of the library grid (the seed's text note, the newest item).
     private var firstCell: XCUIElement { app.buttons.matching(identifier: "media.cell").firstMatch }
+
+    /// The seed's photo with overlapping boxes, taken on 10 Nov 2026 (ci/seed_server.py), found by what VoiceOver
+    /// reads for its cell.
+    private var boxesCell: XCUIElement {
+        app.buttons.matching(NSPredicate(format: "identifier == 'media.cell' AND label BEGINSWITH 'Photo, Nov 10, 2026'"))
+            .firstMatch
+    }
 
     func testTheTabsTheGridAndMore() throws {
         try launchSignedIn()
@@ -42,14 +49,15 @@ final class CoreScreens: ScreenTestCase {
 
     func testTheViewerGivesTheTapToTheSmallerBox() throws {
         try launchSignedIn()
-        XCTAssertTrue(firstCell.waitForExistence(timeout: 30))
-        firstCell.tap()
-        // The seed's newest photo: a face inside a larger person box of someone else.
+        XCTAssertTrue(boxesCell.waitForExistence(timeout: 30), "the seed's photo with boxes is not in the grid")
+        boxesCell.tap()
+        // A face inside a larger person box of someone else.
         let face = app.buttons["Face of Test Visitor"]
         let person = app.buttons["Person box of Test Person"]
         XCTAssertTrue(face.waitForExistence(timeout: 30), "the face box did not show")
         XCTAssertTrue(person.exists, "the person box did not show")
         XCTAssertTrue(person.frame.contains(face.frame), "the seed's face box should sit inside the person box")
+        XCTAssertTrue(app.windows.firstMatch.frame.contains(face.frame), "the face box is not on the screen")
         snap("core-viewer-boxes")
 
         // The middle of the face is inside the person box too: the face gets the tap. (A box draws itself and takes

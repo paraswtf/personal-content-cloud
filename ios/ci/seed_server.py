@@ -170,8 +170,9 @@ def library() -> dict:
                              ((end - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%S.000Z"), item["id"]))
             counts["trash"] += 1
 
-    # The viewer's box test (ios/UITests/CoreScreens.swift): the newest photo, where one person's face sits inside a
-    # larger person box of someone else, so a tap on the face must reach the face and not the person box around it.
+    # The viewer's box test (ios/UITests/CoreScreens.swift): a photo taken on 10 Nov 2026 (newer than the others but
+    # the uploads' text note), where one person's face sits inside a larger person box of someone else, so a tap on
+    # the face must reach the face and not the person box around it.
     from tests.helpers import make_body
 
     face_box = (0.40, 0.28, 0.12, 0.17)

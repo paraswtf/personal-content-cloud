@@ -66,6 +66,7 @@ jobs:
       - name: Build for testing
         working-directory: ios
         run: |
+          set -o pipefail
           mkdir -p build
           xcodebuild -project PersonalContentCloud.xcodeproj -scheme PersonalContentCloud \
             -destination 'generic/platform=iOS Simulator' -derivedDataPath build/dd ARCHS=arm64 ONLY_ACTIVE_ARCH=NO \
@@ -92,6 +93,8 @@ jobs:
       - name: Run the tests
         working-directory: ios
         run: |
+          # A failed test fails the job (without pipefail the pipe into xcbeautify hid xcodebuild's status).
+          set -o pipefail
           SERVER="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["server"])' "$PCC_DIR/seed.json")"
           TOKEN="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["token"])' "$PCC_DIR/seed.json")"
           echo "::add-mask::$TOKEN"
