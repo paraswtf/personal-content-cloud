@@ -1,0 +1,110 @@
+# Signs the iPhone app and uploads it to TestFlight. Runs when a push to main changes the app, and when
+# started by hand (Actions > iOS TestFlight > Run workflow), where "upload" off signs and exports only.
+# It needs four repository secrets (ios/README.md, "TestFlight"); without them it says so and stops
+# without failing. Branches other than main never sign: the build job in ios.yml covers them.
+name: iOS TestFlight
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "ios/**"
+  workflow_dispatch:
+    inputs:
+      upload:
+        description: "Upload to TestFlight (off: sign and export only)"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-testflight
+  cancel-in-progress: false
+
+jobs:
+  testflight:
+    name: Sign and upload
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - name: Check the signing secrets
+        id: ready
+        env:
+          TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
+        run: |
+          if [ -n "$TEAM_ID" ] && [ -n "$ASC_KEY_ID" ] && [ -n "$ASC_ISSUER_ID" ] && [ -n "$ASC_KEY_P8" ]; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=TestFlight skipped::The repository has no App Store Connect secrets yet (ios/README.md, TestFlight)."
+          fi
+
+      - uses: actions/checkout@v4
+        if: steps.ready.outputs.ok == 'true'
+
+      - name: Tools and project
+        if: steps.ready.outputs.ok == 'true'
+        working-directory: ios
+        run: |
+          xcodebuild -version
+          brew install xcodegen
+          xcodegen generate
+
+      - name: Archive
+        if: steps.ready.outputs.ok == 'true'
+        working-directory: ios
+        env:
+          TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
+        run: |
+          set -o pipefail
+          umask 077
+          KEY="$RUNNER_TEMP/AuthKey_$ASC_KEY_ID.p8"
+          printf '%s\n' "$ASC_KEY_P8" > "$KEY"
+          # A date makes every build number higher than the last, whoever uploaded it (App Store Connect
+          # refuses a build number that is not higher than the previous one of the same version).
+          BUILD="$(date -u +%Y%m%d.%H%M)"
+          echo "BUILD=$BUILD" >> "$GITHUB_ENV"
+          echo "Build number $BUILD"
+          # The archive is not signed here: the export below signs it with the team's cloud-managed
+          # distribution certificate, so no certificate or profile has to be kept anywhere.
+          xcodebuild -project PersonalContentCloud.xcodeproj -scheme PersonalContentCloud -configuration Release \
+            -destination 'generic/platform=iOS' -archivePath "$RUNNER_TEMP/PCC.xcarchive" \
+            DEVELOPMENT_TEAM="$TEAM_ID" CURRENT_PROJECT_VERSION="$BUILD" \
+            CODE_SIGNING_ALLOWED=NO archive 2>&1 | xcbeautify --renderer github-actions
+
+      - name: Sign, export and upload
+        if: steps.ready.outputs.ok == 'true'
+        env:
+          TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          UPLOAD: ${{ github.event_name == 'push' || inputs.upload }}
+        run: |
+          set -o pipefail
+          KEY="$RUNNER_TEMP/AuthKey_$ASC_KEY_ID.p8"
+          if [ "$UPLOAD" = "true" ]; then DEST=upload; else DEST=export; fi
+          /usr/libexec/PlistBuddy -c "Add :method string app-store-connect" \
+            -c "Add :teamID string $TEAM_ID" -c "Add :signingStyle string automatic" \
+            -c "Add :destination string $DEST" -c "Add :manageAppVersionAndBuildNumber bool false" \
+            "$RUNNER_TEMP/ExportOptions.plist" >/dev/null
+          xcodebuild -exportArchive -archivePath "$RUNNER_TEMP/PCC.xcarchive" -exportPath "$RUNNER_TEMP/export" \
+            -exportOptionsPlist "$RUNNER_TEMP/ExportOptions.plist" -allowProvisioningUpdates \
+            -authenticationKeyPath "$KEY" -authenticationKeyID "$ASC_KEY_ID" -authenticationKeyIssuerID "$ASC_ISSUER_ID" \
+            2>&1 | xcbeautify --renderer github-actions
+          if [ "$DEST" = "upload" ]; then
+            echo "::notice title=TestFlight::Build $BUILD was sent to App Store Connect. It shows in TestFlight once Apple has processed it."
+          else
+            ls -la "$RUNNER_TEMP/export"
+          fi
+
+      - name: Remove the key
+        if: always()
+        run: rm -f "$RUNNER_TEMP"/AuthKey_*.p8

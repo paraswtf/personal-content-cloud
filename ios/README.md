@@ -48,10 +48,39 @@ What it does:
 - Stop on the Sync screen cancels the transfer in flight. The next sync continues it from the
   server's offset.
 
-## Building (needs a Mac)
+## Building
 
-The app cannot be built or run on the server; it needs Xcode 15 or later and an Apple developer
-account for a real device.
+The server this project is developed on has no Xcode. GitHub's macOS machines build the app instead
+(`.github/workflows/ios.yml`): every push that changes `ios/` generates the project with XcodeGen and
+builds it for the simulator, so a branch shows whether the app compiles before anyone opens Xcode.
+
+## TestFlight from GitHub
+
+`.github/workflows/ios-testflight.yml` signs the app and uploads it to TestFlight when a push to main
+changes `ios/`, and when it is started by hand (Actions > iOS TestFlight > Run workflow; with "upload"
+off it signs and exports only, which checks the signing without sending a build). Other branches never
+sign. It needs four repository secrets, added under Settings > Secrets and variables > Actions:
+
+| Secret | What it holds |
+|---|---|
+| `APPLE_TEAM_ID` | the Apple developer team's ID |
+| `ASC_KEY_ID` | the Key ID of an App Store Connect API key |
+| `ASC_ISSUER_ID` | the Issuer ID shown on the same page |
+| `ASC_KEY_P8` | the whole text of that key's `.p8` file |
+
+The key is made in App Store Connect under Users and Access > Integrations > App Store Connect API >
+Team Keys, with the Admin role: the export signs with the team's cloud-managed distribution
+certificate, which a key with a lower role may not be allowed to create. Apple offers the `.p8` for
+download once. Without the four secrets the workflow says so and stops without failing.
+
+The archive itself is not signed; the export signs it and creates the App Store profile, so no
+certificate or profile is kept in the repository or in GitHub. Build numbers are the date and time of
+the build (`20261117.1530`), so each one is higher than the last whoever uploaded it; an upload made
+from a Mac afterwards needs a higher number than the last one from GitHub.
+
+## Building on a Mac
+
+Xcode 15 or later and an Apple developer account for a real device.
 
 ```bash
 brew install xcodegen
