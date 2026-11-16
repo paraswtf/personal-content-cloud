@@ -1,18 +1,27 @@
 // Person search-and-pick combobox with an inline option list (works inside popovers and modals).
 // Offers "Create <name>" for a typed name that matches nobody exactly. With kind 'all' it lists people
 // and then a Pets section, and a new name can become a person ("Create") or a pet ("New pet").
+// Naming by likeness (docs/ARCHITECTURE.md section 10): with `like` (what is being named: boxes, a person's boxes
+// on some items, the whole person, or an item) the empty box lists the most alike named people first, under "Most
+// alike", each with why ("Looks like them") and "Likely" when the matching would take them, then everyone else;
+// typing still filters by name, and the names it finds come in order of likeness. The list waits for the likeness
+// answer before it shows, so nothing moves under the pointer or the arrow keys once it is there. People without a
+// name are never listed (pets without one still are).
 import { Fragment, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from 'react'
 import { keepPreviousData, useQuery } from '@tanstack/react-query'
 import clsx from 'clsx'
 import { PawPrint, Search, UserPlus } from 'lucide-react'
 import { api } from '../../lib/api'
-import type { PersonKind, PersonOut, Species } from '../../lib/types'
+import type { PersonKind, PersonOut, SimilarOption, SimilarPerson, SimilarSource, Species } from '../../lib/types'
 import { formatCount, personName, speciesLabel } from '../../lib/format'
 import { useDebounced } from '../../lib/hooks'
 import { Avatar, Spinner } from '../ui'
 
 /** A new name carries `kind: 'pet'` only when the owner picked "New pet" in a picker listing both kinds. */
 export type PersonChoice = { personId: number } | { newName: string; kind?: PersonKind }
+
+/** The person behind a pick: an alike person comes without counts, a listed one with them. */
+export type PickedPerson = SimilarPerson | PersonOut
 
 /** Request body fields for an assign or tag call from a picker choice. */
 export function choiceBody(choice: PersonChoice | null): { person_id?: number | null; new_person_name?: string; kind?: PersonKind } {
@@ -21,9 +30,24 @@ export function choiceBody(choice: PersonChoice | null): { person_id?: number | 
   return choice.kind === 'pet' ? { new_person_name: choice.newName, kind: 'pet' } : { new_person_name: choice.newName }
 }
 
+/** How many of the most alike people the empty box lists first. */
+export const ALIKE_LIMIT = 6
+
+/** A stable key for a likeness source (callers build a new object on every render), or null when it names
+ *  nothing to compare. */
+export function likeKey(src: SimilarSource | null | undefined): string | null {
+  if (!src) return null
+  const ids = (xs?: number[]) => (xs?.length ? [...new Set(xs)].sort((a, b) => a - b).join(',') : '')
+  // uids name that person's boxes on those items (no person, or no items: nothing); a person alone is the whole person
+  const uids = src.uids?.length && src.person_id !== undefined ? [...new Set(src.uids)].sort().join(',') : ''
+  const person = src.person_id !== undefined && (src.uids === undefined || uids) ? String(src.person_id) : ''
+  const parts = [ids(src.face_ids), ids(src.body_ids), ids(src.animal_ids), uids, person, src.around_uid ?? '']
+  return parts.every((p) => p === '') ? null : parts.join('|')
+}
+
 interface Props {
   /** The picked choice, and the person behind it when an existing one was picked. */
-  onPick: (choice: PersonChoice, person?: PersonOut) => void
+  onPick: (choice: PersonChoice, person?: PickedPerson) => void
   placeholder?: string
   allowCreate?: boolean
   excludeIds?: number[]
@@ -34,9 +58,19 @@ interface Props {
   species?: Species
   /** Pets: list only `species`. */
   speciesOnly?: boolean
+  /** What is being named: the most alike named people are listed first (section 10, naming by likeness). */
+  like?: SimilarSource | null
 }
 
-type Option = { kind: 'person'; person: PersonOut } | { kind: 'create'; name: string; as: PersonKind }
+type Option =
+  | { kind: 'person'; person: PickedPerson; alike: SimilarOption | null; section: 'alike' | 'rest' }
+  | { kind: 'create'; name: string; as: PersonKind }
+
+/** "12 faces, 30 items" (a pet: "Dog, 30 items"), or null for an alike person, who comes without counts. */
+function countsOf(p: PickedPerson, pet: boolean): string | null {
+  if (!('item_count' in p)) return null
+  return pet ? `${speciesLabel(p.species)}, ${formatCount(p.item_count, 'item')}` : `${formatCount(p.face_count, 'face')}, ${formatCount(p.item_count, 'item')}`
+}
 
 export default function PersonPicker({
   onPick,
@@ -47,6 +81,7 @@ export default function PersonPicker({
   kind = 'person',
   species,
   speciesOnly = false,
+  like,
 }: Props) {
   const pets = kind === 'pet'
   const both = kind === 'all'
@@ -58,27 +93,65 @@ export default function PersonPicker({
   const listRef = useRef<HTMLUListElement>(null)
   const baseId = useId()
   const q = useDebounced(text.trim(), 200)
+  // A people-only picker asks for named people (an unnamed group is never a choice); pets are listed as before.
+  const filter = kind === 'person' ? 'named' : 'all'
 
   const persons = useQuery({
-    queryKey: ['people', 'picker', kind, q],
-    queryFn: () => api.people.list({ q: q || undefined, kind, sort: q ? 'name' : 'items', filter: 'all', limit: 30 }),
+    queryKey: ['people', 'picker', kind, filter, q],
+    queryFn: () => api.people.list({ q: q || undefined, kind, sort: q ? 'name' : 'items', filter, limit: 30 }),
     placeholderData: keepPreviousData,
     staleTime: 10_000,
   })
 
+  // The likeness answer is read once per source and kept while the picker is open: not under the 'people' key,
+  // so a refresh of the people lists elsewhere never reorders what the owner is moving through.
+  const likeId = likeKey(like)
+  const alike = useQuery({
+    queryKey: ['likeness', likeId],
+    queryFn: () => api.likeness.people(like as SimilarSource, ALIKE_LIMIT),
+    enabled: likeId !== null,
+    staleTime: Infinity,
+    gcTime: 30_000,
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
+    retry: false,
+  })
+  const waiting = likeId !== null && alike.isPending
+  const ranking = likeId !== null && alike.isSuccess ? alike.data : null
+
   const options = useMemo<Option[]>(() => {
+    if (waiting) return []
     const exclude = new Set(excludeIds ?? [])
     const all = persons.data?.items ?? []
+    const kindOf = (p: PickedPerson) => p.kind ?? 'person'
+    const fits = (p: PickedPerson) =>
+      !exclude.has(p.id) &&
+      (both || kindOf(p) === kind) &&
+      (kindOf(p) === 'pet' || !!p.name?.trim()) &&
+      !(speciesOnly && species && p.species !== species)
     // Both kinds: people first, then the pets (the Pets heading sits before the first of them).
-    const found = both
-      ? [...all.filter((p) => (p.kind ?? 'person') !== 'pet'), ...all.filter((p) => p.kind === 'pet')]
-      : all.filter((p) => (p.kind ?? 'person') === kind)
+    const byKind = both ? [...all.filter((p) => kindOf(p) !== 'pet'), ...all.filter((p) => kindOf(p) === 'pet')] : all
     // Pets of the box's species first, the others after them.
-    const ranked = species ? [...found].sort((a, b) => Number(b.species === species) - Number(a.species === species)) : found
-    const list: Option[] = ranked
-      .filter((p) => !exclude.has(p.id) && !(speciesOnly && species && p.species !== species))
-      .map((p) => ({ kind: 'person', person: p }))
+    const found = (species ? [...byKind].sort((a, b) => Number(b.species === species) - Number(a.species === species)) : byKind).filter(fits)
     const typed = text.trim()
+    const list: Option[] = []
+    if (ranking && !typed) {
+      // an alike person who is in the list below too keeps the list's details (with the counts)
+      const listed = new Map(found.map((p) => [p.id, p]))
+      const top = ranking.items.filter((o) => fits(o.person))
+      for (const o of top) list.push({ kind: 'person', person: listed.get(o.person.id) ?? o.person, alike: o, section: 'alike' })
+      const shown = new Set(top.map((o) => o.person.id))
+      for (const p of found) if (!shown.has(p.id)) list.push({ kind: 'person', person: p, alike: null, section: 'rest' })
+    } else if (ranking) {
+      // Typing: the names found keep their groups (people, then pets) and come in order of likeness within them.
+      const alikeOf = new Map(ranking.items.map((o) => [o.person.id, o]))
+      const score = (p: PersonOut) => ranking.scores[String(p.id)] ?? -1
+      const group = (p: PersonOut) => (both && kindOf(p) === 'pet' ? 1 : 0)
+      const order = found.map((p, i) => ({ p, i })).sort((a, b) => group(a.p) - group(b.p) || score(b.p) - score(a.p) || a.i - b.i)
+      for (const { p } of order) list.push({ kind: 'person', person: p, alike: alikeOf.get(p.id) ?? null, section: 'rest' })
+    } else {
+      for (const p of found) list.push({ kind: 'person', person: p, alike: null, section: 'rest' })
+    }
     if (allowCreate && typed) {
       const lower = typed.toLowerCase()
       const exact = all.some((p) => (p.name ?? '').toLowerCase() === lower)
@@ -88,7 +161,7 @@ export default function PersonPicker({
       }
     }
     return list
-  }, [persons.data, excludeIds, allowCreate, text, kind, species, speciesOnly, both, pets])
+  }, [waiting, ranking, persons.data, excludeIds, allowCreate, text, kind, species, speciesOnly, both, pets])
 
   useEffect(() => setActive(0), [q, options.length])
   useEffect(() => {
@@ -118,7 +191,7 @@ export default function PersonPicker({
     } else if (e.key === 'Enter') {
       e.preventDefault()
       // While the typed text is still debouncing the list belongs to an earlier search.
-      if (text.trim() !== q || persons.isPlaceholderData || persons.isPending) return
+      if (text.trim() !== q || persons.isPlaceholderData || persons.isPending || waiting) return
       const opt = options[active]
       if (opt) pick(opt)
     } else if (e.key === 'Escape' && text) {
@@ -130,6 +203,7 @@ export default function PersonPicker({
 
   const optionId = (i: number) => `${baseId}-opt-${i}`
   const searching = persons.isFetching && text.trim() !== q
+  const loading = persons.isPending || waiting
 
   return (
     <div className="flex flex-col gap-2 text-ink">
@@ -152,9 +226,9 @@ export default function PersonPicker({
           spellCheck={false}
           className="h-10 w-full rounded-full border border-line bg-surface pl-9 pr-9 text-base text-ink placeholder:text-ink-faint hover:border-ink-faint focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/20 sm:text-sm"
         />
-        {(searching || persons.isPending) && (
+        {(searching || loading) && (
           <span className="absolute right-3 top-1/2 -translate-y-1/2">
-            <Spinner className="[&_svg]:size-4" label="Searching" />
+            <Spinner className="[&_svg]:size-4" label={waiting ? 'Finding who looks alike' : 'Searching'} />
           </span>
         )}
       </div>
@@ -164,6 +238,7 @@ export default function PersonPicker({
         id={`${baseId}-list`}
         role="listbox"
         aria-label={both ? 'People and pets' : pets ? 'Pets' : 'People'}
+        aria-busy={loading || undefined}
         className="max-h-64 overflow-y-auto overscroll-contain rounded-xl border border-line bg-surface p-1"
       >
         {persons.isError && (
@@ -171,7 +246,7 @@ export default function PersonPicker({
             Could not load people.
           </li>
         )}
-        {!persons.isPending && !persons.isError && options.length === 0 && (
+        {!loading && !persons.isError && options.length === 0 && (
           <li className="px-3 py-2 text-sm text-ink-soft">{text.trim()
               ? pets
                 ? 'No pet matches that name.'
@@ -185,7 +260,12 @@ export default function PersonPicker({
         {options.map((opt, i) => {
           const prev = options[i - 1]
           const petRow = opt.kind === 'person' ? opt.person.kind === 'pet' : opt.as === 'pet'
-          const heading = both && opt.kind === 'person' && petRow && prev?.kind === 'person' && prev.person.kind !== 'pet' ? 'Pets' : null
+          let heading: string | null = null
+          if (opt.kind === 'person' && opt.section === 'alike') heading = i === 0 ? 'Most alike' : null
+          else if (opt.kind === 'person' && prev?.kind === 'person' && prev.section === 'alike') heading = both && petRow ? 'Pets' : 'Everyone else'
+          else if (both && opt.kind === 'person' && petRow && prev?.kind === 'person' && prev.person.kind !== 'pet') heading = 'Pets'
+          const counts = opt.kind === 'person' ? countsOf(opt.person, petRow) : null
+          const detail = opt.kind !== 'person' ? '' : opt.alike ? [opt.alike.reason || 'Alike', counts].filter(Boolean).join(', ') : (counts ?? '')
           return (
           <Fragment key={opt.kind === 'person' ? opt.person.id : `create-${opt.as}`}>
           {heading && (
@@ -211,12 +291,11 @@ export default function PersonPicker({
                 <Avatar src={opt.person.cover_url} name={opt.person.name ?? '?'} size={32} />
                 <span className="min-w-0 flex-1">
                   <span className={clsx('block truncate font-medium', !opt.person.name && 'text-ink-soft')}>{personName(opt.person)}</span>
-                  <span className="block text-xs text-ink-soft">
-                    {petRow
-                      ? `${speciesLabel(opt.person.species)}, ${formatCount(opt.person.item_count, 'item')}`
-                      : `${formatCount(opt.person.face_count, 'face')}, ${formatCount(opt.person.item_count, 'item')}`}
-                  </span>
+                  <span className="block text-xs text-ink-soft">{detail}</span>
                 </span>
+                {opt.alike?.likely && (
+                  <span className="shrink-0 rounded-full border border-accent/40 px-2 py-0.5 text-[11px] font-semibold text-accent">Likely</span>
+                )}
               </>
             ) : (
               <>

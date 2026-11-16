@@ -352,6 +352,7 @@ export default function FaceEditor({ uid, target, anchor, onClose, onDone, track
                   : 'Search or type a new name'
           }
           excludeIds={box.person ? [box.person.id] : guess ? [guess.person.id] : undefined}
+          like={{ face_ids: faceIds, body_ids: bodyIds }}
           onPick={(choice) => {
             if (busy) return
             if (groupScope) nameGroup.mutate(choice)
