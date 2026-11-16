@@ -12,7 +12,8 @@ CONTRACT.
   Only those faces take the owner's choice. The faces that left are remembered as not that group
   (cluster.record_rejections; a group the move left empty is gone and skipped). With a named target, every other automatic face of each group becomes an open guess
   for the target, for the owner to confirm or turn down: it leaves the group (person_id NULL, assigned_by 'guess'),
-  with evidence {basis 'group', score, face, ref_face_id, ref_item_uid, was_person_id}, and the person box around
+  with evidence {basis 'group', score, face, ref_face_id, ref_item_uid, was_person_id} (the reference is the best
+  face just named outside the vault and the trash; none when every named face is in one), and the person box around
   it follows (cluster.sync_bodies_to_faces). The score is the cosine of the face to the mean of the faces just
   named (0 to 1). A face stays in its group when its photo is trashed or in the vault, the target is in its photo
   already, the owner said it is not the target (guess_rejections), the owner said the whole group is not the
@@ -97,14 +98,18 @@ def rest_to_guesses(conn: sqlite3.Connection, leaving: dict[int, list[int]],
         if gid in dismissed:
             continue
         seed_rows = conn.execute(
-            f"SELECT f.id, f.embedding, f.quality, i.uid FROM faces f JOIN items i ON i.id = f.item_id "
+            f"SELECT f.id, f.embedding, f.quality, i.uid, (i.deleted_at IS NULL AND i.nsfw = 0) AS shown "
+            f"FROM faces f JOIN items i ON i.id = f.item_id "
             f"WHERE f.id IN ({','.join('?' * len(seeds))}) ORDER BY f.quality DESC, f.id", sorted(seeds)).fetchall()
         vecs = [v for v in (_unit(r["embedding"]) for r in seed_rows) if v is not None]
         if not vecs:
             continue
         ref = np.mean(np.stack(vecs), axis=0)
         ref /= max(float(np.linalg.norm(ref)), 1e-9)
-        best_seed = seed_rows[0]
+        # The guesses' reference: the best named face in the library. The guesses sit outside the vault and the
+        # trash, where a locked session reviews them, so a face named in a vault (or trashed) photo is never named
+        # as their reference; with only such faces, the evidence has none.
+        best_seed = next((r for r in seed_rows if r["shown"]), None)
         picks: dict[Any, tuple[float, sqlite3.Row]] = {}
         for r in conn.execute(
             "SELECT f.id, f.item_id, f.embedding, i.kind FROM faces f JOIN items i ON i.id = f.item_id "
@@ -126,8 +131,9 @@ def rest_to_guesses(conn: sqlite3.Connection, leaving: dict[int, list[int]],
                 continue
             picks[key] = (score, r)
         for score, r in sorted(picks.values(), key=lambda t: int(t[1]["id"])):
-            ev = {"basis": BASIS, "score": round(score, 4), "face": round(score, 4),
-                  "ref_face_id": int(best_seed["id"]), "ref_item_uid": str(best_seed["uid"]), "was_person_id": int(gid)}
+            ev = {"basis": BASIS, "score": round(score, 4), "face": round(score, 4), "was_person_id": int(gid)}
+            if best_seed is not None:
+                ev.update(ref_face_id=int(best_seed["id"]), ref_item_uid=str(best_seed["uid"]))
             cur = conn.execute(
                 "UPDATE faces SET person_id = NULL, assigned_by = 'guess', guess_person_id = ?, guess_score = ?, "
                 "guess_evidence = ? WHERE id = ? AND person_id = ? AND assigned_by = 'auto'",

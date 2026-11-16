@@ -308,3 +308,34 @@ def test_hold_drops_another_box_guess_for_the_same_person_in_the_photo(conn):
     # nothing held: the same object comes back
     plain = {("face", other): None}
     assert hidden_groups.hold(conn, row, [b for b in boxes if b.id == other], plain) is plain
+
+
+def test_a_face_named_in_a_vault_photo_is_not_the_reference_of_its_guesses(vault_client, conn):
+    """The guesses sit in photos outside the vault, which a locked session reviews too: their evidence must not
+    point at the vault photo the owner named the face in (no other guess has a vault photo as its reference)."""
+    group, faces, _ = _group(conn, 3, base_seed=1300)
+    vault_item = _item(conn, nsfw=1)
+    hidden = make_face(conn, vault_item["id"], group, embedding=_near(_vec(1300), 1350))
+    r = vault_client.post("/api/faces/assign", json={"face_ids": [hidden], "new_person_name": "Asha"})
+    assert r.status_code == 200, r.text
+    assert r.json()["guessed"] == 3
+    for f in faces:
+        ev = json.loads(_person_of(conn, f)["guess_evidence"])
+        assert ev["basis"] == "group" and ev["was_person_id"] == group
+        assert "ref_face_id" not in ev and "ref_item_uid" not in ev, ev
+    assert vault_client.post("/api/auth/vault/lock").status_code == 200
+    page = vault_client.get("/api/review/guesses").json()
+    assert page["total"] == 3 and vault_item["uid"] not in json.dumps(page)
+
+
+def test_the_reference_of_group_guesses_is_a_named_face_outside_the_vault(vault_client, conn):
+    """Faces named together from one group, one of them in the vault: the reference is the one in the library."""
+    group, faces, items = _group(conn, 4, base_seed=1400)
+    # the vault face is the better one, the reference a plain choice would take
+    hidden = make_face(conn, _item(conn, nsfw=1)["id"], group, embedding=_near(_vec(1400), 1450, 0.01),
+                       det_score=0.99, size_px=200)
+    r = vault_client.post("/api/faces/assign", json={"face_ids": [hidden, faces[0]], "new_person_name": "Asha"})
+    assert r.status_code == 200, r.text
+    for f in faces[1:]:
+        ev = json.loads(_person_of(conn, f)["guess_evidence"])
+        assert (ev["ref_face_id"], ev["ref_item_uid"]) == (faces[0], items[0]["uid"]), ev

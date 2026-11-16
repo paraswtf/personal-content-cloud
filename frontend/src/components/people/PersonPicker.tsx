@@ -5,8 +5,9 @@
 // on some items, the whole person, or an item) the empty box lists the most alike named people first, under "Most
 // alike", each with why ("Looks like them") and "Likely" when the matching would take them, then everyone else;
 // typing still filters by name, and the names it finds come in order of likeness. The list waits for the likeness
-// answer before it shows, so nothing moves under the pointer or the arrow keys once it is there. People without a
-// name are never listed (pets without one still are).
+// answer and the people list before it shows, so nothing moves under the pointer or the arrow keys once it is there
+// (a people list landing later used to add rows and send the highlight back to the first one, so Enter named someone
+// else). People without a name are never listed (pets without one still are).
 import { Fragment, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from 'react'
 import { keepPreviousData, useQuery } from '@tanstack/react-query'
 import clsx from 'clsx'
@@ -120,7 +121,8 @@ export default function PersonPicker({
   const ranking = likeId !== null && alike.isSuccess ? alike.data : null
 
   const options = useMemo<Option[]>(() => {
-    if (waiting) return []
+    // both answers first: rows added under the owner's pointer or keys would move the highlight (setActive below)
+    if (waiting || persons.isPending) return []
     const exclude = new Set(excludeIds ?? [])
     const all = persons.data?.items ?? []
     const kindOf = (p: PickedPerson) => p.kind ?? 'person'
@@ -161,7 +163,7 @@ export default function PersonPicker({
       }
     }
     return list
-  }, [waiting, ranking, persons.data, excludeIds, allowCreate, text, kind, species, speciesOnly, both, pets])
+  }, [waiting, ranking, persons.isPending, persons.data, excludeIds, allowCreate, text, kind, species, speciesOnly, both, pets])
 
   useEffect(() => setActive(0), [q, options.length])
   useEffect(() => {
@@ -274,7 +276,7 @@ export default function PersonPicker({
           return (
           <Fragment key={opt.kind === 'person' ? opt.person.id : `create-${opt.as}`}>
           {heading && (
-            <li role="presentation" className="px-2 pb-1 pt-2 text-[11px] font-semibold uppercase tracking-[0.1em] text-ink-faint">
+            <li role="presentation" className="px-2 pb-1 pt-2 text-[11px] font-semibold uppercase tracking-[0.1em] text-ink-soft">
               {heading}
             </li>
           )}

@@ -1021,8 +1021,9 @@ use them), but no answer of the API shows such a group:
   the name, and no look-alikes follow from an unnamed group (`_follow_lookalikes` still runs for faces leaving a named
   person). Each group's other automatic faces become open guesses for that person, taken out of the group
   (`person_id` NULL, `assigned_by 'guess'`, evidence `{basis: 'group', score, face, ref_face_id, ref_item_uid,
-  was_person_id}`; the score is the cosine to the mean of the faces just named, 0 to 1), the person box around each
-  following it. Left in the group: faces in trashed or vault photos, in a photo where the person is already, faces
+  was_person_id}`; the score is the cosine to the mean of the faces just named, 0 to 1; the reference face is the best
+  of them outside the vault and the trash, and with none there the evidence has no reference, so a locked session's
+  Review never names a vault photo), the person box around each following it. Left in the group: faces in trashed or vault photos, in a photo where the person is already, faces
   the owner turned down for the person, all of a group the owner dismissed against the person (`merge_dismissals`),
   and all but the most alike of a group's faces in one photo (videos may show the person several times). The faces
   named are remembered as not the group (`guess_rejections`); a group left empty goes. `AssignOut.guessed` counts the
