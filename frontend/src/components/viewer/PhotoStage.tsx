@@ -8,6 +8,9 @@
 // system did. Adjust mode (section 10): one box shows BoxAdjuster to move or resize it, the others step back.
 // Body traits (section 34): while a box's editor is open, its tattoo, nails and mehndi regions show as dashed violet
 // rings (the person box's, for a face), drawn only, never in the way of a tap.
+// Overlapping boxes (section 14): a smaller box sits above a larger one and gets the tap (`stackLayers`), whatever
+// is edited, hovered or lit; the names and guess chips sit above every box, a smaller box's above a larger box's.
+// The page keeps the boxes in their list order, so Tab still goes faces, then person boxes, then pets.
 import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
 import { useMutation } from '@tanstack/react-query'
 import clsx from 'clsx'
@@ -20,7 +23,7 @@ import { ORIGIN_LABEL, boxOrigin } from '../../lib/origin'
 import { errorMessage } from '../admin/adminHooks'
 import OriginIcon from '../people/OriginIcon'
 import BoxAdjuster from './BoxAdjuster'
-import { adjustLabel, animalLabel, boxKey, stillBoxes, type BoxTarget, type DrawKind } from './boxes'
+import { adjustLabel, animalLabel, boxKey, stackLayers, stillBoxes, type BoxTarget, type DrawKind } from './boxes'
 import GuessChip from './GuessChip'
 import PersonBoxCard from './PersonBoxCard'
 import { darkButton, useInvalidateItem } from './shared'
@@ -213,6 +216,9 @@ export default function PhotoStage({
   const h = natural?.h || detail.height || 3
   const ratio = w / h
   const boxes = src ? [] : stillBoxes(detail)
+  // Each box's layer, 1 for the largest; the names and chips take the layers above every box, in the same order.
+  const layers = stackLayers(boxes)
+  const labelBase = boxes.length
   const names = detail.people.map((p) => personName(p)).join(', ')
 
   useEffect(() => {
@@ -293,13 +299,16 @@ export default function PhotoStage({
 
       {liveSrc && <LiveClip key={liveSrc} src={liveSrc} onStop={onLiveStop} onError={onLiveError} />}
 
-      {showFaces &&
-        loaded &&
-        !liveSrc &&
-        boxes.map((t) => {
+      {showFaces && loaded && !liveSrc && boxes.length > 0 && (
+        // One layer of its own for the boxes, under the draw and adjust layers: only the boxes and the guess chips
+        // take the pointer, so a tap between them still reaches the photo.
+        <div className="pointer-events-none absolute inset-0 isolate">
+        {boxes.map((t) => {
           const b = t.box
           const key = boxKey(t)
           if (key === adjustKey) return null
+          const layer = layers.get(key) ?? 1
+          const chip = !!b.guess && !b.person
           const isBody = t.kind === 'body'
           const isAnimal = t.kind === 'animal'
           const noun = isAnimal ? 'pet' : isBody ? 'person' : 'face'
@@ -320,15 +329,18 @@ export default function PhotoStage({
           const below = b.y + b.h < 0.86
           const pos = { left: `${b.x * 100}%`, top: `${b.y * 100}%`, width: `${b.w * 100}%`, height: `${b.h * 100}%` }
           return (
-            <div key={key} className={clsx('group absolute', adjustKey && 'pointer-events-none opacity-40')} style={pos}>
+            <div key={key} className="group absolute" style={pos} data-layer={layer}>
               <button
                 type="button"
                 ref={(el) => {
                   if (el) boxRefs.current.set(key, el)
                   else boxRefs.current.delete(key)
                 }}
+                style={{ zIndex: layer }}
                 className={clsx(
                   'absolute inset-0 rounded-md border-2 shadow-[0_0_0_1px_rgba(0,0,0,0.45)] transition-colors focus-visible:outline-none',
+                  // while another box is moved or resized, the others step back and take no taps
+                  adjustKey ? 'opacity-40' : 'pointer-events-auto',
                   (isBody || isAnimal) && 'rounded-lg border-[1.5px]',
                   b.person
                     ? isAnimal
@@ -352,10 +364,12 @@ export default function PhotoStage({
                 onClick={(e) => onEditBox(t, e.currentTarget)}
               />
               <span
+                style={{ zIndex: labelBase + layer }}
                 className={clsx(
                   'absolute left-1/2 flex max-w-[14rem] -translate-x-1/2 justify-center whitespace-nowrap',
                   below ? 'top-full mt-1' : 'bottom-full mb-1',
-                  b.guess ? 'z-10' : 'pointer-events-none',
+                  // a name lets taps through to the boxes under it; a guess chip has buttons of its own
+                  adjustKey ? 'opacity-40' : chip && 'pointer-events-auto',
                 )}
               >
                 {b.guess && !b.person ? (
@@ -386,6 +400,8 @@ export default function PhotoStage({
             </div>
           )
         })}
+        </div>
+      )}
 
       {showFaces &&
         loaded &&

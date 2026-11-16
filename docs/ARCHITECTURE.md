@@ -1615,6 +1615,20 @@ started, or a badge in the details jumping elsewhere. Save sends `PUT .../box` a
 without a request; `no_face` keeps the handles with "No face there. For someone whose face does not show, use
 Add a person box instead." The focus then goes back to the box's own button (on a video, its chip).
 
+Overlapping boxes (2026-11-17, `stackLayers` in `viewer/boxes.ts`, used by `viewer/PhotoStage.tsx`): where boxes on a
+photo overlap, the smaller one is drawn above and gets the tap or click, so a face inside a person box, a child in
+front of a grown-up or a person on a pet's box can always be picked. The layer comes from the box's area alone (its
+share of the width times its share of the height, the same order as the area on screen), 1 for the largest; equal
+areas keep the list's order, the later box above. Nothing else raises a box: the one being edited, hovered,
+focused, lit from a badge or picked by the guess keys shows it by its border and ring only. The boxes sit in a
+layer of their own (`isolate`, under the draw and adjust layers) that lets taps between boxes through to the
+photo; the names and guess chips take the layers above every box, a smaller box's name above a larger box's, so a
+chip is never hidden under a neighbouring box, and a plain name lets taps through to the box under it. The page
+keeps the boxes in their list order (faces, then person boxes without a face, then pets), so Tab moves through
+them as before rather than from the largest to the smallest. A video draws one box at a time (the picked chip's),
+so nothing overlaps there. `frontend/scripts/check-boxes.mjs` (run by `tests/test_viewer_boxes.py`) checks the
+rule in node.
+
 Header (2026-11-08, `components/shell/Header.tsx`, `Nav.tsx`, `HeaderMenu.tsx`): on md and up the bar
 holds the site name (from lg), Library and People as links, a Documents menu (All documents and the six
 document groups, `/documents?group=<id>`) and a More menu in two groups (Browse: Albums, Map, Vault with its
@@ -1952,6 +1966,12 @@ picture named by an address in place of the bytes in the file, and with its pict
 is named by an address (three.js asks for a picture and for a buffer in two different ways): a 19th group checks
 that the page asks for neither address. All 19 groups run in the suite; the test skips when node or the frontend's
 packages are missing. What the pictures look like is not something it can tell: that takes a browser.
+
+`frontend/scripts/check-boxes.mjs` checks the stacking of overlapping boxes on a photo (section 14) the same way: it
+bundles `viewer/boxes.ts` and runs `stackLayers` on a face inside a person box, a person and a face on a pet's box,
+every order of five boxes, a crowd of 40, equal areas, boxes of no size or a broken size, tall and wide photos, and
+the boxes of a photo as the stage lists them: 9 groups, run by `tests/test_viewer_boxes.py` (skipped without node or
+the frontend's packages). That a tap really reaches the smaller box is checked in a browser.
 
 ## 17. Build notes
 
