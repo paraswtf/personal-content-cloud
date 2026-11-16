@@ -93,6 +93,77 @@ In Xcode: pick your team under Signing and Capabilities (the bundle id `in.rivan
 `project.yml`), make sure Background Modes lists "Background fetch" and "Background processing", then run
 on your iPhone. A simulator has no real photo library to speak of, so test on a device.
 
+## Tests on GitHub
+
+The server this project is developed on has no Mac, so the app is compiled and tested by the iOS workflow
+(`.github/workflows/ios.yml`) on GitHub's macOS machines, on every push that touches `ios/`. One run:
+
+1. Generates the project with XcodeGen and builds the app and both test targets for the simulator, while an
+   iPhone simulator boots in the background (`ci/pick_simulator.py` takes the runtime of the SDK the app is
+   built with when the machine has it, else the newest one).
+2. Installs the backend into a virtual environment (`ci/install_backend.sh`: the versions of
+   `backend/uv.lock`, with the CPU onnxruntime in place of the GPU one) and starts it on 127.0.0.1:8765 with
+   the models off (`PCC_NO_MODELS=1`) and a fresh data folder.
+3. Seeds it (`ci/seed_server.py`), first with rows and files written by the backend's own test helpers,
+   then over HTTP like a client: 36 drawn landscape photos over six months (24 with a place, one in the
+   vault, one in the trash, two favourites), two named people ("Test Person", "Test Visitor") with 21 face
+   boxes and three faces nobody named, the owner account (set up through `/api/auth/setup`), a device
+   token from `POST /api/auth/devices` (the route behind Settings > Sessions > Devices), three photos
+   uploaded with the app's resumable protocol (date and place in their EXIF), a text note, two albums
+   and a share link of one. Everything is generated; no real people or photos.
+4. Runs the unit tests (`UnitTests/`, hosted by the app) and the screen tests (`UITests/`) against that
+   server. The seeded address and token reach the tests as `TEST_RUNNER_PCC_TEST_SERVER` and
+   `TEST_RUNNER_PCC_TEST_TOKEN` (xcodebuild hands them to the test runner without the prefix); the tests pass
+   them to the app as the launch variables `PCC_TEST_SERVER` and `PCC_TEST_TOKEN`, and a Debug build signs
+   in with them (`Sources/TestLaunch.swift`, not compiled into Release builds). `PCC_TEST_SIGNED_OUT=1`
+   starts on the sign-in screen instead. With a test server the automatic sync is off.
+5. Keeps the screenshots as the `screenshots` artifact, the build, test and backend logs as `logs`, and
+   on a failure the whole `xcresult` bundle.
+
+A failing test fails the run.
+
+### Adding a screen test
+
+Subclass `ScreenTestCase` in a new file under `UITests/`. `launchSignedIn()` starts the app signed in to
+the seeded server, `tab("Name")` taps a tab, and `snap("name")` keeps a screenshot as `name.png` (keep the
+names unique across tests):
+
+```swift
+final class AlbumsScreens: ScreenTestCase {
+    func testAlbums() throws {
+        try launchSignedIn()
+        tab("Albums")
+        XCTAssertTrue(app.staticTexts["Weekend trip"].waitForExistence(timeout: 15))
+        snap("albums")
+    }
+}
+```
+
+A screen that needs more in the library gets it in `ci/seed_server.py`: rows and files in `library()`,
+anything a client would do in `api()`.
+
+### Reading a run
+
+```bash
+gh run list --workflow iOS --branch <branch>
+gh run watch <run id> --exit-status
+gh run view <run id> --log-failed
+gh run download <run id> -n screenshots -D screenshots/
+```
+
+`screenshots/tests.txt` lists every test with its result.
+
+### Running the tests on a Mac
+
+Start the backend with the same seed (the commands are in the workflow's "Seed and start the backend"
+step), then:
+
+```bash
+TEST_RUNNER_PCC_TEST_SERVER=http://127.0.0.1:8765 TEST_RUNNER_PCC_TEST_TOKEN=<token from seed.json> \
+  xcodebuild test -project PersonalContentCloud.xcodeproj -scheme PersonalContentCloud \
+  -destination 'platform=iOS Simulator,name=iPhone 16 Pro'
+```
+
 ## First run
 
 1. On the website, open Settings > Sessions > Devices, add a device named after your phone and copy the
