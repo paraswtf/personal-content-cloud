@@ -308,7 +308,7 @@ class Client:
         return up
 
 
-def api(server: str, out: Path | None) -> dict:
+def api(server: str, out: Path | None, existing_ok: bool = False) -> dict:
     c = Client(server)
     deadline = time.monotonic() + 120
     while True:
@@ -321,8 +321,14 @@ def api(server: str, out: Path | None) -> dict:
             time.sleep(1)
     if state.get("setup_required"):
         c.call("POST", "/api/auth/setup", {"username": USERNAME, "password": PASSWORD})
-    else:
+    elif existing_ok:
         c.call("POST", "/api/auth/login", {"username": USERNAME, "password": PASSWORD})
+    else:
+        # A server with an account is not one this run just started (another server may hold the port, such as
+        # a real library): never sign in to it or write to it.
+        raise SystemExit(f"the server at {server} already has an account, so it is not the fresh server this "
+                         "seed sets up; stopping without touching it (--existing-ok signs in to a server this "
+                         "script seeded before)")
     c.call("POST", "/api/auth/vault/unlock", {"password": PASSWORD})
     device = c.call("POST", "/api/auth/devices", {"name": DEVICE_NAME})
 
@@ -381,11 +387,13 @@ def main() -> None:
     a = sub.add_parser("api", help="account, token, uploads, album and share, once the server answers")
     a.add_argument("--server", required=True)
     a.add_argument("--out", type=Path)
+    a.add_argument("--existing-ok", action="store_true",
+                   help="sign in to a server this script seeded before instead of stopping")
     args = ap.parse_args()
     if args.step == "library":
         library()
     else:
-        api(args.server, args.out)
+        api(args.server, args.out, existing_ok=args.existing_ok)
 
 
 if __name__ == "__main__":
