@@ -98,7 +98,8 @@ final class CoreScreens: ScreenTestCase {
     private func dismissSheet(showing element: XCUIElement, file: StaticString = #filePath, line: UInt = #line) {
         app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.12)).tap()
         if !element.waitForNonExistence(timeout: 3) {
-            element.press(forDuration: 0.1, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.99)))
+            element.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+                .press(forDuration: 0.1, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.99)))
         }
         XCTAssertTrue(element.waitForNonExistence(timeout: 10), "the sheet did not close", file: file, line: line)
     }
