@@ -20,6 +20,7 @@ final class SmokeScreens: ScreenTestCase {
         tab("More")
         app.buttons["more.upload"].tap()
         XCTAssertTrue(app.navigationBars["Upload and sync"].waitForExistence(timeout: 10))
+        answerSystemAlert(timeout: 5)  // opening upload asks for Photos access
         snap("upload")
         app.buttons["upload.sync"].tap()
         XCTAssertTrue(app.navigationBars["Sync"].waitForExistence(timeout: 30))

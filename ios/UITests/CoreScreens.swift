@@ -16,6 +16,8 @@ final class CoreScreens: ScreenTestCase {
     func testTheTabsTheGridAndMore() throws {
         try launchSignedIn()
         XCTAssertTrue(firstCell.waitForExistence(timeout: 30), "the library grid did not show")
+        let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+        XCTAssertFalse(springboard.alerts.firstMatch.exists, "a permission prompt showed at launch")
         snap("core-library")
         for (label, name) in [("People", "core-people"), ("Albums", "core-albums"), ("Review", "core-review")] {
             tab(label)
@@ -24,9 +26,11 @@ final class CoreScreens: ScreenTestCase {
         tab("More")
         XCTAssertTrue(app.navigationBars["More"].waitForExistence(timeout: 10))
         snap("core-more")
-        // The phone's sync lives under More, Upload and sync.
+        // The phone's sync lives under More, Upload and sync, which is where the app first asks for Photos access
+        // (never at launch: the library above showed no prompt).
         app.buttons["more.upload"].tap()
         XCTAssertTrue(app.navigationBars["Upload and sync"].waitForExistence(timeout: 10))
+        answerSystemAlert(timeout: 5)
         app.buttons["upload.sync"].tap()
         XCTAssertTrue(app.navigationBars["Sync"].waitForExistence(timeout: 10))
         snap("core-sync")
@@ -67,8 +71,7 @@ final class CoreScreens: ScreenTestCase {
         XCTAssertTrue(title.waitForExistence(timeout: 10), "a tapped box opened nothing")
         XCTAssertEqual(title.label, "Face of Test Visitor")
         snap("core-viewer-face-tapped")
-        title.swipeDown()
-        XCTAssertTrue(title.waitForNonExistence(timeout: 10))
+        dismissSheet(showing: title)
 
         // A point of the person box away from the face goes to the person box.
         person.coordinate(withNormalizedOffset: CGVector(dx: 0.85, dy: 0.92)).tap()
@@ -89,6 +92,15 @@ final class CoreScreens: ScreenTestCase {
         snap("core-viewer-no-boxes")
         app.buttons["viewer.close"].tap()
         XCTAssertTrue(firstCell.waitForExistence(timeout: 10))
+    }
+
+    /// Closes a short sheet: a tap on the dimmed screen above it, else a drag down from its text.
+    private func dismissSheet(showing element: XCUIElement, file: StaticString = #filePath, line: UInt = #line) {
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.12)).tap()
+        if !element.waitForNonExistence(timeout: 3) {
+            element.press(forDuration: 0.1, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.99)))
+        }
+        XCTAssertTrue(element.waitForNonExistence(timeout: 10), "the sheet did not close", file: file, line: line)
     }
 
     func testSignInWithThePassword() throws {
