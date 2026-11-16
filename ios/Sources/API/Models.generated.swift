@@ -4289,15 +4289,15 @@ extension API.AnimalListItem {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         id = try c.decode(Int.self, forKey: .id)
         itemUid = try c.decode(String.self, forKey: .itemUid)
-        itemKind = try c.decode(Kind.self, forKey: .itemKind)
+        itemKind = try c.decode(API.Kind.self, forKey: .itemKind)
         thumbUrl = try c.decode(String.self, forKey: .thumbUrl)
         url = try c.decode(String.self, forKey: .url)
         detScore = try c.decode(Double.self, forKey: .detScore)
         species = try c.decode(String.self, forKey: .species)
         frameTimeS = try c.decodeIfPresent(Double.self, forKey: .frameTimeS)
         personId = try c.decodeIfPresent(Int.self, forKey: .personId)
-        assignedBy = try c.decodeIfPresent(AssignedBy.self, forKey: .assignedBy) ?? .auto
-        source = try c.decodeIfPresent(Source.self, forKey: .source) ?? .detector
+        assignedBy = try c.decodeIfPresent(API.AssignedBy.self, forKey: .assignedBy) ?? .auto
+        source = try c.decodeIfPresent(API.Source.self, forKey: .source) ?? .detector
         createdAt = try c.decode(String.self, forKey: .createdAt)
     }
 }
@@ -4313,10 +4313,10 @@ extension API.AnimalOut {
         detScore = try c.decode(Double.self, forKey: .detScore)
         species = try c.decode(String.self, forKey: .species)
         frameTimeS = try c.decodeIfPresent(Double.self, forKey: .frameTimeS)
-        person = try c.decodeIfPresent(PersonRef.self, forKey: .person)
-        assignedBy = try c.decodeIfPresent(AssignedBy.self, forKey: .assignedBy) ?? .auto
-        speciesSource = try c.decodeIfPresent(AssignedBy.self, forKey: .speciesSource) ?? .auto
-        source = try c.decodeIfPresent(Source.self, forKey: .source) ?? .detector
+        person = try c.decodeIfPresent(API.PersonRef.self, forKey: .person)
+        assignedBy = try c.decodeIfPresent(API.AssignedBy.self, forKey: .assignedBy) ?? .auto
+        speciesSource = try c.decodeIfPresent(API.AssignedBy.self, forKey: .speciesSource) ?? .auto
+        source = try c.decodeIfPresent(API.Source.self, forKey: .source) ?? .detector
         url = try c.decode(String.self, forKey: .url)
         group = try c.decodeIfPresent(Int.self, forKey: .group)
     }
@@ -4354,7 +4354,7 @@ extension API.AssignOut {
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         updated = try c.decode(Int.self, forKey: .updated)
-        person = try c.decodeIfPresent(PersonOut.self, forKey: .person)
+        person = try c.decodeIfPresent(API.PersonOut.self, forKey: .person)
         followed = try c.decodeIfPresent(Int.self, forKey: .followed) ?? 0
     }
 }
@@ -4381,8 +4381,8 @@ extension API.BackupOut {
         hour = try c.decode(Int.self, forKey: .hour)
         keep = try c.decode(Int.self, forKey: .keep)
         running = try c.decode(Bool.self, forKey: .running)
-        progress = try c.decodeIfPresent([String: JSONValue].self, forKey: .progress)
-        last = try c.decodeIfPresent([String: JSONValue].self, forKey: .last)
+        progress = try c.decodeIfPresent([String: API.JSONValue].self, forKey: .progress)
+        last = try c.decodeIfPresent([String: API.JSONValue].self, forKey: .last)
         snapshots = try c.decodeIfPresent([String].self, forKey: .snapshots) ?? []
         nextRunAt = try c.decodeIfPresent(String.self, forKey: .nextRunAt)
         freeBytes = try c.decodeIfPresent(Int.self, forKey: .freeBytes)
@@ -4400,15 +4400,15 @@ extension API.BodyOut {
         h = try c.decode(Double.self, forKey: .h)
         detScore = try c.decode(Double.self, forKey: .detScore)
         faceId = try c.decodeIfPresent(Int.self, forKey: .faceId)
-        person = try c.decodeIfPresent(PersonRef.self, forKey: .person)
-        assignedBy = try c.decodeIfPresent(BodyOutAssignedBy.self, forKey: .assignedBy) ?? .auto
-        guess = try c.decodeIfPresent(GuessOut.self, forKey: .guess)
+        person = try c.decodeIfPresent(API.PersonRef.self, forKey: .person)
+        assignedBy = try c.decodeIfPresent(API.BodyOutAssignedBy.self, forKey: .assignedBy) ?? .auto
+        guess = try c.decodeIfPresent(API.GuessOut.self, forKey: .guess)
         frameTimeS = try c.decodeIfPresent(Double.self, forKey: .frameTimeS)
         url = try c.decode(String.self, forKey: .url)
         group = try c.decodeIfPresent(Int.self, forKey: .group)
         byGuess = try c.decodeIfPresent(Bool.self, forKey: .byGuess) ?? false
-        source = try c.decodeIfPresent(Source.self, forKey: .source) ?? .detector
-        traits = try c.decodeIfPresent([TraitOut].self, forKey: .traits)
+        source = try c.decodeIfPresent(API.Source.self, forKey: .source) ?? .detector
+        traits = try c.decodeIfPresent([API.TraitOut].self, forKey: .traits)
     }
 }
 
@@ -4462,7 +4462,7 @@ extension API.DocumentOut {
         docGroup = try c.decode(String.self, forKey: .docGroup)
         label = try c.decode(String.self, forKey: .label)
         confidence = try c.decode(Double.self, forKey: .confidence)
-        fields = try c.decode([String: DocumentField].self, forKey: .fields)
+        fields = try c.decode([String: API.DocumentField].self, forKey: .fields)
         fieldOrder = try c.decodeIfPresent([String].self, forKey: .fieldOrder) ?? []
         title = try c.decodeIfPresent(String.self, forKey: .title)
         docDate = try c.decodeIfPresent(String.self, forKey: .docDate)
@@ -4471,7 +4471,7 @@ extension API.DocumentOut {
         barcode = try c.decodeIfPresent(String.self, forKey: .barcode)
         barcodeFormat = try c.decodeIfPresent(String.self, forKey: .barcodeFormat)
         photoUrl = try c.decodeIfPresent(String.self, forKey: .photoUrl)
-        source = try c.decodeIfPresent(AssignedBy.self, forKey: .source) ?? .auto
+        source = try c.decodeIfPresent(API.AssignedBy.self, forKey: .source) ?? .auto
         walletAvailable = try c.decodeIfPresent(Bool.self, forKey: .walletAvailable) ?? false
         updatedAt = try c.decode(String.self, forKey: .updatedAt)
     }
@@ -4514,7 +4514,7 @@ extension API.FaceListItem {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         id = try c.decode(Int.self, forKey: .id)
         itemUid = try c.decode(String.self, forKey: .itemUid)
-        itemKind = try c.decode(Kind.self, forKey: .itemKind)
+        itemKind = try c.decode(API.Kind.self, forKey: .itemKind)
         thumbUrl = try c.decode(String.self, forKey: .thumbUrl)
         url = try c.decode(String.self, forKey: .url)
         detScore = try c.decode(Double.self, forKey: .detScore)
@@ -4522,10 +4522,10 @@ extension API.FaceListItem {
         quality = try c.decode(Double.self, forKey: .quality)
         frameTimeS = try c.decodeIfPresent(Double.self, forKey: .frameTimeS)
         personId = try c.decodeIfPresent(Int.self, forKey: .personId)
-        assignedBy = try c.decode(BodyOutAssignedBy.self, forKey: .assignedBy)
-        source = try c.decodeIfPresent(Source.self, forKey: .source) ?? .detector
+        assignedBy = try c.decode(API.BodyOutAssignedBy.self, forKey: .assignedBy)
+        source = try c.decodeIfPresent(API.Source.self, forKey: .source) ?? .detector
         byGuess = try c.decodeIfPresent(Bool.self, forKey: .byGuess) ?? false
-        guess = try c.decodeIfPresent(GuessOut.self, forKey: .guess)
+        guess = try c.decodeIfPresent(API.GuessOut.self, forKey: .guess)
         createdAt = try c.decode(String.self, forKey: .createdAt)
     }
 }
@@ -4543,12 +4543,12 @@ extension API.FaceOut {
         quality = try c.decode(Double.self, forKey: .quality)
         frameTimeS = try c.decodeIfPresent(Double.self, forKey: .frameTimeS)
         spans = try c.decodeIfPresent([[Double]].self, forKey: .spans)
-        person = try c.decodeIfPresent(PersonRef.self, forKey: .person)
-        assignedBy = try c.decodeIfPresent(BodyOutAssignedBy.self, forKey: .assignedBy) ?? .auto
-        guess = try c.decodeIfPresent(GuessOut.self, forKey: .guess)
+        person = try c.decodeIfPresent(API.PersonRef.self, forKey: .person)
+        assignedBy = try c.decodeIfPresent(API.BodyOutAssignedBy.self, forKey: .assignedBy) ?? .auto
+        guess = try c.decodeIfPresent(API.GuessOut.self, forKey: .guess)
         url = try c.decode(String.self, forKey: .url)
         group = try c.decodeIfPresent(Int.self, forKey: .group)
-        source = try c.decodeIfPresent(Source.self, forKey: .source) ?? .detector
+        source = try c.decodeIfPresent(API.Source.self, forKey: .source) ?? .detector
         byGuess = try c.decodeIfPresent(Bool.self, forKey: .byGuess) ?? false
     }
 }
@@ -4566,9 +4566,9 @@ extension API.GuessCorrectIn {
 extension API.GuessOut {
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        person = try c.decode(PersonRef.self, forKey: .person)
+        person = try c.decode(API.PersonRef.self, forKey: .person)
         score = try c.decode(Double.self, forKey: .score)
-        evidence = try c.decodeIfPresent([String: JSONValue].self, forKey: .evidence) ?? [:]
+        evidence = try c.decodeIfPresent([String: API.JSONValue].self, forKey: .evidence) ?? [:]
     }
 }
 
@@ -4576,7 +4576,7 @@ extension API.ItemCard {
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         uid = try c.decode(String.self, forKey: .uid)
-        kind = try c.decode(Kind.self, forKey: .kind)
+        kind = try c.decode(API.Kind.self, forKey: .kind)
         version = try c.decode(Int.self, forKey: .version)
         filename = try c.decode(String.self, forKey: .filename)
         width = try c.decodeIfPresent(Int.self, forKey: .width)
@@ -4584,20 +4584,20 @@ extension API.ItemCard {
         durationS = try c.decodeIfPresent(Double.self, forKey: .durationS)
         takenAt = try c.decodeIfPresent(String.self, forKey: .takenAt)
         createdAt = try c.decode(String.self, forKey: .createdAt)
-        category = try c.decode(Category.self, forKey: .category)
+        category = try c.decode(API.Category.self, forKey: .category)
         nsfw = try c.decodeIfPresent(Bool.self, forKey: .nsfw) ?? false
         misclick = try c.decodeIfPresent(Bool.self, forKey: .misclick) ?? false
-        misclickReasons = try c.decodeIfPresent([String: JSONValue].self, forKey: .misclickReasons)
+        misclickReasons = try c.decodeIfPresent([String: API.JSONValue].self, forKey: .misclickReasons)
         receivedVia = try c.decodeIfPresent(String.self, forKey: .receivedVia)
         forward = try c.decodeIfPresent(Bool.self, forKey: .forward) ?? false
-        forwardReasons = try c.decodeIfPresent([String: JSONValue].self, forKey: .forwardReasons)
+        forwardReasons = try c.decodeIfPresent([String: API.JSONValue].self, forKey: .forwardReasons)
         favorite = try c.decodeIfPresent(Bool.self, forKey: .favorite) ?? false
         dupGroup = try c.decodeIfPresent(String.self, forKey: .dupGroup)
         dupCount = try c.decodeIfPresent(Int.self, forKey: .dupCount) ?? 0
         pageCount = try c.decodeIfPresent(Int.self, forKey: .pageCount)
         docType = try c.decodeIfPresent(String.self, forKey: .docType)
         live = try c.decodeIfPresent(Bool.self, forKey: .live) ?? false
-        urls = try c.decode(ItemUrls.self, forKey: .urls)
+        urls = try c.decode(API.ItemUrls.self, forKey: .urls)
     }
 }
 
@@ -4605,7 +4605,7 @@ extension API.ItemDetail {
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         uid = try c.decode(String.self, forKey: .uid)
-        kind = try c.decode(Kind.self, forKey: .kind)
+        kind = try c.decode(API.Kind.self, forKey: .kind)
         version = try c.decode(Int.self, forKey: .version)
         filename = try c.decode(String.self, forKey: .filename)
         width = try c.decodeIfPresent(Int.self, forKey: .width)
@@ -4613,20 +4613,20 @@ extension API.ItemDetail {
         durationS = try c.decodeIfPresent(Double.self, forKey: .durationS)
         takenAt = try c.decodeIfPresent(String.self, forKey: .takenAt)
         createdAt = try c.decode(String.self, forKey: .createdAt)
-        category = try c.decode(Category.self, forKey: .category)
+        category = try c.decode(API.Category.self, forKey: .category)
         nsfw = try c.decodeIfPresent(Bool.self, forKey: .nsfw) ?? false
         misclick = try c.decodeIfPresent(Bool.self, forKey: .misclick) ?? false
-        misclickReasons = try c.decodeIfPresent([String: JSONValue].self, forKey: .misclickReasons)
+        misclickReasons = try c.decodeIfPresent([String: API.JSONValue].self, forKey: .misclickReasons)
         receivedVia = try c.decodeIfPresent(String.self, forKey: .receivedVia)
         forward = try c.decodeIfPresent(Bool.self, forKey: .forward) ?? false
-        forwardReasons = try c.decodeIfPresent([String: JSONValue].self, forKey: .forwardReasons)
+        forwardReasons = try c.decodeIfPresent([String: API.JSONValue].self, forKey: .forwardReasons)
         favorite = try c.decodeIfPresent(Bool.self, forKey: .favorite) ?? false
         dupGroup = try c.decodeIfPresent(String.self, forKey: .dupGroup)
         dupCount = try c.decodeIfPresent(Int.self, forKey: .dupCount) ?? 0
         pageCount = try c.decodeIfPresent(Int.self, forKey: .pageCount)
         docType = try c.decodeIfPresent(String.self, forKey: .docType)
         live = try c.decodeIfPresent(Bool.self, forKey: .live) ?? false
-        urls = try c.decode(ItemUrls.self, forKey: .urls)
+        urls = try c.decode(API.ItemUrls.self, forKey: .urls)
         mime = try c.decode(String.self, forKey: .mime)
         sizeBytes = try c.decode(Int.self, forKey: .sizeBytes)
         bitrate = try c.decodeIfPresent(Int.self, forKey: .bitrate)
@@ -4634,27 +4634,27 @@ extension API.ItemDetail {
         videoCodec = try c.decodeIfPresent(String.self, forKey: .videoCodec)
         hasAudio = try c.decodeIfPresent(Bool.self, forKey: .hasAudio)
         camera = try c.decodeIfPresent(String.self, forKey: .camera)
-        gps = try c.decodeIfPresent(GpsOut.self, forKey: .gps)
+        gps = try c.decodeIfPresent(API.GpsOut.self, forKey: .gps)
         exifDatetime = try c.decodeIfPresent(String.self, forKey: .exifDatetime)
-        categorySource = try c.decodeIfPresent(AssignedBy.self, forKey: .categorySource) ?? .auto
-        forwardSource = try c.decodeIfPresent(AssignedBy.self, forKey: .forwardSource) ?? .auto
+        categorySource = try c.decodeIfPresent(API.AssignedBy.self, forKey: .categorySource) ?? .auto
+        forwardSource = try c.decodeIfPresent(API.AssignedBy.self, forKey: .forwardSource) ?? .auto
         categoryScores = try c.decodeIfPresent([String: Double].self, forKey: .categoryScores)
         nsfwScore = try c.decodeIfPresent(Double.self, forKey: .nsfwScore)
-        qualityScores = try c.decodeIfPresent([String: JSONValue].self, forKey: .qualityScores)
-        labels = try c.decodeIfPresent([LabelOut].self, forKey: .labels) ?? []
-        faces = try c.decodeIfPresent([FaceOut].self, forKey: .faces) ?? []
-        bodies = try c.decodeIfPresent([BodyOut].self, forKey: .bodies) ?? []
-        animals = try c.decodeIfPresent([AnimalOut].self, forKey: .animals) ?? []
-        albums = try c.decodeIfPresent([AlbumRef].self, forKey: .albums) ?? []
+        qualityScores = try c.decodeIfPresent([String: API.JSONValue].self, forKey: .qualityScores)
+        labels = try c.decodeIfPresent([API.LabelOut].self, forKey: .labels) ?? []
+        faces = try c.decodeIfPresent([API.FaceOut].self, forKey: .faces) ?? []
+        bodies = try c.decodeIfPresent([API.BodyOut].self, forKey: .bodies) ?? []
+        animals = try c.decodeIfPresent([API.AnimalOut].self, forKey: .animals) ?? []
+        albums = try c.decodeIfPresent([API.AlbumRef].self, forKey: .albums) ?? []
         place = try c.decodeIfPresent(String.self, forKey: .place)
-        tags = try c.decodeIfPresent([PersonRef].self, forKey: .tags) ?? []
-        people = try c.decodeIfPresent([PersonRef].self, forKey: .people) ?? []
-        userTags = try c.decodeIfPresent([ItemTagOut].self, forKey: .userTags) ?? []
-        liveVideo = try c.decodeIfPresent(LiveVideoOut.self, forKey: .liveVideo)
-        document = try c.decodeIfPresent(DocumentOut.self, forKey: .document)
-        textStatus = try c.decodeIfPresent(PreviewStatus.self, forKey: .textStatus) ?? .none
-        analysisStatus = try c.decodeIfPresent(AnalysisStatus.self, forKey: .analysisStatus) ?? .pending
-        previewStatus = try c.decodeIfPresent(PreviewStatus.self, forKey: .previewStatus) ?? .none
+        tags = try c.decodeIfPresent([API.PersonRef].self, forKey: .tags) ?? []
+        people = try c.decodeIfPresent([API.PersonRef].self, forKey: .people) ?? []
+        userTags = try c.decodeIfPresent([API.ItemTagOut].self, forKey: .userTags) ?? []
+        liveVideo = try c.decodeIfPresent(API.LiveVideoOut.self, forKey: .liveVideo)
+        document = try c.decodeIfPresent(API.DocumentOut.self, forKey: .document)
+        textStatus = try c.decodeIfPresent(API.PreviewStatus.self, forKey: .textStatus) ?? .none
+        analysisStatus = try c.decodeIfPresent(API.AnalysisStatus.self, forKey: .analysisStatus) ?? .pending
+        previewStatus = try c.decodeIfPresent(API.PreviewStatus.self, forKey: .previewStatus) ?? .none
         deletedAt = try c.decodeIfPresent(String.self, forKey: .deletedAt)
         updatedAt = try c.decode(String.self, forKey: .updatedAt)
     }
@@ -4665,7 +4665,7 @@ extension API.ItemPersonOut {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         id = try c.decode(Int.self, forKey: .id)
         name = try c.decodeIfPresent(String.self, forKey: .name)
-        kind = try c.decodeIfPresent(ItemPersonOutKind.self, forKey: .kind) ?? .person
+        kind = try c.decodeIfPresent(API.ItemPersonOutKind.self, forKey: .kind) ?? .person
         species = try c.decodeIfPresent(String.self, forKey: .species)
         coverUrl = try c.decodeIfPresent(String.self, forKey: .coverUrl)
         items = try c.decodeIfPresent(Int.self, forKey: .items) ?? 0
@@ -4683,7 +4683,7 @@ extension API.ItemTagOut {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         id = try c.decode(Int.self, forKey: .id)
         name = try c.decode(String.self, forKey: .name)
-        source = try c.decodeIfPresent(AssignedBy.self, forKey: .source) ?? .user
+        source = try c.decodeIfPresent(API.AssignedBy.self, forKey: .source) ?? .user
         score = try c.decodeIfPresent(Double.self, forKey: .score)
     }
 }
@@ -4719,7 +4719,7 @@ extension API.ItemsPeopleOut {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         items = try c.decode(Int.self, forKey: .items)
         unnamedFaces = try c.decodeIfPresent(Int.self, forKey: .unnamedFaces) ?? 0
-        people = try c.decodeIfPresent([ItemPersonOut].self, forKey: .people) ?? []
+        people = try c.decodeIfPresent([API.ItemPersonOut].self, forKey: .people) ?? []
     }
 }
 
@@ -4746,10 +4746,10 @@ extension API.LearningStatus {
         enabled = try c.decode(Bool.self, forKey: .enabled)
         trainedAt = try c.decodeIfPresent(String.self, forKey: .trainedAt)
         pending = try c.decodeIfPresent(Int.self, forKey: .pending) ?? 0
-        learners = try c.decode([String: JSONValue].self, forKey: .learners)
+        learners = try c.decode([String: API.JSONValue].self, forKey: .learners)
         events = try c.decodeIfPresent([String: Int].self, forKey: .events) ?? [:]
         errors = try c.decodeIfPresent([String: String].self, forKey: .errors) ?? [:]
-        vaultSensitivity = try c.decodeIfPresent(VaultSensitivity.self, forKey: .vaultSensitivity) ?? .normal
+        vaultSensitivity = try c.decodeIfPresent(API.VaultSensitivity.self, forKey: .vaultSensitivity) ?? .normal
         vaultMoved = try c.decodeIfPresent([String: Int].self, forKey: .vaultMoved)
     }
 }
@@ -4807,11 +4807,11 @@ extension API.Model3dOut {
         state = try c.decode(String.self, forKey: .state)
         busy = try c.decodeIfPresent(Bool.self, forKey: .busy) ?? false
         stopping = try c.decodeIfPresent(Bool.self, forKey: .stopping) ?? false
-        progress = try c.decodeIfPresent(Model3dProgress.self, forKey: .progress)
+        progress = try c.decodeIfPresent(API.Model3dProgress.self, forKey: .progress)
         error = try c.decodeIfPresent(String.self, forKey: .error)
         generatedAt = try c.decodeIfPresent(String.self, forKey: .generatedAt)
-        options = try c.decodeIfPresent(Model3dOptions.self, forKey: .options)
-        looks = try c.decodeIfPresent([Look3dOut].self, forKey: .looks) ?? []
+        options = try c.decodeIfPresent(API.Model3dOptions.self, forKey: .options)
+        looks = try c.decodeIfPresent([API.Look3dOut].self, forKey: .looks) ?? []
     }
 }
 
@@ -4863,7 +4863,7 @@ extension API.PeopleBulkOut {
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         updated = try c.decode(Int.self, forKey: .updated)
-        person = try c.decodeIfPresent(PersonOut.self, forKey: .person)
+        person = try c.decodeIfPresent(API.PersonOut.self, forKey: .person)
         followed = try c.decodeIfPresent(Int.self, forKey: .followed) ?? 0
         pulled = try c.decodeIfPresent(Int.self, forKey: .pulled) ?? 0
     }
@@ -4915,7 +4915,7 @@ extension API.PersonOut {
         itemCount = try c.decodeIfPresent(Int.self, forKey: .itemCount) ?? 0
         guessCount = try c.decodeIfPresent(Int.self, forKey: .guessCount) ?? 0
         createdAt = try c.decode(String.self, forKey: .createdAt)
-        kind = try c.decodeIfPresent(ItemPersonOutKind.self, forKey: .kind) ?? .person
+        kind = try c.decodeIfPresent(API.ItemPersonOutKind.self, forKey: .kind) ?? .person
         species = try c.decodeIfPresent(String.self, forKey: .species)
         animalCount = try c.decodeIfPresent(Int.self, forKey: .animalCount) ?? 0
         confirmedFaces = try c.decodeIfPresent(Int.self, forKey: .confirmedFaces) ?? 0
@@ -4931,8 +4931,8 @@ extension API.PersonRef {
         id = try c.decode(Int.self, forKey: .id)
         name = try c.decodeIfPresent(String.self, forKey: .name)
         coverUrl = try c.decodeIfPresent(String.self, forKey: .coverUrl)
-        kind = try c.decodeIfPresent(ItemPersonOutKind.self, forKey: .kind) ?? .person
-        relation = try c.decodeIfPresent(Relation.self, forKey: .relation) ?? .in
+        kind = try c.decodeIfPresent(API.ItemPersonOutKind.self, forKey: .kind) ?? .person
+        relation = try c.decodeIfPresent(API.Relation.self, forKey: .relation) ?? .in
         byGuess = try c.decodeIfPresent(Bool.self, forKey: .byGuess)
     }
 }
@@ -4940,9 +4940,9 @@ extension API.PersonRef {
 extension API.PersonTraitsOut {
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        tattoos = try c.decodeIfPresent([TraitGroupOut].self, forKey: .tattoos) ?? []
-        mehndi = try c.decodeIfPresent([TraitOut].self, forKey: .mehndi) ?? []
-        nails = try c.decodeIfPresent([TraitOut].self, forKey: .nails) ?? []
+        tattoos = try c.decodeIfPresent([API.TraitGroupOut].self, forKey: .tattoos) ?? []
+        mehndi = try c.decodeIfPresent([API.TraitOut].self, forKey: .mehndi) ?? []
+        nails = try c.decodeIfPresent([API.TraitOut].self, forKey: .nails) ?? []
     }
 }
 
@@ -4957,13 +4957,13 @@ extension API.PersonUpdate {
 extension API.RecognitionCheck {
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        folds = try c.decodeIfPresent(Folds.self, forKey: .folds)
+        folds = try c.decodeIfPresent(API.Folds.self, forKey: .folds)
         positives = try c.decode(Int.self, forKey: .positives)
         negatives = try c.decode(Int.self, forKey: .negatives)
         unclearPositives = try c.decodeIfPresent(Int.self, forKey: .unclearPositives) ?? 0
         unclearNegatives = try c.decodeIfPresent(Int.self, forKey: .unclearNegatives) ?? 0
-        cuts = try c.decodeIfPresent([RecognitionCut].self, forKey: .cuts) ?? []
-        claim = try c.decodeIfPresent(RecognitionCut.self, forKey: .claim)
+        cuts = try c.decodeIfPresent([API.RecognitionCut].self, forKey: .cuts) ?? []
+        claim = try c.decodeIfPresent(API.RecognitionCut.self, forKey: .claim)
     }
 }
 
@@ -4987,16 +4987,16 @@ extension API.RecognitionOut {
         trained = try c.decodeIfPresent(Bool.self, forKey: .trained) ?? false
         trainedAt = try c.decodeIfPresent(String.self, forKey: .trainedAt)
         counts = try c.decodeIfPresent([String: Double].self, forKey: .counts) ?? [:]
-        check = try c.decodeIfPresent(RecognitionCheck.self, forKey: .check)
+        check = try c.decodeIfPresent(API.RecognitionCheck.self, forKey: .check)
         guessP = try c.decodeIfPresent(Double.self, forKey: .guessP)
         sureP = try c.decodeIfPresent(Double.self, forKey: .sureP)
         conflicts = try c.decodeIfPresent(Int.self, forKey: .conflicts) ?? 0
         elsewhere = try c.decodeIfPresent(Int.self, forKey: .elsewhere) ?? 0
         guesses = try c.decodeIfPresent(Int.self, forKey: .guesses) ?? 0
         withdrawn = try c.decodeIfPresent(Bool.self, forKey: .withdrawn) ?? false
-        scan = try c.decodeIfPresent(RecognitionScan.self, forKey: .scan)
-        running = try c.decodeIfPresent(Running.self, forKey: .running)
-        progress = try c.decodeIfPresent(RecognitionProgress.self, forKey: .progress)
+        scan = try c.decodeIfPresent(API.RecognitionScan.self, forKey: .scan)
+        running = try c.decodeIfPresent(API.Running.self, forKey: .running)
+        progress = try c.decodeIfPresent(API.RecognitionProgress.self, forKey: .progress)
         error = try c.decodeIfPresent(String.self, forKey: .error)
         answersSince = try c.decodeIfPresent(Int.self, forKey: .answersSince) ?? 0
         busy = try c.decodeIfPresent(Bool.self, forKey: .busy) ?? false
@@ -5007,7 +5007,7 @@ extension API.SearchHit {
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         uid = try c.decode(String.self, forKey: .uid)
-        kind = try c.decode(Kind.self, forKey: .kind)
+        kind = try c.decode(API.Kind.self, forKey: .kind)
         version = try c.decode(Int.self, forKey: .version)
         filename = try c.decode(String.self, forKey: .filename)
         width = try c.decodeIfPresent(Int.self, forKey: .width)
@@ -5015,24 +5015,24 @@ extension API.SearchHit {
         durationS = try c.decodeIfPresent(Double.self, forKey: .durationS)
         takenAt = try c.decodeIfPresent(String.self, forKey: .takenAt)
         createdAt = try c.decode(String.self, forKey: .createdAt)
-        category = try c.decode(Category.self, forKey: .category)
+        category = try c.decode(API.Category.self, forKey: .category)
         nsfw = try c.decodeIfPresent(Bool.self, forKey: .nsfw) ?? false
         misclick = try c.decodeIfPresent(Bool.self, forKey: .misclick) ?? false
-        misclickReasons = try c.decodeIfPresent([String: JSONValue].self, forKey: .misclickReasons)
+        misclickReasons = try c.decodeIfPresent([String: API.JSONValue].self, forKey: .misclickReasons)
         receivedVia = try c.decodeIfPresent(String.self, forKey: .receivedVia)
         forward = try c.decodeIfPresent(Bool.self, forKey: .forward) ?? false
-        forwardReasons = try c.decodeIfPresent([String: JSONValue].self, forKey: .forwardReasons)
+        forwardReasons = try c.decodeIfPresent([String: API.JSONValue].self, forKey: .forwardReasons)
         favorite = try c.decodeIfPresent(Bool.self, forKey: .favorite) ?? false
         dupGroup = try c.decodeIfPresent(String.self, forKey: .dupGroup)
         dupCount = try c.decodeIfPresent(Int.self, forKey: .dupCount) ?? 0
         pageCount = try c.decodeIfPresent(Int.self, forKey: .pageCount)
         docType = try c.decodeIfPresent(String.self, forKey: .docType)
         live = try c.decodeIfPresent(Bool.self, forKey: .live) ?? false
-        urls = try c.decode(ItemUrls.self, forKey: .urls)
+        urls = try c.decode(API.ItemUrls.self, forKey: .urls)
         score = try c.decode(Double.self, forKey: .score)
         matchTimeS = try c.decodeIfPresent(Double.self, forKey: .matchTimeS)
         snippet = try c.decodeIfPresent(String.self, forKey: .snippet)
-        source = try c.decodeIfPresent(SearchHitSource.self, forKey: .source) ?? .semantic
+        source = try c.decodeIfPresent(API.SearchHitSource.self, forKey: .source) ?? .semantic
     }
 }
 
@@ -5087,23 +5087,23 @@ extension API.Stats {
         duplicates = try c.decode(Int.self, forKey: .duplicates)
         trash = try c.decode(Int.self, forKey: .trash)
         nsfw = try c.decode(Int.self, forKey: .nsfw)
-        queue = try c.decode([String: JSONValue].self, forKey: .queue)
-        disk = try c.decode(DiskStats.self, forKey: .disk)
+        queue = try c.decode([String: API.JSONValue].self, forKey: .queue)
+        disk = try c.decode(API.DiskStats.self, forKey: .disk)
         analysis = try c.decode([String: Int].self, forKey: .analysis)
         text = try c.decode([String: Int].self, forKey: .text)
-        recent = try c.decodeIfPresent([ItemCard].self, forKey: .recent) ?? []
+        recent = try c.decodeIfPresent([API.ItemCard].self, forKey: .recent) ?? []
     }
 }
 
 extension API.Suggestion {
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        a = try c.decode(PersonOut.self, forKey: .a)
-        b = try c.decode(PersonOut.self, forKey: .b)
+        a = try c.decode(API.PersonOut.self, forKey: .a)
+        b = try c.decode(API.PersonOut.self, forKey: .b)
         similarity = try c.decode(Double.self, forKey: .similarity)
         aSamples = try c.decodeIfPresent([String].self, forKey: .aSamples) ?? []
         bSamples = try c.decodeIfPresent([String].self, forKey: .bSamples) ?? []
-        kind = try c.decodeIfPresent(SuggestionKind.self, forKey: .kind) ?? .same
+        kind = try c.decodeIfPresent(API.SuggestionKind.self, forKey: .kind) ?? .same
     }
 }
 
@@ -5112,7 +5112,7 @@ extension API.SyncCheckOut {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         known = try c.decodeIfPresent([String: String].self, forKey: .known) ?? [:]
         assets = try c.decodeIfPresent([String: String].self, forKey: .assets) ?? [:]
-        pending = try c.decodeIfPresent([String: [SyncPending]].self, forKey: .pending) ?? [:]
+        pending = try c.decodeIfPresent([String: [API.SyncPending]].self, forKey: .pending) ?? [:]
         trashed = try c.decodeIfPresent([String].self, forKey: .trashed) ?? []
     }
 }
@@ -5121,7 +5121,7 @@ extension API.SyncPending {
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         uploadId = try c.decode(String.self, forKey: .uploadId)
-        resource = try c.decodeIfPresent(Resource.self, forKey: .resource) ?? .file
+        resource = try c.decodeIfPresent(API.Resource.self, forKey: .resource) ?? .file
         receivedBytes = try c.decode(Int.self, forKey: .receivedBytes)
         size = try c.decode(Int.self, forKey: .size)
     }
@@ -5151,13 +5151,13 @@ extension API.TagOut {
 extension API.TraitGroupOut {
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        kind = try c.decode(TraitGroupOutKind.self, forKey: .kind)
+        kind = try c.decode(API.TraitGroupOutKind.self, forKey: .kind)
         part = try c.decode(String.self, forKey: .part)
         label = try c.decode(String.self, forKey: .label)
         photos = try c.decode(Int.self, forKey: .photos)
         firstSeen = try c.decodeIfPresent(String.self, forKey: .firstSeen)
         lastSeen = try c.decodeIfPresent(String.self, forKey: .lastSeen)
-        best = try c.decode(TraitOut.self, forKey: .best)
+        best = try c.decode(API.TraitOut.self, forKey: .best)
         itemUids = try c.decodeIfPresent([String].self, forKey: .itemUids) ?? []
     }
 }
@@ -5166,7 +5166,7 @@ extension API.TraitOut {
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         id = try c.decode(Int.self, forKey: .id)
-        kind = try c.decode(TraitGroupOutKind.self, forKey: .kind)
+        kind = try c.decode(API.TraitGroupOutKind.self, forKey: .kind)
         part = try c.decode(String.self, forKey: .part)
         x = try c.decode(Double.self, forKey: .x)
         y = try c.decode(Double.self, forKey: .y)
@@ -5202,7 +5202,7 @@ extension API.UploadOut {
         filename = try c.decode(String.self, forKey: .filename)
         size = try c.decode(Int.self, forKey: .size)
         receivedBytes = try c.decode(Int.self, forKey: .receivedBytes)
-        status = try c.decode(Status.self, forKey: .status)
+        status = try c.decode(API.Status.self, forKey: .status)
         message = try c.decodeIfPresent(String.self, forKey: .message)
         chunkSize = try c.decode(Int.self, forKey: .chunkSize)
         itemUid = try c.decodeIfPresent(String.self, forKey: .itemUid)

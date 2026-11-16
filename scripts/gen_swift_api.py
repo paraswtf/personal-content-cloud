@@ -413,7 +413,7 @@ class Generator:
         ext = [f"extension API.{name} {{", "    init(from decoder: Decoder) throws {",
                "        var c = try decoder.unkeyedContainer()"]
         for f, t, n in fields:
-            ext.append(f"        {f} = try c.{'decodeIfPresent' if n else 'decode'}({t}.self)")
+            ext.append(f"        {f} = try c.{'decodeIfPresent' if n else 'decode'}({self.qualify(t)}.self)")
         ext += ["    }", "", "    func encode(to encoder: Encoder) throws {", "        var c = encoder.unkeyedContainer()"]
         for f, t, n in fields:
             if n:
@@ -518,11 +518,11 @@ class Generator:
             for f in fields:
                 key = "." + f["swift"].strip("`")
                 if f["kind"] == "required":
-                    ext.append(f"        {f['swift']} = try c.decode({f['type']}.self, forKey: {key})")
+                    ext.append(f"        {f['swift']} = try c.decode({self.qualify(f['type'])}.self, forKey: {key})")
                 elif f["kind"] == "optional":
-                    ext.append(f"        {f['swift']} = try c.decodeIfPresent({f['type']}.self, forKey: {key})")
+                    ext.append(f"        {f['swift']} = try c.decodeIfPresent({self.qualify(f['type'])}.self, forKey: {key})")
                 else:
-                    ext.append(f"        {f['swift']} = try c.decodeIfPresent({f['type']}.self, forKey: {key}) "
+                    ext.append(f"        {f['swift']} = try c.decodeIfPresent({self.qualify(f['type'])}.self, forKey: {key}) "
                                f"?? {f['literal']}")
             ext.append("    }")
         if is_input and any(f["nullable"] for f in fields):
