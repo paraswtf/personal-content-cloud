@@ -1,4 +1,5 @@
 import SceneKit
+import SwiftUI
 import UIKit
 import simd
 
@@ -214,15 +215,23 @@ enum HeadsSceneBuilder {
     /// 256 pixels from transparent to opaque: a corner's weight, read through the second set of texture
     /// coordinates, becomes how much of the photo shows there.
     static let weightRamp: UIImage = {
-        let format = UIGraphicsImageRendererFormat()
-        format.scale = 1
-        format.opaque = false
-        return UIGraphicsImageRenderer(size: CGSize(width: 256, height: 1), format: format).image { context in
-            for x in 0..<256 {
-                UIColor(white: 1, alpha: CGFloat(x) / 255).setFill()
-                context.fill(CGRect(x: x, y: 0, width: 1, height: 1))
-            }
+        let width = 256
+        var pixels = [UInt8](repeating: 0, count: width * 4)
+        for x in 0..<width {
+            let a = UInt8(x)
+            // white with premultiplied alpha: every channel equals the alpha
+            pixels[x * 4] = a
+            pixels[x * 4 + 1] = a
+            pixels[x * 4 + 2] = a
+            pixels[x * 4 + 3] = a
         }
+        guard let provider = CGDataProvider(data: Data(pixels) as CFData),
+              let image = CGImage(width: width, height: 1, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: width * 4,
+                                  space: CGColorSpaceCreateDeviceRGB(),
+                                  bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
+                                  provider: provider, decode: nil, shouldInterpolate: true, intent: .defaultIntent)
+        else { return UIImage() }
+        return UIImage(cgImage: image)
     }()
 }
 
@@ -267,6 +276,7 @@ struct HeadsStage: UIViewRepresentable {
         coordinator.stop()
     }
 
+    @MainActor
     final class Coordinator: NSObject, UIGestureRecognizerDelegate {
         /// The lamp and the soft light as shares of full light at brightness 1, and the soft light's ground, for a
         /// model of plain colours and for one whose heads carry the photo (the website's LAMP, SOFT, GROUND and

@@ -49,19 +49,26 @@ final class HeadsGLBTests: XCTestCase {
 
     static func le32(_ v: UInt32) -> Data { u32s([v]) }
 
-    /// A small PNG of four colours, so its orientation could be checked.
+    /// A small PNG of three colours (red and green above, blue below).
     static func picture() -> Data {
-        let format = UIGraphicsImageRendererFormat()
-        format.scale = 1
-        let image = UIGraphicsImageRenderer(size: CGSize(width: 8, height: 8), format: format).image { context in
-            UIColor.red.setFill()
-            context.fill(CGRect(x: 0, y: 0, width: 4, height: 4))
-            UIColor.green.setFill()
-            context.fill(CGRect(x: 4, y: 0, width: 4, height: 4))
-            UIColor.blue.setFill()
-            context.fill(CGRect(x: 0, y: 4, width: 8, height: 4))
+        let width = 8, height = 8
+        var pixels = [UInt8](repeating: 255, count: width * height * 4)
+        for y in 0..<height {
+            for x in 0..<width {
+                let i = (y * width + x) * 4
+                let rgb: (UInt8, UInt8, UInt8) = y < 4 ? (x < 4 ? (255, 0, 0) : (0, 255, 0)) : (0, 0, 255)
+                pixels[i] = rgb.0
+                pixels[i + 1] = rgb.1
+                pixels[i + 2] = rgb.2
+            }
         }
-        return image.pngData() ?? Data()
+        guard let provider = CGDataProvider(data: Data(pixels) as CFData),
+              let image = CGImage(width: width, height: height, bitsPerComponent: 8, bitsPerPixel: 32,
+                                  bytesPerRow: width * 4, space: CGColorSpaceCreateDeviceRGB(),
+                                  bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipLast.rawValue),
+                                  provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent)
+        else { return Data() }
+        return UIImage(cgImage: image).pngData() ?? Data()
     }
 
     /// The description and the data of a head file: a triangle with normals, colours and indices, and unless
