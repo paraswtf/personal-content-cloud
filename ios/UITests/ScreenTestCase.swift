@@ -29,14 +29,26 @@ class ScreenTestCase: XCTestCase {
     override func setUpWithError() throws {
         continueAfterFailure = false
         app = XCUIApplication()
-        // The workflow grants Photos access before the tests; this answers the alert if it shows anyway.
+        // The workflow grants Photos access before the tests; this answers the prompt if it shows anyway
+        // in the middle of a test (answerSystemAlert covers the one at launch).
         addUIInterruptionMonitor(withDescription: "Photos access") { alert in
-            for label in ["Allow Full Access", "Allow Access to All Photos", "Allow", "OK"] where alert.buttons[label].exists {
+            for label in ScreenTestCase.allowLabels where alert.buttons[label].exists {
                 alert.buttons[label].tap()
                 return true
             }
             return false
         }
+    }
+
+    /// The buttons that grant a permission prompt (the simulator runs in English).
+    static let allowLabels = ["Allow Full Access", "Allow Access to All Photos", "Allow", "OK"]
+
+    /// Answers a permission prompt that shows over the app, so the next screenshot shows the app. The app
+    /// asks for Photos access as it starts (BackgroundSync registers a library observer).
+    func answerSystemAlert(timeout: TimeInterval = 2) {
+        let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+        let allow = springboard.buttons.matching(NSPredicate(format: "label IN %@", ScreenTestCase.allowLabels)).firstMatch
+        if allow.waitForExistence(timeout: timeout) { allow.tap() }
     }
 
     /// Starts the app signed in to the seeded server. `environment` adds launch variables for one test.
@@ -46,6 +58,7 @@ class ScreenTestCase: XCTestCase {
         app.launchEnvironment["PCC_TEST_TOKEN"] = token
         for (key, value) in environment { app.launchEnvironment[key] = value }
         app.launch()
+        answerSystemAlert()
     }
 
     /// Starts the app on its sign-in screen, with the seeded server's address filled in.
@@ -54,6 +67,7 @@ class ScreenTestCase: XCTestCase {
         app.launchEnvironment["PCC_TEST_SERVER"] = server
         app.launchEnvironment["PCC_TEST_SIGNED_OUT"] = "1"
         app.launch()
+        answerSystemAlert()
     }
 
     /// Attaches a screenshot of the app, kept even when the test passes. Names are file names: keep
