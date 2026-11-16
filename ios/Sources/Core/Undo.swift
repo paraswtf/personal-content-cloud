@@ -148,7 +148,7 @@ final class UndoCenter {
     }
 
     /// A plain label for a write nobody named (the website's describe() in lib/undo.ts, shortened).
-    static func describe(method: String, path: String) -> String {
+    nonisolated static func describe(method: String, path: String) -> String {
         let parts = path.split(separator: "/").map(String.init)
         let area = parts.count > 1 ? parts[1] : ""
         switch (method, area) {
