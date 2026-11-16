@@ -42,6 +42,26 @@ export function stillBoxes(detail: ItemDetail): BoxTarget[] {
   return [...faces, ...bodies, ...animals]
 }
 
+/** A box's area in the picture's own units (a share of the width times a share of the height). Every box of one
+ *  picture has the same scale, so ordering by this area is ordering by the area on screen. */
+export function boxArea(box: { w: number; h: number }): number {
+  const side = (v: number) => (Number.isFinite(v) && v > 0 ? v : 0)
+  return side(box.w) * side(box.h)
+}
+
+/**
+ * Overlapping boxes (section 14): the smaller box is drawn above a larger one and gets the pointer first, so a
+ * face inside a person box, or a child in front of a grown-up, can always be tapped. The layer comes from the
+ * area alone: being edited, hovered, lit, focused or picked never raises a box (those show by its border and
+ * ring). Returns each target's layer by `boxKey`: 1 for the largest, `targets.length` for the smallest. Equal
+ * areas keep the list's order, the later one above, as the page would paint them.
+ */
+export function stackLayers(targets: readonly { kind: BoxKind; box: { id: number; w: number; h: number } }[]): Map<string, number> {
+  const order = targets.map((t, i) => ({ key: boxKey(t), area: boxArea(t.box), i }))
+  order.sort((a, b) => b.area - a.area || a.i - b.i)
+  return new Map(order.map((o, n) => [o.key, n + 1]))
+}
+
 /** Boxes found in video frames, by time. */
 export function videoBoxes(detail: ItemDetail): BoxTarget[] {
   const faces: BoxTarget[] = detail.faces.filter((f) => f.frame_time_s !== null).map((box) => ({ kind: 'face', box }))

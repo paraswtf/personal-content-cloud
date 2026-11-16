@@ -133,6 +133,7 @@ export default function PersonBoxCard({ uid, box, t, anchor, onAdded, onRedraw, 
       <div className="mt-3">
         <PersonPicker
           autoFocus={!sheet}
+          like={{ around_uid: uid }}
           placeholder="Search people or type a new name"
           onPick={(choice) => {
             if (!add.isPending) add.mutate(choice)

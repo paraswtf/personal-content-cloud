@@ -332,13 +332,15 @@ function DuplicatesTab() {
   )
 }
 
-type Basis = 'all' | 'clothes' | 'trait' | 'face' | 'place'
+type Basis = 'all' | 'clothes' | 'trait' | 'face' | 'place' | 'group'
 const BASES: { value: Basis; label: string }[] = [
   { value: 'all', label: 'All' },
   { value: 'clothes', label: 'Clothes' },
   { value: 'trait', label: 'Tattoos and nails' },
   { value: 'face', label: 'Trained face' },
   { value: 'place', label: 'Position' },
+  // section 10: the faces the app had grouped with one the owner named
+  { value: 'group', label: 'Grouped' },
 ]
 
 function GuessesTab() {
@@ -466,7 +468,7 @@ function GuessesTab() {
         <EmptyState icon={<Sparkles className="size-8" aria-hidden />} title={basis === 'all' ? 'No guesses to review' : 'No guesses of this kind'}>
           Tag someone in a photo: other photos within an hour with the same clothes, photos taken moments apart where someone
           stands in the same spot, and photos taken at any time with the same tattoo, get a guess. Recognition trained on one
-          person (on their page) adds the faces it finds.
+          person (on their page) adds the faces it finds, and naming a face adds the faces that look like it.
         </EmptyState>
       ) : (
         <ul ref={listRef} className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">

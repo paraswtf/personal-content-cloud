@@ -38,7 +38,9 @@ RULES_REV = 4  # 2 (2026-11-09): merges under PULL_FLOOR teach nothing; childhoo
 #               guesses from the position alone (basis 'place', section 35)
 # Bases whose outcomes are not clothes outcomes: their terms are not the clothes terms, so the clothes fit and its
 # event count leave them out.
-NOT_CLOTHES = ("trait", "face", "place")
+# 'group' (section 10, unnamed groups in the background): the guesses made when the owner names a face of an
+# unnamed group; no event had that basis before it existed, so the fit of an existing library is unchanged.
+NOT_CLOTHES = ("trait", "face", "place", "group")
 MIN_GUESS_EVENTS = 30
 MIN_USER_FACES = 3
 FLOOR = 0.30

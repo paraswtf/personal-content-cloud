@@ -138,6 +138,8 @@ export function usePersonEdits(uid: string, onToast: (message: string) => void, 
 
 interface CardProps {
   edit: PersonEditTarget
+  /** The item: the picker lists first who their boxes here look most like (section 10). */
+  uid?: string
   busy: boolean
   /** The item is a video (the wording says so). */
   video: boolean
@@ -149,7 +151,7 @@ interface CardProps {
 }
 
 /** The light card under the chips for "Change to..." (a person or pet picker) and "Rename" (a name field). */
-export function PersonEditCard({ edit, busy, video, onPick, onRename, onSpecies, onCancel }: CardProps) {
+export function PersonEditCard({ edit, uid, busy, video, onPick, onRename, onSpecies, onCancel }: CardProps) {
   const fieldId = useId()
   const root = useRef<HTMLDivElement>(null)
   // The card opens under the chips, possibly below the visible part of the panel (the phone sheet), and grows when
@@ -249,6 +251,7 @@ export function PersonEditCard({ edit, busy, video, onPick, onRename, onSpecies,
             species={edit.species ?? undefined}
             speciesOnly={pet && !!edit.species}
             excludeIds={[edit.who.id]}
+            like={uid ? { uids: [uid], person_id: edit.who.id } : null}
             placeholder={pet ? 'Search pets or type a new name' : 'Search people or type a new name'}
             onPick={(choice) => !busy && onPick(choice)}
           />

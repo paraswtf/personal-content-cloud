@@ -185,8 +185,9 @@ export type TraitKind = 'tattoo' | 'nails' | 'mehndi'
 /** What a guess rests on: 'trait' (tattoo or mehndi alone), 'clothes+trait' (clothes that traits agree with or
  *  broke a tie for), 'face' (recognition trained on that one person, section 10), 'place' (standing in the same
  *  spot as the person in a photo taken moments apart, section 35), 'clothes+place' (clothes that the position agrees
- *  with or broke a tie for), or clothes as before (no basis in the evidence). */
-export type GuessBasis = 'clothes' | 'trait' | 'clothes+trait' | 'face' | 'place' | 'clothes+place'
+ *  with or broke a tie for), 'group' (the app had grouped the face with one the owner named, section 10; `face` is
+ *  their similarity, also the score), or clothes as before (no basis in the evidence). */
+export type GuessBasis = 'clothes' | 'trait' | 'clothes+trait' | 'face' | 'place' | 'clothes+place' | 'group'
 /** evidence.place (section 35): the box the person was followed from, in another photo of the same sequence. */
 export interface PlaceEvidence {
   ref_item_uid?: string
@@ -470,6 +471,8 @@ export interface AssignOut {
   person: PersonOut | null
   /** Faces that looked like the ones taken away from a person and went the same way (section 10). */
   followed?: number
+  /** Section 10: the other faces of an unnamed group a named face came from, now guesses for that person. */
+  guessed?: number
 }
 export interface Suggestion {
   a: PersonOut
@@ -494,10 +497,6 @@ export interface RelatedSuggestionList {
 }
 export interface ItemRelatedSuggestions {
   people: { person: PersonRef; reason: RelatedReason; because_uid: string }[]
-}
-/** Who an unnamed group of childhood photos may be as a child, best first (no bar, section 10). */
-export interface ChildhoodOut {
-  candidates: { person: PersonOut; similarity: number }[]
 }
 export interface SuggestionList {
   items: Suggestion[]
@@ -1162,3 +1161,46 @@ export interface AddAnimalIn {
   t?: number
 }
 /** The boxes a second detector run added (section 22). */
+
+// ------------------------------------------------------------------ naming by likeness (section 10)
+/** What the name picker is naming (POST /api/people/similar): boxes; a person's boxes on some items (`uids` with
+ *  `person_id`); the whole person (`person_id` alone, Merge into); or an item (`around_uid`: who was in the photos of
+ *  the same hour and is not in it, for a box being drawn or a tag on the item). */
+export interface SimilarSource {
+  face_ids?: number[]
+  body_ids?: number[]
+  animal_ids?: number[]
+  uids?: string[]
+  person_id?: number
+  around_uid?: string
+}
+/** What says most that they look alike: the box's open guess, a model trained on the person, the face, the clothes
+ *  of the hour, a pet's look, the whole person's look, or being in the photos of the same hour. */
+export type SimilarBasis = 'guess' | 'model' | 'face' | 'clothes' | 'look' | 'person' | 'hour'
+/** Who an alike person is, as the picker shows them (no counts: counting takes longer than the ranking). */
+export interface SimilarPerson {
+  id: number
+  name: string | null
+  kind: PersonKind
+  /** Set for a pet, null for a person. */
+  species: Species | null
+  cover_url: string | null
+}
+export interface SimilarOption {
+  person: SimilarPerson
+  /** 0 to 1, higher is more alike (a face's own similarity; the order to list them in). */
+  score: number
+  /** The matching or the guess path would take them. */
+  likely: boolean
+  basis: SimilarBasis
+  /** The basis in plain words ("Looks like them", "Same clothes within the hour"). */
+  reason: string
+  /** The box's own open guess: listed before everyone else. */
+  first: boolean
+}
+export interface SimilarOut {
+  /** The most alike named people (pets for pet boxes), best first. */
+  items: SimilarOption[]
+  /** Person id -> score for every person ranked, to order the names typing finds. */
+  scores: Record<string, number>
+}

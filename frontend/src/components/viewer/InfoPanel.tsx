@@ -880,6 +880,7 @@ export default function InfoPanel({
             <PersonEditCard
               key={`${personEdit.mode}-${personEdit.who.id}`}
               edit={personEdit}
+              uid={detail.uid}
               busy={edits.busy}
               video={isVideo}
               onPick={(choice) => {
@@ -1013,7 +1014,7 @@ export default function InfoPanel({
                       </span>
                     </span>
                   </button>
-                  <PersonPicker autoFocus kind="all" excludeIds={detail.people.map((p) => p.id)} onPick={pickTag} />
+                  <PersonPicker autoFocus kind="all" excludeIds={detail.people.map((p) => p.id)} like={{ around_uid: detail.uid }} onPick={pickTag} />
                 </>
               )}
               {addTag.isPending && <p className="mt-2 px-1 text-xs text-ink-soft">Adding tag</p>}

@@ -32,6 +32,11 @@ CONTRACT.
   into that group whenever its guess goes without the owner's answer for it: turned down (reject), cleared by
   guess_item (the model stops naming it, the person is in the photo now, the photo went to the vault), not
   confirmable (confirm), or withdrawn with the guess window (person_scan.regroup).
+- Unnamed groups in the background (section 10, app.analysis.hidden_groups): when the owner names a face of an unnamed
+  group, the group's other faces become guesses for that person (basis 'group', taken out of the group with
+  was_person_id). guess_item keeps such a guess until the owner answers it while it still stands (hidden_groups.hold,
+  after the trained models' merge): its person still has a name, is not in the photo and was not turned down for
+  the face. It has no time window (apply_window_change keeps it) and its outcome has its own terms (record_outcome).
 - Position (section 35, app.analysis.place_match): when a photo is lined up with a neighbour taken within minutes,
   each box's result is also fused with where people stood (basis 'clothes+place', or 'place' for a guess from the
   position alone). A 'place' guess has its own time limits and is kept by apply_window_change.
@@ -528,10 +533,18 @@ def _merge_models(conn: sqlite3.Connection, item: sqlite3.Row, boxes: list[Box],
     try:
         from app.analysis import person_scan
 
-        return person_scan.merge_item(conn, item, boxes, results)
+        merged = person_scan.merge_item(conn, item, boxes, results)
     except Exception:  # noqa: BLE001 - a trained model never blocks guessing
         log.exception("guess: the trained recognition failed for item %s; without it", item["id"])
-        return results
+        merged = results
+    try:
+        from app.analysis import hidden_groups
+
+        # the guesses made when the owner named a face of an unnamed group wait for the owner (section 10)
+        return hidden_groups.hold(conn, item, boxes, merged)
+    except Exception:  # noqa: BLE001 - never blocks guessing
+        log.exception("guess: could not keep the guesses of named group faces for item %s", item["id"])
+        return merged
 
 
 def _left_groups(conn: sqlite3.Connection, where: str, params: list[Any]) -> dict[int, int]:
@@ -738,9 +751,9 @@ def apply_window_change(conn: sqlite3.Connection) -> int:
                     ev = json_loads(r["guess_evidence"]) or {}
                 except Exception:
                     ev = {}
-                if isinstance(ev, dict) and ev.get("basis") in ("trait", "face", "place"):
-                    # traits alone (section 34) and a trained model (section 10) have no time window; position
-                    # has its own (section 35)
+                if isinstance(ev, dict) and ev.get("basis") in ("trait", "face", "place", "group"):
+                    # traits alone (section 34), a trained model and a named group face (section 10) have no time
+                    # window; position has its own (section 35)
                     continue
                 ref_uid = ev.get("ref_item_uid") if isinstance(ev, dict) else None
                 ref = conn.execute("SELECT taken_at FROM items WHERE uid = ?", (ref_uid,)).fetchone() if ref_uid else None
@@ -809,6 +822,12 @@ def record_outcome(conn: sqlite3.Connection, row: sqlite3.Row, person_id: int, l
             # A guess of the model trained on this person (section 10): no clothes terms; the people learner
             # leaves these out as well.
             features = {"basis": "face", "p": ev.get("p"), "face": ev.get("face"), "score": ev.get("score")}
+            events.record(conn, "guess", label, features, item_id=int(row["item_id"]), person_id=int(person_id))
+            return
+        if basis == "group":
+            # A guess made when the owner named a face of an unnamed group (section 10): no clothes terms; the
+            # people learner leaves these out as well.
+            features = {"basis": "group", "face": ev.get("face"), "score": ev.get("score")}
             events.record(conn, "guess", label, features, item_id=int(row["item_id"]), person_id=int(person_id))
             return
         if basis == "place":

@@ -146,6 +146,9 @@ def test_clustering_honours_a_loosened_threshold(conn, world):
 
 def test_merge_route_reports_the_followers(client, conn, world):
     w = world
+    # the route merges people the owner sees, so named ones (an unnamed group is not found by id, section 10)
+    with tx(conn):
+        conn.execute("UPDATE persons SET name = 'Source', name_key = 'source' WHERE id = ?", (w["source"],))
     r = client.post("/api/people/merge", json={"target_id": w["asha"], "source_ids": [w["source"]]})
     assert r.status_code == 200, r.text
     assert r.json()["id"] == w["asha"] and r.json()["followed"] == 1

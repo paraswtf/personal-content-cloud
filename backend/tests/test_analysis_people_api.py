@@ -63,13 +63,14 @@ def test_list_people_filters_sorts_and_pages(api, conn):
 
     r = api.get("/api/people").json()
     ids = [p["id"] for p in r["items"]]
-    assert secret not in ids and r["total"] == 4
+    # an unnamed group stays in the background (section 10, test_hidden_groups.py): not listed, not counted
+    assert secret not in ids and unnamed not in ids and r["total"] == 3
     assert ids[0] == asha and r["items"][0]["item_count"] == 3 and r["items"][0]["face_count"] == 3
     assert empty_named in ids
 
-    assert {p["id"] for p in api.get("/api/people?filter=unnamed").json()["items"]} == {unnamed}
+    assert api.get("/api/people?filter=unnamed").json()["items"] == []
     assert {p["id"] for p in api.get("/api/people?q=rav").json()["items"]} == {ravi}
-    assert {p["id"] for p in api.get(f"/api/people?q=unnamed%20%23{unnamed}").json()["items"]} == {unnamed}
+    assert api.get(f"/api/people?q=unnamed%20%23{unnamed}").json()["items"] == []
 
     for sort in ("items", "name", "recent"):
         seen, cursor = [], None
@@ -81,7 +82,7 @@ def test_list_people_filters_sorts_and_pages(api, conn):
                 break
         assert sorted(seen) == sorted(ids) and len(seen) == len(set(seen)), sort
         if sort == "name":
-            assert seen[:3] == [asha, empty_named, ravi] and seen[-1] == unnamed
+            assert seen == [asha, empty_named, ravi]
     assert api.get("/api/people?cursor=bad").status_code == 400
 
 
@@ -99,10 +100,14 @@ def test_create_rename_merge_delete(api, conn):
     assert api.post("/api/people", json={"name": "asha", "face_ids": [f2]}).json()["id"] == asha
     assert api.post("/api/people", json={"name": "   "}).status_code in (400, 422)
 
-    other = make_person(conn)
+    # an unnamed group is not found by id (section 10): only a named person can be renamed
+    group = make_person(conn)
+    make_face(conn, _item(conn)["id"], group, embedding=_vec(6))
+    assert api.patch(f"/api/people/{group}", json={"name": "ASHA"}).status_code == 404
+    other = make_person(conn, "Other")
     f3 = make_face(conn, _item(conn)["id"], other, embedding=_vec(3))
     r = api.patch(f"/api/people/{other}", json={"name": "ASHA"})
-    assert r.status_code == 200 and r.json()["id"] == asha and r.json()["face_count"] == 3
+    assert r.status_code == 200 and r.json()["id"] == asha and r.json()["face_count"] == 3, r.text
     assert conn.execute("SELECT COUNT(*) FROM persons WHERE id = ?", (other,)).fetchone()[0] == 0
     assert conn.execute("SELECT COUNT(*) FROM jobs WHERE type = 'guess'").fetchone()[0] >= 1
 
@@ -165,7 +170,7 @@ def test_unassigned_assign_and_delete_faces(api, conn):
     assert api.post("/api/faces/assign", json={"face_ids": [f2], "person_id": pid, "new_person_name": "X"}).status_code == 400
     assert api.post("/api/faces/assign", json={"face_ids": [12345], "person_id": pid}).status_code == 404
     r = api.post("/api/faces/assign", json={"face_ids": [f1]})
-    assert r.json() == {"updated": 1, "person": None, "followed": 0}
+    assert r.json() == {"updated": 1, "person": None, "followed": 0, "guessed": 0}
     # Meera had nothing else: still there (named people are kept).
     assert api.get(f"/api/people/{pid}").status_code == 200
 
@@ -225,7 +230,8 @@ def test_guess_review_confirm_reject(api, conn):
 
 def test_suggestions_and_dismiss(api, conn):
     base = _vec(50)
-    a, b = make_person(conn), make_person(conn)
+    # named people: a pair with an unnamed group is not suggested (section 10, test_hidden_groups.py)
+    a, b = make_person(conn, "Asha"), make_person(conn, "Meera")
     near = lambda s: (lambda v: v / np.linalg.norm(v))(base + 0.5 * _vec(s))  # noqa: E731
     make_face(conn, _item(conn)["id"], a, embedding=near(51))
     make_face(conn, _item(conn)["id"], b, embedding=near(52))
