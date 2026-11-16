@@ -40,6 +40,12 @@ export function followedTail(followed: number | undefined): string {
   return followed ? ` ${formatCount(followed, 'look-alike')} came along.` : ''
 }
 
+/** Naming a face that the app had grouped with others (section 10): the others wait in Review as guesses. */
+export function guessedTail(guessed: number | undefined): string {
+  if (!guessed) return ''
+  return ` ${formatCount(guessed, 'face')} that ${guessed === 1 ? 'looks' : 'look'} alike ${guessed === 1 ? 'waits' : 'wait'} in Review.`
+}
+
 export function formatCount(n: number, singular: string, plural = `${singular}s`): string {
   return `${n.toLocaleString()} ${n === 1 ? singular : plural}`
 }

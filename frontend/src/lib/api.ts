@@ -55,7 +55,6 @@ import type {
   SessionOut,
   Stats,
   SuggestionList,
-  ChildhoodOut,
   ItemRelatedSuggestions,
   RelatedSuggestionList,
   SystemOut,
@@ -453,7 +452,7 @@ export const api = {
     /** `basis`: clothes, trait (tattoos, nails and mehndi, with or without clothes; section 34), face (recognition
      *  trained on one person, section 10) or place (the position, with or without clothes, section 35); all when
      *  unset. */
-    guesses: (cursor?: string | null, limit = 60, person?: number, basis?: 'all' | 'clothes' | 'trait' | 'face' | 'place') =>
+    guesses: (cursor?: string | null, limit = 60, person?: number, basis?: 'all' | 'clothes' | 'trait' | 'face' | 'place' | 'group') =>
       get<GuessPage>(`/api/review/guesses${qs({ cursor, limit, person, basis: basis === 'all' ? undefined : basis })}`),
     duplicates: (cursor?: string | null, limit = 30) => get<DupGroupPage>(`/api/duplicates${qs({ cursor, limit })}`),
     setBest: (uid: string) => post<OkOut>(`/api/duplicates/${enc(uid)}/best`),
@@ -497,7 +496,6 @@ export const api = {
     /** "Someone else": the guess learned as wrong and the boxes given to the right person, one action. */
     correctGuesses: (body: GuessCorrectIn) => post<AssignOut>('/api/guesses/correct', body),
     suggestions: (limit = 30) => get<SuggestionList>(`/api/suggestions${qs({ limit })}`),
-    childhood: (id: number) => get<ChildhoodOut>(`/api/people/${id}/childhood`),
     /** Items that may be related to the person too (section 10), best first. */
     relatedSuggestions: (id: number, limit = 24) => get<RelatedSuggestionList>(`/api/people/${id}/related-suggestions${qs({ limit })}`),
     /** Tattoos, and the mehndi and nails of the last 60 days, matched to the person (section 34). */
