@@ -77,6 +77,12 @@ extension APIClient {
         return try await perform("PUT", "/api/animals/\(APIPath.segment(animalId))/box", body: body, as: API.AnimalOut.self)
     }
 
+    /// Sign a device (the iOS app) in with the account's password and give it a device token, shown once.
+    /// POST /api/auth/device-login
+    nonisolated func deviceLogin(body: API.DeviceLoginIn) async throws -> API.DeviceCreated {
+        return try await perform("POST", "/api/auth/device-login", body: body, as: API.DeviceCreated.self)
+    }
+
     /// GET /api/auth/devices
     nonisolated func listDevices() async throws -> [API.SessionOut] {
         return try await perform("GET", "/api/auth/devices", as: [API.SessionOut].self)

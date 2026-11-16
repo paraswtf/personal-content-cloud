@@ -769,6 +769,19 @@ extension API {
         }
     }
 
+    /// The iOS app signs in with the account's password and gets a device token (section 21).
+    struct DeviceLoginIn: Codable, Hashable, Sendable {
+        var username: String
+        var password: String
+        var deviceName: String
+
+        enum CodingKeys: String, CodingKey {
+            case username
+            case password
+            case deviceName = "device_name"
+        }
+    }
+
     struct DiskStats: Codable, Hashable, Sendable {
         var freeBytes: Int
         var totalBytes: Int
