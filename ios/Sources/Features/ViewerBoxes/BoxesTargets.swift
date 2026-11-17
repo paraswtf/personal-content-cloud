@@ -210,6 +210,20 @@ enum BoxesLookup {
         return out
     }
 
+    /// The named people whose faces are on screen at `t` seconds of a video, from the faces' spans (the website's
+    /// facesAt and "In the frame"), each once, in the item's order.
+    static func inFrame(_ item: API.ItemDetail, at t: Double) -> [API.PersonRef] {
+        var seen: Set<Int> = []
+        var out: [API.PersonRef] = []
+        for f in item.faces {
+            guard let p = f.person, Fmt.isNamed(p.name), !seen.contains(p.id),
+                  (f.spans ?? []).contains(where: { $0.count >= 2 && $0[0] <= t && t <= $0[1] }) else { continue }
+            seen.insert(p.id)
+            out.append(p)
+        }
+        return out
+    }
+
     /// A person's thumb on this item: their first box's crop, else their cover.
     static func thumb(of person: API.PersonRef, in item: API.ItemDetail) -> String? {
         if let f = item.faces.first(where: { $0.person?.id == person.id }) { return f.url }

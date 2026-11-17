@@ -519,22 +519,31 @@ final class StageEditOverlay: UIView {
 }
 
 /// One box: a border and, for a named person or a guess, a small label above it. It takes no touches itself;
-/// the stage hit-tests the boxes smallest first. VoiceOver activates it directly.
+/// the stage hit-tests the boxes smallest first. VoiceOver activates it directly. The border follows the website's
+/// PhotoStage: white for a named face, sky for a named person box, green for a pet, amber for a guess, and dashed
+/// while nobody is on the box.
 final class BoxView: UIView {
     let box: StageBox
     var onActivate: (() -> Void)?
 
     private let label = PaddedLabel()
+    private let outline = CAShapeLayer()
     private var isSelectedBox = false
     private var zoom: CGFloat = 1
+
+    /// Nobody is on the box yet: a face or person box without a person or a guess, or a pet not named.
+    private var untagged: Bool {
+        box.kind == .animal ? box.personId == nil : (box.name == nil && box.guessName == nil)
+    }
 
     init(box: StageBox) {
         self.box = box
         super.init(frame: .zero)
         isUserInteractionEnabled = false
         backgroundColor = .clear
-        layer.borderWidth = 2
-        layer.cornerRadius = 4
+        outline.fillColor = UIColor.clear.cgColor
+        outline.lineJoin = .round
+        layer.addSublayer(outline)
         layer.shadowColor = UIColor.black.cgColor
         layer.shadowOpacity = 0.45
         layer.shadowRadius = 1.5
@@ -569,11 +578,29 @@ final class BoxView: UIView {
         setZoom(zoom)
     }
 
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        updateOutline()
+    }
+
+    /// The border, the same width on screen whatever the zoom.
+    private func updateOutline() {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        defer { CATransaction.commit() }
+        let width = (isSelectedBox ? 3 : 2) / zoom
+        outline.frame = bounds
+        let radius = (box.kind == .face ? 4 : 6) / zoom
+        outline.path = UIBezierPath(roundedRect: bounds.insetBy(dx: width / 2, dy: width / 2), cornerRadius: radius).cgPath
+        outline.lineWidth = width
+        outline.lineDashPattern = untagged && !isSelectedBox
+            ? [NSNumber(value: Double(5 / zoom)), NSNumber(value: Double(3 / zoom))] : nil
+    }
+
     /// Keeps the border and the label the same size on screen whatever the zoom.
     func setZoom(_ z: CGFloat) {
         zoom = max(z, 0.01)
-        layer.borderWidth = (isSelectedBox ? 3 : 2) / zoom
-        layer.cornerRadius = 4 / zoom
+        updateOutline()
         guard !label.isHidden else { return }
         let size = label.intrinsicContentSize
         label.transform = .identity
@@ -596,15 +623,15 @@ final class BoxView: UIView {
         if isSelectedBox {
             color = .systemBlue
         } else if box.kind == .animal {
-            color = .systemTeal
+            color = .systemGreen
         } else if box.name != nil {
-            color = .white
-        } else if box.guessName != nil {
-            color = .systemYellow
+            color = box.kind == .body ? .systemCyan : .white
         } else {
-            color = UIColor.white.withAlphaComponent(0.7)
+            // a guess, and a box nobody is on (dashed)
+            color = .systemYellow
         }
-        layer.borderColor = color.cgColor
+        outline.strokeColor = color.cgColor
+        updateOutline()
     }
 }
 

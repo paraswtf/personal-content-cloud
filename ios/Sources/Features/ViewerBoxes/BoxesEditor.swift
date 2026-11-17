@@ -108,20 +108,26 @@ struct BoxesEditorView: View {
         BoxesLookup.tracks(of: box, in: item)
     }
 
-    /// Runs an action once at a time; a change that went through closes the editor.
-    private func run(_ action: @escaping () async -> Bool) {
+    /// Runs an action once at a time; a change that went through closes the editor, unless `keepOpen` (the
+    /// traits, where the owner often answers several in a row, as on the website).
+    private func run(keepOpen: Bool = false, _ action: @escaping () async -> Bool) {
         guard !state.busy else { return }
         state.busy = true
         Task {
             let ok = await action()
             state.busy = false
-            if ok { onClose() }
+            if ok && !keepOpen { onClose() }
         }
     }
 
-    /// Moving or resizing needs the still picture the core's stage draws.
+    /// Moving or resizing: a photo's box on the core's stage, a video's box on its own paused frame (once the
+    /// streaming copy is there to show it).
     private func canAdjust(_ box: BoxesTarget) -> Bool {
-        box.frameTimeS == nil && context?.detail.mediaKind == .image
+        switch context?.detail.mediaKind {
+        case .image?: return box.frameTimeS == nil
+        case .video?: return box.frameTimeS != nil && item?.urls.video != nil
+        default: return false
+        }
     }
 
     /// For a whole video's tracks, the owner's origin when any track is theirs (the website's mergeOrigins).
@@ -225,7 +231,7 @@ struct BoxesEditorView: View {
                 }
                 if canAdjust(box) {
                     Button {
-                        model.startAdjusting(box.stageBox, uid: target.uid)
+                        model.startAdjusting(box.stageBox, uid: target.uid, frameTime: box.frameTimeS)
                     } label: {
                         Label("Move or resize", systemImage: "arrow.up.and.down.and.arrow.left.and.right")
                     }
@@ -246,7 +252,7 @@ struct BoxesEditorView: View {
     private func guessSection(_ guess: API.GuessOut, boxes: [BoxesTarget]) -> some View {
         let name = Fmt.personName(guess.person.name)
         return Section {
-            (Text("Looks like ") + Text(name).bold() + Text("."))
+            (Text("Looks like ") + Text(name).bold() + Text(", \(ReviewEvidence.sure(guess))."))
                 .accessibilityIdentifier("boxes.guess.text")
             ReviewGuessEvidence(guess: guess)
             HStack(spacing: 12) {
@@ -288,18 +294,18 @@ struct BoxesEditorView: View {
                     Menu {
                         if trait.hidden {
                             Button {
-                                run { await BoxesActions.trait(trait, verdict: nil, owner: owner, uid: target.uid, vault: target.vault) }
+                                run(keepOpen: true) { await BoxesActions.trait(trait, verdict: nil, owner: owner, uid: target.uid, vault: target.vault) }
                             } label: {
                                 Label("Show again", systemImage: "eye")
                             }
                         } else {
                             Button {
-                                run { await BoxesActions.trait(trait, verdict: .notTrait, owner: owner, uid: target.uid, vault: target.vault) }
+                                run(keepOpen: true) { await BoxesActions.trait(trait, verdict: .notTrait, owner: owner, uid: target.uid, vault: target.vault) }
                             } label: {
                                 Label(BoxesWords.notTraitLabel(trait.kind), systemImage: "eye.slash")
                             }
                             Button {
-                                run { await BoxesActions.trait(trait, verdict: .notTheirs, owner: owner, uid: target.uid, vault: target.vault) }
+                                run(keepOpen: true) { await BoxesActions.trait(trait, verdict: .notTheirs, owner: owner, uid: target.uid, vault: target.vault) }
                             } label: {
                                 Label("Not this person's", systemImage: "person.crop.circle.badge.xmark")
                             }
@@ -379,7 +385,7 @@ struct BoxesEditorView: View {
                 }
                 if canAdjust(box) {
                     Button {
-                        model.startAdjusting(box.stageBox, uid: target.uid)
+                        model.startAdjusting(box.stageBox, uid: target.uid, frameTime: box.frameTimeS)
                     } label: {
                         Label("Move or resize", systemImage: "arrow.up.and.down.and.arrow.left.and.right")
                     }

@@ -22,6 +22,11 @@ struct ViewerScreen: View {
                                       },
                                       selectedBoxId: boxes.selectedBoxId))
             .viewerBoxEditors(boxes)
+            .onAppear {
+                // A box drawn on a video goes with the time of the frame on screen.
+                let pages = pages
+                boxes.frameClock = { uid in pages.playerTime(uid) }
+            }
             .task(id: request.id) { await closeWhenTheVaultLocks() }
     }
 

@@ -61,7 +61,10 @@ final class BoxesScreens: ScreenTestCase {
         tapBox("Face, maybe Boxes Beta")
         XCTAssertTrue(app.navigationBars["Edit face"].waitForExistence(timeout: 10))
         XCTAssertEqual(app.staticTexts["boxes.editor.name"].label, "Boxes Beta?")
-        XCTAssertTrue(app.staticTexts["boxes.guess.text"].exists, "the guess panel did not show")
+        let guessText = app.staticTexts["boxes.guess.text"]
+        XCTAssertTrue(guessText.exists, "the guess panel did not show")
+        // "Looks like Boxes Beta, 82% sure.": how sure the guess is, as the website says it
+        XCTAssertTrue(guessText.label.hasPrefix("Looks like Boxes Beta, "), "the guess does not say how sure: \(guessText.label)")
         snap("boxes-guess")
         app.buttons["boxes.guess.yes"].tap()
         XCTAssertTrue(app.buttons["Face of Boxes Beta"].waitForExistence(timeout: 20), "the guess was not confirmed")
@@ -170,8 +173,20 @@ final class BoxesScreens: ScreenTestCase {
         // The picker opens over the panel, ranked by likeness to Boxes Alpha's boxes here; nothing is saved.
         let bar = app.navigationBars["Change Boxes Alpha to..."]
         XCTAssertTrue(bar.waitForExistence(timeout: 10), "the change picker did not open")
+        let note = app.staticTexts["picker.note"]
+        XCTAssertTrue(note.waitForExistence(timeout: 5), "the change picker does not say what picking does")
+        XCTAssertEqual(note.label, "Their faces and tags in this picture go to the one you pick, and look-alike faces may follow.")
         snap("boxes-info-change")
         bar.buttons["Cancel"].tap()
         XCTAssertTrue(menu.waitForExistence(timeout: 10), "the panel did not come back")
+
+        // The person's own page: the viewer closes and the page opens on the tab underneath.
+        let open = app.buttons.matching(NSPredicate(format: "identifier == 'boxes.person.open' AND label == %@",
+                                                    "Open Boxes Alpha's page")).firstMatch
+        XCTAssertTrue(open.waitForExistence(timeout: 5), "the row has no link to the person's page")
+        open.tap()
+        XCTAssertTrue(app.buttons["viewer.close"].waitForNonExistence(timeout: 15), "the viewer stayed open")
+        XCTAssertTrue(app.navigationBars["Boxes Alpha"].waitForExistence(timeout: 20), "the person's page did not open")
+        snap("boxes-info-person-page")
     }
 }

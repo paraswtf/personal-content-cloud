@@ -28,6 +28,16 @@ struct BoxesDrawn: Identifiable {
     let kind: StageDrawKind
     let rect: CGRect
     let vault: Bool
+    /// A video's box: the time of the paused frame it was drawn on (nil on a photo).
+    var t: Double? = nil
+}
+
+/// A box or a person shown in a video from the info panel: the player pauses on its frame and draws the box.
+struct BoxesVideoFocus: Equatable {
+    let id = UUID()
+    let uid: String
+    let boxKey: String
+    let time: Double
 }
 
 /// What the boxes area keeps while the viewer is open: the box being edited (drawn selected), the stage's edit
@@ -49,6 +59,12 @@ final class ViewerBoxesModel {
     var adjustError: String?
     var drawError: String?
     var saving = false
+    /// A box to show in a video (the info panel's "Show in the video" and a guess's name): the video stage of
+    /// that item seeks to its frame and draws it.
+    var videoFocus: BoxesVideoFocus?
+    /// The time of the frame on screen in a video, by item, or nil before its player is made (the viewer area sets
+    /// it from its players), so a box drawn on a video is sent with the paused frame's time.
+    @ObservationIgnored var frameClock: ((String) -> Double?)?
     @ObservationIgnored private var spotlightTask: Task<Void, Never>?
 
     /// The box drawn selected on the stage (never raised above a smaller one).
@@ -62,19 +78,32 @@ final class ViewerBoxesModel {
         editing = BoxesEditorTarget(uid: context.uid, kind: box.kind, boxId: box.boxId, vault: context.vault)
     }
 
-    /// "Move or resize": the editor closes and the box gets handles on the stage.
-    func startAdjusting(_ box: StageBox, uid: String) {
+    /// "Move or resize": the editor closes and the box gets handles on the stage. A video's box is moved on its
+    /// own frame (`frameTime`), which the video stage shows paused.
+    func startAdjusting(_ box: StageBox, uid: String, frameTime: Double? = nil) {
         editing = nil
         adjustError = nil
-        stage.startAdjusting(box, on: uid)
+        stage.startAdjusting(box, on: uid, frameTime: frameTime)
     }
 
-    /// "Add a face box", "Add a person box", "Add a pet box": the owner drags a box over the picture.
+    /// "Add a face box", "Add a person box", "Add a pet box": the owner drags a box over the picture, or over the
+    /// paused frame of a video (the time of the frame on screen goes with the box).
     func startDrawing(_ kind: StageDrawKind, in context: ViewerPageContext) {
         editing = nil
         drawError = nil
         stage.contexts[context.uid] = context
-        stage.startDrawing(kind, on: context.uid)
+        var t: Double?
+        if context.detail.mediaKind == .video {
+            let now: Double? = frameClock?(context.uid) ?? nil
+            t = now ?? context.startAt ?? 0
+        }
+        stage.startDrawing(kind, on: context.uid, frameTime: t)
+    }
+
+    /// Shows a box of a video on its frame (the player pauses there).
+    func showInVideo(_ target: BoxesTarget, uid: String) {
+        guard let time = target.frameTimeS else { return }
+        videoFocus = BoxesVideoFocus(uid: uid, boxKey: target.id, time: time)
     }
 
     /// Leaves moving or drawing without saving.
@@ -108,7 +137,7 @@ final class ViewerBoxesModel {
     /// The drawn box's next step: who is in it, or which species it is.
     func nameDrawn() {
         guard let kind = stage.drawingKind, let rect = stage.rect, let uid = stage.uid else { return }
-        let drawn = BoxesDrawn(uid: uid, kind: kind, rect: rect, vault: editVault)
+        let drawn = BoxesDrawn(uid: uid, kind: kind, rect: rect, vault: editVault, t: stage.frameTime)
         drawError = nil
         if kind == .pet { choosingSpecies = drawn } else { naming = drawn }
     }
@@ -116,18 +145,22 @@ final class ViewerBoxesModel {
     /// Adds the drawn person or face box with who is in it.
     func addDrawn(_ drawn: BoxesDrawn, pick: PersonPick) async {
         saving = true
-        let error = await BoxesActions.addBox(drawn.kind, rect: drawn.rect, pick: pick, uid: drawn.uid, vault: drawn.vault)
+        let error = await BoxesActions.addBox(drawn.kind, rect: drawn.rect, pick: pick, uid: drawn.uid, vault: drawn.vault,
+                                              t: drawn.t)
         saving = false
         if let error { drawError = error } else { cancelEdit() }
     }
 
-    /// Adds the drawn pet box with its species, then opens its editor to name the pet.
+    /// Adds the drawn pet box with its species, then opens its editor to name the pet (on a video, the new box
+    /// shows as a chip under the video, which names it, as the website says).
     func addDrawnPet(_ drawn: BoxesDrawn, species: API.Species) async {
         saving = true
-        let added = await BoxesActions.addPet(rect: drawn.rect, species: species, uid: drawn.uid, vault: drawn.vault)
+        let added = await BoxesActions.addPet(rect: drawn.rect, species: species, uid: drawn.uid, vault: drawn.vault,
+                                              t: drawn.t)
         saving = false
         guard let added else { return }
         cancelEdit()
+        if drawn.t != nil { return }
         // The species list is still going away: the editor opens once it has.
         try? await Task.sleep(nanoseconds: 600_000_000)
         editing = BoxesEditorTarget(uid: drawn.uid, kind: .animal, boxId: added.id, vault: drawn.vault, fresh: true)
@@ -144,26 +177,25 @@ final class ViewerBoxesModel {
     }
 }
 
-/// The boxes area's buttons in the viewer's bottom bar: adding a box by drawing it, and asking the detector to
-/// look for pets again. Drawing needs the still picture, so it is offered on photos.
+/// The boxes area's buttons in the viewer's bottom bar: adding a box by drawing it (on a photo, or on the paused
+/// frame of a video), and asking the detector to look for pets again.
 struct ViewerBoxesToolbarItems: View {
     let model: ViewerBoxesModel
     let context: ViewerPageContext
 
     var body: some View {
         let kind = context.detail.mediaKind
-        if kind == .image || kind == .video {
+        // A video needs its streaming copy to show the frame being drawn on.
+        if kind == .image || (kind == .video && context.item?.urls.video != nil) {
             Menu {
-                if kind == .image {
-                    Button { model.startDrawing(.face, in: context) } label: {
-                        Label("Add a face box", systemImage: "faceid")
-                    }
-                    Button { model.startDrawing(.person, in: context) } label: {
-                        Label("Add a person box", systemImage: "person.crop.rectangle")
-                    }
-                    Button { model.startDrawing(.pet, in: context) } label: {
-                        Label("Add a pet box", systemImage: "pawprint")
-                    }
+                Button { model.startDrawing(.face, in: context) } label: {
+                    Label("Add a face box", systemImage: "faceid")
+                }
+                Button { model.startDrawing(.person, in: context) } label: {
+                    Label("Add a person box", systemImage: "person.crop.rectangle")
+                }
+                Button { model.startDrawing(.pet, in: context) } label: {
+                    Label("Add a pet box", systemImage: "pawprint")
                 }
                 Button {
                     Task { await BoxesActions.findPets(uid: context.uid, vault: context.vault) }
@@ -216,24 +248,26 @@ struct ViewerBoxesSheets: ViewModifier {
     }
 }
 
-/// While drawing: what to do, "Whole photo" and Cancel, at the top of the picture.
+/// While drawing: what to do, "Whole photo" (or "Whole frame" on a video) and Cancel, at the top of the picture.
 struct BoxesEditTopBar: View {
     let model: ViewerBoxesModel
 
     var body: some View {
         let stage = model.stage
+        let video = stage.frameTime != nil
         if let kind = stage.drawingKind, stage.rect == nil || stage.dragging {
             VStack(spacing: 8) {
-                Text("Drag over the \(kind.noun)")
+                Text(video ? "Paused. Drag over the \(kind.noun) in this frame" : "Drag over the \(kind.noun)")
                     .font(.subheadline.weight(.semibold))
                     .lineLimit(1)
+                    .minimumScaleFactor(0.8)
                     .padding(.horizontal, 12)
                     .padding(.vertical, 8)
                     .background(.black.opacity(0.7), in: Capsule())
                     .accessibilityIdentifier("boxes.draw.hint")
                 HStack(spacing: 8) {
                     if kind != .face {
-                        Button("Whole photo") { stage.setRect(StageEditGeometry.wholePhoto) }
+                        Button(video ? "Whole frame" : "Whole photo") { stage.setRect(StageEditGeometry.wholePhoto) }
                             .buttonStyle(.bordered)
                             .fixedSize()
                             .accessibilityIdentifier("boxes.draw.whole")
@@ -274,7 +308,7 @@ struct BoxesEditBottomBar: View {
         return VStack(alignment: .leading, spacing: 8) {
             Text("Move or resize \(label)")
                 .font(.subheadline.weight(.semibold))
-            Text("Drag the box to move it, or a corner to resize it. Two fingers move and zoom the photo.")
+            Text("Drag the box to move it, or a corner to resize it. Two fingers move and zoom the \(model.stage.frameTime != nil ? "frame" : "photo").")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
             if let error = model.adjustError {
@@ -304,13 +338,14 @@ struct BoxesEditBottomBar: View {
     }
 
     private func drawnCard(_ kind: StageDrawKind) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
+        let onFrame = model.stage.frameTime != nil ? " on this frame" : ""
+        return VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 10) {
                 Image(systemName: kind == .face ? "faceid" : kind == .pet ? "pawprint" : "person.crop.rectangle")
                     .font(.title3)
                     .accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(kind == .face ? "Face box" : kind == .pet ? "Pet box" : "Person box")
+                    Text((kind == .face ? "Face box" : kind == .pet ? "Pet box" : "Person box") + onFrame)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     Text(kind == .pet ? "What is it?" : "Who is it?")
@@ -320,6 +355,16 @@ struct BoxesEditBottomBar: View {
             Text(hint(kind))
                 .font(.footnote)
                 .foregroundStyle(.secondary)
+            if model.saving {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text("Adding the box")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+                .accessibilityElement(children: .combine)
+                .accessibilityIdentifier("boxes.draw.adding")
+            }
             if let error = model.drawError {
                 Text(error)
                     .font(.footnote)

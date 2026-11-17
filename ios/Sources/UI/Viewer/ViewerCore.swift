@@ -1,5 +1,6 @@
 import SwiftUI
 import AVKit
+import Combine
 
 /// The item on screen in the viewer: the core's view of it (what the stage draws), the whole generated
 /// `API.ItemDetail` (nil only if it could not be decoded; `json` holds the raw answer), and a way to load it
@@ -31,6 +32,8 @@ struct ViewerStageEnvironment {
     let toggleChrome: () -> Void
     /// Tells the viewer the page is zoomed in, so a swipe pans the page instead of going to the next one.
     let setZoomed: (Bool) -> Void
+    /// The bottom bar's Show or Hide boxes: a video hides its people chips and the box on its frame too.
+    var showBoxes = true
 }
 
 /// What the viewer area adds to the core viewer (Features/Viewer/ViewerScreen.swift fills these).
@@ -216,7 +219,7 @@ struct ViewerCore: View {
     private var bottomBar: some View {
         HStack(spacing: 20) {
             if let ctx = currentContext {
-                if !ctx.detail.stillBoxes.isEmpty {
+                if !ctx.detail.stillBoxes.isEmpty || Self.videoHasBoxes(ctx) {
                     Button {
                         showBoxes.toggle()
                     } label: {
@@ -247,6 +250,13 @@ struct ViewerCore: View {
         .padding(.vertical, 6)
         .background(LinearGradient(colors: [.clear, .black.opacity(0.65)], startPoint: .top, endPoint: .bottom)
             .ignoresSafeArea())
+    }
+
+    /// A video with people or pets on its frames: the toggle hides its chips (the website's boxes button).
+    static func videoHasBoxes(_ ctx: ViewerPageContext) -> Bool {
+        guard ctx.detail.mediaKind == .video, let item = ctx.item else { return false }
+        return item.faces.contains { $0.frameTimeS != nil } || item.bodies.contains { $0.frameTimeS != nil }
+            || item.animals.contains { $0.frameTimeS != nil }
     }
 
     /// The item the viewer was opened on.
@@ -307,6 +317,8 @@ struct ViewerPage: View {
     @State private var loadError: Error?
     @State private var reloadToken = 0
     @State private var livePlayer: AVPlayer?
+    /// The large preview could not be loaded (the thumb stays, with the website's note).
+    @State private var previewFailed = false
 
     private var kind: MediaKind { MediaKind(detail?.kind ?? entry.kind) }
 
@@ -332,10 +344,28 @@ struct ViewerPage: View {
                               edit: editingHere ? edit : nil,
                               editRevision: editingHere ? (edit?.revision ?? 0) : -1)
                 if let livePlayer {
+                    // A tap on the playing clip stops it, as on the website.
                     PlayerSurface(player: livePlayer)
-                        .allowsHitTesting(false)
+                        .contentShape(Rectangle())
+                        .onTapGesture { stopLive() }
                         .accessibilityHidden(true)
                 }
+            }
+            if previewFailed && detail != nil && custom == nil && kind != .video {
+                VStack {
+                    Spacer()
+                    Text("The preview could not be loaded. You can still download the original.")
+                        .font(.footnote)
+                        .multilineTextAlignment(.center)
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 10)
+                        .background(.black.opacity(0.65), in: RoundedRectangle(cornerRadius: 12))
+                        .padding(.horizontal, 24)
+                        .padding(.bottom, 96)
+                        .accessibilityIdentifier("viewer.previewFailed")
+                }
+                .allowsHitTesting(false)
             }
             if detail == nil, let loadError {
                 VStack(spacing: 12) {
@@ -352,9 +382,9 @@ struct ViewerPage: View {
         .overlay(alignment: .topLeading) {
             if let liveRef, kind == .image, custom == nil {
                 Button {
-                    playLive(liveRef)
+                    if livePlayer == nil { playLive(liveRef) } else { stopLive() }
                 } label: {
-                    Label("LIVE", systemImage: "livephoto")
+                    Label("LIVE", systemImage: livePlayer == nil ? "livephoto" : "livephoto.slash")
                         .font(.caption.weight(.semibold))
                         .padding(.horizontal, 8)
                         .padding(.vertical, 4)
@@ -363,18 +393,30 @@ struct ViewerPage: View {
                 .foregroundStyle(.white)
                 .padding(.top, 104)
                 .padding(.leading, 12)
-                .accessibilityLabel("Play the Live Photo")
+                .accessibilityLabel(livePlayer == nil ? "Play the Live Photo" : "Stop the Live Photo")
+                .accessibilityIdentifier("viewer.live")
             }
         }
         .accessibilityElement(children: .contain)
         .accessibilityLabel(accessibilityText)
         .task(id: "\(entry.uid)#\(reloadToken)") { await load() }
+        .task(id: pollKey) { await poll() }
         .onCloudChange(uid: entry.uid) { reloadToken += 1 }
         .onReceive(NotificationCenter.default.publisher(for: .AVPlayerItemDidPlayToEndTime)) { note in
-            if let item = note.object as? AVPlayerItem, item === livePlayer?.currentItem { livePlayer = nil }
+            // the clip loops, muted, until it is tapped or the owner leaves the item (the website's LiveButton)
+            if let item = note.object as? AVPlayerItem, item === livePlayer?.currentItem {
+                livePlayer?.seek(to: .zero)
+                livePlayer?.play()
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .AVPlayerItemFailedToPlayToEndTime)) { note in
+            if let item = note.object as? AVPlayerItem, item === livePlayer?.currentItem { liveFailed() }
+        }
+        .onReceive(liveStatus) { status in
+            if status == .failed { liveFailed() }
         }
         .onChange(of: isCurrent) { _, nowCurrent in
-            if !nowCurrent { livePlayer?.pause(); livePlayer = nil }
+            if !nowCurrent { stopLive() }
         }
     }
 
@@ -402,7 +444,7 @@ struct ViewerPage: View {
         guard let stage, let ctx = context else { return nil }
         let zoom = $zoomed
         return stage(ctx, ViewerStageEnvironment(isCurrent: isCurrent, toggleChrome: onTap,
-                                                 setZoomed: { zoom.wrappedValue = $0 }))
+                                                 setZoomed: { zoom.wrappedValue = $0 }, showBoxes: showBoxes))
     }
 
     private var accessibilityText: String {
@@ -411,9 +453,49 @@ struct ViewerPage: View {
     }
 
     private func playLive(_ ref: String) {
-        guard let player = AuthorizedPlayer.player(for: ref, vault: vault) else { return }
+        guard let player = AuthorizedPlayer.player(for: ref, vault: vault) else {
+            Toaster.shared.error("The clip could not be played")
+            return
+        }
+        player.isMuted = true
         livePlayer = player
         player.play()
+    }
+
+    private func stopLive() {
+        livePlayer?.pause()
+        livePlayer = nil
+    }
+
+    private func liveFailed() {
+        guard livePlayer != nil else { return }
+        stopLive()
+        Toaster.shared.error("The clip could not be played")
+    }
+
+    /// The Live Photo clip's loading state, as it changes (a clip that cannot load is reported).
+    private var liveStatus: AnyPublisher<AVPlayerItem.Status, Never> {
+        guard let item = livePlayer?.currentItem else { return Empty().eraseToAnyPublisher() }
+        return item.publisher(for: \.status).removeDuplicates().eraseToAnyPublisher()
+    }
+
+    /// What the page waits for while the server still works on the item: the website reads it again every 4
+    /// seconds while faces or text are pending, and every 5 seconds while a video's new copy is made (a video
+    /// without any copy yet asks again from its own page). Only the page on screen asks.
+    private var pollSeconds: UInt64? {
+        guard isCurrent, let item else { return nil }
+        if item.analysisStatus == .pending || item.textStatus == .pending { return 4 }
+        if MediaKind(item.kind.rawValue) == .video && item.previewStatus == .pending && item.urls.video != nil { return 5 }
+        return nil
+    }
+
+    private var pollKey: String { "\(entry.uid)#\(pollSeconds ?? 0)#\(reloadToken)" }
+
+    private func poll() async {
+        guard let seconds = pollSeconds else { return }
+        try? await Task.sleep(nanoseconds: seconds * 1_000_000_000)
+        if Task.isCancelled { return }
+        reloadToken += 1
     }
 
     private func load() async {
@@ -435,8 +517,14 @@ struct ViewerPage: View {
                 image = try? await ImageLoader.shared.image(decoded.urls.thumb, maxPixel: 512, vault: vault)
             }
             if decoded.mediaKind != .video {
-                let preview = try await ImageLoader.shared.image(decoded.urls.preview, maxPixel: 2560, vault: vault)
-                image = preview
+                do {
+                    let preview = try await ImageLoader.shared.image(decoded.urls.preview, maxPixel: 2560, vault: vault)
+                    image = preview
+                    previewFailed = false
+                } catch {
+                    if error is CancellationError || Task.isCancelled { return }
+                    previewFailed = true
+                }
             }
         } catch {
             if error is CancellationError || Task.isCancelled { return }

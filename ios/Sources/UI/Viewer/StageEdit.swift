@@ -33,6 +33,9 @@ final class StageEditState {
     private(set) var revision = 0
     /// True while a finger draws or drags on the stage.
     var dragging = false
+    /// A video's edit: the time of the paused frame the box is drawn or moved on (nil on a photo). The frame
+    /// shown and the time sent with a new box are both this one.
+    private(set) var frameTime: Double?
     /// The latest context of each page the viewer loaded, by uid (the viewer core keeps it current).
     var contexts: [String: ViewerPageContext] = [:]
 
@@ -53,16 +56,18 @@ final class StageEditState {
         return nil
     }
 
-    func startAdjusting(_ box: StageBox, on uid: String) {
+    func startAdjusting(_ box: StageBox, on uid: String, frameTime: Double? = nil) {
         self.uid = uid
+        self.frameTime = frameTime
         mode = .adjust(box)
         rect = CGRect(x: box.x, y: box.y, width: box.w, height: box.h)
         dragging = false
         revision += 1
     }
 
-    func startDrawing(_ kind: StageDrawKind, on uid: String) {
+    func startDrawing(_ kind: StageDrawKind, on uid: String, frameTime: Double? = nil) {
         self.uid = uid
+        self.frameTime = frameTime
         mode = .draw(kind)
         rect = nil
         dragging = false
@@ -82,6 +87,7 @@ final class StageEditState {
 
     func stop() {
         uid = nil
+        frameTime = nil
         mode = nil
         rect = nil
         dragging = false

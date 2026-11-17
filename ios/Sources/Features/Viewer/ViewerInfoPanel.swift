@@ -28,6 +28,8 @@ struct ViewerInfoPanel: View {
             }
         }
         .onCloudChange(uid: context.uid) { Task { await refresh() } }
+        // The viewer read the item again (after a change, or while the server still works on it): show that.
+        .onChange(of: context.json) { _, _ in fresh = nil }
         .task { trashDays = await ViewerConfig.loadTrashDays() }
         .sheet(item: $file) { file in
             ViewerShareSheet(items: [file.url]).onDisappear { ViewerFiles.discard(file) }
@@ -56,15 +58,13 @@ struct ViewerInfoPanel: View {
                 }
                 if item.misclick { misclickSection(item) }
                 if ViewerFormat.receivedLabel(item.receivedVia) != nil || item.forward { forwardSection(item) }
+                // Opened from the Documents page: the document comes first, as the website's document mode.
+                if ctx.documentFirst { documentSection(item) }
                 processingSection(item, kind: kind)
                 ViewerBoxesInfoSection(model: boxes, context: ctx)
                 ViewerRelatedSection(context: ctx)
                 ViewerTagsSection(context: ctx, item: item)
-                if let document = item.document {
-                    Section("Document") {
-                        ViewerDocumentCard(context: ctx, document: document)
-                    }
-                }
+                if !ctx.documentFirst { documentSection(item) }
             }
             Group {
             if !item.nsfw { categorySection(item) }
@@ -95,11 +95,20 @@ struct ViewerInfoPanel: View {
         .confirmAction("Move this \(ViewerFormat.trashNoun(kind)) to the trash?", isPresented: $confirmTrash,
                        actionTitle: "Move to trash",
                        message: "It leaves the library now and is deleted for good after \(trashDays) days. Until then you can restore it from Trash with its tags and document details.") {
-            Task { await ViewerActions.trash(ctx, router: router) }
+            Task { await ViewerActions.trash(ctx) }
         }
     }
 
     // MARK: sections
+
+    @ViewBuilder
+    private func documentSection(_ item: API.ItemDetail) -> some View {
+        if let document = item.document {
+            Section("Document") {
+                ViewerDocumentCard(context: ctx, document: document)
+            }
+        }
+    }
 
     private func misclickSection(_ item: API.ItemDetail) -> some View {
         Section("Possible mis-click") {
@@ -309,7 +318,7 @@ struct ViewerInfoPanel: View {
                 .disabled(downloading)
             }
             Button {
-                Task { await ViewerActions.setPrivate(ctx, !item.nsfw, router: router) }
+                Task { await ViewerActions.setPrivate(ctx, !item.nsfw) }
             } label: {
                 Label(item.nsfw ? "Not private" : "Mark private", systemImage: item.nsfw ? "lock.open" : "lock")
             }
@@ -472,12 +481,13 @@ extension ViewerActions {
         }
     }
 
-    /// Moves the item into or out of the vault; it then leaves the list the viewer was opened on, so the viewer closes.
-    static func setPrivate(_ context: ViewerPageContext, _ on: Bool, router: AppRouter) async {
+    /// Moves the item into or out of the vault; it then leaves the list the viewer was opened on, so the viewer goes
+    /// on to the next item (or closes after the last), as the website does.
+    static func setPrivate(_ context: ViewerPageContext, _ on: Bool) async {
         let done = await run(context, on ? "Moved to the vault" : "Moved out of the vault", doing: "save the change") {
             _ = try await $0.updateItem(uid: context.uid, body: API.ItemUpdate(nsfw: on))
         }
-        if done { router.viewer = nil }
+        if done { context.removeFromViewer() }
     }
 
     static func reprocess(_ context: ViewerPageContext, _ stage: API.Stages) async {
@@ -486,11 +496,11 @@ extension ViewerActions {
         }
     }
 
-    /// Moves the item to the trash (the message offers Undo) and closes the viewer.
-    static func trash(_ context: ViewerPageContext, router: AppRouter) async {
+    /// Moves the item to the trash (the message offers Undo) and goes on to the next item (or closes after the last).
+    static func trash(_ context: ViewerPageContext) async {
         let done = await run(context, "Moved to the trash", doing: "move it to the trash") {
             _ = try await $0.deleteItem(uid: context.uid)
         }
-        if done { router.viewer = nil }
+        if done { context.removeFromViewer() }
     }
 }

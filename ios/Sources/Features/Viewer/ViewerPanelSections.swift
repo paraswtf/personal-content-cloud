@@ -8,6 +8,7 @@ struct ViewerTagsSection: View {
     let context: ViewerPageContext
     let item: API.ItemDetail
 
+    @Environment(AppRouter.self) private var router
     @State private var text = ""
     @State private var options: [API.TagOut] = []
     @State private var busy = false
@@ -25,7 +26,18 @@ struct ViewerTagsSection: View {
                 ViewerFlow {
                     ForEach(mine, id: \.id) { tag in
                         HStack(spacing: 2) {
-                            Text(tag.name).lineLimit(1)
+                            if linksToLibrary {
+                                Button {
+                                    showTagged(tag.name)
+                                } label: {
+                                    Text(tag.name).lineLimit(1).foregroundStyle(.primary)
+                                }
+                                .accessibilityLabel(tag.name)
+                                .accessibilityHint("Shows everything tagged \(tag.name)")
+                                .accessibilityIdentifier("viewer.tag.show")
+                            } else {
+                                Text(tag.name).lineLimit(1)
+                            }
                             Button {
                                 Task { await remove(tag) }
                             } label: {
@@ -92,13 +104,19 @@ struct ViewerTagsSection: View {
                         Button {
                             Task { await add(API.UserTagIn(tagId: tag.id), name: tag.name) }
                         } label: {
-                            Label(tag.name, systemImage: "plus")
+                            HStack(spacing: 6) {
+                                Image(systemName: "plus").imageScale(.small)
+                                Text(tag.name).lineLimit(1)
+                                Text("\(tag.items)")
+                                    .font(.caption.monospacedDigit())
+                                    .foregroundStyle(.secondary)
+                            }
                                 .font(.subheadline)
                                 .padding(.horizontal, 10)
                                 .padding(.vertical, 6)
                                 .background(Color.secondary.opacity(0.12), in: Capsule())
                         }
-                        .accessibilityLabel("Add tag \(tag.name)")
+                        .accessibilityLabel("Add tag \(tag.name), \(Fmt.count(tag.items, "item"))")
                     }
                 }
                 .buttonStyle(.borderless)
@@ -110,6 +128,19 @@ struct ViewerTagsSection: View {
             }
         }
         .task(id: typed) { await loadOptions() }
+    }
+
+    /// A tag opens the library with that tag (the website's link). The vault's items stay in the vault, whose
+    /// screen has no tag filter on the phone, so their tags are plain text.
+    private var linksToLibrary: Bool { !context.vault && !item.nsfw }
+
+    /// Everything with the tag: the viewer closes and the library opens filtered on the tab underneath, as Show on
+    /// map does.
+    private func showTagged(_ name: String) {
+        var filters = LibraryFilters()
+        filters.tag = [name]
+        router.viewer = nil
+        router.open(.libraryFiltered(filters))
     }
 
     private func same(_ a: String, _ b: String) -> Bool {

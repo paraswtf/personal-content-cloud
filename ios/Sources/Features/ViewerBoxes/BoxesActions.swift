@@ -241,10 +241,12 @@ enum BoxesActions {
         }
     }
 
-    /// Adds the person box or face box the owner drew, with who is in it. Returns nil when it was added, else what
-    /// went wrong in words.
-    static func addBox(_ kind: StageDrawKind, rect: CGRect, pick: PersonPick, uid: String, vault: Bool) async -> String? {
+    /// Adds the person box or face box the owner drew, with who is in it; on a video, `t` is the time of the paused
+    /// frame it was drawn on. Returns nil when it was added, else what went wrong in words.
+    static func addBox(_ kind: StageDrawKind, rect: CGRect, pick: PersonPick, uid: String, vault: Bool,
+                       t: Double? = nil) async -> String? {
         let (personId, newName) = parts(pick)
+        let video = t != nil
         let typed = newName ?? "them"
         let x = Double(rect.minX), y = Double(rect.minY), w = Double(rect.width), h = Double(rect.height)
         let before = UndoCenter.shared.entries.first?.id
@@ -252,18 +254,19 @@ enum BoxesActions {
             let text: String = try await APIContext.$vault.withValue(vault) {
                 try await UndoCenter.shared.perform(kind == .face ? "Added a face box" : "Added a person box", toast: false) {
                     if kind == .face {
-                        let r = try await Cloud.api().addFaceBox(uid: uid, body: API.FaceBoxIn(x: x, y: y, w: w, h: h,
+                        let r = try await Cloud.api().addFaceBox(uid: uid, body: API.FaceBoxIn(x: x, y: y, w: w, h: h, t: t,
                                                                                                 personId: personId,
                                                                                                 newPersonName: newName))
                         let who = Fmt.isNamed(r.person?.name) ? Fmt.personName(r.person?.name) : typed
-                        return "Tagged \(who) with a face box."
+                        return video ? "Tagged \(who) with a face box on this frame." : "Tagged \(who) with a face box."
                     }
-                    let r = try await Cloud.api().addPersonBox(uid: uid, body: API.PersonBoxIn(x: x, y: y, w: w, h: h,
+                    let r = try await Cloud.api().addPersonBox(uid: uid, body: API.PersonBoxIn(x: x, y: y, w: w, h: h, t: t,
                                                                                                 personId: personId,
                                                                                                 newPersonName: newName))
                     let who = Fmt.isNamed(r.body.person?.name) ? Fmt.personName(r.body.person?.name) : typed
                     if r.face != nil { return "Tagged \(who). Their face in the box is tagged too." }
-                    return "Tagged \(who) with a person box."
+                    return video ? "Tagged \(who) on this frame. The box shows as a chip under the video."
+                                 : "Tagged \(who) with a person box."
                 }
             }
             toast(text, since: before)
@@ -274,13 +277,18 @@ enum BoxesActions {
         }
     }
 
-    /// Adds the pet box the owner drew, with its species. Returns the new box, or nil after showing the error.
-    static func addPet(rect: CGRect, species: API.Species, uid: String, vault: Bool) async -> API.AnimalOut? {
+    /// Adds the pet box the owner drew, with its species (on a video, `t` is the paused frame's time). Returns the
+    /// new box, or nil after showing the error.
+    static func addPet(rect: CGRect, species: API.Species, uid: String, vault: Bool,
+                       t: Double? = nil) async -> API.AnimalOut? {
         let body = API.AnimalBoxIn(x: Double(rect.minX), y: Double(rect.minY), w: Double(rect.width),
-                                   h: Double(rect.height), species: species.rawValue)
+                                   h: Double(rect.height), species: species.rawValue, t: t)
         let what = BoxesWords.aSpecies(species.rawValue)
+        let video = t != nil
         return await run("Added a pet box", doing: "add the box", uid: uid, vault: vault,
-                         message: { (_: API.AnimalOut) -> String? in "Added \(what) box" }) {
+                         message: { (_: API.AnimalOut) -> String? in
+            video ? "Pet box added. Name it from its chip under the video." : "Added \(what) box"
+        }) {
             try await Cloud.api().addAnimalBox(uid: uid, body: body)
         }
     }

@@ -26,6 +26,7 @@ struct BoxesInfoContent: View {
     let item: API.ItemDetail
 
     @Environment(\.dismiss) private var dismissPanel
+    @Environment(AppRouter.self) private var router
     @State private var editing: BoxesEditorTarget?
     @State private var editingPicks = false
     @State private var changing: BoxesPersonChoice?
@@ -51,6 +52,7 @@ struct BoxesInfoContent: View {
 
     var body: some View {
         if !isDoc || !item.people.isEmpty || !item.faces.isEmpty {
+            if isVideo, let inFrame { inFrameSection(inFrame) }
             peopleSection
             if !relatedPeople.isEmpty {
                 Section {
@@ -67,6 +69,75 @@ struct BoxesInfoContent: View {
                 }
             }
         }
+    }
+
+    // MARK: in the frame (videos)
+
+    /// The named people whose faces are on screen at the frame the video shows now (the website's "In the frame",
+    /// from the faces' spans), or nil when the video has no player yet.
+    private var inFrame: [API.PersonRef]? {
+        guard let clock = model.frameClock, let t = clock(uid) else { return nil }
+        return BoxesLookup.inFrame(item, at: t)
+    }
+
+    private func inFrameSection(_ people: [API.PersonRef]) -> some View {
+        Section {
+            if people.isEmpty {
+                Text("No one known in this frame.")
+                    .foregroundStyle(.secondary)
+            }
+            ForEach(people, id: \.id) { p in
+                HStack(spacing: 10) {
+                    RemoteImage(ref: BoxesLookup.thumb(of: p, in: item), maxPixel: 120, vault: vault)
+                        .frame(width: 36, height: 36)
+                        .clipShape(Circle())
+                        .accessibilityHidden(true)
+                    Text(Fmt.personName(p.name))
+                        .lineLimit(1)
+                    Spacer()
+                    if let track = firstTrack(of: p) {
+                        Button {
+                            dismissPanel()
+                            model.showInVideo(track, uid: uid)
+                        } label: {
+                            Image(systemName: "viewfinder").frame(width: 36, height: 36)
+                        }
+                        .buttonStyle(.borderless)
+                        .accessibilityLabel("Show \(Fmt.personName(p.name)) in the video")
+                    }
+                    openPageButton(p)
+                }
+            }
+        } header: {
+            Text("In the frame")
+        }
+    }
+
+    /// A person's first box in the video, by time.
+    private func firstTrack(of p: API.PersonRef) -> BoxesTarget? {
+        let boxes = item.faces.filter { $0.person?.id == p.id }.map { BoxesTarget.face($0) }
+            + item.bodies.filter { $0.person?.id == p.id }.map { BoxesTarget.body($0) }
+            + item.animals.filter { $0.person?.id == p.id }.map { BoxesTarget.animal($0) }
+        return boxes.filter { $0.frameTimeS != nil }.min { ($0.frameTimeS ?? 0) < ($1.frameTimeS ?? 0) }
+    }
+
+    /// Opens the person's (or pet's) page: the viewer closes and the page opens on the tab underneath, as the
+    /// website's link leaves the item.
+    private func openPage(_ p: API.PersonRef) {
+        router.viewer = nil
+        router.open(.person(id: p.id))
+    }
+
+    private func openPageButton(_ p: API.PersonRef) -> some View {
+        let name = Fmt.personName(p.name, kind: p.kind == .pet ? "pet" : "person", species: speciesOf(p))
+        return Button {
+            openPage(p)
+        } label: {
+            Image(systemName: "arrow.up.right").frame(width: 36, height: 36)
+        }
+        .buttonStyle(.borderless)
+        .accessibilityLabel("Open \(name)'s page")
+        .accessibilityIdentifier("boxes.person.open")
     }
 
     // MARK: people
@@ -144,9 +215,12 @@ struct BoxesInfoContent: View {
             let p = choice.person
             let pet = p.kind == .pet
             let species = speciesOf(p)
+            let here = isVideo ? "video" : "picture"
             PersonPickerSheet(title: "Change \(BoxesWords.displayName(p.name, pet: pet)) to...", kind: pet ? .pet : .person,
                               like: .person(p.id, on: [uid]), excluding: [p.id], species: species,
-                              speciesOnly: pet && species != nil) { pick in
+                              speciesOnly: pet && species != nil,
+                              note: pet ? "Its boxes and tags in this \(here) go to the pet you pick."
+                                        : "Their faces and tags in this \(here) go to the one you pick, and look-alike faces may follow.") { pick in
                 act { await BoxesActions.change(p, to: pick, uid: uid, vault: vault) }
             }
         }
@@ -188,10 +262,12 @@ struct BoxesInfoContent: View {
         Binding(get: { renaming != nil }, set: { if !$0 { renaming = nil } })
     }
 
-    /// Adding a box by drawing it: on photos, where the core's stage draws.
+    /// Adding a box by drawing it: on a photo, or on the paused frame of a video once its streaming copy is there.
+    private var canDraw: Bool { kind == .image || (isVideo && item.urls.video != nil) }
+
     @ViewBuilder
     private var addBoxRows: some View {
-        if kind == .image {
+        if canDraw {
             Button { model.startDrawing(.face, in: context) } label: {
                 Label("Add a face box", systemImage: "faceid")
             }
@@ -207,7 +283,7 @@ struct BoxesInfoContent: View {
                     Label("More", systemImage: "ellipsis")
                 }
             } else {
-                if kind == .image {
+                if canDraw {
                     Button { model.startDrawing(.pet, in: context) } label: {
                         Label("Add a pet box", systemImage: "pawprint")
                     }
@@ -221,7 +297,7 @@ struct BoxesInfoContent: View {
                 .accessibilityIdentifier("boxes.info.findPets")
             }
             if item.animals.isEmpty {
-                Text(isVideo ? "No pet box in this video. Let the detector look again more closely."
+                Text(isVideo ? "No pet box in this video. Pause on a frame with the pet and draw a box over it, or let the detector look again more closely."
                      : "No pet box here. Draw one over the pet, or let the detector look again more closely.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
@@ -273,7 +349,13 @@ struct BoxesInfoContent: View {
             }
             .accessibilityElement(children: .combine)
             Spacer()
+            openPageButton(p)
             Menu {
+                Button {
+                    openPage(p)
+                } label: {
+                    Label(pet ? "Open its page" : "Open their page", systemImage: "arrow.up.right")
+                }
                 Button("Change to...") { changing = BoxesPersonChoice(person: p) }
                 Button(renameLabel) {
                     renameText = p.name ?? ""
@@ -300,6 +382,14 @@ struct BoxesInfoContent: View {
                         model.show(key)
                     } label: {
                         Label("Show in the photo", systemImage: "viewfinder")
+                    }
+                }
+                if isVideo, let track = firstTrack(of: p) {
+                    Button {
+                        dismissPanel()
+                        model.showInVideo(track, uid: uid)
+                    } label: {
+                        Label("Show in the video", systemImage: "viewfinder")
                     }
                 }
                 if tagOnly {
@@ -374,9 +464,17 @@ struct BoxesInfoContent: View {
                 .accessibilityLabel("Edit this \(noun)")
                 OriginIcon(origin: .guess)
                     .foregroundStyle(.secondary)
-                Text("\(name)?")
-                    .font(.subheadline.weight(.semibold))
-                    .lineLimit(1)
+                Button {
+                    showGuess(t)
+                } label: {
+                    Text("\(name)?")
+                        .font(.subheadline.weight(.semibold))
+                        .lineLimit(1)
+                }
+                .buttonStyle(.borderless)
+                .disabled(!canShow(t))
+                .accessibilityLabel("Show \(name)? in the \(isVideo ? "video" : "photo")")
+                .accessibilityIdentifier("boxes.guessRow.show")
                 Spacer()
                 Button {
                     act { await BoxesActions.answer([t], confirm: true, guessName: name, uid: uid, vault: vault) }
@@ -410,6 +508,19 @@ struct BoxesInfoContent: View {
                     .padding(.leading, 48)
             }
         }
+    }
+
+    /// A guess's box can be shown: a photo's still box on the stage, or a video's box on its frame.
+    private func canShow(_ t: BoxesTarget) -> Bool {
+        kind == .image ? t.frameTimeS == nil : (isVideo && t.frameTimeS != nil && item.urls.video != nil)
+    }
+
+    /// The website's guess chip name: the panel steps aside and the guessed box lights up on the photo, or the
+    /// video pauses on its frame with the box drawn.
+    private func showGuess(_ t: BoxesTarget) {
+        guard canShow(t) else { return }
+        dismissPanel()
+        if isVideo { model.showInVideo(t, uid: uid) } else { model.show(t.id) }
     }
 }
 
