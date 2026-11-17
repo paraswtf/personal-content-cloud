@@ -124,7 +124,15 @@ final class PeopleScreens: ScreenTestCase {
         XCTAssertTrue(reveal(card("People Epsilon")), "no card for People Epsilon")
         app.buttons["people.merge"].tap()
         card("People Delta").tap()
-        card("People Epsilon").tap()
+        let epsilon = card("People Epsilon")
+        // The merge bar at the bottom can cover the card once merging starts (more so under the open vault's bar):
+        // a slow drag brings it above the bar first.
+        let clear = app.tabBars.firstMatch.frame.minY - 90
+        if epsilon.frame.maxY > clear {
+            let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.6))
+            start.press(forDuration: 0.1, thenDragTo: start.withOffset(CGVector(dx: 0, dy: clear - epsilon.frame.maxY - 40)))
+        }
+        epsilon.tap()
         app.buttons["people.merge.start"].tap()
         let confirm = app.buttons["people.merge.confirm"]
         XCTAssertTrue(confirm.waitForExistence(timeout: 10), "the merge sheet did not open")

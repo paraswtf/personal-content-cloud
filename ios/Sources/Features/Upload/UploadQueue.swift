@@ -25,12 +25,16 @@ final class UploadQueue {
 
     /// The server's limit per file (GET /api/config); the server's default until it is read.
     var maxUploadBytes: Int64 = 16 * 1024 * 1024 * 1024
+    /// The server's settings were read in this session (the Upload screen reads them when it opens).
+    var configLoaded = false
     /// What the last add did ("2 files added to the queue."), shown under the buttons for a while.
     var notice: String?
     /// Files the Photos picker is still handing over.
     var importing = 0
     /// Records whose files are being exported from Photos or hashed (the "Checking" phase).
     private(set) var checking: Set<String> = []
+    /// How much of a copied file has been hashed (0...1), while it is checked ("Checking 40%").
+    private(set) var checkProgress: [String: Double] = [:]
     /// Records the queue had already started an upload for (Resuming instead of Uploading).
     private(set) var resumed: Set<String> = []
 
@@ -64,9 +68,12 @@ final class UploadQueue {
         UploadPhase.of(status: rec.status, serverStatus: rec.serverStatus, checking: checking.contains(rec.assetId))
     }
 
+    /// `progress` is the upload's; a file being checked shows how much of it is hashed instead.
     func info(_ rec: SyncRecord, progress: Double?) -> UploadRowInfo {
-        UploadRowInfo(phase: phase(rec), serverStatus: rec.serverStatus, bytes: max(rec.bytes, 0), progress: progress,
-                      skipped: rec.status == "skipped")
+        let current = self.phase(rec)
+        let shown = current == .checking ? checkProgress[rec.assetId] : progress
+        return UploadRowInfo(phase: current, serverStatus: rec.serverStatus, bytes: max(rec.bytes, 0), progress: shown,
+                             skipped: rec.status == "skipped")
     }
 
     // MARK: adding
@@ -259,6 +266,7 @@ final class UploadQueue {
                 if claimed { SyncEngine.shared.release(id) }
                 self.inFlight.remove(id)
                 self.checking.remove(id)
+                self.checkProgress[id] = nil
                 self.pump()
             }
             guard let api = APIClient.current() else { return }
@@ -289,6 +297,7 @@ final class UploadQueue {
             // Cancelled or taken off the list while it was checked.
             guard rec.status == "pending", rec.queuedAt != nil, self.record(id) != nil else { return }
             self.checking.remove(id)
+            self.checkProgress[id] = nil
             BackgroundUploader.shared.start(rec)
             self.save()
             await BackgroundUploader.shared.wait(for: id, until: nil)
@@ -336,16 +345,39 @@ final class UploadQueue {
     private func hash(_ rec: SyncRecord) async throws {
         var files = rec.files
         guard !files.isEmpty else { throw UploadQueueError("This file could not be read. It may have been moved or deleted.") }
-        for i in files.indices where files[i].sha256.isEmpty {
+        let id = rec.assetId
+        let total = Double(max(1, files.reduce(Int64(0)) { $0 + max(0, $1.bytes) }))
+        var before: Int64 = 0
+        for i in files.indices {
+            let size = max(0, files[i].bytes)
+            defer { before += size }
+            guard files[i].sha256.isEmpty else { continue }
             let url = UploadPaths.url(files[i].path)
             guard FileManager.default.fileExists(atPath: url.path) else {
                 throw UploadQueueError("This file could not be read. It may have been moved or deleted.")
             }
-            files[i].sha256 = try await Task.detached(priority: .utility) { try PhotoLibrary.sha256(of: url) }.value
+            let done = Double(before)
+            checkProgress[id] = done / total
+            files[i].sha256 = try await Task.detached(priority: .utility) {
+                var shown = -1
+                return try PhotoLibrary.sha256(of: url) { share in
+                    // Whole percents only, so the row redraws at most a hundred times.
+                    let percent = Int(((done + share * Double(size)) / total * 100).rounded(.down))
+                    guard percent != shown else { return }
+                    shown = percent
+                    Task { @MainActor in UploadQueue.shared.showChecked(id, Double(percent) / 100) }
+                }
+            }.value
         }
         rec.files = files
         rec.sha256 = files.first?.sha256
         rec.updatedAt = Date()
+    }
+
+    /// A hashing step's share, while the file is still being checked.
+    fileprivate func showChecked(_ id: String, _ share: Double) {
+        guard checking.contains(id) else { return }
+        if share > (checkProgress[id] ?? -1) { checkProgress[id] = share }
     }
 
     // MARK: the server's answer

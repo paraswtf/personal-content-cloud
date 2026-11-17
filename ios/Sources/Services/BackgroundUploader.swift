@@ -78,6 +78,10 @@ final class BackgroundUploader: NSObject, ObservableObject {
     /// The files being sent now, by asset id.
     @Published private(set) var sending: [String: Sending] = [:]
 
+    /// When a request that failed on the way is tried again, by asset id (the Upload screen's "Connection problem.
+    /// Trying again in N s."). Cleared once bytes move again or the asset leaves the wire.
+    @Published private(set) var retryAt: [String: Date] = [:]
+
     /// The files being sent, in a steady order for the Sync screen.
     var sendingList: [Sending] {
         sending.values.sorted { $0.filename == $1.filename ? $0.id < $1.id : $0.filename < $1.filename }
@@ -349,6 +353,7 @@ final class BackgroundUploader: NSObject, ObservableObject {
         save()
         sending.removeAll()
         lastProgress.removeAll()
+        retryAt.removeAll()
     }
 
     // MARK: the state machine
@@ -522,6 +527,7 @@ final class BackgroundUploader: NSObject, ObservableObject {
 
     private func succeeded(_ rec: SyncRecord, _ tag: UploadTaskTag, _ body: Data) {
         rec.attempts = 0
+        clearRetry(rec.assetId)
         lastProgress[rec.assetId] = Date()
         switch tag.step {
         case "chunk":
@@ -598,6 +604,7 @@ final class BackgroundUploader: NSObject, ObservableObject {
             return
         }
         let delay = Self.backoff[min(rec.attempts - 1, Self.backoff.count - 1)]
+        retryAt[rec.assetId] = Date(timeIntervalSinceNow: delay)
         scheduleNext(rec, after: delay)
     }
 
@@ -667,7 +674,13 @@ final class BackgroundUploader: NSObject, ObservableObject {
     private func ended(_ assetId: String) {
         sending[assetId] = nil
         lastProgress[assetId] = nil
+        clearRetry(assetId)
         releaseAll(assetId)
+    }
+
+    /// The asset is moving again: no countdown on its row.
+    private func clearRetry(_ assetId: String) {
+        if retryAt[assetId] != nil { retryAt[assetId] = nil }
     }
 
     // MARK: helpers
@@ -725,6 +738,7 @@ final class BackgroundUploader: NSObject, ObservableObject {
     fileprivate func sent(_ tag: UploadTaskTag?, total: Int64) {
         guard let tag else { return }
         lastProgress[tag.asset] = Date()
+        clearRetry(tag.asset)
         guard tag.step == "chunk", let bytes = sending[tag.asset]?.bytes, bytes > 0 else { return }
         sending[tag.asset]?.progress = min(1, Double(tag.offset + total) / Double(bytes))
     }

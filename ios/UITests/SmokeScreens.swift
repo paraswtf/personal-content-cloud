@@ -37,5 +37,9 @@ final class SmokeScreens: ScreenTestCase {
         app.buttons["more.settings"].tap()
         XCTAssertTrue(app.navigationBars["Settings"].waitForExistence(timeout: 10))
         snap("settings")
+        // the cloud's name from the server, beside its address at the bottom
+        app.collectionViews.firstMatch.swipeUp()
+        XCTAssertTrue(app.staticTexts["Name"].waitForExistence(timeout: 10), "Settings does not name the cloud")
+        snap("settings-server")
     }
 }

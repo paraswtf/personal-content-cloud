@@ -1,10 +1,13 @@
 import SwiftUI
 
 /// The signed-in app: five tabs (Library, People, Albums, Review, More), each with its own navigation stack, and
-/// the viewer over everything.
+/// the viewer over everything. Review shows how many items wait there; while the vault is open, a bar over every
+/// tab shows the time left (ShellVaultBar).
 struct MainShell: View {
     @State private var router = AppRouter()
     @Environment(\.scenePhase) private var scenePhase
+
+    private var status: ShellStatus { ShellStatus.shared }
 
     var body: some View {
         TabView(selection: tabSelection) {
@@ -19,6 +22,7 @@ struct MainShell: View {
                 .tag(AppTab.albums)
             TabRoot(tab: .review) { ReviewScreen() }
                 .tabItem { Label("Review", systemImage: "checkmark.bubble") }
+                .badge(ShellStatus.badge(status.reviewWaiting).map { Text($0) })
                 .tag(AppTab.review)
             TabRoot(tab: .more) { MoreMenu() }
                 .tabItem { Label("More", systemImage: "ellipsis.circle") }
@@ -30,9 +34,25 @@ struct MainShell: View {
                 .environment(router)
                 .toastHost()
         }
-        .task { startAutomaticSync() }
+        .task {
+            startAutomaticSync()
+            await status.refresh()
+        }
         .onChange(of: scenePhase) { _, phase in
-            if phase == .active { startAutomaticSync() }
+            if phase == .active {
+                startAutomaticSync()
+                Task { await status.refresh() }
+            }
+        }
+        // Review's count follows decisions made anywhere; changing tabs reads it again now and then.
+        .onCloudChange { Task { await status.refreshStats(force: true) } }
+        .onChange(of: router.tab) { _, _ in
+            Task { await status.refreshStats(force: false) }
+        }
+        // The vault closed (locked, or its window ran out on the phone's clock): ask the server how things stand,
+        // as the website's badge does at zero.
+        .onChange(of: VaultSession.shared.until) { old, new in
+            if old != nil && new == nil { Task { await status.refresh(force: false) } }
         }
     }
 
@@ -62,11 +82,14 @@ struct TabRoot<Content: View>: View {
     @Environment(AppRouter.self) private var router
 
     var body: some View {
-        NavigationStack(path: router.path(tab)) {
-            content()
-                .navigationDestination(for: Route.self) { route in
-                    RouteDestination(route: route)
-                }
+        VStack(spacing: 0) {
+            ShellVaultBar()
+            NavigationStack(path: router.path(tab)) {
+                content()
+                    .navigationDestination(for: Route.self) { route in
+                        RouteDestination(route: route)
+                    }
+            }
         }
     }
 }
@@ -95,18 +118,54 @@ struct RouteDestination: View {
     }
 }
 
-/// The More tab: the screens that do not have a tab of their own.
+/// The More tab: the screens that do not have a tab of their own, under the website's headings (Browse, Tidy up,
+/// Account), and the theme.
 struct MoreMenu: View {
+    @AppStorage(SettingsAppearanceChoice.storageKey) private var theme: SettingsAppearanceChoice = .system
+
     var body: some View {
         List {
-            ForEach(MoreDestination.allCases) { destination in
-                NavigationLink(value: Route.more(destination)) {
-                    Label(destination.title, systemImage: destination.systemImage)
+            ForEach(MoreDestination.groups, id: \.title) { group in
+                Section(group.title) {
+                    ForEach(group.destinations) { destination in
+                        row(destination)
+                    }
                 }
-                .accessibilityIdentifier("more.\(destination.rawValue)")
+            }
+            Section("Theme") {
+                Picker("Theme", selection: $theme) {
+                    ForEach(SettingsAppearanceChoice.allCases) { option in
+                        Text(option.label).tag(option)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .accessibilityIdentifier("more.theme")
             }
         }
         .navigationTitle("More")
+    }
+
+    private func row(_ destination: MoreDestination) -> some View {
+        let vault = VaultSession.shared
+        let isVault = destination == .vault
+        let open = isVault && vault.isOpen()
+        // The vault's state, once the server said it (the website's "Open now" and "Locked").
+        let hint: String? = isVault && vault.loaded ? (open ? "Open now" : "Locked") : nil
+        return NavigationLink(value: Route.more(destination)) {
+            Label {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(destination.title)
+                    if let hint {
+                        Text(hint)
+                            .font(.caption)
+                            .foregroundStyle(open ? Color.orange : Color.secondary)
+                    }
+                }
+            } icon: {
+                Image(systemName: open ? "lock.open" : destination.systemImage)
+            }
+        }
+        .accessibilityIdentifier("more.\(destination.rawValue)")
     }
 }
 

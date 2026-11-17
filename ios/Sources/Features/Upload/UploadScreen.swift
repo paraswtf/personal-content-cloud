@@ -12,12 +12,15 @@ import UniformTypeIdentifiers
 struct UploadScreen: View {
     @Environment(AppRouter.self) private var router
     @ObservedObject private var uploader = BackgroundUploader.shared
+    @ObservedObject private var sync = SyncEngine.shared
     @Query(UploadScreen.queueDescriptor) private var rows: [SyncRecord]
 
     @State private var picked: [PhotosPickerItem] = []
     @State private var choosingFiles = false
     @State private var cameraOpen = false
     @State private var cameraRefused = false
+    @State private var loadingConfig = false
+    @State private var configError: Error?
 
     private let queue = UploadQueue.shared
 
@@ -66,8 +69,12 @@ struct UploadScreen: View {
         // Opening upload is where the app first asks for Photos access (never at launch or sign-in).
         .task {
             await PhotoLibrary.requestAccessIfNeeded()
-            if let config = try? await Cloud.api().getConfig() { queue.maxUploadBytes = Int64(config.maxUploadBytes) }
+            await loadConfig()
             await queue.resume()
+        }
+        // back online: files left waiting go on
+        .onChange(of: sync.online) { _, online in
+            if online { queue.pump() }
         }
         .onDisappear { queue.stopPolling() }
     }
@@ -80,6 +87,7 @@ struct UploadScreen: View {
                              onClearFinished: { queue.clearFinished() })
             ForEach(listRows) { row in
                 UploadQueueRow(rec: row.rec, info: row.info, resumed: queue.resumed.contains(row.rec.assetId),
+                               offline: !sync.online, retryAt: uploader.retryAt[row.rec.assetId],
                                onView: viewAction(row.rec, row.info),
                                onRetry: { queue.retry(row.rec) },
                                onCancel: { queue.cancel(row.rec) },
@@ -120,7 +128,11 @@ struct UploadScreen: View {
                 }
             }
         } footer: {
-            Text("Up to \(UploadText.limit(queue.maxUploadBytes)) per file. Photos (including HEIC and RAW), videos, PDFs, Word, Excel, PowerPoint and text files are indexed. Originals are kept exactly as uploaded.")
+            // the limit only once the server said it (here, below everything, so reading it moves no row the owner
+            // is about to tap)
+            Text((queue.configLoaded ? "Up to \(UploadText.limit(queue.maxUploadBytes)) per file. "
+                  : loadingConfig ? "Reading the server's upload limit. " : "")
+                 + "Photos (including HEIC and RAW), videos, PDFs, Word, Excel, PowerPoint and text files are indexed. Originals are kept exactly as uploaded.")
         }
     }
 
@@ -156,6 +168,13 @@ struct UploadScreen: View {
             }
             .disabled(!UploadCamera.available)
             .accessibilityIdentifier("upload.camera")
+            if UploadCamera.available && UploadCamera.microphoneRefused {
+                Label("No microphone: clips are recorded without sound.", systemImage: "mic.slash")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("upload.noMicrophone")
+            }
+            configRows
             #if DEBUG
             if UploadTestHook.files != nil {
                 Button("Add the test files") { UploadTestHook.add() }
@@ -175,6 +194,39 @@ struct UploadScreen: View {
                     .foregroundStyle(.secondary)
                     .accessibilityIdentifier("upload.notice")
             }
+        }
+    }
+
+    /// What went wrong reading the server's upload settings (its size limit per file), with Try again (the website's
+    /// error card on its Upload page); while they are read, the notes' footer says so. The rest of the screen stays
+    /// usable meanwhile.
+    @ViewBuilder private var configRows: some View {
+        if let configError {
+            VStack(alignment: .leading, spacing: 6) {
+                Label(ErrorText.describe(configError, doing: "read the server's upload settings"),
+                      systemImage: "exclamationmark.triangle")
+                    .font(.footnote)
+                    .foregroundStyle(.orange)
+                    .accessibilityIdentifier("upload.configError")
+                Button("Try again") { Task { await loadConfig() } }
+                    .font(.footnote.weight(.semibold))
+                    .disabled(loadingConfig)
+                    .accessibilityIdentifier("upload.configRetry")
+            }
+        }
+    }
+
+    private func loadConfig() async {
+        loadingConfig = true
+        defer { loadingConfig = false }
+        do {
+            let config = try await Cloud.api().getConfig()
+            queue.maxUploadBytes = Int64(config.maxUploadBytes)
+            queue.configLoaded = true
+            configError = nil
+        } catch {
+            if error is CancellationError || (error as? URLError)?.code == .cancelled { return }
+            configError = error
         }
     }
 

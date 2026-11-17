@@ -182,6 +182,12 @@ enum Fmt {
         return m % 60 == 0 ? "\(h) h" : "\(h) h \(m % 60) min"
     }
 
+    /// "14:05" for seconds left (the website's vault badge, mmss): whole minutes, then two-digit seconds.
+    static func clock(_ seconds: Int) -> String {
+        let s = max(0, seconds)
+        return "\(s / 60):" + String(format: "%02d", s % 60)
+    }
+
     /// "4032 x 3024 (12.2 MP)".
     static func resolution(_ w: Int?, _ h: Int?) -> String {
         guard let w, let h, w > 0, h > 0 else { return "" }

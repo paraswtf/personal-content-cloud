@@ -339,7 +339,7 @@ struct SettingsSystemView: View {
         defer { downloading = false }
         do {
             _ = try await Cloud.api().downloadModels()
-            Toaster.shared.ok("Model download started. Progress shows here.")
+            Toaster.shared.info("Model download started. Progress shows here.")
             await load()
         } catch {
             Toaster.shared.error(error, doing: "start the download")
@@ -364,7 +364,9 @@ struct SettingsSystemView: View {
         defer { retrying = false }
         do {
             let out = try await Cloud.api().retryFailed()
-            Toaster.shared.ok(SettingsSystemText.retryMessage(out.requeued))
+            // nothing to retry is a plain note on the website, the rest a success
+            let message = SettingsSystemText.retryMessage(out.requeued)
+            if out.requeued == 0 { Toaster.shared.info(message) } else { Toaster.shared.ok(message) }
             await load()
         } catch {
             Toaster.shared.error(error, doing: "retry the failed uploads")
@@ -379,9 +381,9 @@ struct SettingsSystemView: View {
             if out.started {
                 Toaster.shared.ok("Backup started. Progress shows here.")
             } else if out.running {
-                Toaster.shared.ok("A backup is already running.")
+                Toaster.shared.info("A backup is already running.")
             } else {
-                Toaster.shared.ok("Backups are off: set BACKUP_DIR first.")
+                Toaster.shared.info("Backups are off: set BACKUP_DIR first.")
             }
             await load()
         } catch {

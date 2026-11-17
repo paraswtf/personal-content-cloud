@@ -356,7 +356,7 @@ struct SettingsLearningView: View {
             let next = try await Cloud.api().learningStatus()
             status = next
             if on && !next.enabled {
-                Toaster.shared.ok("Learning is turned off on the server (LEARNING_ENABLED).")
+                Toaster.shared.info("Learning is turned off on the server (LEARNING_ENABLED).")
             } else {
                 Toaster.shared.ok(on ? "Learning is on." : "Learning is off. The built-in rules decide on their own.")
             }
@@ -400,7 +400,9 @@ struct SettingsLearningView: View {
         defer { applying = false }
         do {
             let out = try await Cloud.api().learningApply()
-            Toaster.shared.ok(SettingsSystemText.applyMessage(items: out.items, documents: out.documents, tags: out.tags))
+            // nothing to look at again is a plain note on the website, the rest a success
+            let message = SettingsSystemText.applyMessage(items: out.items, documents: out.documents, tags: out.tags)
+            if out.items + out.documents + out.tags == 0 { Toaster.shared.info(message) } else { Toaster.shared.ok(message) }
             if out.tags > 0 || out.items + out.documents > 0 { CloudEvents.post() }
         } catch {
             Toaster.shared.error(error, doing: "queue the items")

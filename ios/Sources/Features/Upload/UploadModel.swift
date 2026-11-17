@@ -233,11 +233,28 @@ enum UploadText {
     static func phase(_ phase: UploadPhase, progress: Double?, resumed: Bool) -> String? {
         switch phase {
         case .waiting: return "Waiting"
-        case .checking: return resumed ? "Resuming" : "Checking"
+        case .checking:
+            if let progress { return "Checking \(Int((progress * 100).rounded()))%" }
+            return resumed ? "Resuming" : "Checking"
         case .uploading: return "\(resumed ? "Resuming" : "Uploading") \(Int(((progress ?? 0) * 100).rounded()))%"
         case .processing: return "Processing"
         default: return nil
         }
+    }
+
+    /// Why a file on its way waits (the website's QueueRow): the phone is offline, or a request failed and is tried
+    /// again in `retryIn` seconds. Nil when neither.
+    static func network(offline: Bool, retryIn: Int?) -> String? {
+        if offline { return "You are offline. The upload continues when the connection is back." }
+        if let retryIn, retryIn > 0 { return "Connection problem. Trying again in \(retryIn) s." }
+        return nil
+    }
+
+    /// Whole seconds until `date`, rounded up; nil once it has passed.
+    static func secondsUntil(_ date: Date?, now: Date) -> Int? {
+        guard let date else { return nil }
+        let left = date.timeIntervalSince(now)
+        return left > 0 ? Int(left.rounded(.up)) : nil
     }
 
     /// The three notes under the queue.

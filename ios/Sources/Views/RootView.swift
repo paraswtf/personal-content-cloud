@@ -22,6 +22,7 @@ struct RootView: View {
                 ImageLoader.shared.clear()
                 UndoCenter.shared.clear()
                 VaultSession.shared.expire()
+                ShellStatus.shared.clear()
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: .apiUnauthorized)) { _ in

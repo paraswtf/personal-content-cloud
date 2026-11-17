@@ -15,6 +15,12 @@ enum UploadCamera {
         let s = AVCaptureDevice.authorizationStatus(for: .video)
         return s == .denied || s == .restricted
     }
+
+    /// The owner said no to the microphone: the system camera then records clips without sound (the website's "No
+    /// microphone" note). Before it is asked, the camera asks itself.
+    static var microphoneRefused: Bool {
+        AVAudioApplication.shared.recordPermission == .denied
+    }
 }
 
 struct UploadCameraPicker: UIViewControllerRepresentable {

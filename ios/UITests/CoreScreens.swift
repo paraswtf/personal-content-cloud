@@ -39,6 +39,42 @@ final class CoreScreens: ScreenTestCase {
         XCTAssertTrue(app.navigationBars["More"].waitForExistence(timeout: 10))
     }
 
+    /// What the shell shows on every screen: how many items wait in Review (a badge on its tab), and, while the vault
+    /// is open (the seed opens it for the whole run), a bar with the time left that opens the vault. More groups its
+    /// screens under headings and offers the theme. The bar's Lock is never tapped: the vault stays open for the others.
+    func testTheShellShowsWhatWaitsAndTheOpenVault() throws {
+        try launchSignedIn()
+        XCTAssertTrue(firstCell.waitForExistence(timeout: 30), "the library grid did not show")
+        let review = app.tabBars.buttons["Review"]
+        XCTAssertTrue(review.waitForExistence(timeout: 10))
+        let counted = NSPredicate { object, _ in
+            guard let tab = object as? XCUIElement else { return false }
+            let text = "\(tab.label) \(tab.value as? String ?? "")"
+            return text.rangeOfCharacter(from: .decimalDigits) != nil
+        }
+        let badge = XCTNSPredicateExpectation(predicate: counted, object: review)
+        XCTAssertEqual(XCTWaiter().wait(for: [badge], timeout: 30), .completed,
+                       "the Review tab shows no count: \(review.label) \(review.value as? String ?? "")")
+
+        let vault = app.buttons["shell.vault"]
+        XCTAssertTrue(vault.waitForExistence(timeout: 30), "no vault bar while the vault is open")
+        XCTAssertTrue(vault.label.hasPrefix("Vault unlocked, "), "the vault bar reads \(vault.label)")
+        XCTAssertTrue(app.buttons["shell.vaultLock"].exists, "the vault bar has no Lock")
+        snap("core-shell-vault-bar")
+        vault.tap()
+        XCTAssertTrue(app.navigationBars["Vault"].waitForExistence(timeout: 10), "the vault bar did not open the vault")
+        snap("core-shell-vault-opened")
+
+        tab("More")
+        XCTAssertTrue(app.navigationBars["More"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.staticTexts["BROWSE"].exists || app.staticTexts["Browse"].exists, "More has no headings")
+        let vaultEntry = app.buttons["more.vault"]
+        XCTAssertTrue(vaultEntry.waitForExistence(timeout: 10))
+        XCTAssertTrue(vaultEntry.label.contains("Open now"), "the vault entry reads \(vaultEntry.label)")
+        XCTAssertTrue(app.descendants(matching: .any)["more.theme"].exists, "More has no theme choice")
+        snap("core-shell-more")
+    }
+
     func testSelectingInTheGrid() throws {
         try launchSignedIn()
         XCTAssertTrue(firstCell.waitForExistence(timeout: 30))
