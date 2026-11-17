@@ -258,6 +258,8 @@ struct HeadsStage: UIViewRepresentable {
     let spin: Bool
     /// A head of the model carries its photo: the whole model is lit evenly (the website's PHOTO_LAMP rule).
     let evenLight: Bool
+    /// The look on screen, for VoiceOver ("3D head: 30s, beard").
+    var label: String? = nil
 
     func makeCoordinator() -> Coordinator { Coordinator(view: $view) }
 
@@ -270,6 +272,7 @@ struct HeadsStage: UIViewRepresentable {
         c.binding = $view
         c.update(prepared: prepared, key: lookKey, view: view, light: light, colour: colour, photo: photo,
                  spin: spin, even: evenLight)
+        uiView.accessibilityLabel = label.map { "3D head: \($0)" } ?? "3D head"
     }
 
     static func dismantleUIView(_ uiView: HeadsSceneView, coordinator: Coordinator) {

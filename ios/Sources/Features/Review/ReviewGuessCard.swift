@@ -5,12 +5,12 @@ import SwiftUI
 /// rests on and the evidence, and Yes, No and Someone else (the guess is learned as wrong and the box goes to the
 /// person picked, in one step). The review area builds it; the person page's Guesses tab shows it too. The card
 /// sends the answer itself; `onDecided` runs once the owner answered it, so the list can take the card away.
-/// `onOpenItem` opens a photo (the guess's own or the one a reason refers to); without it the card opens the photo
-/// in the viewer by itself.
+/// `onOpenItem` opens a photo (the guess's own or the one a reason refers to) with the second to start a video at
+/// (the box's frame when the scene is tapped, else nil); without it the card opens the photo in the viewer by itself.
 struct ReviewGuessCard: View {
     let guess: API.GuessItem
     var onDecided: (() -> Void)? = nil
-    var onOpenItem: ((String) -> Void)? = nil
+    var onOpenItem: ((String, Double?) -> Void)? = nil
 
     @Environment(AppRouter.self) private var router
     @State private var busy: ReviewDecisions.Action?
@@ -55,7 +55,7 @@ struct ReviewGuessCard: View {
                 }
                 Spacer(minLength: 0)
             }
-            ReviewGuessEvidence(guess: guess.guess, cropUrl: box.url, onOpenItem: { uid in open(uid) })
+            ReviewGuessEvidence(guess: guess.guess, cropUrl: box.url, onOpenItem: { uid in open(uid, at: nil) })
             if let outcome {
                 Label(outcome, systemImage: "checkmark.circle")
                     .font(.subheadline)
@@ -101,7 +101,7 @@ struct ReviewGuessCard: View {
     /// The photo the guess is in; a video shows the frame at the box's time with the box outlined.
     private var sceneButton: some View {
         Button {
-            open(guess.item.uid)
+            open(guess.item.uid, at: frameTime)
         } label: {
             sceneThumb
                 .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
@@ -203,11 +203,13 @@ struct ReviewGuessCard: View {
         }
     }
 
-    private func open(_ uid: String) {
+    private func open(_ uid: String, at time: Double?) {
         if let onOpenItem {
-            onOpenItem(uid)
+            onOpenItem(uid, time)
         } else if uid == guess.item.uid {
-            router.show([guess.item], start: guess.item)
+            var entry = guess.item.viewerEntry
+            entry.startAt = time
+            router.show(entries: [entry], start: 0)
         } else {
             router.open(.item(uid: uid))
         }

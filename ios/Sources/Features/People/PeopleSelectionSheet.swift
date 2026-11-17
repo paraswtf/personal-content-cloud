@@ -4,13 +4,16 @@ import SwiftUI
 /// section 10): everyone the selected items show, each with Change to, Rename and Not this person (Not this pet),
 /// and Tag someone in these; on a person's or pet's page (`fromPersonId`) first "Not NAME?", which moves their
 /// appearances on the items to someone else or says they are not NAME there. One sheet with steps. A move, a "Not
-/// NAME" or a tag closes the sheet and runs `onDone` (the caller ends its selection); a rename keeps it open.
+/// NAME" or a tag closes the sheet and runs `onDone` (the caller ends its selection); a rename keeps it open, except
+/// a rename that merges the page's own person into someone else: the sheet closes and `onMerged` gets the person
+/// they joined, so the page can follow them.
 /// The library's and the person page's selections present it.
 struct PeopleSelectionSheet: View {
     let uids: [String]
     var vault = false
     var fromPersonId: Int? = nil
     var onDone: (() -> Void)? = nil
+    var onMerged: ((Int) -> Void)? = nil
 
     @Environment(\.dismiss) private var dismiss
     @State private var step: PeopleSelectionStep = .list
@@ -375,8 +378,9 @@ struct PeopleSelectionSheet: View {
         }
         guard let p = r else { return }
         if p.id != who.id && who.id == fromPersonId {
-            // the page's own person went away into the one they joined
+            // the page's own person went away into the one they joined: follow them
             finish()
+            onMerged?(p.id)
             return
         }
         step = .list

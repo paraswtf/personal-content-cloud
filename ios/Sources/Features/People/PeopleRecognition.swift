@@ -11,6 +11,8 @@ struct PeopleRecognitionCard: View {
     /// start loading); the card follows a run from there and hands every newer status back with `onStatus`.
     let status: API.RecognitionOut
     let onStatus: (API.RecognitionOut) -> Void
+    /// "N guesses waiting for you" opens the page's Guesses tab.
+    var onShowGuesses: (() -> Void)? = nil
 
     /// Whether the card shows at all: nothing when it cannot be trained yet and never was (too few faces, learning
     /// off), as on the website.
@@ -95,9 +97,25 @@ struct PeopleRecognitionCard: View {
             } else {
                 note(trainedText(s))
                 if let scan = s.scan {
-                    let waiting = s.guesses > 0 ? "\(Fmt.count(s.guesses, "guess", "guesses")) waiting for you" : "no guess waiting"
                     let none = scan.guesses == 0 ? ". It found no face that looks like \(name) and is not tagged yet." : "."
-                    note("Last look, \(Fmt.date(scan.at, withTime: true)): \(Fmt.count(scan.looked, "other face")), \(waiting)\(none)")
+                    let lead = "Last look, \(Fmt.date(scan.at, withTime: true)): \(Fmt.count(scan.looked, "other face")), "
+                    if s.guesses > 0, let onShowGuesses {
+                        // the website's link to the Guesses tab
+                        let waiting = "\(Fmt.count(s.guesses, "guess", "guesses")) waiting for you"
+                        Button(action: onShowGuesses) {
+                            (Text(lead) + Text(waiting).foregroundStyle(Color.accentColor).fontWeight(.medium) + Text(none))
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .multilineTextAlignment(.leading)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityHint("Opens the Guesses tab")
+                        .accessibilityIdentifier("person.recognition.guesses")
+                    } else {
+                        let waiting = s.guesses > 0 ? "\(Fmt.count(s.guesses, "guess", "guesses")) waiting for you" : "no guess waiting"
+                        note("\(lead)\(waiting)\(none)")
+                    }
                 }
                 if s.withdrawn { note("Its guesses were taken back. It makes no new ones until you look again.") }
                 if !s.available, let reason = s.reason {

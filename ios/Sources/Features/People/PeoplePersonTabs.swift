@@ -22,6 +22,8 @@ struct PeoplePersonItemsTab: View {
     let person: API.PersonOut
     let related: Bool
     let header: AnyView
+    /// A rename in the People sheet merged this person into someone else: the page shows that person.
+    var onMerged: (Int) -> Void = { _ in }
 
     @Environment(AppRouter.self) private var router
     @State private var pager: Pager<API.ItemCard>
@@ -31,10 +33,11 @@ struct PeoplePersonItemsTab: View {
     /// would never start loading them).
     @State private var suggested: [API.RelatedSuggestionOut] = []
 
-    init(person: API.PersonOut, related: Bool, header: AnyView) {
+    init(person: API.PersonOut, related: Bool, header: AnyView, onMerged: @escaping (Int) -> Void = { _ in }) {
         self.person = person
         self.related = related
         self.header = header
+        self.onMerged = onMerged
         let id = person.id
         _pager = State(initialValue: Pager<API.ItemCard> { cursor in
             try await Cloud.api().personItems(personId: id, relation: related ? .related : nil, cursor: cursor,
@@ -82,7 +85,8 @@ struct PeoplePersonItemsTab: View {
         .sheet(item: $sheet) { s in
             switch s {
             case .people(let uids):
-                PeopleSelectionSheet(uids: uids, fromPersonId: person.id, onDone: { selection.end() })
+                PeopleSelectionSheet(uids: uids, fromPersonId: person.id, onDone: { selection.end() },
+                                     onMerged: onMerged)
             case .album(let uids):
                 AlbumsAddSheet(uids: uids, onDone: { selection.end() })
             case .share(let uids):
@@ -342,10 +346,14 @@ struct PeoplePersonFacesTab: View {
         }
     }
 
+    /// The viewer on the items of every face loaded, at this face's item (a video at the face's frame); paging past
+    /// the last one loads the next page of faces.
     private func open(_ face: API.FaceListItem) {
-        let faces = pager.items.map(\.face)
-        let thumbs = Dictionary(faces.map { ($0.itemUid, $0.thumbUrl) }, uniquingKeysWith: { a, _ in a })
-        PeopleViewer.open(router, uids: faces.map(\.itemUid), thumbs: thumbs, start: face.itemUid)
+        let pager = self.pager
+        PeopleViewer.open(router, entries: pager.items.map { PeopleViewer.entry($0.face) }, start: face.itemUid,
+                          startAt: face.frameTimeS) {
+            await PeopleViewer.more(pager) { PeopleViewer.entry($0.face) }
+        }
     }
 
     private func assign(_ choice: PeopleChoice?) async {
@@ -480,10 +488,14 @@ struct PeoplePersonCropsTab: View {
         }
     }
 
+    /// The viewer on the items of every crop loaded, at this crop's item (a video at the crop's frame); paging past
+    /// the last one loads the next page of crops.
     private func open(_ crop: API.AnimalListItem) {
-        let crops = pager.items.map(\.crop)
-        let thumbs = Dictionary(crops.map { ($0.itemUid, $0.thumbUrl) }, uniquingKeysWith: { a, _ in a })
-        PeopleViewer.open(router, uids: crops.map(\.itemUid), thumbs: thumbs, start: crop.itemUid)
+        let pager = self.pager
+        PeopleViewer.open(router, entries: pager.items.map { PeopleViewer.entry($0.crop) }, start: crop.itemUid,
+                          startAt: crop.frameTimeS) {
+            await PeopleViewer.more(pager) { PeopleViewer.entry($0.crop) }
+        }
     }
 
     private func assign(_ choice: PeopleChoice?) async {
@@ -532,6 +544,7 @@ struct PeoplePersonGuessesTab: View {
     let person: API.PersonOut
     let header: AnyView
 
+    @Environment(AppRouter.self) private var router
     @State private var pager: Pager<PeopleGuessRow>
     @State private var busy = false
 
@@ -569,7 +582,7 @@ struct PeoplePersonGuessesTab: View {
                 ForEach(mine) { row in
                     ReviewGuessCard(guess: row.guess, onDecided: {
                         pager.remove(where: { $0.id == row.id })
-                    })
+                    }, onOpenItem: { uid, t in open(uid, at: t) })
                     .padding(.horizontal, 16)
                     .onAppear { pager.loadMoreIfNeeded(row) }
                 }
@@ -579,6 +592,23 @@ struct PeoplePersonGuessesTab: View {
         .task { if !pager.loaded { await pager.refresh() } }
         .refreshable { await pager.refresh() }
         .onCloudChange { Task { await pager.refresh() } }
+    }
+
+    /// The viewer on the photos of this person's guesses loaded, at `uid` (a video at the box's time when the scene
+    /// was tapped); paging past the last one loads more guesses.
+    private func open(_ uid: String, at time: Double?) {
+        let entries = mine.map(\.guess.item.viewerEntry)
+        guard entries.contains(where: { $0.uid == uid }) else {
+            router.open(.item(uid: uid))
+            return
+        }
+        let pager = self.pager
+        let id = person.id
+        PeopleViewer.open(router, entries: entries, start: uid, startAt: time) {
+            await PeopleViewer.more(pager) { row in
+                row.guess.guess.person.id == id ? row.guess.item.viewerEntry : nil
+            }
+        }
     }
 
     @ViewBuilder private var states: some View {

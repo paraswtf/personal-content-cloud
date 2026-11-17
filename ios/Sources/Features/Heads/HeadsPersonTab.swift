@@ -8,10 +8,16 @@ import SwiftUI
 /// made, every 5 while someone else's is, and when a head does not load (its look may be gone on the server).
 ///
 /// The people area shows it as the person page's 3D tab. It has no scroll view of its own: the person page's
-/// scroll view holds it. The head itself takes a drag that starts on it, so the page scrolls from around it.
+/// scroll view holds it, and `reveal` scrolls it to a view of this tab by its id (the Generate again panel, opened
+/// from the line above the head, is brought into view). The head itself takes a drag that starts on it, so the
+/// page scrolls from around it.
 struct HeadsPersonTab: View {
     let personId: Int
     let name: String
+    var reveal: ((String) -> Void)? = nil
+
+    /// The id of the Generate again panel, for `reveal`.
+    static let againPanelId = "heads.againPanel"
 
     @State private var status: API.Model3dOut?
     @State private var loadError: Error?
@@ -21,11 +27,16 @@ struct HeadsPersonTab: View {
     @State private var starting = false
     @State private var stopping = false
     @State private var refresh = 0
+    /// A head or a look's picture did not load and the status is being read again: the stage says "Checking the
+    /// model" until it is back.
+    @State private var checking = false
+    @State private var askedAt = Date.distantPast
     @State private var store: HeadsStore
 
-    init(personId: Int, name: String) {
+    init(personId: Int, name: String, reveal: ((String) -> Void)? = nil) {
         self.personId = personId
         self.name = name
+        self.reveal = reveal
         _store = State(initialValue: HeadsStore(personId: personId))
     }
 
@@ -92,7 +103,7 @@ struct HeadsPersonTab: View {
                 if !running && HeadsWords.beforePhotoTextures(s) {
                     VStack(alignment: .leading, spacing: 6) {
                         Text("These heads were made before photo textures.")
-                        Button("Generate again to lay the photo over the face") { openAgain(s) }
+                        Button("Generate again to lay the photo over the face") { openAgain(s, jump: true) }
                             .accessibilityIdentifier("heads.againFromNote")
                     }
                     .font(.subheadline)
@@ -100,7 +111,7 @@ struct HeadsPersonTab: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .background(Color(.tertiarySystemFill), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
                 }
-                HeadsModelView(looks: s.looks, store: store, onLoadError: { refresh += 1 })
+                HeadsModelView(looks: s.looks, store: store, checking: checking, onLoadError: { loadFailed() })
                     .id(s.generatedAt ?? "")
                 modelCard(s, running: running, why: why)
             }
@@ -168,17 +179,21 @@ struct HeadsPersonTab: View {
                 .accessibilityIdentifier("heads.delete")
             }
             if again && !running {
-                Divider()
-                Text("The photos are read again and new heads are built. The new model takes this one's place when it is ready.")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                if let why { notice(why) }
-                HeadsOptionSliders(value: $options, disabled: !s.available, reliefInstalled: s.reliefInstalled)
-                HStack(spacing: 10) {
-                    generateButton(why: why)
-                    Button("Cancel") { again = false }
-                        .accessibilityIdentifier("heads.againCancel")
+                VStack(alignment: .leading, spacing: 12) {
+                    Divider()
+                    Text("The photos are read again and new heads are built. The new model takes this one's place when it is ready.")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                    if let why { notice(why) }
+                    HeadsOptionSliders(value: $options, disabled: !s.available, reliefInstalled: s.reliefInstalled)
+                    HStack(spacing: 10) {
+                        generateButton(why: why)
+                        Button("Cancel") { again = false }
+                            .accessibilityIdentifier("heads.againCancel")
+                    }
                 }
+                .id(Self.againPanelId)
+                .accessibilityIdentifier(Self.againPanelId)
             }
         }
     }
@@ -223,6 +238,7 @@ struct HeadsPersonTab: View {
     private func poll() async {
         while !Task.isCancelled {
             await load()
+            checking = false
             guard let s = status else { return }
             let seconds: UInt64
             if s.state == "running" {
@@ -249,10 +265,29 @@ struct HeadsPersonTab: View {
     }
 
     /// Open the panel with the options as this model was made; what a model from before an option existed does not
-    /// say starts at its default.
-    private func openAgain(_ s: API.Model3dOut) {
-        options = HeadsOptions.complete(s.options)
-        again = true
+    /// say starts at its default. From the line above the head (`jump`) the panel is brought into view; when it is
+    /// open already, it is only brought into view and keeps the options set in it.
+    private func openAgain(_ s: API.Model3dOut, jump: Bool = false) {
+        if !again {
+            options = HeadsOptions.complete(s.options)
+            again = true
+        }
+        guard jump, let reveal else { return }
+        Task { @MainActor in
+            // the panel is drawn on the next pass
+            try? await Task.sleep(nanoseconds: 100_000_000)
+            withAnimation { reveal(Self.againPanelId) }
+        }
+    }
+
+    /// A head or a look's picture did not load: it may belong to a look the server stopped listing, so the status is
+    /// read again and that look drops out. Pictures failing together ask once.
+    private func loadFailed() {
+        let now = Date()
+        guard now.timeIntervalSince(askedAt) >= 1 else { return }
+        askedAt = now
+        checking = true
+        refresh += 1
     }
 
     private func generate() {
@@ -330,6 +365,8 @@ struct HeadsPersonTab: View {
 struct HeadsModelView: View {
     let looks: [API.Look3dOut]
     let store: HeadsStore
+    /// The status is being read again after a failure: a failed head says "Checking the model" meanwhile.
+    var checking = false
     let onLoadError: () -> Void
 
     @Environment(AppRouter.self) private var router
@@ -365,8 +402,13 @@ struct HeadsModelView: View {
     private func stage(_ active: API.Look3dOut, ready: HeadsPrepared?) -> some View {
         ZStack {
             HeadsStage(prepared: ready, lookKey: active.key, view: $view, light: light, colour: colour, photo: photo,
-                       spin: spin, evenLight: looks.contains(where: { $0.textured }))
+                       spin: spin, evenLight: looks.contains(where: { $0.textured }), label: active.label)
             switch store.states[active.meshUrl] {
+            case .failed? where checking:
+                ProgressView("Checking the model")
+                    .padding(12)
+                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    .accessibilityIdentifier("heads.checking")
             case .failed(let message)?:
                 VStack(spacing: 10) {
                     Text(message)
@@ -434,7 +476,7 @@ struct HeadsModelView: View {
                         lookKey = look.key
                     } label: {
                         VStack(alignment: .leading, spacing: 2) {
-                            RemoteImage(ref: look.pictureUrl, maxPixel: 256)
+                            RemoteImage(ref: look.pictureUrl, maxPixel: 256, onFailure: onLoadError)
                                 .frame(width: 88, height: 88)
                                 .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                             Text(lines.0)

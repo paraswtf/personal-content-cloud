@@ -67,7 +67,7 @@ struct ReviewGuessesTab: View {
                 ForEach(pager.items) { row in
                     ReviewGuessCard(guess: row.guess,
                                     onDecided: { pager.remove { $0.id == row.id } },
-                                    onOpenItem: { uid in open(uid) })
+                                    onOpenItem: { uid, t in open(uid, at: t) })
                         .onAppear { pager.loadMoreIfNeeded(row) }
                 }
                 ReviewListState(pager: pager, emptyTitle: emptyTitle, emptyText: emptyText, emptyImage: "sparkles")
@@ -139,12 +139,17 @@ struct ReviewGuessesTab: View {
         return pager.items.map(\.guess.item).filter { seen.insert($0.uid).inserted }
     }
 
-    private func open(_ uid: String) {
-        let list = items
-        if let item = list.first(where: { $0.uid == uid }) {
-            router.show(list, start: item) {
+    /// The viewer on the photos of every guess loaded, at `uid` (a video at the box's time when the scene was
+    /// tapped); paging past the last one loads more guesses.
+    private func open(_ uid: String, at time: Double?) {
+        var list = items.map(\.viewerEntry)
+        if let i = list.firstIndex(where: { $0.uid == uid }) {
+            if let time, time.isFinite, time > 0 { list[i].startAt = time }
+            let pager = self.pager
+            router.show(entries: list, start: i) {
                 await pager.loadMore()
-                return items.map(\.viewerEntry)
+                var seen = Set<String>()
+                return pager.items.map(\.guess.item).filter { seen.insert($0.uid).inserted }.map(\.viewerEntry)
             }
         } else {
             router.open(.item(uid: uid))

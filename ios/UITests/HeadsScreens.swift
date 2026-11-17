@@ -86,6 +86,8 @@ final class HeadsScreens: ScreenTestCase {
         XCTAssertFalse(element("heads.loadRetry").exists, "the head file was refused")
         // the model opens on the latest age: the older look, whose face was shaped
         XCTAssertTrue(caption.label.hasPrefix("About 41, short hair, a beard."), caption.label)
+        // VoiceOver names the look on screen
+        XCTAssertTrue(element("heads.viewer").label.hasPrefix("3D head: About 41"), element("heads.viewer").label)
         XCTAssertTrue(app.staticTexts["The nose, lips and chin were shaped from the photo by a depth model."].exists)
         XCTAssertTrue(app.staticTexts["From the front this is the photo; past about 50 degrees the sides and back are filled in."].exists)
         snap("heads-model")
@@ -99,6 +101,7 @@ final class HeadsScreens: ScreenTestCase {
         XCTAssertTrue(note.waitForExistence(timeout: 10))
         XCTAssertEqual(note.label, "The face was not shaped: the depth model is not installed.")
         XCTAssertTrue(caption.label.hasPrefix("About 29"), caption.label)
+        XCTAssertTrue(element("heads.viewer").label.hasPrefix("3D head: About 29"), element("heads.viewer").label)
         snap("heads-look-young")
 
         // turn the head and take its colours away: the sliders say what the head shows
