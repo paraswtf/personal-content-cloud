@@ -58,6 +58,8 @@ enum Route: Hashable {
     case mapAt(MapStart)
     /// The library with filters set (a tag tapped in the viewer shows everything with that tag).
     case libraryFiltered(LibraryFilters)
+    /// The vault with filters set (a tag of a private item tapped in the viewer: the website's /vault?tag=).
+    case vaultFiltered(LibraryFilters)
 }
 
 /// One item the viewer can page to. The thumb shows at once while the item itself loads. `startAt` opens a video
