@@ -36,6 +36,9 @@ struct BoxesInfoContent: View {
     @State private var tagging = false
     @State private var moreBoxes = false
     @State private var busy = false
+    /// The time of the frame the video shows, read again while the panel is open (a player's time is not observed),
+    /// so "In the frame" follows playing and seeking. Nil until the first read.
+    @State private var frameNow: Double?
 
     private var uid: String { context.uid }
     private var vault: Bool { context.vault }
@@ -76,8 +79,25 @@ struct BoxesInfoContent: View {
     /// The named people whose faces are on screen at the frame the video shows now (the website's "In the frame",
     /// from the faces' spans), or nil when the video has no player yet.
     private var inFrame: [API.PersonRef]? {
-        guard let clock = model.frameClock, let t = clock(uid) else { return nil }
+        guard let t = videoTime else { return nil }
         return BoxesLookup.inFrame(item, at: t)
+    }
+
+    /// The time of the frame on screen: the last one read, else the player's now; nil without a player.
+    private var videoTime: Double? {
+        guard let clock = model.frameClock, let now = clock(uid) else { return nil }
+        return frameNow ?? now
+    }
+
+    /// Reads the player's time a few times a second while the section shows, and keeps it when the frame moved by a
+    /// quarter of a second or more, so the list changes as the video plays or the owner seeks.
+    private func followFrame() async {
+        while !Task.isCancelled {
+            if let t = model.frameClock?(uid) ?? nil, frameNow.map({ abs($0 - t) >= 0.25 }) ?? true {
+                frameNow = t
+            }
+            try? await Task.sleep(nanoseconds: 250_000_000)
+        }
     }
 
     private func inFrameSection(_ people: [API.PersonRef]) -> some View {
@@ -95,7 +115,7 @@ struct BoxesInfoContent: View {
                     Text(Fmt.personName(p.name))
                         .lineLimit(1)
                     Spacer()
-                    if let track = firstTrack(of: p) {
+                    if let track = trackOnScreen(of: p) {
                         Button {
                             dismissPanel()
                             model.showInVideo(track, uid: uid)
@@ -109,8 +129,19 @@ struct BoxesInfoContent: View {
                 }
             }
         } header: {
+            // on the header, one view: a modifier on the section would reach each of its rows
             Text("In the frame")
+                .task(id: uid) { await followFrame() }
         }
+    }
+
+    /// "In the frame"'s Show: the person's face on screen now, else their first box (the website's
+    /// onShowPerson(id, true)).
+    private func trackOnScreen(of p: API.PersonRef) -> BoxesTarget? {
+        if let t = videoTime, let face = BoxesLookup.faceOnScreen(of: p.id, in: item, at: t) {
+            return BoxesTarget.face(face)
+        }
+        return firstTrack(of: p)
     }
 
     /// A person's first box in the video, by time.

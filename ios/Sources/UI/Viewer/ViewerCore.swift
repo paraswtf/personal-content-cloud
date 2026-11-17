@@ -116,6 +116,10 @@ struct ViewerCore: View {
         .onChange(of: editing) { _, nowEditing in
             if nowEditing { info = nil }
         }
+        .onChange(of: edit?.showBoxesRequest ?? 0) { _, _ in
+            // the boxes area shows a person or a box, or starts moving or drawing one: the boxes come back on
+            showBoxes = true
+        }
         .sheet(item: $info) { opened in
             // The item as it is now: a save in the panel reloads the page, and the panel shows the new answer.
             let ctx = contexts[opened.uid] ?? opened
@@ -316,6 +320,9 @@ struct ViewerPage: View {
     @State private var image: UIImage?
     @State private var loadError: Error?
     @State private var reloadToken = 0
+    /// Bumped after each poll, so the next one waits its turn (a poll reads the item again without reloading the
+    /// picture).
+    @State private var pollRound = 0
     @State private var livePlayer: AVPlayer?
     /// The large preview could not be loaded (the thumb stays, with the website's note).
     @State private var previewFailed = false
@@ -418,6 +425,13 @@ struct ViewerPage: View {
         .onChange(of: isCurrent) { _, nowCurrent in
             if !nowCurrent { stopLive() }
         }
+        .onChange(of: edit?.showBoxesRequest ?? 0) { _, _ in
+            // boxes are not drawn over a playing Live Photo clip (the website's showPerson, showBox, startAdjust)
+            stopLive()
+        }
+        .onChange(of: edit?.isEditing(entry.uid) ?? false) { _, nowEditing in
+            if nowEditing { stopLive() }
+        }
     }
 
     private var pixelSize: CGSize? {
@@ -489,13 +503,36 @@ struct ViewerPage: View {
         return nil
     }
 
-    private var pollKey: String { "\(entry.uid)#\(pollSeconds ?? 0)#\(reloadToken)" }
+    private var pollKey: String { "\(entry.uid)#\(pollSeconds ?? 0)#\(pollRound)" }
 
+    /// Reads the item again, as the website's refetch does: the details change, the picture being loaded (the large
+    /// preview on a slow link) goes on loading.
     private func poll() async {
         guard let seconds = pollSeconds else { return }
         try? await Task.sleep(nanoseconds: seconds * 1_000_000_000)
         if Task.isCancelled { return }
-        reloadToken += 1
+        await refreshDetail()
+        if Task.isCancelled { return }
+        pollRound += 1
+    }
+
+    /// The item's details read again without starting the picture over. Only a new version of the picture (its
+    /// preview's address changed: rotated, edited) loads the whole page again.
+    private func refreshDetail() async {
+        guard let server = APIConnection.current else { return }
+        let query = vault ? [URLQueryItem(name: "vault", value: "1")] : []
+        guard let answer = try? await CoreHTTP.raw(server, "GET", "/api/items/\(entry.uid)", query: query),
+              let decoded = try? CoreHTTP.decoder.decode(CoreItemDetail.self, from: answer.0) else { return }
+        let data = answer.0
+        if Task.isCancelled { return }
+        if decoded.mediaKind != .video, let shown = detail?.urls.preview, shown != decoded.urls.preview {
+            reloadToken += 1
+            return
+        }
+        detail = decoded
+        item = try? JSONDecoder().decode(API.ItemDetail.self, from: data)
+        json = data
+        if let ctx = context { onContext(ctx) }
     }
 
     private func load() async {

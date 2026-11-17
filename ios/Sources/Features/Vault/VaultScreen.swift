@@ -3,11 +3,18 @@ import SwiftUI
 /// The vault (the website's VaultPage): private items. Locked, it shows only the unlock form and asks for nothing
 /// else (no lists, no pictures). Open, it shows the library of private items (LibraryBrowser with the vault scope,
 /// every request with vault=1) under a bar with the time left and Lock now. When the window ends, on this phone's
-/// clock or because the server says so, it asks for the password again.
+/// clock or because the server says so, it asks for the password again. `filters` opens it with filters set (a tag of a
+/// private item tapped in the viewer).
 struct VaultScreen: View {
+    var filters: LibraryFilters? = nil
+
     @Environment(\.scenePhase) private var scenePhase
     @Environment(AppRouter.self) private var router
     @State private var locking = false
+
+    init(filters: LibraryFilters? = nil) {
+        self.filters = filters
+    }
 
     private var vault: VaultSession { VaultSession.shared }
 
@@ -44,6 +51,7 @@ struct VaultScreen: View {
         } else if let until = vault.until, vault.isOpen() {
             LibraryBrowser(scope: .vault,
                            header: AnyView(VaultOpenBar(until: until, locking: locking, onLock: lock)),
+                           filters: filters,
                            title: "Vault")
         } else if let error = vault.loadError {
             ErrorState(error: error) { Task { await vault.refresh() } }

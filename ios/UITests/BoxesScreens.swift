@@ -153,6 +153,29 @@ final class BoxesScreens: ScreenTestCase {
         snap("boxes-pet-named")
     }
 
+    /// "Show in the photo" turns the boxes back on after the owner hid them, as the website's showPerson does.
+    func testShowInThePhotoBringsHiddenBoxesBack() throws {
+        try launchSignedIn()
+        openPhoto("Apr 28, 2026")
+        let face = app.buttons["Face of Boxes Alpha"]
+        XCTAssertTrue(face.waitForExistence(timeout: 30), "the face box did not show")
+        let toggle = app.buttons["viewer.boxes"]
+        XCTAssertTrue(toggle.waitForExistence(timeout: 10), "the boxes button is missing")
+        toggle.tap()
+        XCTAssertTrue(face.waitForNonExistence(timeout: 10), "the boxes did not hide")
+        XCTAssertEqual(toggle.label, "Show boxes")
+        app.buttons["viewer.info"].tap()
+        let menu = app.buttons["boxes.person.menu"]
+        XCTAssertTrue(menu.waitForExistence(timeout: 15), "the people section did not list Boxes Alpha")
+        menu.tap()
+        let show = app.buttons["Show in the photo"]
+        XCTAssertTrue(show.waitForExistence(timeout: 5), "Show in the photo is missing from the menu")
+        show.tap()
+        XCTAssertTrue(face.waitForExistence(timeout: 15), "Show in the photo did not bring the boxes back")
+        XCTAssertEqual(toggle.label, "Hide boxes")
+        snap("boxes-show-brings-boxes-back")
+    }
+
     func testTheInfoPanelsPeopleSection() throws {
         try launchSignedIn()
         openPhoto("Apr 28, 2026")

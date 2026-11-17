@@ -114,6 +114,8 @@ struct RouteDestination: View {
         case .libraryFiltered(let filters):
             LibraryBrowser(scope: .all, filters: filters)
                 .navigationTitle("Library")
+        case .vaultFiltered(let filters):
+            VaultScreen(filters: filters)
         }
     }
 }

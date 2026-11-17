@@ -83,6 +83,7 @@ final class ViewerBoxesModel {
     func startAdjusting(_ box: StageBox, uid: String, frameTime: Double? = nil) {
         editing = nil
         adjustError = nil
+        stage.requestShowBoxes()
         stage.startAdjusting(box, on: uid, frameTime: frameTime)
     }
 
@@ -97,12 +98,14 @@ final class ViewerBoxesModel {
             let now: Double? = frameClock?(context.uid) ?? nil
             t = now ?? context.startAt ?? 0
         }
+        stage.requestShowBoxes()
         stage.startDrawing(kind, on: context.uid, frameTime: t)
     }
 
-    /// Shows a box of a video on its frame (the player pauses there).
+    /// Shows a box of a video on its frame (the player pauses there). The boxes come back on if the owner hid them.
     func showInVideo(_ target: BoxesTarget, uid: String) {
         guard let time = target.frameTimeS else { return }
+        stage.requestShowBoxes()
         videoFocus = BoxesVideoFocus(uid: uid, boxKey: target.id, time: time)
     }
 
@@ -166,8 +169,10 @@ final class ViewerBoxesModel {
         editing = BoxesEditorTarget(uid: drawn.uid, kind: .animal, boxId: added.id, vault: drawn.vault, fresh: true)
     }
 
-    /// Shows a box on the stage for a moment.
+    /// Shows a box on the stage for a moment. The boxes come back on if the owner hid them, and a playing Live Photo
+    /// clip stops (the website's showBox).
     func show(_ boxKey: String) {
+        stage.requestShowBoxes()
         spotlight = boxKey
         spotlightTask?.cancel()
         spotlightTask = Task { [weak self] in

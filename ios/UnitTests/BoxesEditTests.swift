@@ -197,6 +197,34 @@ final class BoxesEditTests: XCTestCase {
         XCTAssertEqual(BoxesLookup.inFrame(i, at: 5.0).map(\.id), [])
     }
 
+    func testInTheFramesShowPicksThePersonsFaceOnScreenNow() throws {
+        let sam = #"{"id": 7, "name": "Sam"}"#
+        func spanned(_ id: Int, _ person: String, _ t: String, _ spans: String) -> String {
+            face(id, person: person, t: t).replacingOccurrences(of: "\"group\": null", with: "\"group\": null, \"spans\": \(spans)")
+        }
+        let i = try item(faces: "[\(spanned(1, sam, "0.5", "[[0.0, 1.0]]")), \(spanned(2, sam, "2.5", "[[2.0, 3.0]]"))]",
+                         kind: "video")
+        XCTAssertEqual(BoxesLookup.faceOnScreen(of: 7, in: i, at: 2.4)?.id, 2, "the face on screen, not the first one")
+        XCTAssertEqual(BoxesLookup.faceOnScreen(of: 7, in: i, at: 0.2)?.id, 1)
+        XCTAssertNil(BoxesLookup.faceOnScreen(of: 7, in: i, at: 1.5), "between the spans no face is on screen")
+        XCTAssertNil(BoxesLookup.faceOnScreen(of: 8, in: i, at: 2.4), "someone else's face is not theirs")
+    }
+
+    @MainActor
+    func testShowingABoxOrMovingOneAsksTheViewerToShowTheBoxes() throws {
+        let model = ViewerBoxesModel()
+        let start = model.stage.showBoxesRequest
+        model.show("face:1")
+        XCTAssertEqual(model.stage.showBoxesRequest, start + 1, "Show in the photo leaves hidden boxes hidden")
+        let i = try item(faces: "[\(face(3, t: "1.5"))]", kind: "video")
+        model.showInVideo(BoxesTarget.face(i.faces[0]), uid: "u1")
+        XCTAssertEqual(model.stage.showBoxesRequest, start + 2, "Show in the video leaves hidden boxes hidden")
+        XCTAssertEqual(model.videoFocus?.time, 1.5)
+        model.startAdjusting(BoxesTarget.face(i.faces[0]).stageBox, uid: "u1", frameTime: 1.5)
+        XCTAssertEqual(model.stage.showBoxesRequest, start + 3, "moving a box leaves hidden boxes hidden")
+        model.cancelEdit()
+    }
+
     @MainActor
     func testAVideosEditKeepsItsFrameTimeUntilItStops() {
         let state = StageEditState()
