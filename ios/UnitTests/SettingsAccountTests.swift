@@ -62,6 +62,16 @@ final class SettingsAccountTests: XCTestCase {
         XCTAssertFalse(SettingsAccountText.isVaultLocked(URLError(.timedOut)))
     }
 
+    /// The unlock sheet says which action it is for, as the website's "Confirm it is you" dialog does.
+    func testTheUnlockSheetSaysWhatItIsFor() {
+        XCTAssertEqual(SettingsAccountText.unlockTitle, "Confirm it is you")
+        XCTAssertEqual(SettingsAccountText.unlockReason(.addDevice(name: "Spare phone")),
+                       "To add a device, unlock the vault with your password.")
+        let key = API.PasskeyOut(id: 7, name: "Work laptop", createdAt: "2026-11-01T10:00:00Z")
+        XCTAssertEqual(SettingsAccountText.unlockReason(.removePasskey(key)),
+                       "To remove \"Work laptop\", unlock the vault with your password.")
+    }
+
     func testWalletStatusReadsTheSystemAnswer() {
         let missing = SettingsWalletStatus(["configured": .bool(false),
                                             "missing": .array([.string("WALLET_PASS_TYPE_ID"), .string("cert.pem")])])

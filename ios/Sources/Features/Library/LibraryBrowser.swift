@@ -125,13 +125,15 @@ struct LibraryBrowser: View {
             LibrarySearchResults(model: model, vault: scope.isVault, header: AnyView(topBlock)) { hit in
                 // a video opens at its matching moment
                 router.show(entries: model.hitEntries, start: model.hits.firstIndex { $0.uid == hit.uid } ?? 0,
-                            vault: scope.isVault) { await model.loadMoreForViewer() }
+                            vault: scope.isVault, total: model.hitsTotal) { await model.loadMoreForViewer() }
             }
         } else {
             LibraryTimelineView(model: model, vault: scope.isVault, header: AnyView(topBlock)) { card in
-                router.show(model.timelineItems, start: card, vault: scope.isVault) {
-                    await model.loadMoreForViewer()
-                }
+                // the counter counts the whole library (album, vault), at the item's place in the whole timeline
+                let library = model
+                router.show(library.timelineItems, start: card, vault: scope.isVault, total: library.total,
+                            loadMore: { await library.loadMoreForViewer() },
+                            positionOf: { library.timelinePosition(of: $0) })
             }
         }
     }

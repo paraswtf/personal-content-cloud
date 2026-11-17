@@ -92,6 +92,18 @@ final class LibraryModel {
     /// The uids Select all picks: every loaded item of the list on screen.
     var loadedUids: [String] { searching ? hits.map(\.uid) : timelineItems.map(\.uid) }
 
+    /// An item's place in the whole timeline, from 0 (the website's timeline.positionOf): the items of the months
+    /// before its month and its place in its month. The viewer's counter needs it because the months loaded can
+    /// leave gaps (the scrubber jumps over months). Nil when its month is not loaded.
+    func timelinePosition(of uid: String) -> Int? {
+        var before = 0
+        for bucket in buckets {
+            if let i = months[bucket.key]?.cards.firstIndex(where: { $0.uid == uid }) { return before + i }
+            before += bucket.count
+        }
+        return nil
+    }
+
     /// Every month is loaded to its end.
     var timelineComplete: Bool {
         buckets.allSatisfy { months[$0.key]?.complete == true }

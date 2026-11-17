@@ -5,8 +5,33 @@ import XCTest
 /// "Setacct test key", the "Firefox on Windows" session and the device "Setacct spare phone", plus a device the test
 /// adds itself. They never end "iPhone simulator" (the tests' token), never change the password and never sign out
 /// everywhere; the vault may be open or locked for the app (the seed opened it, it closes after 15 minutes), and the
-/// tests accept both.
+/// tests accept both. The passkey test locks it on purpose to show the unlock sheet, and opens it again there.
 final class SettingsAccountScreens: ScreenTestCase {
+    /// The seed's throwaway account on a server that lives for one CI run (ci/seed_server.py).
+    private var password: String { ProcessInfo.processInfo.environment["PCC_TEST_PASSWORD"] ?? "ci-only-password" }
+
+    /// Locks the vault for the app from the vault screen (it may be locked already), then goes back to More.
+    private func lockVault() {
+        tab("More")
+        let entry = app.buttons["more.vault"]
+        XCTAssertTrue(entry.waitForExistence(timeout: 15), "no Vault under More")
+        entry.tap()
+        let lock = app.buttons["vault.lock"]
+        let field = app.secureTextFields["vault.password"]
+        var open = false
+        for _ in 0..<30 {
+            if lock.waitForExistence(timeout: 1) {
+                open = true
+                break
+            }
+            if field.exists { break }
+        }
+        if open { lock.tap() }
+        XCTAssertTrue(field.waitForExistence(timeout: 20), "the vault did not lock")
+        app.navigationBars["Vault"].buttons.element(boundBy: 0).tap()
+        XCTAssertTrue(app.buttons["more.settings"].waitForExistence(timeout: 10), "did not go back to More")
+    }
+
     private func openSettings(_ row: String) {
         tab("More")
         let settings = app.buttons["more.settings"]
@@ -45,6 +70,10 @@ final class SettingsAccountScreens: ScreenTestCase {
         XCTAssertTrue(username.waitForExistence(timeout: 15), "no username row")
         let shown = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label == 'owner'"), object: username)
         XCTAssertEqual(XCTWaiter.wait(for: [shown], timeout: 15), .completed, "the username did not show")
+        // The change password form carries the account name for password managers, read-only.
+        let account = app.textFields["account.usernameField"]
+        XCTAssertTrue(account.waitForExistence(timeout: 5), "no username beside the password fields")
+        XCTAssertEqual(account.value as? String, "owner", "the form does not carry the account name")
         snap("setacct-account")
 
         // The form's own checks run before anything is sent: a short new password and a mismatch never reach the
@@ -77,6 +106,7 @@ final class SettingsAccountScreens: ScreenTestCase {
 
     func testPasskeys() throws {
         try launchSignedIn()
+        lockVault()
         openSettings("settings.passkeys")
         XCTAssertTrue(app.navigationBars["Passkeys"].waitForExistence(timeout: 15))
         XCTAssertTrue(app.staticTexts["Setacct test key"].waitForExistence(timeout: 20), "the seeded passkey is not listed")
@@ -94,22 +124,25 @@ final class SettingsAccountScreens: ScreenTestCase {
         alert.buttons["Save"].tap()
         XCTAssertTrue(app.staticTexts["Setacct renamed key"].waitForExistence(timeout: 20), "the new name did not show")
 
-        // Removing needs the vault open for the app: removed when it is, the unlock sheet when it is not.
+        // Removing needs the vault open for the app. The test locked it, so the unlock sheet asks first and says
+        // what it is for (the website's "Confirm it is you" dialog); the password opens the vault and the removal
+        // goes through. The vault stays open for the tests after this one.
         app.buttons["Remove Setacct renamed key"].tap()
         let remove = dialogButton("Remove")
         XCTAssertTrue(remove.exists, "no confirmation for removing the passkey")
         remove.tap()
-        let removed = app.staticTexts["No passkeys yet."]
-        if removed.waitForExistence(timeout: 15) {
-            snap("setacct-passkey-removed")
-        } else {
-            let cancel = app.buttons["Cancel"].firstMatch
-            XCTAssertTrue(cancel.waitForExistence(timeout: 10), "neither removed nor asked to open the vault")
-            snap("setacct-passkey-vault")
-            cancel.tap()
-            XCTAssertTrue(app.staticTexts["Setacct renamed key"].waitForExistence(timeout: 10),
-                          "the passkey should stay while the vault is locked")
-        }
+        XCTAssertTrue(app.navigationBars["Confirm it is you"].waitForExistence(timeout: 15),
+                      "the unlock sheet did not show")
+        let reason = "To remove \"Setacct renamed key\", unlock the vault with your password."
+        XCTAssertTrue(app.staticTexts[reason].exists, "the unlock sheet does not say what it is for")
+        snap("setacct-passkey-vault")
+        let field = app.secureTextFields["vault.password"]
+        XCTAssertTrue(field.waitForExistence(timeout: 5), "no password field on the unlock sheet")
+        field.tap()
+        field.typeText(password + "\n")
+        XCTAssertTrue(app.staticTexts["No passkeys yet."].waitForExistence(timeout: 20),
+                      "the passkey was not removed after the vault opened")
+        snap("setacct-passkey-removed")
     }
 
     func testSessionsAndDevices() throws {
@@ -143,6 +176,9 @@ final class SettingsAccountScreens: ScreenTestCase {
         } else {
             let cancel = app.buttons["Cancel"].firstMatch
             XCTAssertTrue(cancel.waitForExistence(timeout: 10), "neither a token nor the unlock sheet showed")
+            XCTAssertTrue(app.navigationBars["Confirm it is you"].exists, "the unlock sheet has no title")
+            XCTAssertTrue(app.staticTexts["To add a device, unlock the vault with your password."].exists,
+                          "the unlock sheet does not say what it is for")
             snap("setacct-device-vault")
             cancel.tap()
         }

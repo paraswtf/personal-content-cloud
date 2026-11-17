@@ -125,6 +125,18 @@ enum SettingsAccountText {
         return api.status == 403 && api.detail == "vault_locked"
     }
 
+    /// The title of the sheet that opens the vault for a refused action (the website's "Confirm it is you" dialog).
+    static let unlockTitle = "Confirm it is you"
+
+    /// What that sheet says it is for, as the website's dialog does (PasskeysTab.tsx, SessionsTab.tsx). The app takes
+    /// only the password (its form points to the website for a passkey), so the sentence names only the password.
+    static func unlockReason(_ pending: SettingsAccountPending) -> String {
+        switch pending {
+        case .addDevice: return "To add a device, unlock the vault with your password."
+        case .removePasskey(let key): return "To remove \"\(key.name)\", unlock the vault with your password."
+        }
+    }
+
     /// "203.0.113.4, signed in 3 Nov 2026, last active 5 Nov 2026 at 10:30".
     static func sessionLine(_ session: API.SessionOut) -> String {
         var ip = ""

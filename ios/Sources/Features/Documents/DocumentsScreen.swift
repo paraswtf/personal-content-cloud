@@ -144,7 +144,7 @@ struct DocumentsScreen: View {
     /// Opens the viewer in document mode (the website's mode="document"): the info panel opens at once with the
     /// document's section first, and the owner pages through the list.
     private func open(_ entry: DocumentsEntry) {
-        router.show(pager.items.map(\.item), start: entry.item, mode: .document) {
+        router.show(pager.items.map(\.item), start: entry.item, mode: .document, total: pager.total) {
             await pager.loadMore()
             return pager.items.map { $0.item.viewerEntry }
         }
