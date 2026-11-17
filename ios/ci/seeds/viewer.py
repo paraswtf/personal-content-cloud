@@ -5,8 +5,8 @@ after the area, so they sit at the end of the library and touch nothing the othe
   pipeline does, then its virtual document, a boarding pass with one hard-to-read field and a barcode;
 - a photo received on WhatsApp and kept in the library ("VIEWER_RECEIVED.JPG", 18 Apr), with a place, category and
   quality scores, labels, and the tag "Viewer trip" (added in `api`, as the owner would);
-- when ffmpeg is on the machine, a short playable video ("VIEWER_CLIP.MP4", 12 Apr) with a face of "Viewer Guest"
-  at one second;
+- a short playable video ("VIEWER_CLIP.MP4", 12 Apr, made with ffmpeg when it is there, else with OpenCV) with a
+  face of "Viewer Guest" at one second;
 - a file the server keeps without a preview ("VIEWER_NOTES.BIN", 10 Apr).
 
 A video whose streaming copy is still being made is not seeded: the server queues the copy again when it starts,
@@ -36,6 +36,34 @@ def _previews(kit, item, img) -> None:
         copy = img.copy()
         copy.thumbnail((side, side))
         copy.save(path, "WEBP", quality=80)
+
+
+def _clip(frame, tmp: Path):
+    """Three seconds of `frame` as an MP4: (bytes, codec), or None when nothing here can write one."""
+    clip = tmp / "clip.mp4"
+    if shutil.which("ffmpeg"):
+        still = tmp / "frame.png"
+        frame.save(still)
+        subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-loop", "1", "-framerate", "25",
+                        "-i", str(still), "-t", "3", "-vf", "format=yuv420p", "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                        "-movflags", "+faststart", "-an", str(clip)], check=True, timeout=120)
+        return clip.read_bytes(), "h264"
+    try:
+        import cv2
+        import numpy as np
+    except ImportError:
+        return None
+    bgr = cv2.cvtColor(np.asarray(frame.convert("RGB")), cv2.COLOR_RGB2BGR)
+    for fourcc, codec in (("avc1", "h264"), ("mp4v", "mpeg4")):
+        writer = cv2.VideoWriter(str(clip), cv2.VideoWriter_fourcc(*fourcc), 25, (frame.width, frame.height))
+        if not writer.isOpened():
+            continue
+        for _ in range(75):
+            writer.write(bgr)
+        writer.release()
+        if clip.is_file() and clip.stat().st_size > 1000:
+            return clip.read_bytes(), codec
+    return None
 
 
 def library(kit) -> dict:
@@ -87,28 +115,24 @@ def library(kit) -> dict:
     _previews(kit, received, img)
     out["received"] = received["uid"]
 
-    # a short playable video with a named face at one second, when ffmpeg is here to make one
-    if shutil.which("ffmpeg"):
-        frame = kit.scene(4300, [((0.40, 0.25, 0.16, 0.24), (210, 170, 140), (40, 30, 30))])
-        with tempfile.TemporaryDirectory() as tmp:
-            still = Path(tmp) / "frame.png"
-            frame.save(still)
-            clip = Path(tmp) / "clip.mp4"
-            subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-loop", "1", "-framerate", "25",
-                            "-i", str(still), "-t", "3", "-vf", "scale=640:480,format=yuv420p", "-c:v", "libx264",
-                            "-pix_fmt", "yuv420p", "-movflags", "+faststart", "-an", str(clip)],
-                           check=True, timeout=120)
+    # a short playable video with a named face at one second (ffmpeg makes it when it is here, else OpenCV, which
+    # the backend installs)
+    frame = kit.scene(4300, [((0.40, 0.25, 0.16, 0.24), (210, 170, 140), (40, 30, 30))]).resize((640, 480))
+    with tempfile.TemporaryDirectory() as tmp:
+        made = _clip(frame, Path(tmp))
+        if made is not None:
+            data, codec = made
             video = kit.make_item(
-                conn, kind="video", data=clip.read_bytes(), ext=".mp4", mime="video/mp4", width=640, height=480,
+                conn, kind="video", data=data, ext=".mp4", mime="video/mp4", width=640, height=480,
                 filename="VIEWER_CLIP.MP4", taken_at="2026-04-12T11:00:00.000Z", category="personal",
-                duration_s=3.0, video_codec="h264", bitrate=300_000, preview_status="none",
-                forward_checked=1)
-        _previews(kit, video, frame.resize((640, 480)))
-        guest = kit.make_person(conn, GUEST)
-        face_id = kit.make_face(conn, int(video["id"]), guest, box=(0.40, 0.25, 0.16, 0.24), size_px=102,
-                                assigned_by="user", frame_time_s=1.0)
-        kit.crop(frame, (0.40, 0.25, 0.16, 0.24)).save(kit.storage.face_crop_path(face_id), "WEBP", quality=85)
-        out["clip"] = video["uid"]
+                duration_s=3.0, video_codec=codec, bitrate=300_000, preview_status="none", forward_checked=1)
+            _previews(kit, video, frame)
+            guest = kit.make_person(conn, GUEST)
+            face_id = kit.make_face(conn, int(video["id"]), guest, box=(0.40, 0.25, 0.16, 0.24), size_px=102,
+                                    assigned_by="user", frame_time_s=1.0)
+            kit.crop(frame, (0.40, 0.25, 0.16, 0.24)).save(kit.storage.face_crop_path(face_id), "WEBP", quality=85)
+            out["clip"] = video["uid"]
+            out["clip_codec"] = codec
 
     # a file without a preview
     other = kit.make_item(conn, kind="other", data=b"viewer notes, not a picture\n" * 8, ext=".bin",

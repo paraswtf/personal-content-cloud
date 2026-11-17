@@ -165,7 +165,7 @@ final class ViewerScreens: ScreenTestCase {
             swipes += 1
         }
         guard video.exists else {
-            throw XCTSkip("the seed made no video here (no ffmpeg on the machine)")
+            throw XCTSkip("the seed made no video here (neither ffmpeg nor OpenCV could write one)")
         }
         video.tap()
         XCTAssertTrue(app.buttons["viewer.close"].waitForExistence(timeout: 20))
