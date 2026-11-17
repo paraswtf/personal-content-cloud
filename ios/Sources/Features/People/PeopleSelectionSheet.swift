@@ -160,11 +160,12 @@ struct PeopleSelectionSheet: View {
                         Text("Fix who \(uids.count == 1 ? "this item shows" : "these \(uids.count.formatted()) items show").")
                             .font(.caption)
                             .foregroundStyle(.secondary)
-                        HStack(spacing: 8) {
+                        VStack(alignment: .leading, spacing: 8) {
                             Button {
                                 step = .move(from)
                             } label: {
-                                Label("Move these to...", systemImage: "person.crop.circle.badge.questionmark")
+                                Label("Move these to...", systemImage: "arrow.right.circle")
+                                    .frame(maxWidth: .infinity)
                             }
                             .buttonStyle(.borderedProminent)
                             .accessibilityIdentifier("peopleSheet.fromMove")
@@ -172,11 +173,12 @@ struct PeopleSelectionSheet: View {
                                 step = .not(from)
                             } label: {
                                 Label(from.notLabel, systemImage: "person.crop.circle.badge.xmark")
+                                    .frame(maxWidth: .infinity)
                             }
                             .buttonStyle(.bordered)
                             .accessibilityIdentifier("peopleSheet.fromNot")
                         }
-                        .controlSize(.small)
+                        .padding(.top, 4)
                     }
                     .padding(.vertical, 4)
                 }
