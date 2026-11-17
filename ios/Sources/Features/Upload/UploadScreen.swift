@@ -128,8 +128,10 @@ struct UploadScreen: View {
                 }
             }
         } footer: {
-            // the limit only once the server said it
-            Text((queue.configLoaded ? "Up to \(UploadText.limit(queue.maxUploadBytes)) per file. " : "")
+            // the limit only once the server said it (here, below everything, so reading it moves no row the owner
+            // is about to tap)
+            Text((queue.configLoaded ? "Up to \(UploadText.limit(queue.maxUploadBytes)) per file. "
+                  : loadingConfig ? "Reading the server's upload limit. " : "")
                  + "Photos (including HEIC and RAW), videos, PDFs, Word, Excel, PowerPoint and text files are indexed. Originals are kept exactly as uploaded.")
         }
     }
@@ -195,8 +197,9 @@ struct UploadScreen: View {
         }
     }
 
-    /// Reading the server's upload settings (its size limit per file), and what went wrong with Try again (the
-    /// website's spinner and error card on its Upload page). The rest of the screen stays usable meanwhile.
+    /// What went wrong reading the server's upload settings (its size limit per file), with Try again (the website's
+    /// error card on its Upload page); while they are read, the notes' footer says so. The rest of the screen stays
+    /// usable meanwhile.
     @ViewBuilder private var configRows: some View {
         if let configError {
             VStack(alignment: .leading, spacing: 6) {
@@ -210,13 +213,6 @@ struct UploadScreen: View {
                     .disabled(loadingConfig)
                     .accessibilityIdentifier("upload.configRetry")
             }
-        } else if loadingConfig && !queue.configLoaded {
-            HStack(spacing: 8) {
-                ProgressView()
-                Text("Reading the server's upload settings").font(.footnote).foregroundStyle(.secondary)
-            }
-            .accessibilityElement(children: .combine)
-            .accessibilityIdentifier("upload.configLoading")
         }
     }
 
