@@ -2,8 +2,8 @@ import XCTest
 
 /// The People tab and the person pages against the seeded server (ci/seeds/people.py adds its own people: People
 /// Alpha with faces, two guesses and a tattoo, People Beta and People Gamma who look alike, People Delta and People
-/// Epsilon to merge, People Zeta to rename, the cat People Pet, and two faces nobody named, 333 px wide). The tests
-/// change only those.
+/// Epsilon to merge, People Zeta to rename, People Eta and People Theta to merge from the People sheet, the cat
+/// People Pet, and two faces nobody named, 333 px wide). The tests change only those.
 final class PeopleScreens: ScreenTestCase {
     /// A text on screen, whatever kind of element shows it.
     private func text(_ label: String) -> XCUIElement {
@@ -159,6 +159,46 @@ final class PeopleScreens: ScreenTestCase {
         openTab("people.tab.crops")
         XCTAssertTrue(app.buttons.matching(identifier: "people.crop").firstMatch.waitForExistence(timeout: 20))
         snap("people-pet-crops")
+
+        // Merge into says what merging a pet does, and that only cats are listed
+        app.buttons["person.menu"].tap()
+        let merge = app.buttons["Merge into"]
+        XCTAssertTrue(merge.waitForExistence(timeout: 10), "the menu has no Merge into")
+        merge.tap()
+        let note = app.staticTexts["picker.note"]
+        XCTAssertTrue(note.waitForExistence(timeout: 15), "the merge picker says nothing about merging")
+        XCTAssertTrue(note.label.hasPrefix("Pick the pet this really is. Only pets of the same species (cat) are listed."),
+                      note.label)
+        snap("people-pet-merge-picker")
+        app.buttons["Cancel"].firstMatch.tap()
+    }
+
+    /// Renaming the page's own person in the People sheet to a name someone else has merges them, and the page
+    /// follows to the person they joined (the website's PeopleBulkAction).
+    func testPeopleSheetRenameMergeFollows() throws {
+        try launchSignedIn()
+        openPerson("People Eta")
+        let select = app.buttons["person.items.select"]
+        XCTAssertTrue(select.waitForExistence(timeout: 20))
+        select.tap()
+        app.buttons.matching(identifier: "media.cell").firstMatch.tap()
+        app.buttons["People in these items"].tap()
+        // the sheet's own Rename (the page under it has a Rename button too, person.rename)
+        let rename = app.buttons.matching(NSPredicate(format: "label == 'Rename' AND identifier != 'person.rename'"))
+            .firstMatch
+        XCTAssertTrue(rename.waitForExistence(timeout: 20), "the sheet offers no Rename for People Eta")
+        rename.tap()
+        let field = app.textFields["peopleSheet.name"]
+        XCTAssertTrue(field.waitForExistence(timeout: 10), "the rename step did not open")
+        // at the end of the name, which the box starts with
+        field.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.5)).tap()
+        field.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: 16) + "People Theta")
+        app.buttons["peopleSheet.save"].tap()
+        let followed = NSPredicate(format: "label == 'People Theta'")
+        expectation(for: followed, evaluatedWith: app.staticTexts["person.name"])
+        waitForExpectations(timeout: 20)
+        XCTAssertFalse(text("This person is not here any more").exists, "the page stayed on the merged-away person")
+        snap("people-sheet-merge-followed")
     }
 
     func testPeopleSheetOnASelection() throws {

@@ -124,7 +124,7 @@ struct PersonScreen: View {
             if let p = person {
                 PersonPickerSheet(title: "Merge \(PeopleText.name(p)) into", kind: isPet ? .pet : .person,
                                   like: .person(p.id), excluding: [p.id], allowCreate: false, species: p.species,
-                                  speciesOnly: isPet) { pick in
+                                  speciesOnly: isPet, note: mergeNote(p)) { pick in
                     if case .existing(let option) = pick { pendingTarget = option }
                 }
             }
@@ -148,6 +148,14 @@ struct PersonScreen: View {
 
     private var isPet: Bool { person.map(PeopleText.isPet) ?? false }
 
+    /// What merging does, under the picker's title (the website's words).
+    private func mergeNote(_ p: API.PersonOut) -> String {
+        if PeopleText.isPet(p) {
+            return "Pick the pet this really is. Only pets of the same species (\(Fmt.speciesLabel(p.species).lowercased())) are listed. Every crop and tag moves to them and this entry goes away."
+        }
+        return "Pick the person this really is. Every face, body and tag moves to them and this entry goes away."
+    }
+
     // MARK: the page
 
     @ViewBuilder private func page(_ p: API.PersonOut) -> some View {
@@ -156,9 +164,11 @@ struct PersonScreen: View {
         let current = tabs.contains(tab) ? tab : .items
         switch current {
         case .items:
-            PeoplePersonItemsTab(person: p, related: false, header: head).id("items-\(p.id)")
+            PeoplePersonItemsTab(person: p, related: false, header: head, onMerged: { shownId = $0 })
+                .id("items-\(p.id)")
         case .related:
-            PeoplePersonItemsTab(person: p, related: true, header: head).id("related-\(p.id)")
+            PeoplePersonItemsTab(person: p, related: true, header: head, onMerged: { shownId = $0 })
+                .id("related-\(p.id)")
         case .faces:
             PeoplePersonFacesTab(person: p, header: head).id("faces-\(p.id)")
         case .crops:
@@ -170,12 +180,15 @@ struct PersonScreen: View {
         case .threeD:
             // The 3D tab has no scroll view of its own: the page's holds it, under the same header as the other
             // tabs, so the controls under the head can be reached (a drag that starts on the head turns the head).
-            ScrollView {
-                VStack(alignment: .leading, spacing: 12) {
-                    head
-                    HeadsPersonTab(personId: p.id, name: PeopleText.name(p))
+            ScrollViewReader { proxy in
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 12) {
+                        head
+                        HeadsPersonTab(personId: p.id, name: PeopleText.name(p),
+                                       reveal: { proxy.scrollTo($0, anchor: .top) })
+                    }
+                    .padding(.bottom, 16)
                 }
-                .padding(.bottom, 16)
             }
             .id("3d-\(p.id)")
         }
@@ -209,7 +222,8 @@ struct PersonScreen: View {
             }
             if !PeopleText.isPet(p) && Fmt.isNamed(p.name), let status = recognition,
                PeopleRecognitionCard.shows(status) {
-                PeopleRecognitionCard(person: p, status: status, onStatus: { recognition = $0 })
+                PeopleRecognitionCard(person: p, status: status, onStatus: { recognition = $0 },
+                                      onShowGuesses: { tab = .guesses })
             }
             tabBar(p)
         }
@@ -304,8 +318,11 @@ struct PersonScreen: View {
     // MARK: loading and actions
 
     private func load() async {
+        // a load for the person before a merge that answers late must not replace the one they joined
+        let id = shownId
         do {
-            let p = try await Cloud.api().getPerson(personId: shownId)
+            let p = try await Cloud.api().getPerson(personId: id)
+            guard id == shownId else { return }
             person = p
             loadError = nil
             if !PeopleText.isPet(p) && Fmt.isNamed(p.name) {
@@ -314,7 +331,7 @@ struct PersonScreen: View {
                 recognition = nil
             }
         } catch {
-            if error is CancellationError { return }
+            if error is CancellationError || id != shownId { return }
             if person == nil || (error as? APIError)?.status == 404 {
                 person = nil
                 loadError = error

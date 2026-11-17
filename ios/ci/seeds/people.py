@@ -3,7 +3,8 @@
 Its own people, all named after the area, so the tests that rename, merge, tag or move change nothing another
 area looks at: "People Alpha" (faces, a cover, two guesses, a tattoo), "People Beta" and "People Gamma" (faces
 that look alike, so they are suggested as the same person), "People Delta" and "People Epsilon" (merged by a
-test), "People Zeta" (renamed by a test), the pet "People Pet" (a cat with two crops), and two faces nobody
+test), "People Zeta" (renamed by a test), "People Eta" and "People Theta" (a test renames Eta to Theta in the
+People sheet of Eta's page, which merges them and follows to Theta), the pet "People Pet" (a cat with two crops), and two faces nobody
 named, drawn 333 pixels wide so a test can tell them from the core's. Everything is dated March 2026 and before.
 """
 from __future__ import annotations
@@ -42,7 +43,8 @@ def library(kit) -> dict:
         return pid
 
     ids = {name: person(name) for name in
-           ("People Alpha", "People Beta", "People Gamma", "People Delta", "People Epsilon", "People Zeta")}
+           ("People Alpha", "People Beta", "People Gamma", "People Delta", "People Epsilon", "People Zeta",
+            "People Eta", "People Theta")}
     pet = person("People Pet", kind="pet", species="cat")
     looks = {name: random_vec() for name in ids}
     looks["People Gamma"] = near(looks["People Beta"])  # Beta and Gamma look alike: a merge suggestion
@@ -104,6 +106,11 @@ def library(kit) -> dict:
         _, (fa, fb) = photo(k, [(left, ids[a], mine(a)), (right, ids[b], mine(b))])
         faces[a].append(fa)
         faces[b].append(fb)
+
+    # People Eta and People Theta, one photo each
+    for k, name in ((13, "People Eta"), (14, "People Theta")):
+        _, (fid,) = photo(k, [(left, ids[name], mine(name))])
+        faces[name].append(fid)
 
     # two faces nobody named, told apart from the core's by their size
     _, unnamed = photo(9, [(left, None, {"embedding": random_vec(), "size_px": UNNAMED_PX}),

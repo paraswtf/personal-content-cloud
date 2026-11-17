@@ -67,17 +67,23 @@ struct ReviewGuessEvidence: View {
     private var secondary: Color { dark ? Color.white.opacity(0.7) : Color.secondary }
 }
 
-/// One crop of a comparison, or "Photo changed" when the server no longer has it (the website's Crop).
+/// One crop of a comparison, or "Photo changed" when the server no longer has it or it no longer loads (the row
+/// was measured again, or the photo went to the vault or the trash), as the website's Crop.
 struct ReviewCrop: View {
     let ref: String?
     let label: String
     var dark = false
     var vault = false
 
+    /// The address that failed to load (a new address is tried again).
+    @State private var failedRef: String?
+
+    private var changed: Bool { ref == nil || failedRef == ref }
+
     var body: some View {
         ZStack {
-            if let ref {
-                RemoteImage(ref: ref, maxPixel: 216, vault: vault)
+            if let ref, !changed {
+                RemoteImage(ref: ref, maxPixel: 216, vault: vault, onFailure: { failedRef = ref })
             } else {
                 Text("Photo changed")
                     .font(.system(size: 10))
@@ -94,7 +100,7 @@ struct ReviewCrop: View {
                 .stroke(dark ? Color.white.opacity(0.2) : Color(uiColor: .separator), lineWidth: 0.5)
         )
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel(ref == nil ? "Photo changed" : label)
+        .accessibilityLabel(changed ? "Photo changed" : label)
     }
 }
 

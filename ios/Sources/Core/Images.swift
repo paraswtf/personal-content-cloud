@@ -135,17 +135,22 @@ struct RemoteImage: View {
     var contentMode: ContentMode = .fill
     /// A vault item's picture (sent with vault=1).
     var vault = false
+    /// Runs when the picture fails to load (a crop measured again, a look removed): the caller can say so or read
+    /// its status again.
+    var onFailure: (() -> Void)? = nil
 
     @State private var image: UIImage?
     /// The address `image` was loaded from, so a reused view never shows another item's picture.
     @State private var shown: String?
     @State private var failed = false
 
-    init(ref: String?, maxPixel: Int = 512, contentMode: ContentMode = .fill, vault: Bool = false) {
+    init(ref: String?, maxPixel: Int = 512, contentMode: ContentMode = .fill, vault: Bool = false,
+         onFailure: (() -> Void)? = nil) {
         self.ref = ref
         self.maxPixel = maxPixel
         self.contentMode = contentMode
         self.vault = vault
+        self.onFailure = onFailure
         let hit = ref.flatMap { ImageLoader.shared.cached($0, maxPixel: maxPixel, vault: vault) }
         _image = State(initialValue: hit)
         _shown = State(initialValue: hit == nil ? nil : ref)
@@ -191,7 +196,10 @@ struct RemoteImage: View {
             image = loaded
             shown = ref
         } catch {
-            if !(error is CancellationError) && !Task.isCancelled { failed = true }
+            if !(error is CancellationError) && !Task.isCancelled {
+                failed = true
+                onFailure?()
+            }
         }
     }
 }

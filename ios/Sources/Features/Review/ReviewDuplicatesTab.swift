@@ -19,6 +19,8 @@ struct ReviewDuplicatesTab: View {
     }
     @State private var deleting: API.ItemCard?
     @State private var working: String?
+    /// The running action is a delete (the tapped Make best shows a spinner otherwise).
+    @State private var deletingNow = false
 
     var body: some View {
         ScrollView {
@@ -73,7 +75,7 @@ struct ReviewDuplicatesTab: View {
     private func tile(_ item: API.ItemCard, best: Bool, group: ReviewDupGroup) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Button {
-                router.show(group.all, start: item)
+                open(item)
             } label: {
                 Color.clear
                     .aspectRatio(1, contentMode: .fit)
@@ -107,7 +109,13 @@ struct ReviewDuplicatesTab: View {
                 Button {
                     Task { await makeBest(item) }
                 } label: {
-                    Text("Make best").frame(maxWidth: .infinity)
+                    HStack(spacing: 4) {
+                        if working == item.uid && !deletingNow {
+                            ProgressView().controlSize(.small)
+                        }
+                        Text("Make best")
+                    }
+                    .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.bordered)
                 .disabled(working != nil)
@@ -125,6 +133,21 @@ struct ReviewDuplicatesTab: View {
             }
         }
         .frame(width: 140)
+    }
+
+    /// Every copy of every group loaded, in order, for the viewer (the website's flat list).
+    private static func flat(_ groups: [ReviewDupGroup]) -> [API.ItemCard] {
+        var seen = Set<String>()
+        return groups.flatMap(\.all).filter { seen.insert($0.uid).inserted }
+    }
+
+    /// The viewer on every copy of every group loaded, at `item`; paging past the last one loads more groups.
+    private func open(_ item: API.ItemCard) {
+        let pager = self.pager
+        router.show(Self.flat(pager.items), start: item) {
+            await ReviewPaging.loadMore(pager)
+            return Self.flat(pager.items).map(\.viewerEntry)
+        }
     }
 
     private func makeBest(_ item: API.ItemCard) async {
@@ -147,7 +170,11 @@ struct ReviewDuplicatesTab: View {
         deleting = nil
         guard working == nil else { return }
         working = item.uid
-        defer { working = nil }
+        deletingNow = true
+        defer {
+            working = nil
+            deletingNow = false
+        }
         do {
             let api = try Cloud.api()
             try await ReviewDecisions.run("Copy moved to the trash.", message: { (_: API.Ok) in "Copy moved to the trash." }) {

@@ -155,11 +155,54 @@ enum PeopleAction {
 @MainActor
 enum PeopleViewer {
     static func open(_ router: AppRouter, uids: [String], thumbs: [String: String] = [:], start: String) {
+        open(router, entries: uids.map { ViewerEntry(uid: $0, thumb: thumbs[$0]) }, start: start)
+    }
+
+    /// The viewer on `entries` (each item once, the first entry of an item kept), at the item `start`. `startAt`
+    /// opens that item's video paused at the second of the face, crop or guess tapped; `loadMore` loads the list's
+    /// next page and hands back every entry so far, so paging goes on past the rows loaded.
+    static func open(_ router: AppRouter, entries: [ViewerEntry], start: String, startAt: Double? = nil,
+                     loadMore: (() async -> [ViewerEntry])? = nil) {
+        var list = unique(entries)
+        guard !list.isEmpty else { return }
+        let index = list.firstIndex(where: { $0.uid == start }) ?? 0
+        if let startAt, startAt.isFinite, startAt > 0, list[index].uid == start { list[index].startAt = startAt }
+        router.show(entries: list, start: index, loadMore: loadMore)
+    }
+
+    /// Loads the pager's next pages for the viewer until one brings an item not seen yet (a video can hold many
+    /// faces), and hands back every entry so far. A page already loading (the grid asked for it) is waited for.
+    /// `entry` is nil for a row the viewer leaves out.
+    static func more<Item: Identifiable>(_ pager: Pager<Item>, _ entry: (Item) -> ViewerEntry?) async -> [ViewerEntry] {
+        let known = Set(pager.items.compactMap { entry($0)?.uid })
+        for _ in 0..<5 {
+            var waited = 0
+            while pager.loading && waited < 100 {
+                try? await Task.sleep(nanoseconds: 100_000_000)
+                waited += 1
+            }
+            if pager.items.contains(where: { entry($0).map { !known.contains($0.uid) } ?? false }) { break }
+            let count = pager.items.count
+            await pager.loadMore()
+            if pager.items.count == count { break }
+        }
+        return unique(pager.items.compactMap(entry))
+    }
+
+    /// Each item once, in order.
+    static func unique(_ entries: [ViewerEntry]) -> [ViewerEntry] {
         var seen = Set<String>()
-        let unique = uids.filter { seen.insert($0).inserted }
-        guard !unique.isEmpty else { return }
-        let entries = unique.map { ViewerEntry(uid: $0, thumb: thumbs[$0]) }
-        router.viewer = ViewerRequest(entries: entries, start: unique.firstIndex(of: start) ?? 0)
+        return entries.filter { seen.insert($0.uid).inserted }
+    }
+
+    /// A face's item, for the viewer.
+    static func entry(_ face: API.FaceListItem) -> ViewerEntry {
+        ViewerEntry(uid: face.itemUid, thumb: face.thumbUrl, kind: face.itemKind.rawValue)
+    }
+
+    /// A crop's item, for the viewer.
+    static func entry(_ crop: API.AnimalListItem) -> ViewerEntry {
+        ViewerEntry(uid: crop.itemUid, thumb: crop.thumbUrl, kind: crop.itemKind.rawValue)
     }
 }
 

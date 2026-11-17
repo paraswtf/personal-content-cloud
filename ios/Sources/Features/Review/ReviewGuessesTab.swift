@@ -7,6 +7,23 @@ struct ReviewGuessRow: Identifiable {
     var id: String { "\(guess.kind.rawValue):\(guess.id)" }
 }
 
+/// Loads a list's next page for the viewer, waiting first for a page the list itself is loading (its rows'
+/// onAppear asked for it), so the viewer does not take a load that returned at once for the end of the list.
+@MainActor
+enum ReviewPaging {
+    static func loadMore<Item: Identifiable>(_ pager: Pager<Item>) async {
+        var waited = 0
+        while pager.loading && waited < 100 {
+            try? await Task.sleep(nanoseconds: 100_000_000)
+            waited += 1
+        }
+        let count = pager.items.count
+        await pager.loadMore()
+        // the page that was loading may have been the last new one: one more when the list grew by nothing
+        if pager.items.count == count && !pager.finished && !pager.loading { await pager.loadMore() }
+    }
+}
+
 /// What the guesses list shows: every guess, or those of one basis (the website's filter chips) and of one person.
 struct ReviewGuessFilter: Hashable {
     var basis: API.Basis = .all
@@ -67,7 +84,7 @@ struct ReviewGuessesTab: View {
                 ForEach(pager.items) { row in
                     ReviewGuessCard(guess: row.guess,
                                     onDecided: { pager.remove { $0.id == row.id } },
-                                    onOpenItem: { uid in open(uid) })
+                                    onOpenItem: { uid, t in open(uid, at: t) })
                         .onAppear { pager.loadMoreIfNeeded(row) }
                 }
                 ReviewListState(pager: pager, emptyTitle: emptyTitle, emptyText: emptyText, emptyImage: "sparkles")
@@ -139,12 +156,17 @@ struct ReviewGuessesTab: View {
         return pager.items.map(\.guess.item).filter { seen.insert($0.uid).inserted }
     }
 
-    private func open(_ uid: String) {
-        let list = items
-        if let item = list.first(where: { $0.uid == uid }) {
-            router.show(list, start: item) {
-                await pager.loadMore()
-                return items.map(\.viewerEntry)
+    /// The viewer on the photos of every guess loaded, at `uid` (a video at the box's time when the scene was
+    /// tapped); paging past the last one loads more guesses.
+    private func open(_ uid: String, at time: Double?) {
+        var list = items.map(\.viewerEntry)
+        if let i = list.firstIndex(where: { $0.uid == uid }) {
+            if let time, time.isFinite, time > 0 { list[i].startAt = time }
+            let pager = self.pager
+            router.show(entries: list, start: i) {
+                await ReviewPaging.loadMore(pager)
+                var seen = Set<String>()
+                return pager.items.map(\.guess.item).filter { seen.insert($0.uid).inserted }.map(\.viewerEntry)
             }
         } else {
             router.open(.item(uid: uid))
