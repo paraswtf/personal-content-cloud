@@ -98,10 +98,9 @@ struct PersonScreen: View {
                         Label("Delete", systemImage: "trash")
                     }
                 } label: {
-                    Image(systemName: "ellipsis.circle")
+                    Label("More", systemImage: "ellipsis.circle")
                 }
                 .disabled(person == nil)
-                .accessibilityLabel("More")
                 .accessibilityIdentifier("person.menu")
             }
         }
