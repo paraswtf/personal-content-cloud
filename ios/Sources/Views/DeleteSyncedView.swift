@@ -9,6 +9,7 @@ struct DeleteSyncedView: View {
     @State private var trashedRows: [SyncEngine.SyncedRow] = []
     @State private var selected: Set<String> = []
     @State private var loading = false
+    @State private var deleting = false
     @State private var confirm = false
     @State private var message: String?
 
@@ -53,7 +54,7 @@ struct DeleteSyncedView: View {
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("Delete \(selected.count)", role: .destructive) { confirm = true }
-                        .disabled(selected.isEmpty)
+                        .disabled(selected.isEmpty || deleting)
                 }
             }
             .confirmationDialog(confirmTitle, isPresented: $confirm, titleVisibility: .visible) {
@@ -112,7 +113,30 @@ struct DeleteSyncedView: View {
     }
 
     private func deleteSelected() async {
+        guard !deleting else { return }
+        deleting = true
+        defer { deleting = false }
         let chosen = allRows.filter { selected.contains($0.id) }
+        // Asked again right before: a photo whose copy changed on the server since the list was made (moved to the
+        // server's trash, taken out of it, or no longer confirmed) is not removed; the list shows it as it is now.
+        let wasTrashed = Set(trashedRows.map(\.id))
+        let now = await SyncEngine.shared.confirmedSynced()
+        if now.stored.isEmpty && now.trashed.isEmpty {
+            // Nothing confirmed at all: the server could not be asked (or holds none of them now); keep the list.
+            message = "The server could not confirm these items. Nothing was removed."
+            return
+        }
+        let stored = Set(now.stored.map(\.id))
+        let trashed = Set(now.trashed.map(\.id))
+        let unchanged = chosen.filter { wasTrashed.contains($0.id) ? trashed.contains($0.id) : stored.contains($0.id) }
+        rows = now.stored
+        trashedRows = now.trashed
+        selected = selected.intersection(unchanged.map(\.id))
+        if unchanged.count < chosen.count {
+            let changed = chosen.count - unchanged.count
+            message = "\(changed) changed on the server since this list was made. Nothing was removed; check the list and delete again."
+            return
+        }
         let ok = await PhotoLibrary.delete(chosen.map(\.asset))
         if ok {
             SyncEngine.shared.markDeleted(chosen.map(\.rec))
