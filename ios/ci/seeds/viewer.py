@@ -12,6 +12,9 @@ after the area, so they sit at the end of the library and touch nothing the othe
 A video whose streaming copy is still being made is not seeded: the server queues the copy again when it starts,
 so the "preparing" state would not last until the tests.
 
+Every item is marked as already checked for forwards (forward_checked), so the server's backfill does not decide
+again how it was received (it would take "WhatsApp" off the photo, whose name is not WhatsApp's).
+
 Everything is generated; no real people, no real photos.
 """
 from __future__ import annotations
@@ -51,7 +54,7 @@ def library(kit) -> dict:
     ])
     pdf = kit.make_item(conn, kind="pdf", data=data, ext=".pdf", mime="application/pdf", width=612, height=792,
                         filename="Viewer boarding pass.pdf", taken_at="2026-04-20T08:30:00.000Z",
-                        category="documents", page_count=2)
+                        category="documents", page_count=2, forward_checked=1)
     _regenerate_derivatives(conn.execute("SELECT * FROM items WHERE id = ?", (pdf["id"],)).fetchone(), conn)
     enqueue_text(conn, int(pdf["id"]), 1)
     drain("text")
@@ -77,7 +80,7 @@ def library(kit) -> dict:
     received = kit.make_item(
         conn, data=kit.jpeg(img), width=kit.W, height=kit.H, filename="VIEWER_RECEIVED.JPG",
         taken_at="2026-04-18T17:05:00.000Z", camera="CI Camera", category="places", received_via="whatsapp",
-        gps_lat=15.4909, gps_lon=73.8278,
+        gps_lat=15.4909, gps_lon=73.8278, forward_checked=1,
         category_scores=json.dumps({"places": 0.62, "misc": 0.21, "objects": 0.09, "food": 0.04}),
         quality_scores=json.dumps({"blur_var": 182.4, "mean_lum": 141.0, "p95_lum": 236.0, "clipped_frac": 0.01,
                                    "accident_p": 0.04}))
@@ -98,7 +101,8 @@ def library(kit) -> dict:
             video = kit.make_item(
                 conn, kind="video", data=clip.read_bytes(), ext=".mp4", mime="video/mp4", width=640, height=480,
                 filename="VIEWER_CLIP.MP4", taken_at="2026-04-12T11:00:00.000Z", category="personal",
-                duration_s=3.0, video_codec="h264", bitrate=300_000, preview_status="none")
+                duration_s=3.0, video_codec="h264", bitrate=300_000, preview_status="none",
+                forward_checked=1)
         _previews(kit, video, frame.resize((640, 480)))
         guest = kit.make_person(conn, GUEST)
         face_id = kit.make_face(conn, int(video["id"]), guest, box=(0.40, 0.25, 0.16, 0.24), size_px=102,
@@ -109,7 +113,7 @@ def library(kit) -> dict:
     # a file without a preview
     other = kit.make_item(conn, kind="other", data=b"viewer notes, not a picture\n" * 8, ext=".bin",
                           mime="application/octet-stream", width=None, height=None, filename="VIEWER_NOTES.BIN",
-                          taken_at="2026-04-10T10:00:00.000Z", category="misc")
+                          taken_at="2026-04-10T10:00:00.000Z", category="misc", forward_checked=1)
     out["other"] = other["uid"]
     return out
 

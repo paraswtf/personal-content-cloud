@@ -30,6 +30,8 @@ struct ViewerInfoPanel: View {
         .onCloudChange(uid: context.uid) { Task { await refresh() } }
         .task { trashDays = await ViewerConfig.loadTrashDays() }
         .sheet(item: $file) { file in ViewerShareSheet(items: [file.url]) }
+        // the viewer's own toasts are under this sheet: show them here too
+        .toastHost()
     }
 
     private func refresh() async {

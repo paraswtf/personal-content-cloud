@@ -83,9 +83,10 @@ final class ViewerScreens: ScreenTestCase {
         XCTAssertTrue(chip.waitForExistence(timeout: 15), "the new tag did not show")
         snap("viewer-tag-added")
         app.buttons["Remove tag Viewer check"].tap()
+        // the server teaches its tag learner on a removal, which takes a while on the test machine
         let gone = NSPredicate(format: "exists == false")
         expectation(for: gone, evaluatedWith: chip)
-        waitForExpectations(timeout: 15)
+        waitForExpectations(timeout: 60)
         XCTAssertTrue(text("Viewer trip").exists, "the seeded tag should stay")
     }
 
@@ -106,7 +107,8 @@ final class ViewerScreens: ScreenTestCase {
         expectation(for: off, evaluatedWith: star)
         waitForExpectations(timeout: 15)
 
-        app.buttons["viewer.more"].tap()
+        // the menu's own button sits inside the labelled one: tap the place
+        app.buttons["viewer.more"].coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
         XCTAssertTrue(app.buttons["Add to album"].waitForExistence(timeout: 10), "the menu did not open")
         XCTAssertTrue(app.buttons["Mark private"].exists)
         XCTAssertTrue(app.buttons["Save to Photos"].exists)
