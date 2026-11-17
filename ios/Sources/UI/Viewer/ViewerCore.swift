@@ -80,6 +80,10 @@ struct ViewerCore: View {
 
     private var currentContext: ViewerPageContext? { current.flatMap { contexts[$0] } }
     private var currentIndex: Int? { current.flatMap { uid in entries.firstIndex(where: { $0.uid == uid }) } }
+    /// The boxes area's edit (a box moved or drawn), when the boxes area put one in the environment.
+    @Environment(StageEditState.self) private var edit: StageEditState?
+    /// A box is being moved or drawn: the bars hide, paging stops and the info panel closes until it ends.
+    private var editing: Bool { edit?.isActive ?? false }
 
     var body: some View {
         ScrollViewReader { proxy in
@@ -90,14 +94,19 @@ struct ViewerCore: View {
                 }
         }
         .background(Color.black.ignoresSafeArea())
-        .overlay(alignment: .top) { if chrome { topBar } }
-        .overlay(alignment: .bottom) { if chrome { bottomBar } }
+        .overlay(alignment: .top) { if chrome && !editing { topBar } }
+        .overlay(alignment: .bottom) { if chrome && !editing { bottomBar } }
         .statusBarHidden(!chrome)
         .preferredColorScheme(.dark)
         .onChange(of: current) { _, _ in
             Task { await loadMoreIfNeeded() }
         }
-        .sheet(item: $info) { ctx in
+        .onChange(of: editing) { _, nowEditing in
+            if nowEditing { info = nil }
+        }
+        .sheet(item: $info) { opened in
+            // The item as it is now: a save in the panel reloads the page, and the panel shows the new answer.
+            let ctx = contexts[opened.uid] ?? opened
             NavigationStack {
                 Group {
                     if let panel = hooks.infoPanel {
@@ -125,7 +134,10 @@ struct ViewerCore: View {
                                zoomed: zoomBinding(entry.uid),
                                onTap: { withAnimation(.easeInOut(duration: 0.2)) { chrome.toggle() } },
                                onBoxTap: { box, ctx in hooks.onBoxTap?(box, ctx) },
-                               onContext: { ctx in contexts[ctx.uid] = ctx },
+                               onContext: { ctx in
+                                   contexts[ctx.uid] = ctx
+                                   edit?.contexts[ctx.uid] = ctx
+                               },
                                stage: hooks.stage,
                                vault: request.vault)
                         .containerRelativeFrame([.horizontal, .vertical])
@@ -137,7 +149,7 @@ struct ViewerCore: View {
         .scrollTargetBehavior(.paging)
         .scrollPosition(id: $current)
         .scrollIndicators(.hidden)
-        .scrollDisabled(zoomedUid != nil)
+        .scrollDisabled(zoomedUid != nil || editing)
         .ignoresSafeArea()
         // On the scroll view itself: on the whole viewer it would replace the identifiers of its buttons.
         .accessibilityIdentifier("viewer")
@@ -247,6 +259,7 @@ struct ViewerPage: View {
     /// Opened from the vault: the item, its pictures and its videos are asked for with `vault=1`.
     var vault = false
 
+    @Environment(StageEditState.self) private var edit: StageEditState?
     @State private var detail: CoreItemDetail?
     @State private var item: API.ItemDetail?
     @State private var json: Data?
@@ -265,14 +278,18 @@ struct ViewerPage: View {
             } else if kind == .video, let detail, let video = detail.urls.video {
                 ViewerVideo(ref: video, posterRef: detail.urls.previewSmall, isCurrent: isCurrent, vault: vault)
             } else {
+                let editingHere = edit?.isEditing(entry.uid) ?? false
                 ZoomableStage(image: image,
                               pixelSize: pixelSize,
                               boxes: detail?.stillBoxes ?? [],
-                              showBoxes: showBoxes && livePlayer == nil,
+                              // the boxes show while one of them is moved or a new one drawn
+                              showBoxes: editingHere || (showBoxes && livePlayer == nil),
                               selectedBoxId: selectedBoxId,
                               zoomed: $zoomed,
                               onBoxTap: { box in if let ctx = context { onBoxTap(box, ctx) } },
-                              onTap: onTap)
+                              onTap: onTap,
+                              edit: editingHere ? edit : nil,
+                              editRevision: editingHere ? (edit?.revision ?? 0) : -1)
                 if let livePlayer {
                     PlayerSurface(player: livePlayer)
                         .allowsHitTesting(false)

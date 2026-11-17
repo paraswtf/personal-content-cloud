@@ -3,6 +3,8 @@ import UIKit
 
 /// A photo that pinches and double-taps to zoom, with its boxes drawn over it. A tap goes to the topmost box under
 /// the finger, which is the smallest one there (BoxStack), else to `onTap` (which shows or hides the controls).
+/// While `edit` names this picture, the stage moves or resizes a box, or draws a new one: one finger edits, two
+/// fingers pan and zoom, and taps on boxes wait.
 struct ZoomableStage: UIViewRepresentable {
     var image: UIImage?
     /// The picture's size in pixels when known before it loads, so the boxes can be placed at once.
@@ -13,6 +15,10 @@ struct ZoomableStage: UIViewRepresentable {
     @Binding var zoomed: Bool
     var onBoxTap: (StageBox) -> Void
     var onTap: () -> Void
+    /// The boxes area's edit of this picture, or nil.
+    var edit: StageEditState? = nil
+    /// Changes whenever the edit starts, stops or takes a rectangle from outside, so the stage updates.
+    var editRevision = 0
 
     func makeCoordinator() -> Coordinator { Coordinator(parent: self) }
 
@@ -25,6 +31,7 @@ struct ZoomableStage: UIViewRepresentable {
     func updateUIView(_ view: StageView, context: Context) {
         context.coordinator.parent = self
         view.apply(image: image, pixelSize: pixelSize, boxes: boxes, showBoxes: showBoxes, selected: selectedBoxId)
+        view.applyEdit(edit, revision: editRevision)
     }
 
     final class Coordinator {
@@ -56,8 +63,16 @@ final class StageView: UIScrollView, UIScrollViewDelegate {
     private var selected: String?
     private var pictureSize: CGSize = .zero
     private var lastBounds: CGSize = .zero
+    private let singleTapper: UITapGestureRecognizer
+    private let doubleTapper: UITapGestureRecognizer
+    private var editOverlay: StageEditOverlay?
+    private var editRevision = -1
+    /// The id of the box being moved (drawn by the overlay instead), while adjusting.
+    private var adjustingId: String?
 
     override init(frame: CGRect) {
+        singleTapper = UITapGestureRecognizer()
+        doubleTapper = UITapGestureRecognizer()
         super.init(frame: frame)
         delegate = self
         showsHorizontalScrollIndicator = false
@@ -75,12 +90,12 @@ final class StageView: UIScrollView, UIScrollViewDelegate {
         content.isAccessibilityElement = false
         addSubview(content)
 
-        let single = UITapGestureRecognizer(target: self, action: #selector(singleTap(_:)))
-        let double = UITapGestureRecognizer(target: self, action: #selector(doubleTap(_:)))
-        double.numberOfTapsRequired = 2
-        single.require(toFail: double)
-        addGestureRecognizer(single)
-        addGestureRecognizer(double)
+        singleTapper.addTarget(self, action: #selector(singleTap(_:)))
+        doubleTapper.addTarget(self, action: #selector(doubleTap(_:)))
+        doubleTapper.numberOfTapsRequired = 2
+        singleTapper.require(toFail: doubleTapper)
+        addGestureRecognizer(singleTapper)
+        addGestureRecognizer(doubleTapper)
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
@@ -111,6 +126,50 @@ final class StageView: UIScrollView, UIScrollViewDelegate {
             styleBoxes()
         }
         if relayout { resetLayout() }
+    }
+
+    /// Starts, updates or ends the boxes area's edit of this picture.
+    func applyEdit(_ state: StageEditState?, revision: Int) {
+        guard let state, let mode = state.mode else {
+            if editOverlay != nil { endEdit() }
+            return
+        }
+        let overlay: StageEditOverlay
+        if let existing = editOverlay {
+            overlay = existing
+        } else {
+            overlay = StageEditOverlay(frame: content.bounds)
+            content.addSubview(overlay)
+            editOverlay = overlay
+            // One finger edits; two fingers pan and zoom. Taps on boxes wait until the edit ends.
+            panGestureRecognizer.minimumNumberOfTouches = 2
+            singleTapper.isEnabled = false
+            doubleTapper.isEnabled = false
+        }
+        overlay.state = state
+        overlay.frame = content.bounds
+        overlay.zoom = zoomScale
+        if revision != editRevision {
+            editRevision = revision
+            overlay.configure(mode: mode, rect: state.rect)
+        }
+        let newAdjusting: String?
+        if case .adjust(let box) = mode { newAdjusting = box.id } else { newAdjusting = nil }
+        if newAdjusting != adjustingId {
+            adjustingId = newAdjusting
+        }
+        styleBoxes()
+    }
+
+    private func endEdit() {
+        editOverlay?.removeFromSuperview()
+        editOverlay = nil
+        editRevision = -1
+        adjustingId = nil
+        panGestureRecognizer.minimumNumberOfTouches = 1
+        singleTapper.isEnabled = true
+        doubleTapper.isEnabled = true
+        styleBoxes()
     }
 
     override func layoutSubviews() {
@@ -160,7 +219,11 @@ final class StageView: UIScrollView, UIScrollViewDelegate {
         for box in BoxStack.paintOrder(boxes) {
             let view = BoxView(box: box)
             view.onActivate = { [weak self] in self?.coordinator?.tapped(box) }
-            content.addSubview(view)
+            if let editOverlay {
+                content.insertSubview(view, belowSubview: editOverlay)
+            } else {
+                content.addSubview(view)
+            }
             boxViews[box.id] = view
         }
         layoutBoxes()
@@ -175,18 +238,30 @@ final class StageView: UIScrollView, UIScrollViewDelegate {
                                 width: box.w * size.width, height: box.h * size.height)
             view.setZoom(zoomScale)
         }
+        if let editOverlay {
+            editOverlay.frame = content.bounds
+            editOverlay.zoom = zoomScale
+        }
     }
 
     private func styleBoxes() {
+        let editing = editOverlay != nil
         for (id, view) in boxViews {
-            view.isHidden = !showBoxes
-            view.isAccessibilityElement = showBoxes
+            view.isHidden = !showBoxes || id == adjustingId
+            // While a box is edited the others stay in view, faded, and take no part.
+            view.alpha = editing ? 0.4 : 1
+            view.isAccessibilityElement = showBoxes && !editing
             view.setSelected(id == selected)
             view.setZoom(zoomScale)
         }
         // VoiceOver reads the shown boxes in the item's own order: faces, then person boxes, then pets. Hidden boxes
-        // leave the list (a listed element stays readable even when its view is hidden).
-        content.accessibilityElements = showBoxes ? boxes.compactMap { boxViews[$0.id] } : []
+        // leave the list (a listed element stays readable even when its view is hidden). While editing, VoiceOver
+        // reads the edited box with its actions instead.
+        if let editOverlay {
+            content.accessibilityElements = [editOverlay]
+        } else {
+            content.accessibilityElements = showBoxes ? boxes.compactMap { boxViews[$0.id] } : []
+        }
     }
 
     // MARK: gestures
@@ -224,7 +299,222 @@ final class StageView: UIScrollView, UIScrollViewDelegate {
     func scrollViewDidZoom(_ scrollView: UIScrollView) {
         centerContent()
         for view in boxViews.values { view.setZoom(zoomScale) }
+        editOverlay?.zoom = zoomScale
         coordinator?.zoomChanged(zoomScale > 1.01)
+    }
+}
+
+/// The layer over the picture while a box is moved or resized, or a new one drawn. It lives in the picture's own
+/// coordinates (it zooms with it) and keeps its lines and handles the same size on the screen. One finger drags:
+/// inside the box it moves the box, at a corner it resizes it; in draw mode it draws a new box from where the
+/// finger went down. VoiceOver gets the box as one element with actions to move and resize it.
+final class StageEditOverlay: UIView {
+    weak var state: StageEditState?
+    var zoom: CGFloat = 1 {
+        didSet { if zoom != oldValue { setNeedsLayout() } }
+    }
+
+    private var mode: StageEditState.Mode?
+    private var rect: CGRect?
+    /// The box as it was when adjusting started: the smallest sides come from it.
+    private var startRect: CGRect = .zero
+    private var dragStartRect: CGRect = .zero
+    private var dragHandle: StageEditGeometry.Handle?
+    private var drawStart: CGPoint?
+    private let border = CAShapeLayer()
+    private var handles: [CAShapeLayer] = []
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        backgroundColor = .clear
+        border.fillColor = UIColor.clear.cgColor
+        border.lineJoin = .round
+        layer.addSublayer(border)
+        for _ in 0..<4 {
+            let h = CAShapeLayer()
+            h.fillColor = UIColor.white.cgColor
+            h.strokeColor = UIColor.systemBlue.cgColor
+            layer.addSublayer(h)
+            handles.append(h)
+        }
+        let pan = UIPanGestureRecognizer(target: self, action: #selector(panned(_:)))
+        pan.maximumNumberOfTouches = 1
+        addGestureRecognizer(pan)
+        isAccessibilityElement = true
+        accessibilityIdentifier = "stage.edit"
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
+
+    func configure(mode: StageEditState.Mode, rect: CGRect?) {
+        self.mode = mode
+        self.rect = rect
+        if case .adjust = mode, let rect { startRect = rect }
+        updateAccessibility()
+        setNeedsLayout()
+    }
+
+    private var color: UIColor {
+        switch mode {
+        case .draw(.face): return .white
+        case .draw(.person): return .systemCyan
+        case .draw(.pet): return .systemGreen
+        default: return .systemBlue
+        }
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        defer { CATransaction.commit() }
+        border.frame = bounds
+        guard let rect, bounds.width > 0, bounds.height > 0 else {
+            border.path = nil
+            handles.forEach { $0.isHidden = true }
+            return
+        }
+        let r = CGRect(x: rect.minX * bounds.width, y: rect.minY * bounds.height,
+                       width: rect.width * bounds.width, height: rect.height * bounds.height)
+        let z = max(zoom, 0.01)
+        border.path = UIBezierPath(roundedRect: r, cornerRadius: 4 / z).cgPath
+        border.strokeColor = color.cgColor
+        border.lineWidth = 3 / z
+        let drawingNow = state?.dragging == true && drawStart != nil
+        border.lineDashPattern = drawingNow ? [NSNumber(value: Double(6 / z)), NSNumber(value: Double(4 / z))] : nil
+        border.fillColor = color.withAlphaComponent(0.12).cgColor
+        let adjusting: Bool
+        if case .adjust = mode { adjusting = true } else { adjusting = false }
+        let corners = [CGPoint(x: r.minX, y: r.minY), CGPoint(x: r.maxX, y: r.minY),
+                       CGPoint(x: r.minX, y: r.maxY), CGPoint(x: r.maxX, y: r.maxY)]
+        let side = 16 / z
+        for (i, h) in handles.enumerated() {
+            h.isHidden = !adjusting
+            h.frame = bounds
+            h.lineWidth = 2 / z
+            h.path = UIBezierPath(ovalIn: CGRect(x: corners[i].x - side / 2, y: corners[i].y - side / 2,
+                                                 width: side, height: side)).cgPath
+        }
+    }
+
+    private func unit(_ p: CGPoint) -> CGPoint {
+        CGPoint(x: bounds.width > 0 ? p.x / bounds.width : 0, y: bounds.height > 0 ? p.y / bounds.height : 0)
+    }
+
+    @objc private func panned(_ g: UIPanGestureRecognizer) {
+        guard let mode, bounds.width > 0, bounds.height > 0 else { return }
+        let p = unit(g.location(in: self))
+        switch mode {
+        case .adjust:
+            adjustPan(g, at: p)
+        case .draw:
+            drawPan(g, at: p)
+        }
+    }
+
+    private func adjustPan(_ g: UIPanGestureRecognizer, at p: CGPoint) {
+        switch g.state {
+        case .began:
+            guard let rect else { return }
+            // A corner within about 28 points on the screen takes the touch.
+            let reachX = 28 / (bounds.width * max(zoom, 0.01)), reachY = 28 / (bounds.height * max(zoom, 0.01))
+            dragHandle = StageEditGeometry.handle(at: p, in: rect, reachX: reachX, reachY: reachY)
+            dragStartRect = rect
+            state?.dragging = dragHandle != nil
+        case .changed:
+            guard let handle = dragHandle else { return }
+            let t = g.translation(in: self)
+            let mins = StageEditGeometry.minSides(for: startRect)
+            let next = StageEditGeometry.moved(handle, dragStartRect, dx: t.x / bounds.width, dy: t.y / bounds.height,
+                                               minW: mins.w, minH: mins.h)
+            rect = next
+            setNeedsLayout()
+            state?.stageChanged(next)
+        default:
+            dragHandle = nil
+            state?.dragging = false
+            updateAccessibility()
+        }
+    }
+
+    private func drawPan(_ g: UIPanGestureRecognizer, at p: CGPoint) {
+        let minW = StageEditGeometry.minDrawPoints / (bounds.width * max(zoom, 0.01))
+        let minH = StageEditGeometry.minDrawPoints / (bounds.height * max(zoom, 0.01))
+        switch g.state {
+        case .began:
+            // The finger went down where it was before the pan was recognised.
+            let t = g.translation(in: self)
+            drawStart = CGPoint(x: p.x - t.x / bounds.width, y: p.y - t.y / bounds.height)
+            state?.dragging = true
+            rect = nil
+            setNeedsLayout()
+        case .changed:
+            guard let start = drawStart else { return }
+            rect = StageEditGeometry.drawn(from: start, to: p, minW: 0, minH: 0)
+            setNeedsLayout()
+        case .ended:
+            guard let start = drawStart else { return }
+            drawStart = nil
+            let done = StageEditGeometry.drawn(from: start, to: p, minW: minW, minH: minH)
+            rect = done ?? state?.rect
+            state?.dragging = false
+            // Too small: the box drawn before, if any, stays.
+            if let done { state?.stageChanged(done) }
+            updateAccessibility()
+            setNeedsLayout()
+        default:
+            drawStart = nil
+            rect = state?.rect
+            state?.dragging = false
+            setNeedsLayout()
+        }
+    }
+
+    // MARK: VoiceOver
+
+    private func updateAccessibility() {
+        switch mode {
+        case .adjust(let box):
+            let text = box.accessibilityText
+            let lowered = text.prefix(1).lowercased() + String(text.dropFirst())
+            accessibilityLabel = "Moving the box: \(lowered)"
+            accessibilityHint = "Use the actions to move it or change its size."
+            accessibilityCustomActions = [
+                action("Move left") { $0.offsetBy(dx: -0.01, dy: 0) },
+                action("Move right") { $0.offsetBy(dx: 0.01, dy: 0) },
+                action("Move up") { $0.offsetBy(dx: 0, dy: -0.01) },
+                action("Move down") { $0.offsetBy(dx: 0, dy: 0.01) },
+                action("Larger") { [weak self] r in
+                    let mins = StageEditGeometry.minSides(for: self?.startRect ?? r)
+                    return StageEditGeometry.grown(r, by: 0.02, minW: mins.w, minH: mins.h)
+                },
+                action("Smaller") { [weak self] r in
+                    let mins = StageEditGeometry.minSides(for: self?.startRect ?? r)
+                    return StageEditGeometry.grown(r, by: -0.02, minW: mins.w, minH: mins.h)
+                },
+            ]
+        case .draw(let kind):
+            accessibilityLabel = rect == nil ? "Drag over the \(kind.noun) to draw a box" : "The box you drew over the \(kind.noun)"
+            accessibilityHint = nil
+            accessibilityCustomActions = nil
+        case nil:
+            accessibilityLabel = nil
+            accessibilityCustomActions = nil
+        }
+    }
+
+    private func action(_ name: String, _ change: @escaping (CGRect) -> CGRect) -> UIAccessibilityCustomAction {
+        UIAccessibilityCustomAction(name: name) { [weak self] _ in
+            guard let self, let rect = self.rect else { return false }
+            var next = change(rect)
+            // A move stays inside the picture.
+            next.origin.x = StageEditGeometry.clamp(next.minX, 0, 1 - next.width)
+            next.origin.y = StageEditGeometry.clamp(next.minY, 0, 1 - next.height)
+            self.rect = next
+            self.setNeedsLayout()
+            self.state?.stageChanged(next)
+            return true
+        }
     }
 }
 

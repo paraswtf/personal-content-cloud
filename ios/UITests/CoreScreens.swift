@@ -67,24 +67,27 @@ final class CoreScreens: ScreenTestCase {
         // The middle of the face is inside the person box too: the face gets the tap. (A box draws itself and takes
         // no touches; the stage hit-tests the boxes, so the tap goes by its place on the screen.)
         face.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
-        let title = app.staticTexts["viewer.box.title"]
-        XCTAssertTrue(title.waitForExistence(timeout: 10), "a tapped box opened nothing")
-        XCTAssertEqual(title.label, "Face of Test Visitor")
+        // The face's editor opens (the boxes area's FaceEditor), naming whose face it is.
+        let name = app.staticTexts["boxes.editor.name"]
+        XCTAssertTrue(app.navigationBars["Edit face"].waitForExistence(timeout: 10), "a tapped box opened nothing")
+        XCTAssertEqual(name.label, "Test Visitor")
         snap("core-viewer-face-tapped")
-        dismissSheet(showing: title)
+        closeEditor()
 
         // A point of the person box away from the face goes to the person box.
         person.coordinate(withNormalizedOffset: CGVector(dx: 0.85, dy: 0.92)).tap()
-        XCTAssertTrue(title.waitForExistence(timeout: 10))
-        XCTAssertEqual(title.label, "Person box of Test Person")
+        XCTAssertTrue(app.navigationBars["Edit person"].waitForExistence(timeout: 10), "the person box opened nothing")
+        XCTAssertEqual(name.label, "Test Person")
 
-        // "Who is this?" opens the person picker ranked by likeness to the box (nothing is saved here).
+        // "Move to someone else" opens the person picker ranked by likeness to the box (nothing is saved here).
         app.buttons["viewer.box.who"].tap()
         XCTAssertTrue(app.navigationBars["Who is this?"].waitForExistence(timeout: 15), "the picker did not open")
         XCTAssertTrue(app.buttons.matching(identifier: "picker.option").firstMatch.waitForExistence(timeout: 20),
                       "the picker listed nobody")
         snap("core-picker")
-        app.navigationBars["Who is this?"].buttons["Cancel"].tap()
+        app.navigationBars["Who is this?"].buttons.firstMatch.tap()
+        XCTAssertTrue(app.navigationBars["Edit person"].waitForExistence(timeout: 10), "the picker did not go back")
+        closeEditor()
 
         // Hiding the boxes, then closing the viewer. A tap above a sheet can reach the photo and hide the controls;
         // a tap on an empty part of the photo shows them again.
@@ -98,6 +101,13 @@ final class CoreScreens: ScreenTestCase {
         snap("core-viewer-no-boxes")
         app.buttons["viewer.close"].tap()
         XCTAssertTrue(firstCell.waitForExistence(timeout: 10))
+    }
+
+    /// Closes a box's editor with its Close button.
+    private func closeEditor(file: StaticString = #filePath, line: UInt = #line) {
+        app.buttons["boxes.editor.close"].tap()
+        XCTAssertTrue(app.buttons["boxes.editor.close"].waitForNonExistence(timeout: 10), "the editor did not close",
+                      file: file, line: line)
     }
 
     /// Closes a short sheet: a tap on the dimmed screen above it, else a drag down from its text.
