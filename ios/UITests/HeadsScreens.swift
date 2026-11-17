@@ -10,7 +10,16 @@ final class HeadsScreens: ScreenTestCase {
         XCTAssertTrue(card.waitForExistence(timeout: 20), "no card for \(name) on People")
         card.tap()
         let tab3d = app.buttons["people.tab.3d"]
-        if tab3d.waitForExistence(timeout: 5) { tab3d.tap() }
+        if tab3d.waitForExistence(timeout: 5) {
+            // The person page's tabs scroll sideways and 3D is the last one, off the screen on a phone.
+            let bar = app.scrollViews["people.tabs"]
+            var swipes = 0
+            while !tab3d.isHittable && bar.exists && swipes < 4 {
+                bar.swipeLeft()
+                swipes += 1
+            }
+            tab3d.tap()
+        }
     }
 
     private func element(_ identifier: String) -> XCUIElement {
