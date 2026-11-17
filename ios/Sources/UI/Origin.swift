@@ -29,6 +29,9 @@ enum BoxOrigin: String, CaseIterable {
     /// The owner's origins show a person icon, the rest the system's icon.
     var isMine: Bool { self == .you || self == .drawn }
 
+    /// The icon's symbol: a person for the owner's origins, the system's chip for the rest.
+    var symbolName: String { isMine ? "person.fill" : "cpu" }
+
     /// Who put the person (or the guess) on one box; nil for a box the detector found with nobody on it (the
     /// website's boxOrigin). `assignedByUser`: `assigned_by == "user"`; `drawnByUser`: `source == "user"`;
     /// `byGuess`: the person came from a guess the owner confirmed.
@@ -52,7 +55,7 @@ struct OriginIcon: View {
     var decorative = false
 
     var body: some View {
-        Image(systemName: origin.isMine ? "person.fill" : "cpu")
+        Image(systemName: origin.symbolName)
             .imageScale(.small)
             .accessibilityLabel(label ?? origin.label)
             .accessibilityHidden(decorative)

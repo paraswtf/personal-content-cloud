@@ -18,6 +18,9 @@ struct StageBox: Identifiable, Hashable {
     var guessName: String?
     /// The person the box belongs to, when it belongs to one.
     var personId: Int?
+    /// Who put the person, the pet or the guess on the box (the website's boxOrigin): drawn as an icon after the
+    /// label and read by VoiceOver after the box. Nil for a box the detector found with nobody on it.
+    var origin: BoxOrigin? = nil
 
     var id: String { "\(kind.rawValue):\(boxId)" }
 
@@ -40,6 +43,10 @@ struct StageBox: Identifiable, Hashable {
         if let guessName { return "\(guessName)?" }
         return nil
     }
+
+    /// The origin drawn after the label (the website's OriginIcon beside the name, or on a guess's chip). A box
+    /// without a label draws none; VoiceOver still reads its origin.
+    var labelOrigin: BoxOrigin? { label == nil ? nil : origin }
 }
 
 /// Overlapping boxes (the owner's rule, docs/ARCHITECTURE.md section 14): the smaller box is drawn above a larger

@@ -117,6 +117,9 @@ struct CoreGuess: Decodable, Hashable {
     let score: Double
 }
 
+/// A face box. On every box, `assignedBy` ("auto", "user", "guess"), `source` ("user" when the owner drew the box)
+/// and `byGuess` (the person came from a guess the owner confirmed) give its origin icon (docs/ARCHITECTURE.md
+/// section 10); older servers leave some of them out.
 struct CoreFace: Decodable, Hashable {
     let id: Int
     let x: Double
@@ -126,6 +129,9 @@ struct CoreFace: Decodable, Hashable {
     let frameTimeS: Double?
     let person: CorePersonRef?
     let guess: CoreGuess?
+    let assignedBy: String?
+    let source: String?
+    let byGuess: Bool?
 }
 
 struct CoreBody: Decodable, Hashable {
@@ -138,6 +144,9 @@ struct CoreBody: Decodable, Hashable {
     let frameTimeS: Double?
     let person: CorePersonRef?
     let guess: CoreGuess?
+    let assignedBy: String?
+    let source: String?
+    let byGuess: Bool?
 }
 
 struct CoreAnimal: Decodable, Hashable {
@@ -149,6 +158,8 @@ struct CoreAnimal: Decodable, Hashable {
     let species: String
     let frameTimeS: Double?
     let person: CorePersonRef?
+    let assignedBy: String?
+    let source: String?
 }
 
 struct CoreLiveVideo: Decodable, Hashable {
@@ -182,25 +193,35 @@ struct CoreItemDetail: Decodable, Hashable {
     var mediaKind: MediaKind { MediaKind(kind) }
 
     /// The boxes drawn on the still picture (docs/ARCHITECTURE.md sections 10 and 14): every face, the person
-    /// boxes whose face was not found, and the pets. Video frames' boxes are not drawn on the still.
+    /// boxes whose face was not found, and the pets. Video frames' boxes are not drawn on the still. Each carries its
+    /// origin (the website's boxOrigin): only a named person or a named guess counts, as only those are shown.
     var stillBoxes: [StageBox] {
         var out: [StageBox] = []
         for f in faces ?? [] where f.frameTimeS == nil {
+            let name = Self.named(f.person?.name)
+            let guessName = f.person == nil ? Self.named(f.guess?.person.name) : nil
             out.append(StageBox(kind: .face, boxId: f.id, x: f.x, y: f.y, w: f.w, h: f.h,
-                                name: Self.named(f.person?.name),
-                                guessName: f.person == nil ? Self.named(f.guess?.person.name) : nil,
-                                personId: f.person?.id))
+                                name: name, guessName: guessName, personId: f.person?.id,
+                                origin: BoxOrigin.of(hasPerson: name != nil, assignedByUser: f.assignedBy == "user",
+                                                     drawnByUser: f.source == "user", byGuess: f.byGuess ?? false,
+                                                     hasGuess: guessName != nil)))
         }
         for b in bodies ?? [] where b.frameTimeS == nil && b.faceId == nil {
+            let name = Self.named(b.person?.name)
+            let guessName = b.person == nil ? Self.named(b.guess?.person.name) : nil
             out.append(StageBox(kind: .body, boxId: b.id, x: b.x, y: b.y, w: b.w, h: b.h,
-                                name: Self.named(b.person?.name),
-                                guessName: b.person == nil ? Self.named(b.guess?.person.name) : nil,
-                                personId: b.person?.id))
+                                name: name, guessName: guessName, personId: b.person?.id,
+                                origin: BoxOrigin.of(hasPerson: name != nil, assignedByUser: b.assignedBy == "user",
+                                                     drawnByUser: b.source == "user", byGuess: b.byGuess ?? false,
+                                                     hasGuess: guessName != nil)))
         }
         for a in animals ?? [] where a.frameTimeS == nil {
+            // pets keep their unnamed ones: a pet without a name is still someone the owner or the system put there
             out.append(StageBox(kind: .animal, boxId: a.id, x: a.x, y: a.y, w: a.w, h: a.h,
                                 name: Self.named(a.person?.name) ?? Fmt.speciesLabel(a.species),
-                                guessName: nil, personId: a.person?.id))
+                                guessName: nil, personId: a.person?.id,
+                                origin: BoxOrigin.of(hasPerson: a.person != nil, assignedByUser: a.assignedBy == "user",
+                                                     drawnByUser: a.source == "user")))
         }
         return out
     }
