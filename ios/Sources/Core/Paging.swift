@@ -29,6 +29,8 @@ final class Pager<Item: Identifiable> {
 
     @ObservationIgnored private var next: String?
     @ObservationIgnored private var generation = 0
+    /// The last failure was the first page (a refresh): Try again loads it again rather than the next page.
+    @ObservationIgnored private var refreshFailed = false
     @ObservationIgnored private let load: (String?) async throws -> Page
 
     init(load: @escaping (String?) async throws -> Page) {
@@ -52,9 +54,13 @@ final class Pager<Item: Identifiable> {
             total = page.total
             finished = page.next == nil
             loaded = true
+            refreshFailed = false
         } catch {
             guard gen == generation else { return }
-            if !(error is CancellationError) { self.error = error }
+            if !(error is CancellationError) {
+                self.error = error
+                refreshFailed = true
+            }
         }
         if gen == generation { loading = false }
     }
@@ -73,7 +79,10 @@ final class Pager<Item: Identifiable> {
             finished = page.next == nil
         } catch {
             guard gen == generation else { return }
-            if !(error is CancellationError) { self.error = error }
+            if !(error is CancellationError) {
+                self.error = error
+                refreshFailed = false
+            }
         }
         if gen == generation { loading = false }
     }
@@ -86,10 +95,12 @@ final class Pager<Item: Identifiable> {
         }
     }
 
-    /// After an error: tries the failed load again.
+    /// After an error: tries the failed load again (the first page again when the failure was a refresh, or the
+    /// list has no rows yet).
     func retry() async {
+        let failedRefresh = refreshFailed
         error = nil
-        if loaded { await loadMore() } else { await refresh() }
+        if loaded && !failedRefresh && !items.isEmpty { await loadMore() } else { await refresh() }
     }
 
     /// Removes rows locally (after a delete), keeping the rest in place.
