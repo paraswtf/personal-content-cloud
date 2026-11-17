@@ -96,7 +96,7 @@ export default function AccountTab() {
         </dl>
       </Section>
 
-      <Section title="Change password" description="Other signed-in devices stay signed in. Use Sign out everywhere below to end them.">
+      <Section title="Change password" description="Every other browser and device is signed out, the iPhone app too, and signs in again with the new password. This one stays signed in.">
         <form onSubmit={submit} noValidate className="flex max-w-sm flex-col gap-4">
           {/* lets password managers attach the change to the right account */}
           <input type="text" name="username" autoComplete="username" value={state?.username ?? ''} readOnly hidden />
