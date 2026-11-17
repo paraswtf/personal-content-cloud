@@ -89,8 +89,10 @@ jobs:
           echo "PCC_DIR=$P" >> "$GITHUB_ENV"
           cd backend
           "$RUNNER_TEMP/pcc-venv/bin/python" ../ios/ci/seed_server.py library
+          # --timeout-keep-alive as in scripts/run.sh: with uvicorn's default of 5 s the server closes an idle
+          # connection just as the app reuses it, and a write sent on it is lost ("the network connection was lost").
           nohup "$RUNNER_TEMP/pcc-venv/bin/uvicorn" --factory app.main:create_app --host 127.0.0.1 --port "$PCC_PORT" \
-            > "$P/backend.log" 2>&1 &
+            --timeout-keep-alive 600 > "$P/backend.log" 2>&1 &
           echo $! > "$P/backend.pid"
           "$RUNNER_TEMP/pcc-venv/bin/python" ../ios/ci/seed_server.py api --server "http://127.0.0.1:$PCC_PORT" \
             --out "$P/seed.json" | grep -v '"token"'
