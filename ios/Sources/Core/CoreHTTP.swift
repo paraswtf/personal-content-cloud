@@ -11,7 +11,7 @@ enum CoreHTTP {
         cfg.httpCookieStorage = nil
         cfg.httpShouldSetCookies = false
         cfg.urlCache = nil
-        return URLSession(configuration: cfg)
+        return URLSession(configuration: cfg, delegate: SameHostRedirects.shared, delegateQueue: nil)
     }()
 
     /// Decodes the server's snake_case keys into camelCase properties (`duration_s` becomes `durationS`).

@@ -29,7 +29,8 @@ final class ImageLoader: @unchecked Sendable {
         cfg.httpShouldSetCookies = false
         cfg.timeoutIntervalForRequest = 60
         cfg.httpMaximumConnectionsPerHost = 6
-        session = URLSession(configuration: cfg)
+        // Redirects stay on the server's own host, so the token never follows one elsewhere.
+        session = URLSession(configuration: cfg, delegate: SameHostRedirects.shared, delegateQueue: nil)
     }
 
     /// A picture already in memory, for showing it without a flash.

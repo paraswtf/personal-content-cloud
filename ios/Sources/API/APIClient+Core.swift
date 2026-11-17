@@ -159,8 +159,9 @@ extension APIClient {
     /// Methods that change something: they carry the undo id, and their answer may name an action.
     private static let writeMethods: Set<String> = ["POST", "PUT", "PATCH", "DELETE"]
 
-    /// The session of the generated endpoints: no cookies (the device token is the only credential), and a
-    /// request fails instead of waiting when there is no network, so a screen can say so.
+    /// The session of the generated endpoints: no cookies (the device token is the only credential), a request
+    /// fails instead of waiting when there is no network, so a screen can say so, and redirects stay on the
+    /// server's own host (`SameHostRedirects`).
     static let apiSession: URLSession = {
         let cfg = URLSessionConfiguration.default
         cfg.httpCookieStorage = nil
@@ -168,7 +169,7 @@ extension APIClient {
         cfg.waitsForConnectivity = false
         cfg.timeoutIntervalForRequest = 60
         cfg.timeoutIntervalForResource = 600
-        return URLSession(configuration: cfg)
+        return URLSession(configuration: cfg, delegate: SameHostRedirects.shared, delegateQueue: nil)
     }()
 
     /// The server and token the generated endpoints speak with: this client's own, so a client made for
@@ -262,10 +263,9 @@ extension APIClient {
         let connection = try connection()
         var path = address
         var query: String?
-        if let absolute = URL(string: address), let scheme = absolute.scheme {
-            guard scheme.lowercased() == connection.base.scheme?.lowercased(),
-                  absolute.host?.lowercased() == connection.base.host?.lowercased(),
-                  absolute.port == connection.base.port else {
+        if let absolute = URL(string: address), absolute.scheme != nil {
+            // The same check as the picture loader's (an explicit :443 is the server's own port too).
+            guard connection.sameOrigin(absolute) else {
                 throw APIError(status: 0, detail: "An address outside the server was refused")
             }
             let encodedPath = absolute.path(percentEncoded: true)

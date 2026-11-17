@@ -26,7 +26,8 @@ jobs:
   build:
     name: Build and test
     runs-on: macos-15
-    timeout-minutes: 60
+    # Every area's screen tests together take about half an hour (26 minutes for 189 tests on 2026-11-17).
+    timeout-minutes: 90
     env:
       PCC_PORT: "8765"
     steps:
@@ -77,6 +78,8 @@ jobs:
 
       - name: Seed and start the backend
         run: |
+          # A seed that fails after printing something fails the step (the pipe into grep would hide it).
+          set -o pipefail
           P="$RUNNER_TEMP/pcc"
           mkdir -p "$P/data" "$P/originals" "$P/backup" "$P/models" "$P/no-frontend"
           # The vault stays open for the app's session (opened by the seed) for the whole run: every area's
@@ -151,5 +154,44 @@ jobs:
         with:
           name: xcresult
           path: ios/build/Tests.xcresult
+          if-no-files-found: ignore
+          retention-days: 7
+
+  release:
+    name: Release build
+    # The tests build Debug, where the test hooks live (#if DEBUG). A Release compile beside them catches a
+    # reference to a Debug-only symbol here instead of in the first TestFlight run. Main, the iOS branch and
+    # manual runs only, to keep the macOS machines for the area branches' tests.
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/r15-ios' || github.event_name == 'workflow_dispatch'
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tools
+        run: |
+          xcodebuild -version
+          brew install xcodegen
+          xcodegen --version
+
+      - name: Generate the project
+        working-directory: ios
+        run: xcodegen generate
+
+      - name: Build for Release
+        working-directory: ios
+        run: |
+          set -o pipefail
+          mkdir -p build
+          xcodebuild -project PersonalContentCloud.xcodeproj -scheme PersonalContentCloud -configuration Release \
+            -destination 'generic/platform=iOS' -derivedDataPath build/dd-release CODE_SIGNING_ALLOWED=NO \
+            build 2>&1 | tee build/release.log | xcbeautify --renderer github-actions
+
+      - name: Keep the build log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-log
+          path: ios/build/release.log
           if-no-files-found: ignore
           retention-days: 7

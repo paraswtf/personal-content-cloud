@@ -102,7 +102,8 @@ struct ErrorState: View {
     }
 }
 
-/// The usual body of a list screen driven by a Pager: loading, failed, empty, or the content.
+/// The usual body of a list screen driven by a Pager: loading, failed, empty, or the content. When a later page
+/// fails, the rows stay and a bar under them says so with Try again (the pager loads no more until then).
 struct PagerStateView<Item: Identifiable, Content: View>: View {
     let pager: Pager<Item>
     var emptyTitle = "Nothing here yet"
@@ -121,7 +122,41 @@ struct PagerStateView<Item: Identifiable, Content: View>: View {
             }
         } else {
             content()
+                .safeAreaInset(edge: .bottom) {
+                    if let error = pager.error {
+                        PagerMoreFailed(error: error, loading: pager.loading) { Task { await pager.retry() } }
+                    }
+                }
         }
+    }
+}
+
+/// Under a list whose next page failed: why, and Try again.
+struct PagerMoreFailed: View {
+    let error: Error
+    var loading = false
+    let retry: () -> Void
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(.orange)
+                .accessibilityHidden(true)
+            Text("Could not load more. \(ErrorText.describe(error))")
+                .font(.footnote)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .fixedSize(horizontal: false, vertical: true)
+            if loading {
+                ProgressView()
+            } else {
+                Button("Try again", action: retry)
+                    .font(.footnote.weight(.semibold))
+                    .accessibilityIdentifier("pager.retry")
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(.bar)
     }
 }
 

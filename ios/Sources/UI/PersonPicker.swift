@@ -246,6 +246,8 @@ struct PersonPicker: View {
     @State private var rankingPending = false
     @State private var rankGeneration = 0
     @State private var failure: String?
+    /// When the last pick was taken: a second tap within a second is ignored (`pick(_:)`).
+    @State private var pickedAt: Date?
 
     private var activeLike: LikenessSource? {
         guard let like, !like.isEmpty else { return nil }
@@ -357,7 +359,7 @@ struct PersonPicker: View {
         switch row {
         case .person(let option, _):
             Button {
-                onPick(.existing(option))
+                pick(.existing(option))
             } label: {
                 PersonOptionRow(option: option)
             }
@@ -365,13 +367,22 @@ struct PersonPicker: View {
             .accessibilityIdentifier("picker.option")
         case .create(let name, let newKind):
             Button {
-                onPick(.new(name: name, kind: newKind))
+                pick(.new(name: name, kind: newKind))
             } label: {
                 Label(newKind == "pet" ? "New pet \u{201C}\(name)\u{201D}" : "Create \u{201C}\(name)\u{201D}",
                       systemImage: newKind == "pet" ? "pawprint" : "person.badge.plus")
             }
             .accessibilityIdentifier("picker.create")
         }
+    }
+
+    /// Hands a pick on, once: a fast second tap on a row or on Create (the sheet is still going away) would send the
+    /// save twice or make two people of one new name. After a second the picker takes a pick again, for when the
+    /// save failed and the picker is still there.
+    private func pick(_ choice: PersonPick) {
+        if let at = pickedAt, Date().timeIntervalSince(at) < 1 { return }
+        pickedAt = Date()
+        onPick(choice)
     }
 
     private func loadList() async {
