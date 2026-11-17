@@ -64,14 +64,20 @@ final class LibraryScreens: ScreenTestCase {
         let food = app.buttons["library.category.food"]
         let chips = app.scrollViews["library.categories"]
         XCTAssertTrue(chips.waitForExistence(timeout: 10), "no category chips")
+        // XCUITest calls a chip hittable when a sliver of it shows at the row's edge, and its tap then lands on the
+        // Filters button beside it: only a chip wholly inside the row is tapped
+        func foodShown() -> Bool {
+            let f = food.frame, row = chips.frame
+            return food.exists && f.minX >= row.minX && f.maxX <= row.maxX
+        }
         // slow drags towards Food (a quick swipe flings the short row past it)
-        for _ in 0..<6 where !food.isHittable {
+        for _ in 0..<6 where !foodShown() {
             let behindLeft = food.frame.midX < chips.frame.midX
             let from = chips.coordinate(withNormalizedOffset: CGVector(dx: behindLeft ? 0.2 : 0.8, dy: 0.5))
             let to = chips.coordinate(withNormalizedOffset: CGVector(dx: behindLeft ? 0.8 : 0.2, dy: 0.5))
             from.press(forDuration: 0.05, thenDragTo: to, withVelocity: .slow, thenHoldForDuration: 0.3)
         }
-        XCTAssertTrue(food.isHittable, "the Food chip cannot be reached")
+        XCTAssertTrue(foodShown(), "the Food chip cannot be brought into view")
         food.tap()
         waitForCount("1 item")
         snap("library-filter-food")
