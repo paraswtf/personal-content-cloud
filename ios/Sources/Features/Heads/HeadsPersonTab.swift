@@ -193,7 +193,6 @@ struct HeadsPersonTab: View {
                     }
                 }
                 .id(Self.againPanelId)
-                .accessibilityIdentifier(Self.againPanelId)
             }
         }
     }

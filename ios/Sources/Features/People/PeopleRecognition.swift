@@ -103,7 +103,7 @@ struct PeopleRecognitionCard: View {
                         // the website's link to the Guesses tab
                         let waiting = "\(Fmt.count(s.guesses, "guess", "guesses")) waiting for you"
                         Button(action: onShowGuesses) {
-                            (Text(lead) + Text(waiting).foregroundStyle(Color.accentColor).fontWeight(.medium) + Text(none))
+                            (Text(lead) + Text(waiting).foregroundColor(.accentColor).fontWeight(.medium) + Text(none))
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                                 .multilineTextAlignment(.leading)

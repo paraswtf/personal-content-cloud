@@ -145,7 +145,7 @@ struct ReviewDuplicatesTab: View {
     private func open(_ item: API.ItemCard) {
         let pager = self.pager
         router.show(Self.flat(pager.items), start: item) {
-            await pager.loadMore()
+            await ReviewPaging.loadMore(pager)
             return Self.flat(pager.items).map(\.viewerEntry)
         }
     }
