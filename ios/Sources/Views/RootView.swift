@@ -16,10 +16,12 @@ struct RootView: View {
         .toastHost()
         .onChange(of: session.signedIn) { _, signedIn in
             ConnectionCache.shared.reset()
-            // A signed-out phone keeps nothing of the library: no cached pictures, no undo history.
+            // A signed-out phone keeps nothing of the library: no cached pictures, no undo history, and no open
+            // vault window (the next session's vault starts locked, whatever the last one's said).
             if !signedIn {
                 ImageLoader.shared.clear()
                 UndoCenter.shared.clear()
+                VaultSession.shared.expire()
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: .apiUnauthorized)) { _ in
