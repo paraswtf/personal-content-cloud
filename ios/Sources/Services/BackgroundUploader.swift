@@ -352,12 +352,13 @@ final class BackgroundUploader: NSObject, ObservableObject {
         }
     }
 
+    /// The reason a stopped upload carries: the Upload screen's queue keeps such a file stopped until Retry, offline
+    /// or not.
+    nonisolated static let stoppedReason = "The upload was stopped. Try again to continue it."
+
     /// The Stop button (and signing out): cancels the tasks in flight. The records keep their state, and the next
     /// run continues them from the server's offset. The reason stays on the record, so the Upload screen's queue says
     /// the file was stopped rather than that the connection was lost.
-    /// The reason a stopped upload carries: the queue keeps such a file stopped until Retry, offline or not.
-    nonisolated static let stoppedReason = "The upload was stopped. Try again to continue it."
-
     func pause() {
         session.getAllTasks { tasks in tasks.forEach { $0.cancel() } }
         for rec in records(status: "uploading") {
@@ -639,9 +640,6 @@ final class BackgroundUploader: NSObject, ObservableObject {
         scheduleNext(rec, after: delay)
     }
 
-    /// Whether a failed request uses up one of the asset's attempts: not while the phone has no network path, and
-    /// not for the errors that mean there is none (the path monitor can report the change a moment after the
-    /// request failed). The website's uploader counts no attempt while the browser is offline.
     /// Whether a failed request uses up one of the file's attempts: only time offline does not, as on the website
     /// (uploader.ts gives the attempt back only while the browser is offline). Online, every failure counts, so a
     /// server or proxy that keeps dropping the connection ends in a failed row rather than retrying forever.

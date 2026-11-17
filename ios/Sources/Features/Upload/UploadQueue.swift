@@ -240,6 +240,16 @@ final class UploadQueue {
         // back elsewhere, say) they go on.
         if SyncEngine.shared.online { heldOffline.removeAll() }
         let all = queued()
+        // A file stopped while the queue was not watching it (Stop on the Sync screen before this screen opened, or
+        // signing out) waits for Retry like any stopped file, instead of starting again here by itself.
+        var changed = false
+        for rec in all where rec.status == "pending" && rec.error == BackgroundUploader.stoppedReason
+            && !inFlight.contains(rec.assetId) {
+            rec.status = "failed"
+            rec.updatedAt = Date()
+            changed = true
+        }
+        if changed { save() }
         for rec in all where rec.status == "pending" && !inFlight.contains(rec.assetId) && !heldOffline.contains(rec.assetId) {
             if inFlight.count >= Self.maxInFlight { break }
             begin(rec)
@@ -252,8 +262,10 @@ final class UploadQueue {
     func backOnline() {
         heldOffline.removeAll()
         let known = BackgroundUploader.shared.networkFailures
-        for rec in queued() where Self.failedForNetwork(status: rec.status, serverStatus: rec.serverStatus,
-                                                         error: rec.error, known: known.contains(rec.assetId)) {
+        // A file the owner stopped waits for Retry, even if its connection had failed before it was stopped.
+        for rec in queued() where rec.error != BackgroundUploader.stoppedReason
+            && Self.failedForNetwork(status: rec.status, serverStatus: rec.serverStatus,
+                                     error: rec.error, known: known.contains(rec.assetId)) {
             retry(rec)
         }
         pump()
