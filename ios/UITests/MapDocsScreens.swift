@@ -25,6 +25,17 @@ final class MapDocsScreens: ScreenTestCase {
         return XCTWaiter().wait(for: [expectation], timeout: timeout) == .completed
     }
 
+    /// A photo's thumbnail on the map that is on screen and not under a cluster.
+    private func visibleThumb() -> XCUIElement? {
+        let thumbs = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "identifier == 'map.point' AND label == 'Open this photo'"))
+        for i in 0..<min(thumbs.count, 30) {
+            let thumb = thumbs.element(boundBy: i)
+            if thumb.exists && thumb.isHittable { return thumb }
+        }
+        return nil
+    }
+
     func testMapClustersOpenTheirItems() throws {
         try launchSignedIn()
         openMore("more.map", title: "Map")
@@ -80,17 +91,18 @@ final class MapDocsScreens: ScreenTestCase {
 
         // closer in, the two seeded photos (about 250 m apart, the place's centre between them) come apart and show
         // their thumbnails
-        let thumb = app.descendants(matching: .any)
-            .matching(NSPredicate(format: "identifier == 'map.point' AND label == 'Open this photo'")).firstMatch
+        // (a point inside a cluster keeps a hidden view, so only a thumbnail that can be tapped counts)
         let map = app.maps.firstMatch
         XCTAssertTrue(map.exists, "the map is not on screen")
-        for _ in 0..<3 where !thumb.exists {
-            map.pinch(withScale: 6, velocity: 4)
-            _ = thumb.waitForExistence(timeout: 6)
+        var thumb = visibleThumb()
+        for _ in 0..<4 where thumb == nil {
+            map.pinch(withScale: 5, velocity: 3)
+            Thread.sleep(forTimeInterval: 3)
+            thumb = visibleThumb()
         }
-        XCTAssertTrue(thumb.exists, "zoomed in, no photo showed its thumbnail")
+        let shown = try XCTUnwrap(thumb, "zoomed in, no photo showed its thumbnail")
         snap("mapdocs-thumbs")
-        thumb.tap()
+        shown.tap()
         let title = app.staticTexts["map.panel.title"]
         XCTAssertTrue(title.waitForExistence(timeout: 10), "a thumbnail did not open the panel")
         XCTAssertEqual(title.label, "1 item here")

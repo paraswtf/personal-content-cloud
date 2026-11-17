@@ -157,7 +157,6 @@ final class MapPointView: MKAnnotationView {
         thumbView.contentMode = .scaleAspectFill
         thumbView.clipsToBounds = true
         addSubview(thumbView)
-        isAccessibilityElement = true
         accessibilityTraits = .button
         accessibilityIdentifier = "map.point"
         layer.shadowColor = UIColor.black.cgColor
@@ -167,6 +166,12 @@ final class MapPointView: MKAnnotationView {
     }
 
     required init?(coder: NSCoder) { nil }
+
+    /// MapKit keeps the views of points inside a cluster but does not show them; VoiceOver skips them too.
+    override var isAccessibilityElement: Bool {
+        get { !isHidden && alpha > 0.01 }
+        set {}
+    }
 
     override func prepareForReuse() {
         super.prepareForReuse()
