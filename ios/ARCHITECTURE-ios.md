@@ -94,6 +94,18 @@ the core in its own change.
 - Vault items open with `router.show(items, start: item, vault: true)`: the viewer then asks for the item, its
   pictures and its videos with `vault=1`, and `context.vault` tells the viewer's areas to wrap their calls in
   `APIContext.$vault.withValue(context.vault) { ... }`.
+- The map from another screen: `router.open(.mapAt(MapStart(filters:)))` opens it with the library's filters
+  (the library's "Show on map"), `MapStart(latitude:longitude:)` at one item's spot, which it flies to and lists.
+
+## The vault
+
+- The app signs in with a session of its own, so its vault window is its own: opening the vault in a browser does
+  not open it on the phone. `VaultSession.shared` holds the window (from the auth state's `vault_until`); unlocking
+  and locking go through it, and Settings presents `VaultUnlockSheet` when the server answers 403 `vault_locked`.
+- Vault pictures stay in a memory cache of their own (`ImageLoader`), emptied when the vault is found locked and at
+  sign-out, and are never written to the disk cache.
+- Passkeys need the server's own address as an associated domain, which an app for any self-hosted server cannot
+  have: adding a passkey and unlocking with one open the website instead.
 
 ## People
 
@@ -154,4 +166,33 @@ photo and one in the trash).
   `APIDecodingTests`, which decodes the seeded server's answers into the generated types. An area that adds data
   to the seed adds the matching decoding check there.
 - Add to the seed what a screen needs (in `library()` with the backend's test helpers, or in `api()` over HTTP),
-  made up, never from anyone's library.
+  made up, never from anyone's library. The seed opens the vault for the app's token, and the workflow's server
+  keeps it open for 240 minutes (`VAULT_UNLOCK_MIN`), longer than a full run. Guesses seeded as rows are withdrawn
+  when the server starts unless their evidence has a basis; the people area's seed names a face over HTTP and lets
+  the server make its guesses instead.
+- Tests that write change only what their own seed file made, and leave the rest as they found it: never the
+  device "iPhone simulator" (the tests' token), "Test Person", "Test Visitor", the core's albums, share, trashed
+  photo or the photo of 10 Nov 2026; no password change, sign out everywhere, learning reset or housekeeping.
+- In screen tests, a fast swipe flings a list past the row it looks for: scroll with slow drags and check after
+  each. Inside a List, a chart that takes a drag blocks scrolling, so charts select with a tap.
+
+### Debug-only test hooks
+
+Read only in Debug builds (`#if DEBUG`), as launch variables the screen tests set:
+
+| Variable | What it does |
+|---|---|
+| `PCC_TEST_SERVER`, `PCC_TEST_TOKEN` | sign in to the seeded server with the device token (`Sources/TestLaunch.swift`) |
+| `PCC_TEST_SIGNED_OUT=1` | start on the sign-in screen |
+| `PCC_TEST_ALBUMS_ADD_FROM=<album>` | open Add to album for that album's items (Features/Albums) |
+| `PCC_TEST_UPLOADS=<paths>` | the files "Add the test files" puts in the upload queue (`Features/Upload/UploadTestHook.swift`) |
+| `PCC_TEST_SETSYS_UNDO=1` | opening Undo history changes the seeded album "Setsys undo test", to undo and redo it (`Features/Settings/System/SettingsSystemTestHook.swift`) |
+
+### Things found while building
+
+- A view that draws nothing until it has loaded never runs its `.task`: load in the screen that shows it.
+- Swift Charts cuts a category axis's labels to one column's width: draw time labels under the chart yourself.
+- MapKit keeps the views of points inside a cluster; they are hidden from VoiceOver unless they show.
+- The upload queue keeps its files in `SyncRecord` (`queuedAt`, `origin` library, file or camera, `serverStatus`,
+  `thumbRef`, `itemVault`); a file from Files or the camera gets a record of its own (`upload:<uuid>`), a photo
+  picked from the library uses its asset's record, so the phone's sync knows it is sent.
