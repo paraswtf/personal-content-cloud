@@ -40,7 +40,8 @@ enum ViewerActions {
             let detail = try CoreHTTP.decoder.decode(CoreItemDetail.self, from: data)
             let item = try? JSONDecoder().decode(API.ItemDetail.self, from: data)
             return ViewerPageContext(uid: context.uid, detail: detail, item: item, json: data, reload: context.reload,
-                                     vault: context.vault)
+                                     vault: context.vault, startAt: context.startAt,
+                                     documentFirst: context.documentFirst, removeFromViewer: context.removeFromViewer)
         } catch {
             return nil
         }

@@ -96,6 +96,16 @@ the core in its own change.
   `APIContext.$vault.withValue(context.vault) { ... }`.
 - The map from another screen: `router.open(.mapAt(MapStart(filters:)))` opens it with the library's filters
   (the library's "Show on map"), `MapStart(latitude:longitude:)` at one item's spot, which it flies to and lists.
+- The library with filters set: `router.open(.libraryFiltered(filters))` (a tag tapped in the viewer), which is
+  `LibraryBrowser(scope: .all, filters:)`.
+- A video's moment: `ViewerEntry(uid:thumb:kind:startAt:)` opens a video paused at that second (a search hit's
+  match, a face's or a guess's frame); build such entries and open them with `router.show(entries:start:...)`.
+  The viewer area reads it as `context.startAt`.
+- Document mode: `router.show(items, start:, mode: .document)` (the Documents page) opens the info panel at once,
+  and `context.documentFirst` asks the panel to put the document first.
+- After the item left the list (trash, vault), `context.removeFromViewer()` shows the next item, or closes the
+  viewer when none is left.
+- `PersonPickerSheet(... note:)` shows a line under the title saying what picking does.
 
 ## The vault
 

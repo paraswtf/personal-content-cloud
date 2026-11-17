@@ -19,10 +19,13 @@ struct LibraryBrowser: View {
     @State private var confirmDelete = false
     @State private var showingFilters = false
 
-    init(scope: LibraryScope, header: AnyView? = nil) {
+    /// `filters`: filters set from the start (Route.libraryFiltered: a tag tapped in the viewer).
+    init(scope: LibraryScope, header: AnyView? = nil, filters: LibraryFilters? = nil) {
         self.scope = scope
         self.header = header
-        _model = State(initialValue: LibraryModel(scope: scope))
+        let model = LibraryModel(scope: scope)
+        if let filters { model.filters = filters }
+        _model = State(initialValue: model)
     }
 
     var body: some View {

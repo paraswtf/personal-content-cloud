@@ -12,6 +12,13 @@ struct ViewerPageContext: Identifiable {
     let json: Data
     let reload: () -> Void
     var vault = false
+    /// A video opens paused at this second (a search hit's matching moment, a face's frame): the entry's `startAt`.
+    var startAt: Double? = nil
+    /// Opened in document mode (the Documents page): the info panel opens at once and puts the document first.
+    var documentFirst = false
+    /// Takes this item out of the viewer's list and shows the next one (the one before at the end), or closes the
+    /// viewer when it was the last: after the item went to the trash or the vault, as the website goes on.
+    var removeFromViewer: () -> Void = {}
 
     var id: String { uid }
 }
@@ -69,6 +76,8 @@ struct ViewerCore: View {
     @State private var info: ViewerPageContext?
     @State private var loadingMore = false
     @State private var noMore = false
+    /// Document mode opened the info panel once already.
+    @State private var openedDocumentPanel = false
 
     init(request: ViewerRequest, hooks: ViewerHooks = ViewerHooks()) {
         self.request = request
@@ -137,9 +146,16 @@ struct ViewerCore: View {
                                onContext: { ctx in
                                    contexts[ctx.uid] = ctx
                                    edit?.contexts[ctx.uid] = ctx
+                                   // Document mode: the panel opens with the item the owner tapped.
+                                   if request.mode == .document, !openedDocumentPanel, ctx.uid == startUid {
+                                       openedDocumentPanel = true
+                                       info = ctx
+                                   }
                                },
                                stage: hooks.stage,
-                               vault: request.vault)
+                               vault: request.vault,
+                               documentFirst: request.mode == .document,
+                               onRemove: { uid in remove(uid) })
                         .containerRelativeFrame([.horizontal, .vertical])
                         .id(entry.uid)
                 }
@@ -233,6 +249,26 @@ struct ViewerCore: View {
             .ignoresSafeArea())
     }
 
+    /// The item the viewer was opened on.
+    private var startUid: String? {
+        request.entries.indices.contains(request.start) ? request.entries[request.start].uid : request.entries.first?.uid
+    }
+
+    /// Takes an item out of the list and shows its neighbour (the next one, else the one before); closes the viewer
+    /// when none is left.
+    private func remove(_ uid: String) {
+        guard let i = entries.firstIndex(where: { $0.uid == uid }) else { return }
+        info = nil
+        guard entries.count > 1 else {
+            dismiss()
+            return
+        }
+        let neighbour = i + 1 < entries.count ? entries[i + 1].uid : entries[i - 1].uid
+        if current == uid { current = neighbour }
+        entries.remove(at: i)
+        contexts[uid] = nil
+    }
+
     private func loadMoreIfNeeded() async {
         guard let more = request.loadMore, !loadingMore, !noMore, let i = currentIndex, i >= entries.count - 3 else { return }
         loadingMore = true
@@ -258,6 +294,10 @@ struct ViewerPage: View {
     var stage: ((ViewerPageContext, ViewerStageEnvironment) -> AnyView?)? = nil
     /// Opened from the vault: the item, its pictures and its videos are asked for with `vault=1`.
     var vault = false
+    /// Document mode (ViewerRequest.mode): handed to the context for the info panel.
+    var documentFirst = false
+    /// Takes an item out of the viewer's list (ViewerPageContext.removeFromViewer).
+    var onRemove: (String) -> Void = { _ in }
 
     @Environment(StageEditState.self) private var edit: StageEditState?
     @State private var detail: CoreItemDetail?
@@ -276,7 +316,8 @@ struct ViewerPage: View {
             if let custom {
                 custom
             } else if kind == .video, let detail, let video = detail.urls.video {
-                ViewerVideo(ref: video, posterRef: detail.urls.previewSmall, isCurrent: isCurrent, vault: vault)
+                ViewerVideo(ref: video, posterRef: detail.urls.previewSmall, isCurrent: isCurrent, vault: vault,
+                            startAt: entry.startAt)
             } else {
                 let editingHere = edit?.isEditing(entry.uid) ?? false
                 ZoomableStage(image: image,
@@ -349,8 +390,11 @@ struct ViewerPage: View {
 
     private var context: ViewerPageContext? {
         guard let detail, let json else { return nil }
-        return ViewerPageContext(uid: entry.uid, detail: detail, item: item, json: json, reload: { reloadToken += 1 },
-                                 vault: vault)
+        let uid = entry.uid
+        let remove = onRemove
+        return ViewerPageContext(uid: uid, detail: detail, item: item, json: json, reload: { reloadToken += 1 },
+                                 vault: vault, startAt: entry.startAt, documentFirst: documentFirst,
+                                 removeFromViewer: { remove(uid) })
     }
 
     /// The viewer area's own page for this item, when it draws one.
@@ -407,6 +451,8 @@ struct ViewerVideo: View {
     let posterRef: String
     let isCurrent: Bool
     var vault = false
+    /// Opens paused at this second (ViewerEntry.startAt).
+    var startAt: Double? = nil
 
     @State private var player: AVPlayer?
 
@@ -420,7 +466,13 @@ struct ViewerVideo: View {
         }
         .onChange(of: isCurrent, initial: true) { _, nowCurrent in
             if nowCurrent {
-                if player == nil { player = AuthorizedPlayer.player(for: ref, vault: vault) }
+                if player == nil {
+                    player = AuthorizedPlayer.player(for: ref, vault: vault)
+                    if let startAt, startAt > 0 {
+                        player?.seek(to: CMTime(seconds: startAt, preferredTimescale: 600),
+                                     toleranceBefore: .zero, toleranceAfter: .zero)
+                    }
+                }
             } else {
                 player?.pause()
             }

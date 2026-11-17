@@ -44,15 +44,26 @@ enum Route: Hashable {
     case more(MoreDestination)
     /// The map with the library's filters or at one item's spot ("Show on map").
     case mapAt(MapStart)
+    /// The library with filters set (a tag tapped in the viewer shows everything with that tag).
+    case libraryFiltered(LibraryFilters)
 }
 
-/// One item the viewer can page to. The thumb shows at once while the item itself loads.
+/// One item the viewer can page to. The thumb shows at once while the item itself loads. `startAt` opens a video
+/// paused at that second (a search hit's matching moment, the frame of a face or a guess).
 struct ViewerEntry: Identifiable, Hashable {
     let uid: String
     var thumb: String?
     var kind: String?
+    var startAt: Double? = nil
 
     var id: String { uid }
+}
+
+/// How the viewer opens: as it is, or in document mode (the Documents page: the info panel opens at once with
+/// the document's section first).
+enum ViewerMode: Hashable {
+    case normal
+    case document
 }
 
 /// A request to show the viewer: the items to page through, where to start, and how to load more when the
@@ -64,12 +75,15 @@ struct ViewerRequest: Identifiable {
     let start: Int
     var loadMore: (() async -> [ViewerEntry])?
     var vault = false
+    var mode: ViewerMode = .normal
 
-    init(entries: [ViewerEntry], start: Int, loadMore: (() async -> [ViewerEntry])? = nil, vault: Bool = false) {
+    init(entries: [ViewerEntry], start: Int, loadMore: (() async -> [ViewerEntry])? = nil, vault: Bool = false,
+         mode: ViewerMode = .normal) {
         self.entries = entries
         self.start = min(max(0, start), max(0, entries.count - 1))
         self.loadMore = loadMore
         self.vault = vault
+        self.mode = mode
     }
 }
 
@@ -97,12 +111,20 @@ final class AppRouter {
         }
     }
 
-    /// Opens the viewer on `items`, starting at `start` (`vault: true` from the vault screen).
-    func show<Item: MediaItem>(_ items: [Item], start: Item, vault: Bool = false,
+    /// Opens the viewer on `items`, starting at `start` (`vault: true` from the vault screen, `mode: .document` from
+    /// the Documents page).
+    func show<Item: MediaItem>(_ items: [Item], start: Item, vault: Bool = false, mode: ViewerMode = .normal,
                                loadMore: (() async -> [ViewerEntry])? = nil) {
         let entries = items.map(\.viewerEntry)
         let index = items.firstIndex(where: { $0.uid == start.uid }) ?? 0
-        viewer = ViewerRequest(entries: entries, start: index, loadMore: loadMore, vault: vault)
+        viewer = ViewerRequest(entries: entries, start: index, loadMore: loadMore, vault: vault, mode: mode)
+    }
+
+    /// Opens the viewer on entries the caller built (with `startAt` for a video's moment), starting at index `start`.
+    func show(entries: [ViewerEntry], start: Int, vault: Bool = false, mode: ViewerMode = .normal,
+              loadMore: (() async -> [ViewerEntry])? = nil) {
+        guard !entries.isEmpty else { return }
+        viewer = ViewerRequest(entries: entries, start: start, loadMore: loadMore, vault: vault, mode: mode)
     }
 
     /// Back to the root of a tab (tapping the selected tab again).

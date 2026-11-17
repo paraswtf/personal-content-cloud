@@ -88,6 +88,9 @@ struct RouteDestination: View {
             MoreDestinationView(destination: destination)
         case .mapAt(let start):
             MapScreen(start: start)
+        case .libraryFiltered(let filters):
+            LibraryBrowser(scope: .all, filters: filters)
+                .navigationTitle("Library")
         }
     }
 }

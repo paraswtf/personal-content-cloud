@@ -467,7 +467,8 @@ struct PersonOptionRow: View {
     }
 }
 
-/// The picker in its own sheet, with a title and Cancel.
+/// The picker in its own sheet, with a title and Cancel. `note` says what picking does (the website's line under
+/// "Change to...": "Their faces and tags in this picture go to the one you pick...").
 struct PersonPickerSheet: View {
     var title = "Who is this?"
     var kind: PickerKind = .person
@@ -476,16 +477,28 @@ struct PersonPickerSheet: View {
     var allowCreate = true
     var species: String?
     var speciesOnly = false
+    var note: String? = nil
     let onPick: (PersonPick) -> Void
 
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
         NavigationStack {
-            PersonPicker(kind: kind, like: like, excluding: excluding, allowCreate: allowCreate, species: species,
-                         speciesOnly: speciesOnly) { pick in
-                dismiss()
-                onPick(pick)
+            VStack(spacing: 0) {
+                if let note, !note.isEmpty {
+                    Text(note)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 8)
+                        .accessibilityIdentifier("picker.note")
+                }
+                PersonPicker(kind: kind, like: like, excluding: excluding, allowCreate: allowCreate, species: species,
+                             speciesOnly: speciesOnly) { pick in
+                    dismiss()
+                    onPick(pick)
+                }
             }
             .navigationTitle(title)
             .navigationBarTitleDisplayMode(.inline)
