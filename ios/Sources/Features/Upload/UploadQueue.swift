@@ -36,6 +36,7 @@ final class UploadQueue {
 
     @ObservationIgnored private var inFlight: Set<String> = []
     @ObservationIgnored private var poller: Task<Void, Never>?
+    @ObservationIgnored private var pollRound = 0
     @ObservationIgnored private var noticeTimer: Task<Void, Never>?
 
     private var ctx: ModelContext { SyncStore.shared.container.mainContext }
@@ -224,6 +225,8 @@ final class UploadQueue {
     /// to its create (the same upload) or its offset makes it continue where it stopped.
     func resume() async {
         let uploader = BackgroundUploader.shared
+        // Copies no add took (the app stopped between copying a file and queueing it) go after a day.
+        Task.detached(priority: .utility) { UploadIncoming.sweep(olderThan: 24 * 3600) }
         let live = await uploader.liveAssets()
         // Copied files taken off the list earlier go now, when nothing works on them any more.
         let gone = FetchDescriptor<SyncRecord>(predicate: #Predicate<SyncRecord> { $0.queuedAt == nil && $0.origin != "library" })
@@ -251,7 +254,9 @@ final class UploadQueue {
         checking.insert(id)
         if rec.uploadId != nil { resumed.insert(id) }
         Task { @MainActor [self] in
+            var claimed = false
             defer {
+                if claimed { SyncEngine.shared.release(id) }
                 self.inFlight.remove(id)
                 self.checking.remove(id)
                 self.pump()
@@ -261,6 +266,13 @@ final class UploadQueue {
                 if rec.isQueueFile {
                     try await hash(rec)
                 } else {
+                    // The phone's sync is exporting or starting this photo right now: follow its upload instead of
+                    // exporting a second copy (an export starts by emptying the photo's folder).
+                    guard SyncEngine.shared.claim(id) else {
+                        await self.follow(id)
+                        return
+                    }
+                    claimed = true
                     guard let asset = PhotoLibrary.assets(ids: [id]).first else {
                         throw UploadQueueError("The photo is no longer in the library.")
                     }
@@ -306,6 +318,20 @@ final class UploadQueue {
         }
     }
 
+    /// The phone's sync holds this photo: waits until the sync lets it go, then watches the upload it started. A photo
+    /// the sync has sent is read from the server by the next pump; one it left waiting is begun by the next pump.
+    private func follow(_ id: String) async {
+        while SyncEngine.shared.claimed.contains(id) {
+            try? await Task.sleep(nanoseconds: 500_000_000)
+        }
+        guard let rec = record(id), rec.queuedAt != nil else { return }
+        if rec.status == "uploading" || BackgroundUploader.shared.isDriving(id) {
+            checking.remove(id)
+            await BackgroundUploader.shared.wait(for: id, until: nil)
+            settle(id)
+        }
+    }
+
     /// The SHA-256 of each copied file, which the server uses to keep one copy of a file it already has.
     private func hash(_ rec: SyncRecord) async throws {
         var files = rec.files
@@ -330,6 +356,8 @@ final class UploadQueue {
 
     private func startPolling() {
         guard poller == nil else { return }
+        pollRound += 1
+        let round = pollRound
         poller = Task { @MainActor [weak self] in
             while let self, !Task.isCancelled {
                 let waiting = self.queued().filter(self.waitsForServer)
@@ -337,8 +365,17 @@ final class UploadQueue {
                 await self.readServer(waiting)
                 try? await Task.sleep(nanoseconds: 2_000_000_000)
             }
-            self?.poller = nil
+            // Only this round's poller: a newer one may have started after stopPolling().
+            if let self, self.pollRound == round { self.poller = nil }
         }
+    }
+
+    /// The Upload screen went away: the server's answers are read again when it opens (resume() pumps), as the
+    /// website reads them only while its page is open, so a file the server never finishes does not keep the phone
+    /// asking every two seconds.
+    func stopPolling() {
+        poller?.cancel()
+        poller = nil
     }
 
     /// GET /api/uploads?ids=... for files the server is storing: their status, item and thumb.
@@ -378,7 +415,9 @@ final class UploadQueue {
     func cancel(_ rec: SyncRecord) {
         guard phase(rec).canCancel else { return }
         let id = rec.assetId
-        if rec.status == "uploading" || BackgroundUploader.shared.isDriving(id) {
+        // On the wire, or half on the server from a transfer that stopped (its upload id is kept to continue it): the
+        // uploader stops its requests and cancels the server's upload too.
+        if rec.status == "uploading" || BackgroundUploader.shared.isDriving(id) || rec.uploadId != nil {
             BackgroundUploader.shared.cancel(id)
         } else {
             rec.status = "cancelled"

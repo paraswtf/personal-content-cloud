@@ -152,11 +152,37 @@ final class SyncStore {
     private init() {
         let schema = Schema([SyncRecord.self, SyncEvent.self])
         let config = ModelConfiguration("sync", schema: schema)
+        container = Self.open(schema: schema, config: config)
+    }
+
+    /// Opens the store, and starts the app even when it cannot. A store file that can be read but not opened (a
+    /// model change iOS could not migrate) is moved aside and a new store made: the sync then asks the server what it
+    /// already holds, by asset and by file hash, so nothing is sent twice. A store file that cannot be read now (the
+    /// phone has not been unlocked since it started) is left as it is, and this launch keeps its state in memory.
+    private static func open(schema: Schema, config: ModelConfiguration) -> ModelContainer {
+        if let container = try? ModelContainer(for: schema, configurations: [config]) { return container }
+        let url = config.url
+        if readable(url) {
+            let aside = url.path + ".unopened-\(Int(Date().timeIntervalSince1970))"
+            for suffix in ["", "-wal", "-shm"] where FileManager.default.fileExists(atPath: url.path + suffix) {
+                try? FileManager.default.moveItem(atPath: url.path + suffix, toPath: aside + suffix)
+            }
+            if let fresh = try? ModelContainer(for: schema, configurations: [config]) { return fresh }
+        }
+        let memory = ModelConfiguration("sync-memory", schema: schema, isStoredInMemoryOnly: true)
         do {
-            container = try ModelContainer(for: schema, configurations: [config])
+            return try ModelContainer(for: schema, configurations: [memory])
         } catch {
             fatalError("Could not open the sync store: \(error)")
         }
+    }
+
+    /// The store's file exists and its first bytes can be read now.
+    private static func readable(_ url: URL) -> Bool {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return false }
+        defer { try? handle.close() }
+        guard let head = try? handle.read(upToCount: 16) else { return false }
+        return head.count == 16
     }
 
     /// A context for background work (the main context is for the views).
