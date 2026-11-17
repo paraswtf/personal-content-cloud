@@ -112,10 +112,11 @@ struct SettingsSessionsScreen: View {
             SettingsAccountTokenSheet(device: device)
         }
         .sheet(item: $pending, onDismiss: unlockSheetGone) { action in
-            VaultUnlockSheet(onUnlocked: {
-                resume = action
-                pending = nil
-            })
+            VaultUnlockSheet(title: SettingsAccountText.unlockTitle, reason: SettingsAccountText.unlockReason(action),
+                             onUnlocked: {
+                                 resume = action
+                                 pending = nil
+                             })
         }
     }
 
