@@ -78,6 +78,8 @@ jobs:
 
       - name: Seed and start the backend
         run: |
+          # A seed that fails after printing something fails the step (the pipe into grep would hide it).
+          set -o pipefail
           P="$RUNNER_TEMP/pcc"
           mkdir -p "$P/data" "$P/originals" "$P/backup" "$P/models" "$P/no-frontend"
           # The vault stays open for the app's session (opened by the seed) for the whole run: every area's
