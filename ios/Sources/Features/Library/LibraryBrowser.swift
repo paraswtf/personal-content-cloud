@@ -1,108 +1,276 @@
 import SwiftUI
 
-// The library's browser and filters (the website's components/library/Library.tsx with its `album` and `vault`
-// props, FilterBar.tsx and filters.ts). The library area builds them; the album screen shows
-// LibraryBrowser(scope: .album(id:)), the vault screen LibraryBrowser(scope: .vault) while the vault is open,
-// and the map uses LibraryFilters with LibraryFilterBar. Their names and parameters stay. Placeholders until
-// then: the scope's items, newest first, in the media grid, with selection.
+// The library's browser (the website's components/library/Library.tsx with its `album` and `vault` props). The
+// Library tab shows LibraryBrowser(scope: .all), the album screen LibraryBrowser(scope: .album(id:)) under its own
+// header, and the vault screen LibraryBrowser(scope: .vault) while the vault is open. Their names and parameters
+// stay.
 
-/// Where a library browser looks: the whole library, one album, or the vault (every request with vault=1).
-enum LibraryScope: Hashable {
-    case all
-    case album(id: Int)
-    case vault
-}
-
-/// The library's filters, one field per filter parameter of the item lists (`listItems`, `buckets`, `points`,
-/// `placeList`), so other screens pass them to their own endpoints.
-struct LibraryFilters: Hashable {
-    var category: API.Category?
-    var kind: API.Kind?
-    var person: [Int]?
-    var tag: [String]?
-    var live: Bool?
-    var from: String?
-    var to: String?
-    var favorite: Bool?
-    var misclicks: API.Forwards?
-    var forwards: API.Forwards?
-    var received: String?
-    var dups: API.Dups?
-    var sort: API.Sort?
-}
-
-/// The library's filter controls for a scope. Placeholder: none yet.
-struct LibraryFilterBar: View {
-    @Binding var filters: LibraryFilters
-    var scope: LibraryScope = .all
-
-    var body: some View {
-        EmptyView()
-    }
-}
-
-/// The library's browser for a scope: the timeline, filters, search, selection and its actions. `header` shows
-/// above the items (the album's title and buttons, for example).
+/// The library's browser for a scope: the timeline by month with its scrubber, the search with its modes, the
+/// filters, multi-select with every bulk action, and the viewer over the list. `header` shows above the items and
+/// scrolls with them (the album's title and buttons, the vault's lock).
 struct LibraryBrowser: View {
     let scope: LibraryScope
     var header: AnyView?
 
     @Environment(AppRouter.self) private var router
-    @State private var pager: Pager<API.ItemCard>
-    @State private var selection = SelectionModel<String>()
+    @State private var model: LibraryModel
+    @State private var sheet: LibraryBulkSheet?
+    @State private var sheetUids: [String] = []
+    @State private var confirmDelete = false
+    @State private var showingFilters = false
 
     init(scope: LibraryScope, header: AnyView? = nil) {
         self.scope = scope
         self.header = header
-        _pager = State(initialValue: Pager<API.ItemCard> { cursor in
-            switch scope {
-            case .all:
-                return try await Cloud.api().listItems(cursor: cursor, limit: 120).pagerPage
-            case .album(let id):
-                return try await Cloud.api().listItems(album: id, cursor: cursor, limit: 120).pagerPage
-            case .vault:
-                return try await APIContext.$vault.withValue(true) {
-                    try await Cloud.api().listItems(cursor: cursor, limit: 120).pagerPage
+        _model = State(initialValue: LibraryModel(scope: scope))
+    }
+
+    var body: some View {
+        content
+            .modifier(LibrarySearchField(model: model,
+                                         prompt: scope.isVault ? "Search the vault" : "Search photos, videos and documents"))
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    if !model.selection.active {
+                        Button("Select") { model.selection.begin() }
+                            .accessibilityIdentifier("library.select")
+                    }
                 }
+                if scope == .all {
+                    ToolbarItem(placement: .topBarLeading) {
+                        Button {
+                            router.open(.more(.upload))
+                        } label: {
+                            Label("Upload", systemImage: "icloud.and.arrow.up")
+                        }
+                        .accessibilityIdentifier("library.upload")
+                    }
+                }
+            }
+            .safeAreaInset(edge: .bottom) {
+                if model.selection.active {
+                    LibraryBulkBar(model: model, open: { kind in
+                        sheetUids = Array(model.selection.selected)
+                        sheet = kind
+                    }, delete: { confirmDelete = true })
+                }
+            }
+            .task(id: model.loadKey) {
+                if model.loadedKey != model.loadKey { await model.reload() }
+            }
+            .task(id: model.searchText) {
+                try? await Task.sleep(for: .milliseconds(400))
+                if !Task.isCancelled { model.commitSearch() }
+            }
+            .refreshable { await model.reload() }
+            .onCloudChange { Task { await model.refreshInPlace() } }
+            .sheet(item: $sheet) { kind in
+                sheetView(kind)
+            }
+            // here rather than in the filter bar, so the sheet stays open when the list under it changes
+            .sheet(isPresented: $showingFilters) {
+                LibraryFilterSheet(filters: filtersBinding, scope: scope, searching: model.searching)
+            }
+            .confirmationDialog("Move \(Fmt.count(model.selection.count, "item")) to the trash?",
+                                isPresented: $confirmDelete, titleVisibility: .visible) {
+                Button("Move to trash", role: .destructive) { Task { await model.bulk(.delete) } }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("They leave the library now and can be restored from Trash until it is emptied.")
+            }
+    }
+
+    // MARK: Content
+
+    /// Nothing to show yet or at all: the filters and the search stay on screen above the state.
+    private var listEmpty: Bool { model.searching ? model.hits.isEmpty : model.buckets.isEmpty }
+
+    /// The list on screen is the answer for the current filters and search.
+    private var settled: Bool { model.loadedKey == model.loadKey && !model.loading }
+
+    @ViewBuilder
+    private var content: some View {
+        if model.searching && model.searchUnavailable && settled {
+            stateScroll {
+                ContentUnavailableView {
+                    Label("Search is not available right now", systemImage: "magnifyingglass")
+                } description: {
+                    Text("The search model is not installed or still loading. Settings shows its status.")
+                } actions: {
+                    Button("Browse instead") { model.clearSearch() }
+                        .buttonStyle(.bordered)
+                }
+            }
+        } else if let error = model.error, listEmpty, settled {
+            stateScroll {
+                ErrorState(error: error) { Task { await model.reload() } }
+            }
+        } else if listEmpty && settled {
+            stateScroll { emptyState }
+        } else if listEmpty {
+            stateScroll {
+                ProgressView(model.searching ? "Searching" : "Loading")
+                    .frame(maxWidth: .infinity)
+                    .padding(.top, 60)
+            }
+        } else if model.searching {
+            LibrarySearchResults(model: model, vault: scope.isVault, header: AnyView(topBlock)) { hit in
+                router.show(model.hits, start: hit, vault: scope.isVault) { await model.loadMoreForViewer() }
+            }
+        } else {
+            LibraryTimelineView(model: model, vault: scope.isVault, header: AnyView(topBlock)) { card in
+                router.show(model.timelineItems, start: card, vault: scope.isVault) {
+                    await model.loadMoreForViewer()
+                }
+            }
+        }
+    }
+
+    /// The header, the count, the search modes and the filters, above the items.
+    private var topBlock: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if let header { header }
+            HStack(spacing: 8) {
+                Text(countLine)
+                    .font(.subheadline.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("library.count")
+                if model.loading && !listEmpty {
+                    ProgressView().controlSize(.small)
+                }
+            }
+            if model.searching {
+                Picker("Search by", selection: modeBinding) {
+                    ForEach([API.Mode.auto, .semantic, .text], id: \.self) { mode in
+                        Text(mode.libraryLabel).tag(mode)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .accessibilityIdentifier("library.mode")
+                if model.indexing && !model.searchUnavailable {
+                    Text("Still indexing: \(model.indexed.formatted()) items can be found so far.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            LibraryFilterBar(filters: filtersBinding, scope: scope, searching: model.searching,
+                             presentFilters: { showingFilters = true })
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+    }
+
+    private var countLine: String {
+        if listEmpty && !settled { return model.searching ? "Searching" : "Loading" }
+        if model.searching {
+            return model.searchUnavailable ? "" : "\(Fmt.count(model.hitsTotal, "result")) for \"\(model.query)\""
+        }
+        return Fmt.count(model.total, "item")
+    }
+
+    /// An empty, failed or loading list, with the filters still there to change.
+    private func stateScroll<StateContent: View>(@ViewBuilder _ state: () -> StateContent) -> some View {
+        ScrollView {
+            topBlock
+            state()
+                .frame(minHeight: 320)
+        }
+    }
+
+    @ViewBuilder
+    private var emptyState: some View {
+        if model.searching {
+            ContentUnavailableView {
+                Label("Nothing matches. Try other words.", systemImage: "photo")
+            } description: {
+                Text(model.indexing
+                     ? "Some items are still being indexed, so try again in a few minutes."
+                     : "Describe what is in the picture, like \"beach at sunset\", or type words from a document, like a name or a number.")
+            } actions: {
+                Button("Clear search") { model.clearSearch() }
+                    .buttonStyle(.bordered)
+            }
+        } else if model.filters.narrows {
+            ContentUnavailableView {
+                Label("Nothing matches these filters", systemImage: "photo")
+            } actions: {
+                Button("Clear filters") { model.filters = LibraryFilters() }
+                    .buttonStyle(.bordered)
+            }
+        } else if scope.isVault {
+            ContentUnavailableView {
+                Label("The vault is empty", systemImage: "lock.shield")
+            } description: {
+                Text("Items marked private, and photos found to be explicit, are kept here.")
+            }
+        } else if scope.albumId != nil {
+            ContentUnavailableView {
+                Label("Nothing here yet", systemImage: "rectangle.stack")
+            } description: {
+                Text("Items you add to this album appear here. Select them in the library and choose Add to album.")
+            }
+        } else {
+            ContentUnavailableView {
+                Label("Nothing here yet", systemImage: "photo.on.rectangle")
+            } description: {
+                Text("Photos, videos, PDFs and other documents you upload appear here, sorted and searchable.")
+            } actions: {
+                Button("Upload") { router.open(.more(.upload)) }
+                    .buttonStyle(.borderedProminent)
+            }
+        }
+    }
+
+    // MARK: Sheets
+
+    @ViewBuilder
+    private func sheetView(_ kind: LibraryBulkSheet) -> some View {
+        let uids = sheetUids
+        switch kind {
+        case .album:
+            AlbumsAddSheet(uids: uids) { model.selection.end() }
+        case .share:
+            SharingCreateSheet(target: .items(uids: uids))
+        case .people:
+            PeopleSelectionSheet(uids: uids, vault: scope.isVault) { model.selection.end() }
+        case .tag, .untag:
+            LibraryTagSheet(removing: kind == .untag) { name in
+                Task { await model.bulk(kind == .tag ? .tag : .untag, value: name) }
+            }
+        }
+    }
+
+    // MARK: Bindings
+
+    /// A filter change clears the selection, as on the website.
+    private var filtersBinding: Binding<LibraryFilters> {
+        Binding(get: { model.filters }, set: { value in
+            if value != model.filters {
+                model.selection.clear()
+                model.filters = value
             }
         })
     }
 
-    var body: some View {
-        PagerStateView(pager: pager, emptyTitle: "Nothing here yet", emptyImage: "photo.on.rectangle",
-                       emptyText: "Photos and videos appear here.") {
-            MediaGrid(items: pager.items, selection: selection,
-                      onOpen: { item in open(item) },
-                      onAppear: { item in pager.loadMoreIfNeeded(item) })
-        }
-        .safeAreaInset(edge: .top) {
-            if let header { header }
-        }
-        .toolbar {
-            ToolbarItem(placement: .topBarTrailing) {
-                if !selection.active {
-                    Button("Select") { selection.begin() }
-                        .disabled(pager.items.isEmpty)
-                        .accessibilityIdentifier("library.select")
-                }
-            }
-        }
-        .safeAreaInset(edge: .bottom) {
-            if selection.active {
-                BulkBar(count: selection.count, actions: [],
-                        onSelectAll: { selection.select(pager.items.map(\.uid)) },
-                        onDone: { selection.end() })
-            }
-        }
-        .task { if !pager.loaded { await pager.refresh() } }
-        .refreshable { await pager.refresh() }
-        .onCloudChange { Task { await pager.refresh() } }
+    private var modeBinding: Binding<API.Mode> {
+        Binding(get: { model.mode }, set: { model.mode = $0 })
     }
+}
 
-    private func open(_ item: API.ItemCard) {
-        router.show(pager.items, start: item, vault: scope == .vault) {
-            await pager.loadMore()
-            return pager.items.map(\.viewerEntry)
+/// The search field in the navigation bar (not on an album, whose items the website's search cannot be limited to).
+/// Typing runs the search after a pause, Search runs it at once.
+struct LibrarySearchField: ViewModifier {
+    @Bindable var model: LibraryModel
+    let prompt: String
+
+    func body(content: Content) -> some View {
+        if model.canSearch {
+            content
+                .searchable(text: $model.searchText, placement: .navigationBarDrawer(displayMode: .always),
+                            prompt: prompt)
+                .onSubmit(of: .search) { model.commitSearch() }
+        } else {
+            content
         }
     }
 }
