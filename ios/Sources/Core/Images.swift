@@ -10,6 +10,8 @@ final class ImageLoader: @unchecked Sendable {
     static let shared = ImageLoader()
 
     private let memory = NSCache<NSString, UIImage>()
+    /// Vault pictures, apart from the rest so locking the vault can forget them all (`forgetVault()`).
+    private let vaultMemory = NSCache<NSString, UIImage>()
     private let folder: URL
     private let session: URLSession
     /// The disk cache is trimmed to this size at launch, oldest files first.
@@ -17,6 +19,7 @@ final class ImageLoader: @unchecked Sendable {
 
     init() {
         memory.totalCostLimit = 160 * 1024 * 1024
+        vaultMemory.totalCostLimit = 64 * 1024 * 1024
         let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
         folder = caches.appendingPathComponent("pcc-images", isDirectory: true)
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
@@ -31,18 +34,18 @@ final class ImageLoader: @unchecked Sendable {
 
     /// A picture already in memory, for showing it without a flash.
     func cached(_ ref: String, maxPixel: Int, vault: Bool = false) -> UIImage? {
-        memory.object(forKey: Self.key(ref, maxPixel, vault) as NSString)
+        (vault ? vaultMemory : memory).object(forKey: Self.key(ref, maxPixel, vault) as NSString)
     }
 
     /// Loads a picture no larger than `maxPixel` on its long side. Vault items need `vault` (their addresses
     /// answer only with vault=1 on an unlocked session).
     func image(_ ref: String, maxPixel: Int, vault: Bool = false) async throws -> UIImage {
         let key = Self.key(ref, maxPixel, vault)
-        if let hit = memory.object(forKey: key as NSString) { return hit }
+        if let hit = (vault ? vaultMemory : memory).object(forKey: key as NSString) { return hit }
         guard let server = APIConnection.current, let url = server.mediaURL(ref, vault: vault) else { throw URLError(.badURL) }
         let file = folder.appendingPathComponent(Self.diskName(url.absoluteString))
         if let data = try? Data(contentsOf: file), let image = Self.decode(data, maxPixel: maxPixel) {
-            store(image, key)
+            store(image, key, vault: vault)
             return image
         }
         try Task.checkCancellation()
@@ -57,16 +60,22 @@ final class ImageLoader: @unchecked Sendable {
         guard (200..<300).contains(http.statusCode) else { throw APIError.from(status: http.statusCode, body: data) }
         guard let image = Self.decode(data, maxPixel: maxPixel) else { throw URLError(.cannotDecodeContentData) }
         let cacheControl = (http.value(forHTTPHeaderField: "Cache-Control") ?? "").lowercased()
-        if !cacheControl.contains("no-store") {
+        if !cacheControl.contains("no-store") && !vault {
             try? data.write(to: file, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
         }
-        store(image, key)
+        store(image, key, vault: vault)
         return image
+    }
+
+    /// Forgets the vault's pictures (the vault was found locked: locked by the owner, or its window ended).
+    func forgetVault() {
+        vaultMemory.removeAllObjects()
     }
 
     /// Forgets every cached picture (sign-out).
     func clear() {
         memory.removeAllObjects()
+        vaultMemory.removeAllObjects()
         try? FileManager.default.removeItem(at: folder)
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
     }
@@ -92,9 +101,9 @@ final class ImageLoader: @unchecked Sendable {
         }
     }
 
-    private func store(_ image: UIImage, _ key: String) {
+    private func store(_ image: UIImage, _ key: String, vault: Bool) {
         let pixels = Int(image.size.width * image.scale * image.size.height * image.scale)
-        memory.setObject(image, forKey: key as NSString, cost: pixels * 4)
+        (vault ? vaultMemory : memory).setObject(image, forKey: key as NSString, cost: pixels * 4)
     }
 
     private static func key(_ ref: String, _ maxPixel: Int, _ vault: Bool) -> String { "\(maxPixel)|\(vault ? "v" : "")|\(ref)" }

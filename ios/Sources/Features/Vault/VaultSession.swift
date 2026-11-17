@@ -40,6 +40,8 @@ final class VaultSession {
         passkeys = state.passkeys
         loaded = true
         loadError = nil
+        // A locked vault leaves no picture of it in memory either.
+        if !isOpen() { ImageLoader.shared.forgetVault() }
     }
 
     /// Opens the vault with the account's password. Throws the server's answer (401 for a wrong password).
@@ -59,6 +61,7 @@ final class VaultSession {
     /// The window ran out on this phone's clock and the server did not say otherwise: read it as locked.
     func expire() {
         until = nil
+        ImageLoader.shared.forgetVault()
     }
 }
 
