@@ -86,6 +86,8 @@ struct RouteDestination: View {
                 .toolbar(.hidden, for: .navigationBar, .tabBar)
         case .more(let destination):
             MoreDestinationView(destination: destination)
+        case .mapAt(let start):
+            MapScreen(start: start)
         }
     }
 }

@@ -42,6 +42,8 @@ enum Route: Hashable {
     case album(id: Int)
     case item(uid: String)
     case more(MoreDestination)
+    /// The map with the library's filters or at one item's spot ("Show on map").
+    case mapAt(MapStart)
 }
 
 /// One item the viewer can page to. The thumb shows at once while the item itself loads.

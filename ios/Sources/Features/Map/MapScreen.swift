@@ -16,6 +16,18 @@ struct MapScreen: View {
     @State private var scanning = false
     @State private var flyCount = 0
 
+    /// `start`: the library's filters, or an item's spot to fly to and list (the website's /map?at=).
+    init(start: MapStart? = nil) {
+        _filters = State(initialValue: start?.filters ?? LibraryFilters())
+        if let lat = start?.latitude, let lon = start?.longitude {
+            let pad = 0.0005
+            _flyCount = State(initialValue: 1)
+            _flyTo = State(initialValue: MapFlyTarget(latitude: lat, longitude: lon, nonce: 1))
+            _picked = State(initialValue: MapPickedArea(west: lon - pad, south: lat - pad, east: lon + pad,
+                                                        north: lat + pad, count: 1))
+        }
+    }
+
     var body: some View {
         VStack(spacing: 8) {
             header

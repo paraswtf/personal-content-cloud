@@ -154,7 +154,10 @@ struct LibraryBrowser: View {
                 }
             }
             LibraryFilterBar(filters: filtersBinding, scope: scope, searching: model.searching,
-                             presentFilters: { showingFilters = true })
+                             presentFilters: { showingFilters = true },
+                             showOnMap: scope == .all && !model.searching
+                                 ? { router.open(.mapAt(MapStart(filters: model.filters.normalized(for: .all)))) }
+                                 : nil)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)

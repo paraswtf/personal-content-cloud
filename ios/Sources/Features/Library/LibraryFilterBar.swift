@@ -11,6 +11,8 @@ struct LibraryFilterBar: View {
     /// Given by a screen that presents the filter sheet itself, so the sheet stays open while the list under it
     /// changes; without it the bar presents the sheet.
     var presentFilters: (() -> Void)? = nil
+    /// "Show on map": the same filters on the map (the website's FilterBar map link). Nil hides the button.
+    var showOnMap: (() -> Void)? = nil
 
     @State private var showingFilters = false
 
@@ -49,6 +51,15 @@ struct LibraryFilterBar: View {
                 .buttonStyle(.bordered)
                 .accessibilityLabel(filters.hasExtra ? "Filters, some filters are on" : "Filters")
                 .accessibilityIdentifier("library.filters")
+                if let showOnMap {
+                    Button(action: showOnMap) {
+                        Image(systemName: "map")
+                            .font(.subheadline.weight(.semibold))
+                    }
+                    .buttonStyle(.bordered)
+                    .accessibilityLabel(filters.any ? "Show these on the map" : "Show on map")
+                    .accessibilityIdentifier("library.showOnMap")
+                }
             }
             if filters.any {
                 Button {
