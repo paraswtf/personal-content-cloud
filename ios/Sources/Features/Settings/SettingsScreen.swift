@@ -6,6 +6,8 @@ import SwiftUI
 struct SettingsScreen: View {
     @EnvironmentObject private var session: AppSession
     @State private var confirmSignOut = false
+    @State private var signingOut = false
+    @State private var offerPhoneSignOut = false
 
     var body: some View {
         List {
@@ -25,14 +27,45 @@ struct SettingsScreen: View {
                 link("Appearance", "circle.lefthalf.filled", "settings.appearance") { SettingsAppearanceScreen() }
             }
             Section("Server") {
+                if let name = ShellStatus.shared.siteTitle, !name.isEmpty {
+                    LabeledContent("Name", value: name)
+                        .accessibilityIdentifier("settings.siteTitle")
+                }
                 LabeledContent("Address", value: session.serverURL?.absoluteString ?? "")
-                Button("Sign out", role: .destructive) { confirmSignOut = true }
-                    .accessibilityIdentifier("settings.signOut")
+                Button(role: .destructive) {
+                    confirmSignOut = true
+                } label: {
+                    HStack(spacing: 8) {
+                        Text("Sign out")
+                        if signingOut { ProgressView() }
+                    }
+                }
+                .disabled(signingOut)
+                .accessibilityIdentifier("settings.signOut")
             }
         }
         .navigationTitle("Settings")
         .confirmAction("Sign out of this server?", isPresented: $confirmSignOut, actionTitle: "Sign out") {
-            session.signOut()
+            Task { await signOut() }
+        }
+        .alert("The server could not be reached", isPresented: $offerPhoneSignOut) {
+            Button("Sign out on this phone", role: .destructive) { session.signOut() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("The server still accepts this phone until you remove it under Sessions and devices on the website. "
+                 + "Sign out on this phone anyway?")
+        }
+    }
+
+    /// Ends the session on the server first, as the website's Sign out does, then forgets the token.
+    private func signOut() async {
+        guard !signingOut else { return }
+        signingOut = true
+        defer { signingOut = false }
+        switch await session.signOutOnServer() {
+        case .done, .cancelled: break
+        case .unreachable: offerPhoneSignOut = true
+        case .failed: Toaster.shared.error("Could not sign out. Try again.")
         }
     }
 

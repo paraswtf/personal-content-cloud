@@ -17,6 +17,8 @@ final class SyncEngine: ObservableObject {
     @Published var statusLine = "Idle"
     @Published var progress: Double = 0
     @Published var lastError: String?
+    /// The phone has a network path (NWPathMonitor): the Upload screen's rows say "You are offline" without it.
+    @Published private(set) var online = true
 
     private var task: Task<Void, Never>?
     private let monitor = NWPathMonitor()
@@ -45,7 +47,11 @@ final class SyncEngine: ObservableObject {
     private init() {
         monitor.pathUpdateHandler = { [weak self] path in
             let wifi = path.usesInterfaceType(.wifi) || path.usesInterfaceType(.wiredEthernet)
-            Task { @MainActor in self?.onWifi = wifi }
+            let online = path.status == .satisfied
+            Task { @MainActor in
+                self?.onWifi = wifi
+                if self?.online != online { self?.online = online }
+            }
         }
         monitor.start(queue: DispatchQueue(label: "pcc.netpath"))
         UIDevice.current.isBatteryMonitoringEnabled = true

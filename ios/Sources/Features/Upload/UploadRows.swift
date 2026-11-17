@@ -46,6 +46,10 @@ struct UploadQueueRow: View {
     let rec: SyncRecord
     let info: UploadRowInfo
     let resumed: Bool
+    /// The phone has no network path.
+    var offline = false
+    /// When the uploader tries a failed request again.
+    var retryAt: Date? = nil
     let onView: (() -> Void)?
     let onRetry: () -> Void
     let onCancel: () -> Void
@@ -74,7 +78,15 @@ struct UploadQueueRow: View {
                     ProgressView(value: min(1, max(0, info.progress ?? 0)))
                         .accessibilityLabel("\(name): \(UploadText.phase(info.phase, progress: info.progress, resumed: resumed) ?? "")")
                 }
-                if info.phase == .waiting, let problem = rec.error {
+                if info.phase == .checking, let checked = info.progress {
+                    // hashing on the phone: a softer bar than the upload's
+                    ProgressView(value: min(1, max(0, checked)))
+                        .tint(Color.secondary)
+                        .accessibilityLabel("\(name): \(UploadText.phase(info.phase, progress: checked, resumed: resumed) ?? "")")
+                }
+                if info.phase.canCancel && (offline || retryAt != nil) {
+                    networkNotice
+                } else if info.phase == .waiting, let problem = rec.error {
                     Label(problem, systemImage: "wifi.exclamationmark").font(.caption).foregroundStyle(.orange)
                 }
                 if let badge = UploadText.badge(phase: info.phase, serverStatus: rec.serverStatus, skipped: info.skipped) {
@@ -88,6 +100,19 @@ struct UploadQueueRow: View {
             }
         }
         .padding(.vertical, 2)
+    }
+
+    /// "You are offline..." or "Connection problem. Trying again in 4 s.", counted down every second.
+    private var networkNotice: some View {
+        TimelineView(.periodic(from: .now, by: 1)) { context in
+            if let text = UploadText.network(offline: offline,
+                                             retryIn: UploadText.secondsUntil(retryAt, now: context.date)) {
+                Label(text, systemImage: "wifi.slash")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .accessibilityIdentifier("upload.network")
+            }
+        }
     }
 
     private var subtitle: String {
@@ -197,8 +222,10 @@ struct UploadThumb: View {
             RoundedRectangle(cornerRadius: 10).fill(Color(.secondarySystemBackground))
             if let ref = rec.thumbRef {
                 RemoteImage(ref: ref, maxPixel: 160, vault: rec.itemVault)
+                kindBadge(kind)
             } else if let local {
                 Image(uiImage: local).resizable().scaledToFill()
+                kindBadge(kind)
             } else {
                 VStack(spacing: 2) {
                     Image(systemName: kind.systemImage).font(.title3)
@@ -215,6 +242,19 @@ struct UploadThumb: View {
         .accessibilityHidden(true)
         .task(id: "\(rec.assetId)|\(rec.status)|\(rec.serverStatus ?? "")") {
             if local == nil { local = UploadThumbs.image(rec.assetId) }
+        }
+    }
+
+    /// A small film or document mark over the picture of a video or a document (the website's QueueRow).
+    @ViewBuilder private func kindBadge(_ kind: UploadKind) -> some View {
+        if kind == .video || kind == .pdf || kind == .document {
+            Image(systemName: kind == .video ? "film" : "doc.text")
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(.white)
+                .padding(3)
+                .background(Color.black.opacity(0.65), in: RoundedRectangle(cornerRadius: 4))
+                .padding(4)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
         }
     }
 }

@@ -33,6 +33,18 @@ enum MoreDestination: String, Hashable, CaseIterable, Identifiable {
         case .settings: return "gearshape"
         }
     }
+
+    /// More's headings, as the website's More menu groups its entries (Browse, Tidy up, Account).
+    struct Heading {
+        let title: String
+        let destinations: [MoreDestination]
+    }
+
+    static let groups: [Heading] = [
+        Heading(title: "Browse", destinations: [.map, .documents, .vault, .upload]),
+        Heading(title: "Tidy up", destinations: [.trash]),
+        Heading(title: "Account", destinations: [.settings]),
+    ]
 }
 
 /// A place in the app any screen can go to: `NavigationLink(value: Route.person(id: 3))`, or

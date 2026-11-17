@@ -97,6 +97,8 @@ final class UploadTests: XCTestCase {
         XCTAssertEqual(UploadText.phase(.uploading, progress: 0.42, resumed: false), "Uploading 42%")
         XCTAssertEqual(UploadText.phase(.uploading, progress: 0.42, resumed: true), "Resuming 42%")
         XCTAssertEqual(UploadText.phase(.checking, progress: nil, resumed: false), "Checking")
+        XCTAssertEqual(UploadText.phase(.checking, progress: 0.4, resumed: false), "Checking 40%")
+        XCTAssertEqual(UploadText.phase(.checking, progress: nil, resumed: true), "Resuming")
         XCTAssertEqual(UploadText.phase(.waiting, progress: nil, resumed: false), "Waiting")
         XCTAssertNil(UploadText.phase(.done, progress: nil, resumed: false))
     }
@@ -143,5 +145,18 @@ final class UploadTests: XCTestCase {
         XCTAssertTrue(fm.fileExists(atPath: fresh.path), "a copy made now stays")
         UploadIncoming.discard(fresh)
         XCTAssertFalse(fm.fileExists(atPath: freshFolder.path))
+    }
+
+    func testNetworkNoticeSaysOfflineOrCountsDown() {
+        XCTAssertEqual(UploadText.network(offline: true, retryIn: 4),
+                       "You are offline. The upload continues when the connection is back.")
+        XCTAssertEqual(UploadText.network(offline: false, retryIn: 4), "Connection problem. Trying again in 4 s.")
+        XCTAssertNil(UploadText.network(offline: false, retryIn: nil))
+        XCTAssertNil(UploadText.network(offline: false, retryIn: 0))
+        let now = Date()
+        XCTAssertEqual(UploadText.secondsUntil(now.addingTimeInterval(3.2), now: now), 4)
+        XCTAssertEqual(UploadText.secondsUntil(now.addingTimeInterval(1), now: now), 1)
+        XCTAssertNil(UploadText.secondsUntil(now.addingTimeInterval(-1), now: now))
+        XCTAssertNil(UploadText.secondsUntil(nil, now: now))
     }
 }

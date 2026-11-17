@@ -103,6 +103,14 @@ enum PhotoLibrary {
     }
 
     static func sha256(of url: URL) throws -> String {
+        try sha256(of: url, progress: { _ in })
+    }
+
+    /// The same, telling `progress` the share read so far (0...1) after each chunk (the Upload screen's
+    /// "Checking 40%").
+    static func sha256(of url: URL, progress: (Double) -> Void) throws -> String {
+        let total = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int64) ?? 0
+        var read: Int64 = 0
         let handle = try FileHandle(forReadingFrom: url)
         defer { try? handle.close() }
         var hasher = SHA256()
@@ -112,6 +120,8 @@ enum PhotoLibrary {
             let more: Bool = try autoreleasepool {
                 guard let chunk = try handle.read(upToCount: 4 * 1024 * 1024), !chunk.isEmpty else { return false }
                 hasher.update(data: chunk)
+                read += Int64(chunk.count)
+                if total > 0 { progress(min(1, Double(read) / Double(total))) }
                 return true
             }
             if !more { break }
