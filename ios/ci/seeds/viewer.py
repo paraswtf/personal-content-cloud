@@ -117,7 +117,8 @@ def library(kit) -> dict:
 
     # a short playable video with a named face at one second (ffmpeg makes it when it is here, else OpenCV, which
     # the backend installs)
-    frame = kit.scene(4300, [((0.40, 0.25, 0.16, 0.24), (210, 170, 140), (40, 30, 30))]).resize((640, 480))
+    drawn = kit.scene(4300, [((0.40, 0.25, 0.16, 0.24), (210, 170, 140), (40, 30, 30))])   # kit.W x kit.H
+    frame = drawn.resize((640, 480))
     with tempfile.TemporaryDirectory() as tmp:
         made = _clip(frame, Path(tmp))
         if made is not None:
@@ -130,7 +131,8 @@ def library(kit) -> dict:
             guest = kit.make_person(conn, GUEST)
             face_id = kit.make_face(conn, int(video["id"]), guest, box=(0.40, 0.25, 0.16, 0.24), size_px=102,
                                     assigned_by="user", frame_time_s=1.0)
-            kit.crop(frame, (0.40, 0.25, 0.16, 0.24)).save(kit.storage.face_crop_path(face_id), "WEBP", quality=85)
+            # the crop helper works in kit.W x kit.H, the size the frame was drawn at
+            kit.crop(drawn, (0.40, 0.25, 0.16, 0.24)).save(kit.storage.face_crop_path(face_id), "WEBP", quality=85)
             out["clip"] = video["uid"]
             out["clip_codec"] = codec
 
