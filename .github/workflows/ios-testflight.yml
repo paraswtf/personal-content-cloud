@@ -26,6 +26,8 @@ concurrency:
 jobs:
   testflight:
     name: Sign and upload
+    # Main only, a manual run included: Run workflow offers every branch, and other branches never sign.
+    if: github.ref == 'refs/heads/main'
     runs-on: macos-15
     timeout-minutes: 60
     steps:

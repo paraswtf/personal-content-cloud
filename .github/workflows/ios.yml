@@ -26,7 +26,8 @@ jobs:
   build:
     name: Build and test
     runs-on: macos-15
-    timeout-minutes: 60
+    # Every area's screen tests together take about half an hour (26 minutes for 189 tests on 2026-11-17).
+    timeout-minutes: 90
     env:
       PCC_PORT: "8765"
     steps:
