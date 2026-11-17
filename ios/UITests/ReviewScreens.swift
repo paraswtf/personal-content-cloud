@@ -94,8 +94,9 @@ final class ReviewScreens: ScreenTestCase {
             .matching(NSPredicate(format: "identifier == 'review.cell' AND label CONTAINS 'Pocket shot'")).firstMatch
         XCTAssertTrue(pocket.waitForExistence(timeout: 30), "the seeded mis-click is not listed")
         snap("review-misclicks")
-        pocket.press(forDuration: 0.6)
-        XCTAssertTrue(app.staticTexts["bulk.count"].waitForExistence(timeout: 10))
+        button("review.select").tap()
+        pocket.tap()
+        XCTAssertTrue(app.staticTexts["bulk.count"].waitForExistence(timeout: 10), "selecting did not start")
         XCTAssertEqual(app.staticTexts["bulk.count"].label, "1 selected")
         snap("review-misclicks-selected")
         app.buttons["Keep"].tap()
@@ -107,7 +108,9 @@ final class ReviewScreens: ScreenTestCase {
             .matching(NSPredicate(format: "identifier == 'review.cell' AND label CONTAINS 'Filename from Telegram'")).firstMatch
         XCTAssertTrue(forward.waitForExistence(timeout: 30), "the seeded forward is not listed")
         snap("review-forwards")
-        forward.press(forDuration: 0.6)
+        button("review.select").tap()
+        forward.tap()
+        XCTAssertTrue(app.staticTexts["bulk.count"].waitForExistence(timeout: 10), "selecting did not start")
         app.buttons["Delete"].tap()
         let moveToTrash = app.buttons["Move to trash"]
         XCTAssertTrue(moveToTrash.waitForExistence(timeout: 10), "no confirmation before deleting")

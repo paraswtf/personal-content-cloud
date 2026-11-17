@@ -94,15 +94,13 @@ struct ReviewGuessesTab: View {
     }
 
     private var filters: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 6) {
+        ReviewFlowLayout(spacing: 6, lineSpacing: 8) {
                 ForEach(ReviewBasisChoice.all) { choice in
                     ToggleChip(text: choice.label,
                                isOn: Binding(get: { filter.basis == choice.basis },
                                              set: { on in if on { filter.basis = choice.basis } }))
                         .accessibilityIdentifier("review.basis.\(choice.basis.rawValue)")
                 }
-                Divider().frame(height: 20)
                 if let person = filter.person {
                     Button {
                         filter.person = nil
@@ -122,11 +120,8 @@ struct ReviewGuessesTab: View {
                     .accessibilityLabel("Show the guesses of one person")
                     .accessibilityIdentifier("review.person")
                 }
-            }
-            .padding(.vertical, 2)
         }
-        .accessibilityElement(children: .contain)
-        .accessibilityLabel("Show guesses made from")
+        .padding(.vertical, 2)
     }
 
     private var emptyTitle: String {

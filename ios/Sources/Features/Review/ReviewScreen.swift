@@ -75,49 +75,98 @@ enum ReviewTab: String, CaseIterable, Identifiable {
     }
 }
 
-/// The bins as tabs with their counts.
+/// The bins as four tabs that share the width, each with its count on its icon.
 struct ReviewTabBar: View {
     @Binding var selection: ReviewTab
     let counts: [ReviewTab: Int]
 
     var body: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 4) {
-                ForEach(ReviewTab.allCases) { tab in
-                    let selected = tab == selection
-                    let count = counts[tab] ?? 0
-                    Button {
-                        selection = tab
-                    } label: {
-                        HStack(spacing: 6) {
-                            Image(systemName: tab.systemImage).imageScale(.small)
-                            Text(tab.title)
-                            if count > 0 {
-                                Text(count.formatted())
-                                    .font(.caption.monospacedDigit())
-                                    .padding(.horizontal, 6)
-                                    .padding(.vertical, 2)
-                                    .background(Color(uiColor: .tertiarySystemFill), in: Capsule())
+        HStack(spacing: 0) {
+            ForEach(ReviewTab.allCases) { tab in
+                let selected = tab == selection
+                let count = counts[tab] ?? 0
+                Button {
+                    selection = tab
+                } label: {
+                    VStack(spacing: 3) {
+                        Image(systemName: tab.systemImage)
+                            .font(.system(size: 17))
+                            .frame(width: 30, height: 22)
+                            .overlay(alignment: .topTrailing) {
+                                if count > 0 {
+                                    Text(count.formatted())
+                                        .font(.system(size: 10, weight: .bold).monospacedDigit())
+                                        .foregroundStyle(.white)
+                                        .padding(.horizontal, 4)
+                                        .padding(.vertical, 1)
+                                        .background(selected ? Color.accentColor : Color.gray, in: Capsule())
+                                        .fixedSize()
+                                        .offset(x: 14, y: -6)
+                                }
                             }
-                        }
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(selected ? Color.primary : Color.secondary)
-                        .padding(.horizontal, 10)
-                        .frame(height: 44)
-                        .overlay(alignment: .bottom) {
-                            if selected {
-                                Rectangle().fill(Color.accentColor).frame(height: 2)
-                            }
-                        }
-                        .contentShape(Rectangle())
+                        Text(tab.title)
+                            .font(.caption.weight(.semibold))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.75)
                     }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel(count > 0 ? "\(tab.title), \(count)" : tab.title)
-                    .accessibilityAddTraits(selected ? [.isSelected] : [])
-                    .accessibilityIdentifier("review.tab.\(tab.rawValue)")
+                    .foregroundStyle(selected ? Color.accentColor : Color.secondary)
+                    .frame(maxWidth: .infinity, minHeight: 52)
+                    .overlay(alignment: .bottom) {
+                        if selected {
+                            Rectangle().fill(Color.accentColor).frame(height: 2)
+                        }
+                    }
+                    .contentShape(Rectangle())
                 }
+                .buttonStyle(.plain)
+                .accessibilityLabel(count > 0 ? "\(tab.title), \(count)" : tab.title)
+                .accessibilityAddTraits(selected ? [.isSelected] : [])
+                .accessibilityIdentifier("review.tab.\(tab.rawValue)")
             }
-            .padding(.horizontal, 12)
+        }
+        .padding(.horizontal, 8)
+    }
+}
+
+/// Lays its views out left to right and starts a new line when the width runs out (the filter chips).
+struct ReviewFlowLayout: Layout {
+    var spacing: CGFloat = 6
+    var lineSpacing: CGFloat = 6
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let maxWidth = proposal.width ?? .infinity
+        var x: CGFloat = 0
+        var y: CGFloat = 0
+        var lineHeight: CGFloat = 0
+        var widest: CGFloat = 0
+        for view in subviews {
+            let size = view.sizeThatFits(.unspecified)
+            if x > 0 && x + size.width > maxWidth {
+                y += lineHeight + lineSpacing
+                x = 0
+                lineHeight = 0
+            }
+            x += size.width + spacing
+            widest = max(widest, x - spacing)
+            lineHeight = max(lineHeight, size.height)
+        }
+        return CGSize(width: proposal.width ?? widest, height: y + lineHeight)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        var x = bounds.minX
+        var y = bounds.minY
+        var lineHeight: CGFloat = 0
+        for view in subviews {
+            let size = view.sizeThatFits(.unspecified)
+            if x > bounds.minX && x + size.width > bounds.maxX {
+                y += lineHeight + lineSpacing
+                x = bounds.minX
+                lineHeight = 0
+            }
+            view.place(at: CGPoint(x: x, y: y), proposal: ProposedViewSize(size))
+            x += size.width + spacing
+            lineHeight = max(lineHeight, size.height)
         }
     }
 }
