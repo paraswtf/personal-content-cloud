@@ -26,7 +26,10 @@ final class LibraryScreens: ScreenTestCase {
         XCTAssertTrue(tag.waitForExistence(timeout: 15), "the filter sheet does not list the seed's tag")
         snap("library-filter-sheet")
         tag.tap()
-        app.buttons["library.filters.done"].tap()
+        let done = app.buttons["library.filters.done"]
+        done.tap()
+        // the count changes behind the sheet as soon as the tag is picked: wait for the sheet itself to go
+        XCTAssertTrue(done.waitForNonExistence(timeout: 10), "the filter sheet did not close")
         waitForCount("3 items")
     }
 
@@ -56,7 +59,26 @@ final class LibraryScreens: ScreenTestCase {
             .waitForExistence(timeout: 10))
         XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH 'January 2026'")).firstMatch
             .exists)
-        app.buttons["library.category.food"].tap()
+        // The chips scroll sideways and Food starts behind the Filters and map buttons: a tap at its place would open
+        // the filters again, so the row is scrolled until Food can be touched.
+        let food = app.buttons["library.category.food"]
+        let chips = app.scrollViews["library.categories"]
+        XCTAssertTrue(chips.waitForExistence(timeout: 10), "no category chips")
+        // XCUITest calls a chip hittable when a sliver of it shows at the row's edge, and its tap then lands on the
+        // Filters button beside it: only a chip wholly inside the row is tapped
+        func foodShown() -> Bool {
+            let f = food.frame, row = chips.frame
+            return food.exists && f.minX >= row.minX && f.maxX <= row.maxX
+        }
+        // slow drags towards Food (a quick swipe flings the short row past it)
+        for _ in 0..<6 where !foodShown() {
+            let behindLeft = food.frame.midX < chips.frame.midX
+            let from = chips.coordinate(withNormalizedOffset: CGVector(dx: behindLeft ? 0.2 : 0.8, dy: 0.5))
+            let to = chips.coordinate(withNormalizedOffset: CGVector(dx: behindLeft ? 0.8 : 0.2, dy: 0.5))
+            from.press(forDuration: 0.05, thenDragTo: to, withVelocity: .slow, thenHoldForDuration: 0.3)
+        }
+        XCTAssertTrue(foodShown(), "the Food chip cannot be brought into view")
+        food.tap()
         waitForCount("1 item")
         snap("library-filter-food")
         app.buttons["library.clearFilters"].tap()

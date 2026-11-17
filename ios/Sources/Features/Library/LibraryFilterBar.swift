@@ -33,6 +33,7 @@ struct LibraryFilterBar: View {
                         }
                         .padding(.vertical, 2)
                     }
+                    .accessibilityIdentifier("library.categories")
                 } else {
                     Spacer(minLength: 0)
                 }
