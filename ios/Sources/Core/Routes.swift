@@ -82,7 +82,9 @@ enum ViewerMode: Hashable {
 
 /// A request to show the viewer: the items to page through, where to start, and how to load more when the
 /// owner pages past the last one (the list behind it continues). `vault` opens vault items (the vault screen):
-/// the viewer then asks for everything with `vault=1`.
+/// the viewer then asks for everything with `vault=1`. `total` is the whole list's size when the screen knows it
+/// (the counter then says "3 of 120", the website's position), and `positionOf` an item's place in that whole list
+/// (from 0) when the entries are only parts of it (the library's months loaded so far); nil keeps the entries' order.
 struct ViewerRequest: Identifiable {
     let id = UUID()
     let entries: [ViewerEntry]
@@ -90,14 +92,18 @@ struct ViewerRequest: Identifiable {
     var loadMore: (() async -> [ViewerEntry])?
     var vault = false
     var mode: ViewerMode = .normal
+    var total: Int?
+    var positionOf: ((String) -> Int?)?
 
     init(entries: [ViewerEntry], start: Int, loadMore: (() async -> [ViewerEntry])? = nil, vault: Bool = false,
-         mode: ViewerMode = .normal) {
+         mode: ViewerMode = .normal, total: Int? = nil, positionOf: ((String) -> Int?)? = nil) {
         self.entries = entries
         self.start = min(max(0, start), max(0, entries.count - 1))
         self.loadMore = loadMore
         self.vault = vault
         self.mode = mode
+        self.total = total
+        self.positionOf = positionOf
     }
 }
 
@@ -126,19 +132,23 @@ final class AppRouter {
     }
 
     /// Opens the viewer on `items`, starting at `start` (`vault: true` from the vault screen, `mode: .document` from
-    /// the Documents page).
+    /// the Documents page). `total` and `positionOf`: ViewerRequest's. (`positionOf` comes after `loadMore`, so a
+    /// trailing closure is still `loadMore`.)
     func show<Item: MediaItem>(_ items: [Item], start: Item, vault: Bool = false, mode: ViewerMode = .normal,
-                               loadMore: (() async -> [ViewerEntry])? = nil) {
+                               total: Int? = nil, loadMore: (() async -> [ViewerEntry])? = nil,
+                               positionOf: ((String) -> Int?)? = nil) {
         let entries = items.map(\.viewerEntry)
         let index = items.firstIndex(where: { $0.uid == start.uid }) ?? 0
-        viewer = ViewerRequest(entries: entries, start: index, loadMore: loadMore, vault: vault, mode: mode)
+        viewer = ViewerRequest(entries: entries, start: index, loadMore: loadMore, vault: vault, mode: mode,
+                               total: total, positionOf: positionOf)
     }
 
     /// Opens the viewer on entries the caller built (with `startAt` for a video's moment), starting at index `start`.
     func show(entries: [ViewerEntry], start: Int, vault: Bool = false, mode: ViewerMode = .normal,
-              loadMore: (() async -> [ViewerEntry])? = nil) {
+              total: Int? = nil, loadMore: (() async -> [ViewerEntry])? = nil) {
         guard !entries.isEmpty else { return }
-        viewer = ViewerRequest(entries: entries, start: start, loadMore: loadMore, vault: vault, mode: mode)
+        viewer = ViewerRequest(entries: entries, start: start, loadMore: loadMore, vault: vault, mode: mode,
+                               total: total)
     }
 
     /// Back to the root of a tab (tapping the selected tab again).

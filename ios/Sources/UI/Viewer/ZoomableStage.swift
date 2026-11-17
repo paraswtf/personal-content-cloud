@@ -521,7 +521,9 @@ final class StageEditOverlay: UIView {
 /// One box: a border and, for a named person or a guess, a small label above it. It takes no touches itself;
 /// the stage hit-tests the boxes smallest first. VoiceOver activates it directly. The border follows the website's
 /// PhotoStage: white for a named face, sky for a named person box, green for a pet, amber for a guess, and dashed
-/// while nobody is on the box.
+/// while nobody is on the box. The label ends with the origin's icon (the website's OriginIcon): a person when the
+/// owner tagged or drew it, the system's chip when the app found or guessed it; VoiceOver reads the origin's words
+/// as the box's value.
 final class BoxView: UIView {
     let box: StageBox
     var onActivate: (() -> Void)?
@@ -553,14 +555,33 @@ final class BoxView: UIView {
         label.backgroundColor = UIColor.black.withAlphaComponent(0.62)
         label.layer.cornerRadius = 4
         label.clipsToBounds = true
-        label.text = box.label
+        label.attributedText = Self.labelText(box, font: label.font)
         label.isHidden = box.label == nil
         label.isAccessibilityElement = false
         addSubview(label)
         isAccessibilityElement = true
         accessibilityLabel = box.accessibilityText
+        accessibilityValue = box.origin?.label
         accessibilityTraits = .button
         applyColors()
+    }
+
+    /// The label's text: the name (or "Name?" for a guess) and, after it, the origin's icon in the same white.
+    static func labelText(_ box: StageBox, font: UIFont) -> NSAttributedString? {
+        guard let text = box.label else { return nil }
+        let out = NSMutableAttributedString(string: text, attributes: [.font: font, .foregroundColor: UIColor.white])
+        guard let origin = box.labelOrigin,
+              let icon = UIImage(systemName: origin.symbolName,
+                                 withConfiguration: UIImage.SymbolConfiguration(font: font, scale: .small))?
+                .withTintColor(.white, renderingMode: .alwaysOriginal)
+        else { return out }
+        let attachment = NSTextAttachment(image: icon)
+        // centred on the capitals, as the website's icon sits beside the name
+        attachment.bounds = CGRect(x: 0, y: (font.capHeight - icon.size.height) / 2,
+                                   width: icon.size.width, height: icon.size.height)
+        out.append(NSAttributedString(string: " ", attributes: [.font: font]))
+        out.append(NSAttributedString(attachment: attachment))
+        return out
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }

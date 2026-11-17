@@ -86,6 +86,10 @@ the core in its own change.
   from code (`@Environment(AppRouter.self) private var router`).
 - Items open in the viewer over everything: `router.show(items, start: item, loadMore: { ... })` with the list the
   item came from, so the owner can page through it. `router.open(.item(uid:))` opens a single item.
+- The viewer's counter: pass `total:` when the screen knows the whole list's size (`pager.total`, the library's
+  count) and it says "3 of 120", as the website does; without it, it counts the items loaded with a "+" while more
+  can come. The library also passes `positionOf:` (`LibraryModel.timelinePosition(of:)`), the item's place in the
+  whole timeline, because its loaded months can leave gaps. Taking an item out of the viewer counts one less.
 - The viewer core (`ViewerCore(request:hooks:)`) pages, zooms and plays; the viewer area fills `ViewerHooks`:
   `onBoxTap` (the box under the finger, always the smallest one there), `infoPanel`, `toolbar`, `stage` (a page
   the viewer area draws itself, such as a document's pages; nil keeps the core's picture or video), and
@@ -120,7 +124,9 @@ the core in its own change.
 ## People
 
 - Who put a person on a box: `BoxOrigin.of(...)` and `OriginIcon(origin:)` (UI/Origin.swift, the website's
-  lib/origin.ts and OriginIcon), a person icon for the owner's and the system's icon for the rest.
+  lib/origin.ts and OriginIcon), a person icon for the owner's and the system's icon for the rest. The photo's box
+  labels end with it too: `CoreItemDetail.stillBoxes` gives each `StageBox` its `origin`, `BoxView` draws the icon
+  after the name and VoiceOver reads the words as the box's value (its label stays "Face of ...").
 - Only named people are shown anywhere in the app: the server already leaves unnamed groups out (a box of one
   arrives with `person` nil, a guess for one arrives as nil). Use `PersonOption(person)`, which is nil for an
   unnamed person, and `Fmt.isNamed(_:)` where a list could still hold one.

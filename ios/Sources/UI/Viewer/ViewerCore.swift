@@ -81,11 +81,14 @@ struct ViewerCore: View {
     @State private var noMore = false
     /// Document mode opened the info panel once already.
     @State private var openedDocumentPanel = false
+    /// The whole list's size when the screen that opened the viewer knows it; one less for each item taken out.
+    @State private var total: Int?
 
     init(request: ViewerRequest, hooks: ViewerHooks = ViewerHooks()) {
         self.request = request
         self.hooks = hooks
         _entries = State(initialValue: request.entries)
+        _total = State(initialValue: request.total)
         let start = request.entries.indices.contains(request.start) ? request.entries[request.start].uid : request.entries.first?.uid
         _current = State(initialValue: start)
     }
@@ -207,11 +210,13 @@ struct ViewerCore: View {
             }
             .lineLimit(1)
             Spacer()
-            if let i = currentIndex, entries.count > 1 {
-                Text("\(i + 1) of \(entries.count)\(noMore || request.loadMore == nil ? "" : "+")")
+            if let counter, counter.shown {
+                Text(counter.text)
                     .font(.caption.monospacedDigit())
                     .foregroundStyle(.secondary)
                     .padding(.trailing, 12)
+                    .accessibilityLabel(counter.spoken)
+                    .accessibilityIdentifier("viewer.counter")
             }
         }
         .foregroundStyle(.white)
@@ -263,6 +268,13 @@ struct ViewerCore: View {
             || item.animals.contains { $0.frameTimeS != nil }
     }
 
+    /// The top bar's counter for the item on screen.
+    private var counter: ViewerCounter? {
+        guard let current, let i = currentIndex else { return nil }
+        return ViewerCounter.make(index: i, place: request.positionOf?(current), loaded: entries.count, total: total,
+                                  moreMayCome: !(noMore || request.loadMore == nil))
+    }
+
     /// The item the viewer was opened on.
     private var startUid: String? {
         request.entries.indices.contains(request.start) ? request.entries[request.start].uid : request.entries.first?.uid
@@ -281,6 +293,7 @@ struct ViewerCore: View {
         if current == uid { current = neighbour }
         entries.remove(at: i)
         contexts[uid] = nil
+        if let t = total { total = max(0, t - 1) }
     }
 
     private func loadMoreIfNeeded() async {
@@ -292,6 +305,33 @@ struct ViewerCore: View {
         let fresh = next.filter { !known.contains($0.uid) }
         if fresh.isEmpty { noMore = true } else { entries.append(contentsOf: fresh) }
     }
+}
+
+/// The viewer's counter (the website's Viewer position): the item's place in the whole list and the list's size when
+/// the screen that opened the viewer knows them ("3 of 120"), else its place among the items loaded and how many are
+/// loaded, with a "+" while paging on can load more ("3 of 40+").
+struct ViewerCounter: Equatable {
+    let number: Int
+    let of: Int
+    let more: Bool
+
+    /// `index`: the item's place in the viewer's entries (from 0). `place`: its place in the whole list (from 0),
+    /// when the entries are only parts of it. `loaded`: the entries. `total`: the whole list's size, when known.
+    /// `moreMayCome`: paging past the last entry can load more.
+    static func make(index: Int, place: Int?, loaded: Int, total: Int?, moreMayCome: Bool) -> ViewerCounter {
+        guard let total else { return ViewerCounter(number: index + 1, of: loaded, more: moreMayCome) }
+        let at = place ?? index
+        // as the website: never fewer than the items loaded, nor than the item's own place
+        return ViewerCounter(number: at + 1, of: max(total, loaded, at + 1), more: false)
+    }
+
+    /// Shown once there is more than one item.
+    var shown: Bool { of > 1 }
+
+    var text: String { "\(number.formatted()) of \(of.formatted())\(more ? "+" : "")" }
+
+    /// What VoiceOver reads (the website's "Item 3 of 120").
+    var spoken: String { more ? "Item \(number) of at least \(of)" : "Item \(number) of \(of)" }
 }
 
 /// One page of the viewer: the item's picture (zoomable, with boxes), its video, or its Live Photo clip.

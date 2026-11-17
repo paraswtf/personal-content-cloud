@@ -75,6 +75,25 @@ final class CoreScreens: ScreenTestCase {
         snap("core-shell-more")
     }
 
+    /// The viewer counts the whole list, as the website does ("3 / 120"): the library's newest item is item 1 of the
+    /// library's whole count, though only its newest months are loaded.
+    func testTheViewerCountsTheWholeLibrary() throws {
+        try launchSignedIn()
+        XCTAssertTrue(firstCell.waitForExistence(timeout: 30), "the library grid did not show")
+        let count = app.staticTexts["library.count"]
+        let counted = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label CONTAINS ' item'"), object: count)
+        XCTAssertEqual(XCTWaiter().wait(for: [counted], timeout: 30), .completed, "the library shows no count")
+        let total = Int(String(count.label.prefix { $0 != " " }.filter(\.isNumber))) ?? 0
+        XCTAssertGreaterThan(total, 1, "the library count reads \(count.label)")
+        firstCell.tap()
+        let counter = app.staticTexts["viewer.counter"]
+        XCTAssertTrue(counter.waitForExistence(timeout: 20), "the viewer shows no counter")
+        XCTAssertEqual(counter.label, "Item 1 of \(total)")
+        snap("core-viewer-counter")
+        app.buttons["viewer.close"].tap()
+        XCTAssertTrue(firstCell.waitForExistence(timeout: 10))
+    }
+
     func testSelectingInTheGrid() throws {
         try launchSignedIn()
         XCTAssertTrue(firstCell.waitForExistence(timeout: 30))
@@ -98,6 +117,9 @@ final class CoreScreens: ScreenTestCase {
         XCTAssertTrue(person.exists, "the person box did not show")
         XCTAssertTrue(person.frame.contains(face.frame), "the seed's face box should sit inside the person box")
         XCTAssertTrue(app.windows.firstMatch.frame.contains(face.frame), "the face box is not on the screen")
+        // The owner tagged both: their labels end with the person icon, and VoiceOver reads who put them there.
+        XCTAssertEqual(face.value as? String, "Tagged by you")
+        XCTAssertEqual(person.value as? String, "Tagged by you")
         snap("core-viewer-boxes")
 
         // The middle of the face is inside the person box too: the face gets the tap. (A box draws itself and takes

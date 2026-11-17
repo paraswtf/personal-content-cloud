@@ -69,7 +69,7 @@ struct MapItemsPanel: View {
     }
 
     private func open(_ item: API.ItemCard) {
-        router.show(pager.items, start: item) {
+        router.show(pager.items, start: item, total: pager.total) {
             await pager.loadMore()
             return pager.items.map(\.viewerEntry)
         }
