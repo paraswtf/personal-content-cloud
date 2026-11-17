@@ -79,8 +79,10 @@ jobs:
         run: |
           P="$RUNNER_TEMP/pcc"
           mkdir -p "$P/data" "$P/originals" "$P/backup" "$P/models" "$P/no-frontend"
+          # The vault stays open for the app's session (opened by the seed) for the whole run: every area's
+          # screen tests together take longer than the server's default of 15 minutes.
           export DATA_DIR="$P/data" ORIGINALS_DIR="$P/originals" BACKUP_DIR="$P/backup" MODELS_DIR="$P/models" \
-            FRONTEND_DIST="$P/no-frontend" PCC_NO_MODELS=1 MIN_FREE_DISK_MB=64
+            FRONTEND_DIST="$P/no-frontend" PCC_NO_MODELS=1 MIN_FREE_DISK_MB=64 VAULT_UNLOCK_MIN=240
           echo "PCC_DIR=$P" >> "$GITHUB_ENV"
           cd backend
           "$RUNNER_TEMP/pcc-venv/bin/python" ../ios/ci/seed_server.py library
