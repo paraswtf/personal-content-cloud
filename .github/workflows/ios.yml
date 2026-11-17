@@ -156,3 +156,42 @@ jobs:
           path: ios/build/Tests.xcresult
           if-no-files-found: ignore
           retention-days: 7
+
+  release:
+    name: Release build
+    # The tests build Debug, where the test hooks live (#if DEBUG). A Release compile beside them catches a
+    # reference to a Debug-only symbol here instead of in the first TestFlight run. Main, the iOS branch and
+    # manual runs only, to keep the macOS machines for the area branches' tests.
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/r15-ios' || github.event_name == 'workflow_dispatch'
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tools
+        run: |
+          xcodebuild -version
+          brew install xcodegen
+          xcodegen --version
+
+      - name: Generate the project
+        working-directory: ios
+        run: xcodegen generate
+
+      - name: Build for Release
+        working-directory: ios
+        run: |
+          set -o pipefail
+          mkdir -p build
+          xcodebuild -project PersonalContentCloud.xcodeproj -scheme PersonalContentCloud -configuration Release \
+            -destination 'generic/platform=iOS' -derivedDataPath build/dd-release CODE_SIGNING_ALLOWED=NO \
+            build 2>&1 | tee build/release.log | xcbeautify --renderer github-actions
+
+      - name: Keep the build log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-log
+          path: ios/build/release.log
+          if-no-files-found: ignore
+          retention-days: 7
