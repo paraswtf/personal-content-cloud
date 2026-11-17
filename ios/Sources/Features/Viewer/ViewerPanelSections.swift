@@ -26,18 +26,14 @@ struct ViewerTagsSection: View {
                 ViewerFlow {
                     ForEach(mine, id: \.id) { tag in
                         HStack(spacing: 2) {
-                            if linksToLibrary {
-                                Button {
-                                    showTagged(tag.name)
-                                } label: {
-                                    Text(tag.name).lineLimit(1).foregroundStyle(.primary)
-                                }
-                                .accessibilityLabel(tag.name)
-                                .accessibilityHint("Shows everything tagged \(tag.name)")
-                                .accessibilityIdentifier("viewer.tag.show")
-                            } else {
-                                Text(tag.name).lineLimit(1)
+                            Button {
+                                showTagged(tag.name)
+                            } label: {
+                                Text(tag.name).lineLimit(1).foregroundStyle(.primary)
                             }
+                            .accessibilityLabel(tag.name)
+                            .accessibilityHint("Shows everything tagged \(tag.name)")
+                            .accessibilityIdentifier("viewer.tag.show")
                             Button {
                                 Task { await remove(tag) }
                             } label: {
@@ -130,17 +126,17 @@ struct ViewerTagsSection: View {
         .task(id: typed) { await loadOptions() }
     }
 
-    /// A tag opens the library with that tag (the website's link). The vault's items stay in the vault, whose
-    /// screen has no tag filter on the phone, so their tags are plain text.
-    private var linksToLibrary: Bool { !context.vault && !item.nsfw }
+    /// A private item's tags open the vault with that tag, the rest the library (the website's links to /vault?tag=
+    /// and /?tag=).
+    private var linksToVault: Bool { context.vault || item.nsfw }
 
-    /// Everything with the tag: the viewer closes and the library opens filtered on the tab underneath, as Show on
-    /// map does.
+    /// Everything with the tag: the viewer closes and the library (or the vault, for a private item) opens filtered
+    /// on the tab underneath, as Show on map does.
     private func showTagged(_ name: String) {
         var filters = LibraryFilters()
         filters.tag = [name]
         router.viewer = nil
-        router.open(.libraryFiltered(filters))
+        router.open(linksToVault ? .vaultFiltered(filters) : .libraryFiltered(filters))
     }
 
     private func same(_ a: String, _ b: String) -> Bool {

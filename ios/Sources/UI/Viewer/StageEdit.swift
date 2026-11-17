@@ -38,6 +38,15 @@ final class StageEditState {
     private(set) var frameTime: Double?
     /// The latest context of each page the viewer loaded, by uid (the viewer core keeps it current).
     var contexts: [String: ViewerPageContext] = [:]
+    /// Bumped when the boxes area asks the viewer to show the boxes (showing a person or a box from the info panel,
+    /// moving or drawing one): the viewer turns its boxes on, even after the owner hid them, and stops a playing
+    /// Live Photo clip, as the website's showPerson, showBox and startAdjust do.
+    private(set) var showBoxesRequest = 0
+
+    /// Asks the viewer to show the boxes (see `showBoxesRequest`).
+    func requestShowBoxes() {
+        showBoxesRequest += 1
+    }
 
     var isActive: Bool { mode != nil }
 

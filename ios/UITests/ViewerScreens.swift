@@ -2,9 +2,12 @@ import XCTest
 
 /// The viewer's info panel, toolbar and own pages, on the viewer seed's items (ci/seeds/viewer.py: a boarding pass
 /// PDF, a photo received on WhatsApp with the tag "Viewer trip", a video with a face at one second and a video with
-/// nobody on it when the machine could make them, a file without a preview), which sit at the end of the library
-/// (April 2026). Every change a test makes it takes back, except the person box drawn on the seed's second video.
+/// nobody on it when the machine could make them, a file without a preview, a private photo in the vault with the
+/// tag "Viewer private"), which sit at the end of the library (April 2026). Every change a test makes it takes back.
 final class ViewerScreens: ScreenTestCase {
+    /// The seed's throwaway account on a server that lives for one CI run (ci/seed_server.py).
+    private var password: String { ProcessInfo.processInfo.environment["PCC_TEST_PASSWORD"] ?? "ci-only-password" }
+
     /// The library tile whose label starts with one of `prefixes` (the library names a parsed document by its type,
     /// "Boarding pass, Apr 20, 2026", where the core's grid says "PDF, Apr 20, 2026").
     private func cell(_ prefixes: String...) -> XCUIElement {
@@ -21,15 +24,68 @@ final class ViewerScreens: ScreenTestCase {
         let any = prefixes.map { _ in "label BEGINSWITH %@" }.joined(separator: " OR ")
         let target = app.buttons.matching(NSPredicate(format: "identifier == 'media.cell' AND (\(any))",
                                                       argumentArray: prefixes)).firstMatch
-        var swipes = 0
-        while !(target.exists && target.isHittable) && swipes < 40 {
-            app.swipeUp()
-            swipes += 1
-        }
-        XCTAssertTrue(target.isHittable, "\(prefix) is not in the library", file: file, line: line)
+        XCTAssertTrue(reveal(target), "\(prefix) is not in the library", file: file, line: line)
         target.tap()
         XCTAssertTrue(app.buttons["viewer.close"].waitForExistence(timeout: 20), "the viewer did not open",
                       file: file, line: line)
+    }
+
+    /// Scrolls the grid with short, slow drags until `target` sits wholly below the search field and the month header
+    /// pinned under it, and above the tab bar, where a tap reaches it. XCTest calls a tile under the pinned header
+    /// hittable (its frame is inside the window), but a tap there lands on the header and opens nothing; a swipe
+    /// flings the grid past the row it looks for.
+    @discardableResult
+    private func reveal(_ target: XCUIElement, drags: Int = 60) -> Bool {
+        let window = app.windows.firstMatch
+        var last: CGRect?
+        for _ in 0..<drags {
+            if target.exists {
+                let f = target.frame
+                let top = visibleTop, bottom = visibleBottom
+                if f.minY >= top && f.maxY <= bottom { return true }
+                // the grid did not move (its top or its end): take the tile where it is
+                if f == last { return target.isHittable }
+                last = f
+                if f.minY < top {
+                    drag(window, by: min(top - f.minY + 30, 300))
+                    continue
+                }
+                if f.minY < bottom + 600 {
+                    drag(window, by: -min(f.maxY - bottom + 30, 300))
+                    continue
+                }
+            }
+            drag(window, by: -300)
+        }
+        return false
+    }
+
+    /// Where the grid's rows start to show whole: under the search field (or the bar) and the month header pinned
+    /// under it.
+    private var visibleTop: CGFloat {
+        let search = app.searchFields.firstMatch
+        let bar = app.navigationBars.firstMatch
+        let above = max(search.exists ? search.frame.maxY : 0, bar.exists ? bar.frame.maxY : 0)
+        return above + 56
+    }
+
+    /// Where the grid's rows stop showing: the tab bar.
+    private var visibleBottom: CGFloat {
+        let tabs = app.tabBars.firstMatch
+        return tabs.exists ? tabs.frame.minY : app.windows.firstMatch.frame.maxY - 90
+    }
+
+    /// One slow drag of the grid: `dy` above zero shows what is above, below zero what is below. It holds at the end,
+    /// so the grid stops where the finger does.
+    private func drag(_ window: XCUIElement, by dy: CGFloat) {
+        let start = window.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: dy > 0 ? 0.4 : 0.75))
+        start.press(forDuration: 0.05, thenDragTo: start.withOffset(CGVector(dx: 0, dy: dy)), withVelocity: .slow,
+                    thenHoldForDuration: 0.2)
+    }
+
+    /// The picker's option for a name.
+    private func option(_ name: String) -> XCUIElement {
+        app.buttons.matching(NSPredicate(format: "identifier == 'picker.option' AND label BEGINSWITH %@", name)).firstMatch
     }
 
     private func text(_ label: String) -> XCUIElement {
@@ -189,14 +245,11 @@ final class ViewerScreens: ScreenTestCase {
         try launchSignedIn()
         XCTAssertTrue(app.buttons.matching(identifier: "media.cell").firstMatch.waitForExistence(timeout: 30))
         let video = cell("Video, 0:03, Apr 12, 2026")
-        var swipes = 0
-        while !(video.exists && video.isHittable) && swipes < 40 {
-            app.swipeUp()
-            swipes += 1
-        }
+        let shown = reveal(video)
         guard video.exists else {
             throw XCTSkip("the seed made no video here (neither ffmpeg nor OpenCV could write one)")
         }
+        XCTAssertTrue(shown, "the video is not where a tap reaches it")
         video.tap()
         XCTAssertTrue(app.buttons["viewer.close"].waitForExistence(timeout: 20))
         let chip = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Viewer Guest, 0:01'")).firstMatch
@@ -210,14 +263,11 @@ final class ViewerScreens: ScreenTestCase {
         try launchSignedIn()
         XCTAssertTrue(app.buttons.matching(identifier: "media.cell").firstMatch.waitForExistence(timeout: 30))
         let video = cell("Video, 0:03, Apr 11, 2026")
-        var swipes = 0
-        while !(video.exists && video.isHittable) && swipes < 40 {
-            app.swipeUp()
-            swipes += 1
-        }
+        let shown = reveal(video)
         guard video.exists else {
             throw XCTSkip("the seed made no video here (neither ffmpeg nor OpenCV could write one)")
         }
+        XCTAssertTrue(shown, "the video is not where a tap reaches it")
         video.tap()
         XCTAssertTrue(app.buttons["viewer.close"].waitForExistence(timeout: 20))
         let add = app.buttons["boxes.add"]
@@ -245,17 +295,18 @@ final class ViewerScreens: ScreenTestCase {
         snap("viewer-video-drawn")
         next.tap()
 
+        // The seed's own person, so the test makes nobody new (a person made here would stay for every later test).
         XCTAssertTrue(app.navigationBars["Who is in the box?"].waitForExistence(timeout: 10), "the picker did not open")
         let search = app.searchFields.firstMatch
         XCTAssertTrue(search.waitForExistence(timeout: 15))
         search.tap()
-        search.typeText("Viewer Drawn")
-        let create = app.buttons["picker.create"]
-        XCTAssertTrue(create.waitForExistence(timeout: 15), "the picker offers no new name")
-        create.tap()
+        search.typeText("Viewer Guest")
+        let guest = option("Viewer Guest")
+        XCTAssertTrue(guest.waitForExistence(timeout: 20), "the picker did not list Viewer Guest")
+        guest.tap()
 
         // The box is added with the frame's time and shows as a chip under the video.
-        let chip = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Viewer Drawn, '")).firstMatch
+        let chip = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Viewer Guest, '")).firstMatch
         let failed = app.staticTexts["boxes.draw.error"]
         let outcome = NSPredicate { _, _ in chip.exists || failed.exists }
         expectation(for: outcome, evaluatedWith: nil)
@@ -272,5 +323,50 @@ final class ViewerScreens: ScreenTestCase {
         }
         XCTAssertTrue(chip.exists, "the drawn person box did not show as a chip")
         snap("viewer-video-box-added")
+
+        // Taken back: the chip's pencil opens the box, and Not a person removes it.
+        let edit = app.buttons["Edit, tagged as Viewer Guest"]
+        XCTAssertTrue(edit.waitForExistence(timeout: 10), "the chip has no pencil")
+        edit.tap()
+        let remove = app.buttons["boxes.remove"]
+        XCTAssertTrue(remove.waitForExistence(timeout: 10), "the person box's editor did not open")
+        remove.tap()
+        XCTAssertTrue(chip.waitForNonExistence(timeout: 30), "the drawn box stayed")
+    }
+
+    func testAPrivateItemsTagShowsTheVaultWithIt() throws {
+        try launchSignedIn()
+        tab("More")
+        let row = app.buttons["more.vault"]
+        XCTAssertTrue(row.waitForExistence(timeout: 20), "no vault row under More")
+        row.tap()
+        // The vault stays open for the whole run; when its window has ended meanwhile, open it first.
+        let field = app.secureTextFields["vault.password"]
+        let photo = cell("Photo, Apr 16, 2026")
+        let first = NSPredicate { _, _ in photo.exists || field.exists }
+        expectation(for: first, evaluatedWith: nil)
+        waitForExpectations(timeout: 30)
+        if field.exists && !photo.exists {
+            field.tap()
+            field.typeText(password + "\n")
+        }
+        XCTAssertTrue(photo.waitForExistence(timeout: 30), "the seed's private photo is not in the vault")
+        XCTAssertTrue(reveal(photo), "the private photo is not where a tap reaches it")
+        photo.tap()
+        XCTAssertTrue(app.buttons["viewer.close"].waitForExistence(timeout: 20), "the viewer did not open")
+        openDetails()
+        let tag = tagButton("Viewer private")
+        XCTAssertTrue(tag.waitForExistence(timeout: 15), "the private photo's tag is missing")
+        snap("viewer-vault-tag")
+        tag.tap()
+        // The viewer closes and the vault opens with the tag: only the tagged private photo is listed.
+        XCTAssertTrue(app.buttons["viewer.close"].waitForNonExistence(timeout: 15), "the viewer stayed open")
+        XCTAssertTrue(app.buttons["vault.lock"].waitForExistence(timeout: 20), "the vault did not open")
+        XCTAssertTrue(photo.waitForExistence(timeout: 30), "the tagged private photo is not listed")
+        let cells = app.buttons.matching(identifier: "media.cell")
+        let onlyTagged = NSPredicate { _, _ in cells.count == 1 }
+        expectation(for: onlyTagged, evaluatedWith: nil)
+        waitForExpectations(timeout: 30)
+        snap("viewer-vault-tag-filtered")
     }
 }

@@ -9,7 +9,12 @@ after the area, so they sit at the end of the library and touch nothing the othe
   face of "Viewer Guest" at one second;
 - a second short video with nobody on it ("VIEWER_DRAW.MP4", 11 Apr), where the test draws a person box on the
   paused frame;
-- a file the server keeps without a preview ("VIEWER_NOTES.BIN", 10 Apr).
+- a file the server keeps without a preview ("VIEWER_NOTES.BIN", 10 Apr);
+- a private photo in the vault ("VIEWER_PRIVATE.JPG", 16 Apr) with the tag "Viewer private" (added in `api`), whose
+  tag opens the vault filtered by it.
+
+The video test that draws a person box names it "Viewer Guest", who is seeded here, and removes the box again, so
+no person or box is left behind for a second run or for other areas.
 
 A video whose streaming copy is still being made is not seeded: the server queues the copy again when it starts,
 so the "preparing" state would not last until the tests.
@@ -156,14 +161,26 @@ def library(kit) -> dict:
                           mime="application/octet-stream", width=None, height=None, filename="VIEWER_NOTES.BIN",
                           taken_at="2026-04-10T10:00:00.000Z", category="misc", forward_checked=1)
     out["other"] = other["uid"]
+
+    # a private photo in the vault, tagged in `api`
+    private_img = kit.scene(8120, [])
+    private = kit.make_item(conn, data=kit.jpeg(private_img), width=kit.W, height=kit.H, filename="VIEWER_PRIVATE.JPG",
+                            taken_at="2026-04-16T09:00:00.000Z", category="personal", nsfw=1, forward_checked=1)
+    _previews(kit, private, private_img)
+    out["private"] = private["uid"]
     return out
 
 
 def api(kit) -> dict:
-    """The owner tags the received photo, as they would on the website."""
+    """The owner tags the received photo and the private one, as they would on the website (the vault is open)."""
     items = kit.client.call("GET", "/api/items?limit=200&from=2026-04-01&to=2026-04-30")["items"]
     received = next((it for it in items if it["filename"] == "VIEWER_RECEIVED.JPG"), None)
     if received is None:
         raise SystemExit("the viewer seed's received photo is not in the library")
     kit.client.call("POST", f"/api/items/{received['uid']}/user-tags", {"name": "Viewer trip"})
-    return {"received": received["uid"], "items": len(items)}
+    vault = kit.client.call("GET", "/api/items?limit=200&from=2026-04-01&to=2026-04-30&vault=1")["items"]
+    private = next((it for it in vault if it["filename"] == "VIEWER_PRIVATE.JPG"), None)
+    if private is None:
+        raise SystemExit("the viewer seed's private photo is not in the vault")
+    kit.client.call("POST", f"/api/items/{private['uid']}/user-tags?vault=1", {"name": "Viewer private"})
+    return {"received": received["uid"], "private": private["uid"], "items": len(items)}

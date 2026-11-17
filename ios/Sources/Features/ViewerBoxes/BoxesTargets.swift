@@ -224,6 +224,15 @@ enum BoxesLookup {
         return out
     }
 
+    /// The face of `personId` on screen at `t` seconds of a video (its spans hold `t`), with a frame to show, or nil
+    /// (the website's facesAt with onShowPerson(id, true)).
+    static func faceOnScreen(of personId: Int, in item: API.ItemDetail, at t: Double) -> API.FaceOut? {
+        item.faces.first { f in
+            f.person?.id == personId && f.frameTimeS != nil
+                && (f.spans ?? []).contains(where: { $0.count >= 2 && $0[0] <= t && t <= $0[1] })
+        }
+    }
+
     /// A person's thumb on this item: their first box's crop, else their cover.
     static func thumb(of person: API.PersonRef, in item: API.ItemDetail) -> String? {
         if let f = item.faces.first(where: { $0.person?.id == person.id }) { return f.url }
