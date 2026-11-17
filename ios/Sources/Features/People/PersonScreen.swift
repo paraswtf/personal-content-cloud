@@ -246,7 +246,16 @@ struct PersonScreen: View {
     private func tabBar(_ p: API.PersonOut) -> some View {
         let tabs = PeoplePersonTab.tabs(for: p)
         let current = tabs.contains(tab) ? tab : .items
-        return ScrollView(.horizontal, showsIndicators: false) {
+        // each tab draws its own row, which starts at its beginning: show the selected tab (3D is off the screen
+        // on a phone otherwise)
+        return ScrollViewReader { proxy in
+            tabRow(p, tabs: tabs, current: current)
+                .onAppear { proxy.scrollTo(current, anchor: .center) }
+        }
+    }
+
+    private func tabRow(_ p: API.PersonOut, tabs: [PeoplePersonTab], current: PeoplePersonTab) -> some View {
+        ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 6) {
                 ForEach(tabs) { t in
                     Button {
@@ -273,6 +282,7 @@ struct PersonScreen: View {
                     .accessibilityLabel(t.count(p).map { $0 > 0 ? "\(t.title), \($0)" : t.title } ?? t.title)
                     .accessibilityAddTraits(current == t ? .isSelected : [])
                     .accessibilityIdentifier(t.identifier)
+                    .id(t)
                 }
             }
         }
