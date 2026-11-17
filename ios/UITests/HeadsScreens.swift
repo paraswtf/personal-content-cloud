@@ -11,13 +11,19 @@ final class HeadsScreens: ScreenTestCase {
         card.tap()
         let tab3d = app.buttons["people.tab.3d"]
         if tab3d.waitForExistence(timeout: 5) {
-            // The person page's tabs scroll sideways and 3D is the last one, off the screen on a phone.
-            let bar = app.scrollViews["people.tabs"]
-            var swipes = 0
-            while !tab3d.isHittable && bar.exists && swipes < 4 {
-                bar.swipeLeft()
-                swipes += 1
+            // The person page's tabs scroll sideways and 3D, the last one, starts off the screen on a phone: drag the
+            // row of tabs to the left, at its own height, until 3D can be touched. (A query for the row's scroll view
+            // found nothing to swipe, and a swipe on a tab button could scroll that button back into view.)
+            var drags = 0
+            while !tab3d.isHittable && drags < 5 {
+                let y = tab3d.frame.midY
+                let width = app.frame.width
+                let origin = app.coordinate(withNormalizedOffset: .zero)
+                origin.withOffset(CGVector(dx: width * 0.85, dy: y))
+                    .press(forDuration: 0.05, thenDragTo: origin.withOffset(CGVector(dx: width * 0.15, dy: y)))
+                drags += 1
             }
+            XCTAssertTrue(tab3d.isHittable, "could not reach the 3D tab")
             tab3d.tap()
         }
     }

@@ -168,12 +168,14 @@ struct PersonScreen: View {
         case .traits:
             PeopleTraitsTab(person: p, header: head).id("traits-\(p.id)")
         case .threeD:
-            VStack(spacing: 0) {
-                tabBar(p)
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 8)
-                HeadsPersonTab(personId: p.id, name: PeopleText.name(p))
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            // The 3D tab has no scroll view of its own: the page's holds it, under the same header as the other
+            // tabs, so the controls under the head can be reached (a drag that starts on the head turns the head).
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
+                    head
+                    HeadsPersonTab(personId: p.id, name: PeopleText.name(p))
+                }
+                .padding(.bottom, 16)
             }
             .id("3d-\(p.id)")
         }
