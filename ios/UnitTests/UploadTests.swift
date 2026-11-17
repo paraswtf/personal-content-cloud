@@ -111,4 +111,37 @@ final class UploadTests: XCTestCase {
         XCTAssertTrue(name.hasSuffix(".jpg"), name)
         XCTAssertEqual(name.count, "IMG_20261116_191817.jpg".count)
     }
+
+    /// The phone's sync and the Upload screen's queue never take the same library photo at once: whoever claims it
+    /// first sends it, the other waits until it is let go.
+    @MainActor
+    func testOneSideAtATimeTakesALibraryPhoto() {
+        let engine = SyncEngine.shared
+        let id = "upload-tests-claim-\(UUID().uuidString)"
+        XCTAssertTrue(engine.claim(id))
+        XCTAssertFalse(engine.claim(id), "a second claim of the same photo must fail")
+        XCTAssertTrue(engine.claimed.contains(id))
+        engine.release(id)
+        XCTAssertFalse(engine.claimed.contains(id))
+        XCTAssertTrue(engine.claim(id), "a photo that was let go can be taken again")
+        engine.release(id)
+    }
+
+    /// Copies no add took are swept after a day; a fresh copy stays.
+    func testLeftoverCopiesAreSweptAfterADay() throws {
+        let fm = FileManager.default
+        let old = UploadIncoming.newURL(for: "upload-tests-old.jpg")
+        let fresh = UploadIncoming.newURL(for: "upload-tests-fresh.jpg")
+        try Data([1, 2, 3]).write(to: old)
+        try Data([4, 5, 6]).write(to: fresh)
+        let oldFolder = old.deletingLastPathComponent()
+        let freshFolder = fresh.deletingLastPathComponent()
+        let twoDaysAgo = Date(timeIntervalSinceNow: -2 * 24 * 3600)
+        try fm.setAttributes([.modificationDate: twoDaysAgo], ofItemAtPath: oldFolder.path)
+        UploadIncoming.sweep(olderThan: 24 * 3600)
+        XCTAssertFalse(fm.fileExists(atPath: oldFolder.path), "a copy left for two days is removed")
+        XCTAssertTrue(fm.fileExists(atPath: fresh.path), "a copy made now stays")
+        UploadIncoming.discard(fresh)
+        XCTAssertFalse(fm.fileExists(atPath: freshFolder.path))
+    }
 }

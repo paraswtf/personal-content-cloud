@@ -69,6 +69,7 @@ struct UploadScreen: View {
             if let config = try? await Cloud.api().getConfig() { queue.maxUploadBytes = Int64(config.maxUploadBytes) }
             await queue.resume()
         }
+        .onDisappear { queue.stopPolling() }
     }
 
     private func queueSection(_ infos: [UploadRowInfo]) -> some View {

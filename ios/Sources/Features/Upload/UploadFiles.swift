@@ -35,6 +35,19 @@ struct UploadIncoming: Sendable {
         try? FileManager.default.removeItem(at: dir)
     }
 
+    /// Removes the copies' folders not touched for `age` seconds: copies no add took, because the app stopped
+    /// between making the copy and queueing it. A copy the queue takes leaves this folder at once.
+    static func sweep(olderThan age: TimeInterval) {
+        let fm = FileManager.default
+        let cutoff = Date(timeIntervalSinceNow: -age)
+        let keys: [URLResourceKey] = [.contentModificationDateKey]
+        guard let dirs = try? fm.contentsOfDirectory(at: folder, includingPropertiesForKeys: keys) else { return }
+        for dir in dirs {
+            let modified = (try? dir.resourceValues(forKeys: Set(keys)))?.contentModificationDate ?? .distantPast
+            if modified < cutoff { try? fm.removeItem(at: dir) }
+        }
+    }
+
     /// A file name without path separators or a leading dot, never empty.
     static func safeName(_ name: String) -> String {
         let cleaned = name.replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: ":", with: "_")

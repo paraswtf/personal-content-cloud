@@ -22,6 +22,19 @@ final class SyncEngine: ObservableObject {
     private let monitor = NWPathMonitor()
     private var onWifi = true
 
+    /// Library assets one side is taking to the uploader right now (exporting, hashing, asking the server, starting
+    /// the upload): this sync or the Upload screen's queue (UploadQueue). The side that holds an asset sends it and the
+    /// other leaves it alone, so the two never export the same asset at once (an export starts by emptying the
+    /// asset's folder) or start its upload twice.
+    private(set) var claimed: Set<String> = []
+
+    /// Takes an asset for export and upload; false when the other side holds it.
+    @discardableResult
+    func claim(_ assetId: String) -> Bool { claimed.insert(assetId).inserted }
+
+    /// Lets the asset go (sent, failed, known already, or left for the next run).
+    func release(_ assetId: String) { claimed.remove(assetId) }
+
     /// What the sync check answered for the assets of a run.
     struct ServerState {
         var assets: [String: String] = [:]
@@ -160,9 +173,12 @@ final class SyncEngine: ObservableObject {
             let live = await uploader.liveAssets()
             if live.contains(rec.assetId) || uploader.isDriving(rec.assetId) {
                 uploader.showSending(rec)
-            } else {
+            } else if claim(rec.assetId) {
                 let asset = inLibrary[rec.assetId] ?? PhotoLibrary.assets(ids: [rec.assetId]).first
                 await resume(rec, asset: asset, server: server, api: api)
+                release(rec.assetId)
+            } else {
+                continue   // the Upload screen's queue is taking it to the uploader
             }
             slots.watch(rec.assetId)
             await slots.waitForSlot()
@@ -180,6 +196,9 @@ final class SyncEngine: ObservableObject {
             if handled.contains(id) { continue }
             // Sent from the Upload screen while this run went on: its upload is already on the wire.
             if let rec = byId[id], rec.status == "uploading" || uploader.isDriving(id) { continue }
+            // The Upload screen's queue is exporting it right now: the queue sends it.
+            guard claim(id) else { continue }
+            defer { release(id) }
             let isNew = byId[id] == nil
             let rec = byId[id] ?? {
                 let r = SyncRecord(assetId: id, filename: "", kind: asset.mediaType == .video ? "video" : "image",
