@@ -45,6 +45,8 @@ struct BoxesEditorSheet: View {
         .onAppear {
             if startPicking && path.isEmpty { path = [.picker] }
         }
+        // A failed save leaves the editor open: its message shows here, not under the sheet.
+        .toastHost()
     }
 }
 
