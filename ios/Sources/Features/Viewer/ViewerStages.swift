@@ -67,7 +67,9 @@ struct ViewerDocumentStage: View {
         .padding(.horizontal, 12)
         .contentShape(Rectangle())
         .onTapGesture { environment.toggleChrome() }
-        .sheet(item: $file) { file in ViewerQuickLook(url: file.url).ignoresSafeArea() }
+        .sheet(item: $file) { file in
+            ViewerQuickLook(url: file.url).ignoresSafeArea().onDisappear { ViewerFiles.discard(file) }
+        }
         .onChange(of: page, initial: true) { _, now in state.page[context.uid] = now }
     }
 
@@ -224,7 +226,9 @@ struct ViewerFileCard: View {
         .background(.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 20))
         .padding(24)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .sheet(item: $file) { file in ViewerShareSheet(items: [file.url]) }
+        .sheet(item: $file) { file in
+            ViewerShareSheet(items: [file.url]).onDisappear { ViewerFiles.discard(file) }
+        }
     }
 }
 
@@ -274,7 +278,9 @@ struct ViewerVideoPreparing: View {
                 context.reload()
             }
         }
-        .sheet(item: $file) { file in ViewerShareSheet(items: [file.url]) }
+        .sheet(item: $file) { file in
+            ViewerShareSheet(items: [file.url]).onDisappear { ViewerFiles.discard(file) }
+        }
     }
 }
 

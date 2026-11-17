@@ -50,7 +50,9 @@ struct ViewerToolbar: View {
                 CloudEvents.post(items: [context.uid])
             }
         }
-        .sheet(item: $file) { file in ViewerShareSheet(items: [file.url]) }
+        .sheet(item: $file) { file in
+            ViewerShareSheet(items: [file.url]).onDisappear { ViewerFiles.discard(file) }
+        }
         .confirmAction("Move this \(ViewerFormat.trashNoun(MediaKind(context.item?.kind.rawValue))) to the trash?",
                        isPresented: $confirmTrash, actionTitle: "Move to trash",
                        message: "It leaves the library now and is deleted for good after \(trashDays) days. Until then you can restore it from Trash with its tags and document details.") {
@@ -91,7 +93,8 @@ struct ViewerToolbar: View {
                             Label("Download this page as an image", systemImage: "doc.richtext")
                         }
                     }
-                    if kind == .image || kind == .video {
+                    // Not for private items: the phone's library is outside the vault (and may sync to iCloud).
+                    if (kind == .image || kind == .video) && !item.nsfw && !context.vault {
                         Button {
                             Task { await saveToPhotos(address: download, filename: item.filename) }
                         } label: {
@@ -200,6 +203,7 @@ struct ViewerToolbar: View {
         defer { working = false }
         do {
             let fetched = try await ViewerFiles.fetch(context, address: address, filename: filename)
+            defer { ViewerFiles.discard(fetched) }
             try await ViewerFiles.saveToPhotos(fetched)
             Toaster.shared.ok("Saved to Photos")
         } catch {
