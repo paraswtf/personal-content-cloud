@@ -42,6 +42,22 @@ final class VaultSession {
         loadError = nil
         // A locked vault leaves no picture of it in memory either.
         if !isOpen() { ImageLoader.shared.forgetVault() }
+        scheduleExpiry()
+    }
+
+    @ObservationIgnored private var expiry: Task<Void, Never>?
+
+    /// When the window ends on this phone's clock, the vault reads as locked and its pictures leave memory, wherever
+    /// the owner is in the app (the server sets the window once, at unlocking, and never extends it).
+    private func scheduleExpiry() {
+        expiry?.cancel()
+        expiry = nil
+        guard let end = until, end > Date() else { return }
+        expiry = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(end.timeIntervalSinceNow))
+            guard !Task.isCancelled, let self, self.until == end else { return }
+            self.expire()
+        }
     }
 
     /// Opens the vault with the account's password. Throws the server's answer (401 for a wrong password).
@@ -61,6 +77,8 @@ final class VaultSession {
     /// The window ran out on this phone's clock and the server did not say otherwise: read it as locked.
     func expire() {
         until = nil
+        expiry?.cancel()
+        expiry = nil
         ImageLoader.shared.forgetVault()
     }
 }
