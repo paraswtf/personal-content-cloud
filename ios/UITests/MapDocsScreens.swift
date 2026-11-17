@@ -109,12 +109,19 @@ final class MapDocsScreens: ScreenTestCase {
         let list = app.collectionViews["viewer.info.list"].exists ? app.collectionViews["viewer.info.list"]
                                                                   : app.collectionViews.firstMatch
         let show = app.buttons["viewer.info.showOnMap"]
+        // XCUITest counts a button as hittable when a sliver of it shows at the screen's bottom edge, and a tap there
+        // misses: scroll until it is well inside the screen
+        func wellShown() -> Bool {
+            guard show.exists, show.isHittable else { return false }
+            let screen = app.windows.firstMatch.frame
+            return show.frame.minY >= screen.minY + 150 && show.frame.maxY <= screen.maxY - 90
+        }
         var swipes = 0
-        while !(show.exists && show.isHittable) && swipes < 12 {
+        while !wellShown() && swipes < 12 {
             list.swipeUp()
             swipes += 1
         }
-        XCTAssertTrue(show.exists, "the info panel has no Show on map")
+        XCTAssertTrue(wellShown(), "Show on map did not come into view in the info panel")
         show.tap()
         XCTAssertTrue(app.navigationBars["Map"].waitForExistence(timeout: 15), "the map did not open from the viewer")
         let title = app.staticTexts["map.panel.title"]
