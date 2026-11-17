@@ -32,6 +32,16 @@ final class SyncRecord {
     var filesData: Data?        // [UploadFile] as JSON: the exported originals and their upload state
     var trashedOnServer: Bool = false  // the server holds it, in its trash (shown apart in Delete synced)
 
+    // The Upload screen's queue (Features/Upload). A file chosen there from Files, a picker copy or the camera
+    // gets a record of its own ("upload:<uuid>", origin file or camera); a photo chosen from the library uses
+    // the asset's own record (origin library), so the phone's sync knows it is sent.
+    var queuedAt: Date?         // listed in the Upload screen's queue since then; nil when not listed
+    var origin: String = "library"   // library (an asset of the phone's library), file, camera
+    var serverStatus: String?   // the server's last word on the upload (queued, processing, stored, duplicate,
+                                // rejected, error, cancelled), read while the queue lists it
+    var thumbRef: String?       // the stored item's thumb (item_thumb_url)
+    var itemVault: Bool = false // the stored item is in the vault (item_nsfw): open it with vault=1
+
     init(assetId: String, filename: String, kind: String, bytes: Int64, createdAt: Date) {
         self.assetId = assetId
         self.filename = filename
@@ -48,6 +58,10 @@ final class SyncRecord {
         get { filesData.flatMap { try? JSONDecoder().decode([UploadFile].self, from: $0) } ?? [] }
         set { filesData = newValue.isEmpty ? nil : try? JSONEncoder().encode(newValue) }
     }
+
+    /// A file of the Upload screen, not an asset of the library: its copy stays until the queue lets it go
+    /// (Retry needs it after a failure or a cancel), and the phone's sync leaves it to the queue.
+    var isQueueFile: Bool { origin != "library" }
 
     /// Forgets the upload in flight (the files and their finished uploads stay) and drops its chunk
     /// file, so a transfer that never completes leaves nothing behind.
@@ -138,11 +152,37 @@ final class SyncStore {
     private init() {
         let schema = Schema([SyncRecord.self, SyncEvent.self])
         let config = ModelConfiguration("sync", schema: schema)
+        container = Self.open(schema: schema, config: config)
+    }
+
+    /// Opens the store, and starts the app even when it cannot. A store file that can be read but not opened (a
+    /// model change iOS could not migrate) is moved aside and a new store made: the sync then asks the server what it
+    /// already holds, by asset and by file hash, so nothing is sent twice. A store file that cannot be read now (the
+    /// phone has not been unlocked since it started) is left as it is, and this launch keeps its state in memory.
+    private static func open(schema: Schema, config: ModelConfiguration) -> ModelContainer {
+        if let container = try? ModelContainer(for: schema, configurations: [config]) { return container }
+        let url = config.url
+        if readable(url) {
+            let aside = url.path + ".unopened-\(Int(Date().timeIntervalSince1970))"
+            for suffix in ["", "-wal", "-shm"] where FileManager.default.fileExists(atPath: url.path + suffix) {
+                try? FileManager.default.moveItem(atPath: url.path + suffix, toPath: aside + suffix)
+            }
+            if let fresh = try? ModelContainer(for: schema, configurations: [config]) { return fresh }
+        }
+        let memory = ModelConfiguration("sync-memory", schema: schema, isStoredInMemoryOnly: true)
         do {
-            container = try ModelContainer(for: schema, configurations: [config])
+            return try ModelContainer(for: schema, configurations: [memory])
         } catch {
             fatalError("Could not open the sync store: \(error)")
         }
+    }
+
+    /// The store's file exists and its first bytes can be read now.
+    private static func readable(_ url: URL) -> Bool {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return false }
+        defer { try? handle.close() }
+        guard let head = try? handle.read(upToCount: 16) else { return false }
+        return head.count == 16
     }
 
     /// A context for background work (the main context is for the views).

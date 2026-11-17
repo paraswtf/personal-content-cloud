@@ -12,14 +12,21 @@ struct SettingsView: View {
     @State private var confirmSignOut = false
 
     var body: some View {
-        NavigationStack {
+        // Shown inside the Upload and sync screen's navigation stack.
+        Group {
             Form {
                 Section("Server") {
                     LabeledContent("Address", value: session.serverURL?.absoluteString ?? "")
                     Button("Sign out", role: .destructive) { confirmSignOut = true }
                 }
                 Section("Sync") {
-                    Toggle("Sync automatically", isOn: $autoSync).onChange(of: autoSync) { _, v in AppSettings.autoSync = v; if v { BackgroundSync.schedule() } }
+                    Toggle("Sync automatically", isOn: $autoSync).onChange(of: autoSync) { _, v in
+                        AppSettings.autoSync = v
+                        if v {
+                            BackgroundSync.schedule()
+                            Task { await PhotoLibrary.requestAccessIfNeeded() }
+                        }
+                    }
                     Toggle("Only on Wi-Fi", isOn: $wifiOnly).onChange(of: wifiOnly) { _, v in AppSettings.wifiOnly = v; BackgroundUploader.shared.settingsChanged() }
                     Toggle("Only while charging", isOn: $chargingOnly).onChange(of: chargingOnly) { _, v in AppSettings.chargingOnly = v; BackgroundSync.schedule(); BackgroundUploader.shared.settingsChanged() }
                     Toggle("Include videos", isOn: $includeVideos).onChange(of: includeVideos) { _, v in AppSettings.includeVideos = v }
@@ -38,7 +45,7 @@ struct SettingsView: View {
                         .font(.footnote).foregroundStyle(.secondary)
                 }
             }
-            .navigationTitle("Settings")
+            .navigationTitle("Sync settings")
             .confirmationDialog("Sign out of this server?", isPresented: $confirmSignOut, titleVisibility: .visible) {
                 Button("Sign out", role: .destructive) { session.signOut() }
             }

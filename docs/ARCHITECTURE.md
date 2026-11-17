@@ -168,6 +168,11 @@ and the heads of photos that are gone for good (section 36).
   `POST /api/auth/setup` creates it (username 1..64, password 10..200 chars, argon2id), only while no
   account exists (409 after).
 - Password login: `POST /api/auth/login`. Rate limit: 10 failures per 10 minutes per IP (in memory).
+- Device login (the iOS app): `POST /api/auth/device-login {username, password, device_name}` -> `DeviceCreated
+  {id, name, token}`. The same checks as the password login in the same order (409 `setup_required`, then the
+  shared failure budget, 429 `too_many_attempts`, then 401 `invalid_credentials`), but no cookie: it creates a
+  device session (section 21) and returns its token once. Typing the password proves what the open vault proves
+  for `POST /api/auth/devices`.
 - Passkeys (`webauthn` 3.x): registration from Settings (`resident_key=required`, `user_verification=preferred`),
   login with a discoverable credential (`POST /api/auth/passkeys/login/options` returns options and a
   `challenge_id`; the challenge is stored in `challenges` with a 5-minute expiry; `verify` creates the
@@ -1407,7 +1412,8 @@ login, passkey login, vault unlock and password change), `challenge_invalid` and
 `not_a_pass` (422), `length_required` (411, simple upload without `Content-Length`), `Invalid cursor` (400).
 `vault_locked` is also the answer of passkey registration and removal while the vault is locked.
 
-Auth (`/api/auth`): `GET state`; `POST setup`; `POST login`; `POST logout`; `POST logout-all`;
+Auth (`/api/auth`): `GET state`; `POST setup`; `POST login`; `POST device-login {username, password, device_name}`;
+`POST logout`; `POST logout-all`;
 `GET sessions`; `DELETE sessions/{id}`; `POST password {current_password,new_password}`;
 `POST passkeys/register/options`; `POST passkeys/register/verify {name, credential}`; `GET passkeys`;
 `PATCH passkeys/{id} {name}`; `DELETE passkeys/{id}`; `POST passkeys/login/options` -> `{challenge_id, options}`;
@@ -2392,7 +2398,9 @@ Device tokens: a device session is a `sessions` row with `device_name` set, crea
 `Authorization: Bearer <token>`; `sessions.authenticate` accepts it in place of the cookie, the session
 slides by `DEVICE_DAYS` (365), the vault starts locked, and the CSRF header is not required for bearer
 requests (no cookie, so no browser can send it on the owner's behalf). `SessionOut.device_name` tells
-devices and browsers apart in Settings > Sessions > Devices.
+devices and browsers apart in Settings > Sessions > Devices. The app can also sign in with the account's username
+and password: `POST /api/auth/device-login` (section 4) creates the same kind of device session and returns its
+token once, under the login's failure budget.
 
 Sync check: `POST /api/uploads/check {sha256: [...], asset_ids: [...]}` -> `{known: {sha256: uid}, assets:
 {asset_id: uid}}`, where `asset_ids` are the `pair_key` values the device sent with its uploads (the iOS

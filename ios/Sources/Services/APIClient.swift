@@ -68,8 +68,10 @@ struct ItemBrief: Decodable {
 }
 
 actor APIClient {
-    private let base: URL
-    private let token: String
+    /// Read by the generated endpoints (API/APIClient+Core.swift, `connection()`): immutable and Sendable,
+    /// so they can be read without hopping onto the actor.
+    let base: URL
+    let token: String
     private let session: URLSession
 
     init(base: URL, token: String) {
@@ -80,7 +82,8 @@ actor APIClient {
         cfg.timeoutIntervalForRequest = 60
         cfg.timeoutIntervalForResource = 3600
         cfg.httpCookieStorage = nil
-        session = URLSession(configuration: cfg)
+        // Redirects only on the server's own host, so the device token never reaches another one.
+        session = URLSession(configuration: cfg, delegate: SameHostRedirects.shared, delegateQueue: nil)
     }
 
     static func current() -> APIClient? {

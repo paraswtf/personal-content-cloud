@@ -1,0 +1,208 @@
+# The iPhone app: structure and conventions
+
+The app is SwiftUI for iOS 17 (Observation, no third-party packages), generated into an Xcode project by
+XcodeGen from `ios/project.yml` and built on GitHub's macOS machines (`.github/workflows/ios.yml`). The server's
+contract is `docs/ARCHITECTURE.md`; the website (`frontend/src`) is the reference for what each screen does.
+
+## Folders
+
+| Folder | What it holds | Who changes it |
+|---|---|---|
+| `Sources/API/` | The generated API layer (`Models.generated.swift`, `Endpoints.generated.swift`) and its transport (`APIClient+Core.swift`). Regenerate with `backend/.venv/bin/python scripts/gen_swift_api.py`; `backend/tests/test_swift_api.py` fails when the files are stale. | The generator only |
+| `Sources/Core/` | Services: the connection, the core's own requests, images, video, paging, undo, toasts and error text, formatting, routes, the adapters from API types to the core's shapes. | Core work |
+| `Sources/UI/` | Shared views: the media grid, the viewer core and its boxes, the person picker, selection and the bulk bar, avatar, chips, states. | Core work |
+| `Sources/Shell/` | The tabs, each tab's navigation stack, the More menu, the routes' destinations. | Core work |
+| `Sources/Features/<Area>/` | One folder per area; everything an area needs beyond the core lives here. | That area only |
+| `Sources/Views/`, `Sources/Services/`, `Sources/Models/` | The sign-in screen and the phone library sync (SyncEngine, BackgroundUploader, SyncView, DeleteSyncedView, sync settings). | Upload area and core |
+
+## The areas and their entry files
+
+Each area replaces its placeholder files (keep the type names and initializers, the shell calls them):
+
+| Area | Folder | Entry points others call (names and signatures stay) | Website reference |
+|---|---|---|---|
+| Library | `Features/Library/` | `LibraryScreen()`, `LibraryBrowser(scope:header:)` with `LibraryScope` (`.all`, `.album(id:)`, `.vault`; the album and vault screens show it), `LibraryFilters` and `LibraryFilterBar(filters:scope:)` (the map uses them) | `pages/LibraryPage.tsx`, `components/library`, `components/timeline`, `components/MediaGrid.tsx` |
+| Viewer | `Features/Viewer/` | `ViewerScreen(request:)`, which wires `ViewerInfoPanel`, `ViewerToolbar` and `ViewerStages` into `ViewerHooks` | `components/Viewer.tsx`, `components/viewer` (InfoPanel, TagsPanel, TextPanel, DownloadMenu, RelatedSuggest, VideoStage, DocumentStage, LiveButton) |
+| Viewer boxes | `Features/ViewerBoxes/`, and `UI/Viewer/` for the stage | `ViewerBoxesModel` (`tap(_:in:)`, `selectedBoxId`), `ViewerBoxesToolbarItems(model:context:)`, `ViewerBoxesInfoSection(model:context:)`, `.viewerBoxEditors(_:)` | `components/viewer` (FaceEditor, PersonEdit, AnimalEditor, BoxAdjuster, PersonBoxCard, GuessChip, PhotoStage) |
+| People | `Features/People/` | `PeopleScreen()`, `PersonScreen(personId:)`, `PeopleSelectionSheet(uids:vault:fromPersonId:onDone:)` ("People" on the library's selection) | `pages/PeoplePage.tsx`, `pages/PersonPage.tsx`, `components/people` |
+| 3D heads | `Features/Heads/` | `HeadsPersonTab(personId:name:)` (the person page's 3D tab) | `components/people/Model3dTab.tsx`, `Head3dViewer.tsx` |
+| Review | `Features/Review/` | `ReviewScreen()`, `ReviewGuessCard(guess:onDecided:)` (also on the person page's Guesses tab), `ReviewGuessEvidence(guess:)` (the boxes area's guess chip and editor show it) | `pages/ReviewPage.tsx`, `components/people/GuessCard.tsx` |
+| Albums and sharing | `Features/Albums/` | `AlbumsScreen()`, `AlbumScreen(albumId:)`, `AlbumsAddSheet(uids:onDone:)`, `SharingCreateSheet(target:)`, `SharingLinksScreen()` | `pages/AlbumsPage.tsx`, `pages/AlbumPage.tsx`, `components/albums`, `components/share`, `components/shell/settings/SharingTab.tsx` |
+| Map | `Features/Map/` | `MapScreen()` | `pages/MapPage.tsx`, `components/map` |
+| Documents | `Features/Documents/` | `DocumentsScreen()` | `pages/DocumentsPage.tsx`, `components/documents` |
+| Vault | `Features/Vault/` | `VaultScreen()`, `VaultUnlockSheet(onUnlocked:)` (Settings opens the vault with it) | `pages/VaultPage.tsx`, `components/vault`, `components/shell/VaultBadge.tsx` |
+| Trash | `Features/Trash/` | `TrashScreen()` | `pages/TrashPage.tsx`, `components/trash` |
+| Upload | `Features/Upload/`, `Views/`, `Services/`, `Models/` | `UploadScreen()` (keeps its links to SyncView, DeleteSyncedView and SettingsView) | `pages/UploadPage.tsx`, `components/upload` |
+| Settings: account | `Features/Settings/Account/` | `SettingsAccountScreen()`, `SettingsPasskeysScreen()`, `SettingsSessionsScreen()`, `SettingsWalletScreen()`, `SettingsAppearanceScreen()` | `components/shell/settings` (AccountTab, PasskeysTab, SessionsTab, WalletTab, AppearanceTab) |
+| Settings: system | `Features/Settings/System/` | `SettingsSystemScreen()`, `SettingsLearningScreen()`, `SettingsUndoHistoryScreen()` | `components/shell/settings` (SystemTab, StorageCards, ThroughputCard, VideoCard, LearningTab), `components/admin`, `components/undo` |
+
+`Features/Settings/SettingsScreen.swift` (the list of settings screens) is shared and stays as it is.
+
+Each entry point starts as a placeholder in its area's folder, so an area that uses another's (the library's
+selection presents `AlbumsAddSheet`, the person page shows `HeadsPersonTab` and `ReviewGuessCard`, the viewer's
+toolbar shows `ViewerBoxesToolbarItems`) compiles and runs before that area is done. The area that owns an entry
+point replaces its body and keeps its name and parameters.
+
+Type names must be unique across the app: prefix an area's own types with the area (`PeopleFilterBar`,
+`AlbumRow`), and do not add types to `Core`, `UI` or `Shell` from an area. Something two areas need goes to
+the core in its own change.
+
+## Calling the server
+
+- Screens use the generated endpoints: `let page = try await Cloud.api().listItems(cursor: cursor, limit: 120)`.
+  `Cloud.api()` (main actor) gives the client for the signed-in server and throws a 401 when signed out. Types
+  are in the `API` namespace (`API.ItemCard`, `API.PersonOut`); properties are lowerCamelCase; string enums have
+  an `unknown(String)` case, so switch with a `default`.
+- The vault: wrap the calls of a vault screen in `APIContext.$vault.withValue(true) { ... }`, and pass
+  `vault: true` to `RemoteImage` and `AuthorizedPlayer` for vault items' pictures and videos.
+- The core's own small requests (`CoreHTTP`, with snake_case decoding into the `Core...` structs) are for the core;
+  areas do not need them.
+
+## Lists
+
+- `Pager<Item>` loads a list a page at a time: `Pager { cursor in try await Cloud.api().listTrash(cursor: cursor).pagerPage }`
+  (`API.ItemPage.pagerPage` gives a page; build `Pager.Page(items:next:total:)` for other shapes). Call
+  `await pager.refresh()` in `.task` when `!pager.loaded`, `pager.loadMoreIfNeeded(item)` as rows appear, and use
+  `PagerStateView` for the loading, failed and empty states.
+- `MediaGrid(items:selection:onOpen:onAppear:)` shows any `MediaItem` (`API.ItemCard`, `API.SearchHit`, or an
+  adapter of your own). `SelectionModel<String>` and `BulkBar` handle selecting.
+- Refresh when the server changed: `.onCloudChange { Task { await pager.refresh() } }` (posted after an undo or a
+  redo, and by any screen with `CloudEvents.post(items:)` after a change other screens show).
+
+## Writes, undo and messages
+
+- Every owner action goes through `UndoCenter.shared.perform("Named the face") { try await api.assignFaces(...) }`.
+  All writes inside share one action id, so a loop over many items undoes as one; when the server changed
+  something, the action joins the history and the toast offers Undo (with the website's wording for refusals).
+  The label is the success message in plain words, without the names of people in the library in code.
+  Writes made outside `perform` still join the history with a plain label, but show no message.
+- Errors: `Toaster.shared.error(error, doing: "save the name")` shows "Could not save the name. ..." with the
+  server's code explained (`ErrorText`). A cancelled request shows nothing.
+- `Toaster.shared.ok("Added to the album")` for a plain confirmation.
+
+## Navigation
+
+- `NavigationLink(value: Route.person(id: 3))` pushes on the current tab; `router.open(.album(id: 2))` does the same
+  from code (`@Environment(AppRouter.self) private var router`).
+- Items open in the viewer over everything: `router.show(items, start: item, loadMore: { ... })` with the list the
+  item came from, so the owner can page through it. `router.open(.item(uid:))` opens a single item.
+- The viewer core (`ViewerCore(request:hooks:)`) pages, zooms and plays; the viewer area fills `ViewerHooks`:
+  `onBoxTap` (the box under the finger, always the smallest one there), `infoPanel`, `toolbar`, `stage` (a page
+  the viewer area draws itself, such as a document's pages; nil keeps the core's picture or video), and
+  `selectedBoxId` (drawn selected, never raised above a smaller box). `ViewerPageContext.item` is the whole
+  `API.ItemDetail`; call `context.reload()` after a change to the item.
+- Vault items open with `router.show(items, start: item, vault: true)`: the viewer then asks for the item, its
+  pictures and its videos with `vault=1`, and `context.vault` tells the viewer's areas to wrap their calls in
+  `APIContext.$vault.withValue(context.vault) { ... }`.
+- The map from another screen: `router.open(.mapAt(MapStart(filters:)))` opens it with the library's filters
+  (the library's "Show on map"), `MapStart(latitude:longitude:)` at one item's spot, which it flies to and lists.
+- The library with filters set: `router.open(.libraryFiltered(filters))` (a tag tapped in the viewer), which is
+  `LibraryBrowser(scope: .all, filters:)`.
+- A video's moment: `ViewerEntry(uid:thumb:kind:startAt:)` opens a video paused at that second (a search hit's
+  match, a face's or a guess's frame); build such entries and open them with `router.show(entries:start:...)`.
+  The viewer area reads it as `context.startAt`.
+- Document mode: `router.show(items, start:, mode: .document)` (the Documents page) opens the info panel at once,
+  and `context.documentFirst` asks the panel to put the document first.
+- After the item left the list (trash, vault), `context.removeFromViewer()` shows the next item, or closes the
+  viewer when none is left.
+- `PersonPickerSheet(... note:)` shows a line under the title saying what picking does.
+
+## The vault
+
+- The app signs in with a session of its own, so its vault window is its own: opening the vault in a browser does
+  not open it on the phone. `VaultSession.shared` holds the window (from the auth state's `vault_until`); unlocking
+  and locking go through it, and Settings presents `VaultUnlockSheet` when the server answers 403 `vault_locked`.
+- Vault pictures stay in a memory cache of their own (`ImageLoader`), emptied when the vault is found locked and at
+  sign-out, and are never written to the disk cache.
+- Passkeys need the server's own address as an associated domain, which an app for any self-hosted server cannot
+  have: adding a passkey and unlocking with one open the website instead.
+
+## People
+
+- Who put a person on a box: `BoxOrigin.of(...)` and `OriginIcon(origin:)` (UI/Origin.swift, the website's
+  lib/origin.ts and OriginIcon), a person icon for the owner's and the system's icon for the rest.
+- Only named people are shown anywhere in the app: the server already leaves unnamed groups out (a box of one
+  arrives with `person` nil, a guess for one arrives as nil). Use `PersonOption(person)`, which is nil for an
+  unnamed person, and `Fmt.isNamed(_:)` where a list could still hold one.
+- `PersonPickerSheet(title:kind:like:excluding:allowCreate:species:speciesOnly:onPick:)` picks a person (or pet)
+  or a new name, as the website's PersonPicker. Pass what is being named as `like:` (`.box(box)`,
+  `.faces(ids)`, `.bodies(ids)`, `.animals(ids)`, `.person(id, on: uids)`, `.item(uid)`): with nothing typed, the
+  most alike named people come first under "Most alike", each with why ("Looks like them") and "Likely" when the
+  matching would take them, then everyone else; typing filters by name and keeps the order of likeness. The list
+  waits for the likeness answer, so it never moves under the finger.
+- Naming a face of a group the app made in the background makes guesses of the group's other faces: end the
+  message with `Fmt.guessedTail(answer.guessed)` ("2 faces that look alike wait in Review."), and a merge's with
+  `Fmt.followedTail(answer.followed)`.
+
+## Photos access and the phone's sync
+
+- The app asks for Photos access only on the upload and sync screens (`PhotoLibrary.requestAccessIfNeeded()`
+  when Upload and sync, Sync or Delete synced opens, or when the automatic sync is turned on), never at launch or
+  sign-in. The background task is registered at every launch (`BackgroundSync.register()`); the library observer
+  starts once access is given, and the shell starts the automatic sync when the app opens if it is on and allowed.
+- The upload area keeps that: its screen calls `PhotoLibrary.requestAccessIfNeeded()` when it opens.
+
+## Pictures and video
+
+- `RemoteImage(ref: item.thumbRef, maxPixel: 384)` for any address the API returns (thumbs, previews, face crops,
+  covers). The token is sent to the server's own host only; another host's address is not loaded.
+- `AuthorizedPlayer.player(for: urls.video)` for videos and Live Photo clips; `VideoPlayer(player:)` or
+  `PlayerSurface(player:)` (no controls) to show it.
+
+## Accessibility and words
+
+- Every control has a label (`accessibilityLabel`) and the controls tests use have an `accessibilityIdentifier`
+  of the form `area.thing` (`library.select`, `people.search`). Put identifiers on the controls themselves or on a
+  view that is one element (a List, a ScrollView): on a plain stack or a whole screen, SwiftUI hands the
+  identifier to every element inside and replaces theirs.
+- Words follow the website: plain sentences, no exclamation marks, no em dashes.
+
+## Tests
+
+Every push that touches `ios/` or `backend/` builds the app and runs its tests on GitHub's Macs against a seeded
+server (`README.md`, "Tests on GitHub"; the seed is `ci/seed_server.py`: 37 drawn photos, two named people with
+face boxes, one photo where a face sits inside a larger person box, faces nobody named, albums, a share, a vault
+photo and one in the trash).
+
+- Screen tests: a file per area under `UITests/` (`AlbumsScreens.swift`), a subclass of `ScreenTestCase` that calls
+  `try launchSignedIn()`, goes to its screen (`tab("Albums")`, `app.buttons["more.map"].tap()`), checks what the
+  seed put there and calls `snap("albums")` (unique names: they become the PNG files of the "screenshots"
+  artifact). The core's own are `CoreScreens.swift` and `SmokeScreens.swift`.
+- An area's seed data goes in its own file, `ci/seeds/<area>.py` (`library(kit)` and `api(kit)`, described at the
+  top of `ci/seed_server.py`), and its decoding checks in `UnitTests/<Area>DecodingTests.swift`, so areas never
+  edit the same file. Seeded items are dated before 1 May 2026 and named after the area; tests never count the
+  whole library, since other areas add to it.
+- Unit tests: `UnitTests/`, hosted by the app; pure logic (`BoxStackTests`, `PickerOptionsTests`) and
+  `APIDecodingTests`, which decodes the seeded server's answers into the generated types. An area that adds data
+  to the seed adds the matching decoding check there.
+- Add to the seed what a screen needs (in `library()` with the backend's test helpers, or in `api()` over HTTP),
+  made up, never from anyone's library. The seed opens the vault for the app's token, and the workflow's server
+  keeps it open for 240 minutes (`VAULT_UNLOCK_MIN`), longer than a full run. Guesses seeded as rows are withdrawn
+  when the server starts unless their evidence has a basis; the people area's seed names a face over HTTP and lets
+  the server make its guesses instead.
+- Tests that write change only what their own seed file made, and leave the rest as they found it: never the
+  device "iPhone simulator" (the tests' token), "Test Person", "Test Visitor", the core's albums, share, trashed
+  photo or the photo of 10 Nov 2026; no password change, sign out everywhere, learning reset or housekeeping.
+- In screen tests, a fast swipe flings a list past the row it looks for: scroll with slow drags and check after
+  each. Inside a List, a chart that takes a drag blocks scrolling, so charts select with a tap.
+
+### Debug-only test hooks
+
+Read only in Debug builds (`#if DEBUG`), as launch variables the screen tests set:
+
+| Variable | What it does |
+|---|---|
+| `PCC_TEST_SERVER`, `PCC_TEST_TOKEN` | sign in to the seeded server with the device token (`Sources/TestLaunch.swift`) |
+| `PCC_TEST_SIGNED_OUT=1` | start on the sign-in screen |
+| `PCC_TEST_ALBUMS_ADD_FROM=<album>` | open Add to album for that album's items (Features/Albums) |
+| `PCC_TEST_UPLOADS=<paths>` | the files "Add the test files" puts in the upload queue (`Features/Upload/UploadTestHook.swift`) |
+| `PCC_TEST_SETSYS_UNDO=1` | opening Undo history changes the seeded album "Setsys undo test", to undo and redo it (`Features/Settings/System/SettingsSystemTestHook.swift`) |
+
+### Things found while building
+
+- A view that draws nothing until it has loaded never runs its `.task`: load in the screen that shows it.
+- Swift Charts cuts a category axis's labels to one column's width: draw time labels under the chart yourself.
+- MapKit keeps the views of points inside a cluster; they are hidden from VoiceOver unless they show.
+- The upload queue keeps its files in `SyncRecord` (`queuedAt`, `origin` library, file or camera, `serverStatus`,
+  `thumbRef`, `itemVault`); a file from Files or the camera gets a record of its own (`upload:<uuid>`), a photo
+  picked from the library uses its asset's record, so the phone's sync knows it is sent.

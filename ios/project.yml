@@ -37,6 +37,9 @@ targets:
           UIApplicationSupportsMultipleScenes: false
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
         NSPhotoLibraryUsageDescription: "Content Cloud uploads your new photos and videos to your own server, and can remove the ones it has synced from this phone when you ask it to."
+        NSPhotoLibraryAddUsageDescription: "Content Cloud saves photos and videos you download from your cloud to this phone."
+        NSCameraUsageDescription: "Content Cloud takes photos and videos for your cloud when you use its camera."
+        NSMicrophoneUsageDescription: "Content Cloud records sound with the videos you take in its camera."
         # fetch and processing: the BGProcessingTask sync. The background URLSession that carries the
         # uploads (in.rivant.pcc.upload, section 28) needs no background mode of its own.
         UIBackgroundModes: [fetch, processing]
@@ -44,3 +47,47 @@ targets:
         NSAppTransportSecurity:
           NSAllowsLocalNetworking: true
         ITSAppUsesNonExemptEncryption: false
+  # Unit tests, hosted by the app (decoding tests for the API models go here).
+  PersonalContentCloudTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: UnitTests
+    dependencies:
+      - target: PersonalContentCloud
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: in.rivant.pcc.tests
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/PersonalContentCloud.app/PersonalContentCloud"
+        BUNDLE_LOADER: "$(TEST_HOST)"
+  # Screen tests against a seeded backend (ios/README.md, "Tests on GitHub").
+  PersonalContentCloudUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - path: UITests
+    dependencies:
+      - target: PersonalContentCloud
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: in.rivant.pcc.uitests
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_TARGET_NAME: PersonalContentCloud
+schemes:
+  PersonalContentCloud:
+    build:
+      targets:
+        PersonalContentCloud: all
+        PersonalContentCloudTests: [test]
+        PersonalContentCloudUITests: [test]
+    run:
+      config: Debug
+    test:
+      config: Debug
+      gatherCoverageData: false
+      targets:
+        - PersonalContentCloudTests
+        - PersonalContentCloudUITests
+    archive:
+      config: Release

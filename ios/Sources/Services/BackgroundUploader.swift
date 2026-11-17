@@ -30,7 +30,7 @@ private struct CreateBody: Encodable {
     let size: Int64
     let mime: String?
     let sha256: String
-    let source = "api"
+    let source: String          // api, or camera for the Upload screen's camera
     let client_id = "ios"
     let pair_key: String
     let resource: String
@@ -51,7 +51,8 @@ private struct CreateBody: Encodable {
 /// watches one asset's tasks while the engine waits, so a lost hand-off or a transfer iOS never starts
 /// cannot hold a run. Errors:
 /// - transport failures, 408, 429 and 5xx retry the same request after 1, 2, 4, 8, 16, 30 s
-///   (`earliestBeginDate`), at most eight attempts in a row;
+///   (`earliestBeginDate`), at most eight attempts in a row; time offline does not use up attempts (the
+///   website's uploader.ts does the same), and a request waiting for the connection is not cancelled as stuck;
 /// - 409 offset_mismatch continues from the server's offset; another 409 reads the upload's state;
 /// - 404 on a chunk or complete creates the upload again (create is idempotent per asset, half
 ///   and size, so the server answers with its own row while it has one);
@@ -77,6 +78,15 @@ final class BackgroundUploader: NSObject, ObservableObject {
 
     /// The files being sent now, by asset id.
     @Published private(set) var sending: [String: Sending] = [:]
+
+    /// When a request that failed on the way is tried again, by asset id (the Upload screen's "Connection problem.
+    /// Trying again in N s."). Cleared once bytes move again or the asset leaves the wire.
+    @Published private(set) var retryAt: [String: Date] = [:]
+
+    /// Assets that stopped or failed for the network (gave up on transport errors, could not reach the server, or a
+    /// request never started), which the Upload screen starts again when the connection comes back. Cleared when the
+    /// asset starts again.
+    private(set) var networkFailures: Set<String> = []
 
     /// The files being sent, in a steady order for the Sync screen.
     var sendingList: [Sending] {
@@ -275,18 +285,25 @@ final class BackgroundUploader: NSObject, ObservableObject {
                 // The session is being replaced (the Wi-Fi or charging option changed) and waits for the
                 // other assets' requests: sessionInvalidated() sends this one's next request.
                 if invalidating || reconfigurePending { continue }
-                kicks += 1
+                if SyncEngine.shared.online { kicks += 1 }
                 if kicks > Self.maxKicks {
+                    networkFailures.insert(rec.assetId)
                     stall(rec, "The transfer did not start; it continues on the next sync")
                     return
                 }
                 SyncStore.shared.log("No request in flight for \(rec.filename); sending the next one")
                 scheduleNext(rec)
+            } else if !SyncEngine.shared.online {
+                // Offline the session holds the request until the connection is back: that is waiting, not
+                // stuck. The stall clock starts again from now, so the first look after the connection comes
+                // back does not cancel at once.
+                lastProgress[assetId] = Date()
+                for t in tasks where t.state == .suspended { t.resume() }
             } else if Date().timeIntervalSince(lastProgress[assetId] ?? Date()) > Self.stuckSeconds {
                 SyncStore.shared.log("No progress on \(rec.filename) for \(Int(Self.stuckSeconds)) s; trying again")
                 tasks.forEach { $0.cancel() }
                 lastProgress[assetId] = Date()
-                retry(rec, reason: "no progress for \(Int(Self.stuckSeconds)) s")
+                retry(rec, reason: "no progress for \(Int(Self.stuckSeconds)) s", network: true)
             } else {
                 for t in tasks where t.state == .suspended { t.resume() }
             }
@@ -314,23 +331,52 @@ final class BackgroundUploader: NSObject, ObservableObject {
         return waiter?.byUploader ?? false
     }
 
-    /// The Stop button: cancels the tasks in flight. The records keep their state, and the next run
-    /// continues them from the server's offset.
+    /// The Upload screen's Cancel for one file: its requests stop, the server's upload is cancelled
+    /// (DELETE /api/uploads/{id}) and the record says cancelled. A queue file keeps its copy, so Retry can
+    /// send it again.
+    func cancel(_ assetId: String) {
+        guard let rec = record(assetId) else { return }
+        let inFlight = rec.uploadId
+        session.getAllTasks { tasks in
+            tasks.filter { UploadTaskTag.from($0.taskDescription)?.asset == assetId }.forEach { $0.cancel() }
+        }
+        rec.status = "cancelled"
+        rec.error = nil
+        rec.clearTransfer()
+        rec.files = rec.files.map { var f = $0; if !f.done { f.uploadId = nil }; return f }
+        rec.updatedAt = Date()
+        save()
+        ended(assetId)
+        if let inFlight, let api = APIClient.current() {
+            Task { try? await api.cancelUpload(id: inFlight) }
+        }
+    }
+
+    /// The reason a stopped upload carries: the Upload screen's queue keeps such a file stopped until Retry, offline
+    /// or not.
+    nonisolated static let stoppedReason = "The upload was stopped. Try again to continue it."
+
+    /// The Stop button (and signing out): cancels the tasks in flight. The records keep their state, and the next
+    /// run continues them from the server's offset. The reason stays on the record, so the Upload screen's queue says
+    /// the file was stopped rather than that the connection was lost.
     func pause() {
         session.getAllTasks { tasks in tasks.forEach { $0.cancel() } }
         for rec in records(status: "uploading") {
             rec.status = "pending"
+            rec.error = Self.stoppedReason
             rec.updatedAt = Date()
             releaseAll(rec.assetId)
         }
         save()
         sending.removeAll()
         lastProgress.removeAll()
+        retryAt.removeAll()
     }
 
     // MARK: the state machine
 
     private func begin(_ rec: SyncRecord) {
+        networkFailures.remove(rec.assetId)
         rec.status = "uploading"
         rec.error = nil
         rec.attempts = 0
@@ -423,6 +469,7 @@ final class BackgroundUploader: NSObject, ObservableObject {
                 }
             } else {
                 let body = CreateBody(filename: file.filename, size: file.bytes, mime: file.mime, sha256: file.sha256,
+                                      source: rec.origin == "camera" ? "camera" : "api",
                                       pair_key: rec.assetId, resource: file.resource)
                 bodyURL = UploadPaths.chunks.appendingPathComponent("create-\(UUID().uuidString).json")
                 try JSONEncoder().encode(body).write(to: bodyURL, options: .atomic)
@@ -468,7 +515,7 @@ final class BackgroundUploader: NSObject, ObservableObject {
         if rec.chunkPath == tag.body { rec.chunkPath = nil }
         if let error {
             if (error as? URLError)?.code == .cancelled { return }   // paused, or the app was force-quit
-            retry(rec, reason: error.localizedDescription)
+            retry(rec, reason: error.localizedDescription, error: error)
             return
         }
         switch status {
@@ -498,6 +545,7 @@ final class BackgroundUploader: NSObject, ObservableObject {
 
     private func succeeded(_ rec: SyncRecord, _ tag: UploadTaskTag, _ body: Data) {
         rec.attempts = 0
+        clearRetry(rec.assetId)
         lastProgress[rec.assetId] = Date()
         switch tag.step {
         case "chunk":
@@ -548,7 +596,9 @@ final class BackgroundUploader: NSObject, ObservableObject {
                 do { answer = .some(try await api.upload(id: id)) } catch { answer = .none }
                 guard rec.status == "uploading", rec.uploadId == id else { return }
                 switch answer {
-                case .none: self.stall(rec, "Cannot reach the server; the upload continues on the next sync")
+                case .none:
+                    self.networkFailures.insert(rec.assetId)
+                    self.stall(rec, "Cannot reach the server; the upload continues on the next sync")
                 case .some(.none): self.forgetUpload(rec); self.scheduleNext(rec)
                 case .some(.some(let up)): self.applyUpload(rec, up)
                 }
@@ -567,15 +617,38 @@ final class BackgroundUploader: NSObject, ObservableObject {
         }
     }
 
-    private func retry(_ rec: SyncRecord, reason: String) {
+    /// `network`: the request made no progress (the watchdog), which counts as a network failure like a transport
+    /// error does.
+    private func retry(_ rec: SyncRecord, reason: String, error: Error? = nil, network: Bool = false) {
+        guard Self.countsAttempt(online: SyncEngine.shared.online, error: error) else {
+            // Offline: tried again without counting. The Upload screen says the phone is offline; the background
+            // session holds the request until the connection is back.
+            retryAt[rec.assetId] = nil
+            scheduleNext(rec, after: Self.offlineDelay)
+            return
+        }
         rec.attempts += 1
         if rec.attempts >= Self.maxAttempts {
+            // A transport failure or a request that never moved: the Upload screen starts it again when the
+            // connection comes back (UploadQueue.backOnline).
+            if error is URLError || network { networkFailures.insert(rec.assetId) }
             fail(rec, "Gave up after \(Self.maxAttempts) attempts: \(reason)")
             return
         }
         let delay = Self.backoff[min(rec.attempts - 1, Self.backoff.count - 1)]
+        retryAt[rec.assetId] = Date(timeIntervalSinceNow: delay)
         scheduleNext(rec, after: delay)
     }
+
+    /// Whether a failed request uses up one of the file's attempts: only time offline does not, as on the website
+    /// (uploader.ts gives the attempt back only while the browser is offline). Online, every failure counts, so a
+    /// server or proxy that keeps dropping the connection ends in a failed row rather than retrying forever.
+    nonisolated static func countsAttempt(online: Bool, error: Error?) -> Bool {
+        online
+    }
+
+    /// How long a request that failed offline waits before it is handed to the session again.
+    static let offlineDelay: TimeInterval = 8
 
     /// The current file starts again with a new create (the server dropped or cancelled its upload).
     private func forgetUpload(_ rec: SyncRecord) {
@@ -592,7 +665,8 @@ final class BackgroundUploader: NSObject, ObservableObject {
             files[i].done = true
             files[i].uploadId = uploadId
             files[i].itemUid = itemUid
-            try? FileManager.default.removeItem(at: UploadPaths.url(files[i].path))   // the server has it
+            // the server has it; a queue file keeps its copy until the server's answer is final (Retry)
+            if !rec.isQueueFile { try? FileManager.default.removeItem(at: UploadPaths.url(files[i].path)) }
             if files[i].resource == "still" || files.count == 1 { rec.uid = itemUid ?? rec.uid } else { rec.clipUid = itemUid ?? rec.clipUid }
         }
         rec.files = files
@@ -608,7 +682,7 @@ final class BackgroundUploader: NSObject, ObservableObject {
         rec.error = nil
         rec.clearTransfer()
         rec.updatedAt = Date()
-        UploadPaths.removeAsset(rec.assetId)
+        if !rec.isQueueFile { UploadPaths.removeAsset(rec.assetId) }
         save()
         SyncStore.shared.log("Sent \(rec.filename)")
         ended(rec.assetId)
@@ -621,7 +695,7 @@ final class BackgroundUploader: NSObject, ObservableObject {
         rec.error = message
         rec.clearTransfer()
         rec.updatedAt = Date()
-        UploadPaths.removeAsset(rec.assetId)
+        if !rec.isQueueFile { UploadPaths.removeAsset(rec.assetId) }   // a queue file keeps its copy for Retry
         rec.files = rec.files.map { var f = $0; if !f.done { f.uploadId = nil }; return f }
         save()
         SyncStore.shared.log("\(rec.filename.isEmpty ? rec.assetId : rec.filename): \(message)", level: "error")
@@ -642,7 +716,13 @@ final class BackgroundUploader: NSObject, ObservableObject {
     private func ended(_ assetId: String) {
         sending[assetId] = nil
         lastProgress[assetId] = nil
+        clearRetry(assetId)
         releaseAll(assetId)
+    }
+
+    /// The asset is moving again: no countdown on its row.
+    private func clearRetry(_ assetId: String) {
+        if retryAt[assetId] != nil { retryAt[assetId] = nil }
     }
 
     // MARK: helpers
@@ -700,6 +780,7 @@ final class BackgroundUploader: NSObject, ObservableObject {
     fileprivate func sent(_ tag: UploadTaskTag?, total: Int64) {
         guard let tag else { return }
         lastProgress[tag.asset] = Date()
+        clearRetry(tag.asset)
         guard tag.step == "chunk", let bytes = sending[tag.asset]?.bytes, bytes > 0 else { return }
         sending[tag.asset]?.progress = min(1, Double(tag.offset + total) / Double(bytes))
     }

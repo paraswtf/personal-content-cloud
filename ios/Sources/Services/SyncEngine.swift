@@ -17,10 +17,25 @@ final class SyncEngine: ObservableObject {
     @Published var statusLine = "Idle"
     @Published var progress: Double = 0
     @Published var lastError: String?
+    /// The phone has a network path (NWPathMonitor): the Upload screen's rows say "You are offline" without it.
+    @Published private(set) var online = true
 
     private var task: Task<Void, Never>?
     private let monitor = NWPathMonitor()
     private var onWifi = true
+
+    /// Library assets one side is taking to the uploader right now (exporting, hashing, asking the server, starting
+    /// the upload): this sync or the Upload screen's queue (UploadQueue). The side that holds an asset sends it and the
+    /// other leaves it alone, so the two never export the same asset at once (an export starts by emptying the
+    /// asset's folder) or start its upload twice.
+    private(set) var claimed: Set<String> = []
+
+    /// Takes an asset for export and upload; false when the other side holds it.
+    @discardableResult
+    func claim(_ assetId: String) -> Bool { claimed.insert(assetId).inserted }
+
+    /// Lets the asset go (sent, failed, known already, or left for the next run).
+    func release(_ assetId: String) { claimed.remove(assetId) }
 
     /// What the sync check answered for the assets of a run.
     struct ServerState {
@@ -32,7 +47,11 @@ final class SyncEngine: ObservableObject {
     private init() {
         monitor.pathUpdateHandler = { [weak self] path in
             let wifi = path.usesInterfaceType(.wifi) || path.usesInterfaceType(.wiredEthernet)
-            Task { @MainActor in self?.onWifi = wifi }
+            let online = path.status == .satisfied
+            Task { @MainActor in
+                self?.onWifi = wifi
+                if self?.online != online { self?.online = online }
+            }
         }
         monitor.start(queue: DispatchQueue(label: "pcc.netpath"))
         UIDevice.current.isBatteryMonitoringEnabled = true
@@ -110,7 +129,10 @@ final class SyncEngine: ObservableObject {
         var byId = Dictionary(records.map { ($0.assetId, $0) }, uniquingKeysWith: { a, _ in a })
         let inLibrary = Dictionary(assets.map { ($0.localIdentifier, $0) }, uniquingKeysWith: { a, _ in a })
         // Interrupted uploads come first, whatever the current filter says (they hold server state).
-        let unfinished = records.filter { ($0.status == "uploading" || $0.status == "pending") && $0.files.contains { !$0.done } }
+        // (The Upload screen's own files are its queue's to continue, not the library sync's.)
+        let unfinished = records.filter {
+            !$0.isQueueFile && ($0.status == "uploading" || $0.status == "pending") && $0.files.contains { !$0.done }
+        }
         let todo = assets.filter { byId[$0.localIdentifier]?.status != "synced" }
         SyncStore.shared.log("\(assets.count) items in the library, \(todo.count) to check")
 
@@ -157,9 +179,12 @@ final class SyncEngine: ObservableObject {
             let live = await uploader.liveAssets()
             if live.contains(rec.assetId) || uploader.isDriving(rec.assetId) {
                 uploader.showSending(rec)
-            } else {
+            } else if claim(rec.assetId) {
                 let asset = inLibrary[rec.assetId] ?? PhotoLibrary.assets(ids: [rec.assetId]).first
                 await resume(rec, asset: asset, server: server, api: api)
+                release(rec.assetId)
+            } else {
+                continue   // the Upload screen's queue is taking it to the uploader
             }
             slots.watch(rec.assetId)
             await slots.waitForSlot()
@@ -175,6 +200,11 @@ final class SyncEngine: ObservableObject {
             progress = Double(done) / Double(max(1, todo.count))
             let id = asset.localIdentifier
             if handled.contains(id) { continue }
+            // Sent from the Upload screen while this run went on: its upload is already on the wire.
+            if let rec = byId[id], rec.status == "uploading" || uploader.isDriving(id) { continue }
+            // The Upload screen's queue is exporting it right now: the queue sends it.
+            guard claim(id) else { continue }
+            defer { release(id) }
             let isNew = byId[id] == nil
             let rec = byId[id] ?? {
                 let r = SyncRecord(assetId: id, filename: "", kind: asset.mediaType == .video ? "video" : "image",
@@ -325,7 +355,8 @@ final class SyncEngine: ObservableObject {
 
     /// Exports the asset's originals into its upload folder and hashes them. A file that is the
     /// same as before keeps its upload; the unfinished upload of a file that changed is cancelled.
-    private func prepare(_ rec: SyncRecord, asset: PHAsset, api: APIClient) async throws {
+    /// Also used by the Upload screen for a photo chosen from the library (UploadQueue).
+    func prepare(_ rec: SyncRecord, asset: PHAsset, api: APIClient) async throws {
         let old = rec.files
         UploadPaths.removeAsset(rec.assetId)
         let what = asset.mediaType == .video ? "video (\(Int(asset.duration)) s)" : "photo"

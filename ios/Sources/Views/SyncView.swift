@@ -18,19 +18,23 @@ struct SyncView: View {
     }
 
     static var recentFailed: FetchDescriptor<SyncRecord> {
-        var d = FetchDescriptor<SyncRecord>(predicate: #Predicate<SyncRecord> { $0.status == "failed" },
+        var d = FetchDescriptor<SyncRecord>(predicate: #Predicate<SyncRecord> { $0.status == "failed" && $0.origin == "library" },
                                             sortBy: [SortDescriptor(\.updatedAt, order: .reverse)])
         d.fetchLimit = 20
         return d
     }
 
     private func count(_ status: String) -> Int {
-        (try? ctx.fetchCount(FetchDescriptor<SyncRecord>(predicate: #Predicate<SyncRecord> { $0.status == status }))) ?? 0
+        // the library's assets only: the Upload screen lists its own files
+        (try? ctx.fetchCount(FetchDescriptor<SyncRecord>(predicate: #Predicate<SyncRecord> {
+            $0.status == status && $0.origin == "library"
+        }))) ?? 0
     }
 
     var body: some View {
         let syncedCount = count("synced"), failedCount = count("failed"), waitingCount = count("uploaded")
-        return NavigationStack {
+        // Shown inside the Upload and sync screen's navigation stack.
+        return Group {
             List {
                 Section {
                     HStack {
@@ -87,7 +91,10 @@ struct SyncView: View {
                 }
             }
             .navigationTitle("Sync")
-            .onAppear { if AppSettings.autoSync { engine.start(manual: false) } }
+            .task {
+                // The first visit asks for Photos access (never at launch); the automatic sync starts once allowed.
+                if await PhotoLibrary.requestAccessIfNeeded(), AppSettings.autoSync { engine.start(manual: false) }
+            }
         }
     }
 }

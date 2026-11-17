@@ -8,14 +8,24 @@ enum BackgroundSync {
     static let identifier = "in.rivant.pcc.sync"
     private static var observer: ChangeObserver?
 
+    /// At launch (didFinishLaunching): the background task is registered every time, as iOS requires. The library
+    /// observer waits for Photos access: registering it earlier makes iOS ask for access before sign-in. The app
+    /// asks only from the upload and sync screens (PhotoAccess.requestIfNeeded), which then start the observer.
     static func register() {
         BGTaskScheduler.shared.register(forTaskWithIdentifier: identifier, using: nil) { task in
             guard let task = task as? BGProcessingTask else { return }
             handle(task)
         }
-        observer = ChangeObserver()
-        PHPhotoLibrary.shared().register(observer!)
+        observeLibraryIfAllowed()
         schedule()
+    }
+
+    /// Watches the library for new photos once the app may read it; does nothing before that, or twice.
+    static func observeLibraryIfAllowed() {
+        guard observer == nil, PhotoLibrary.hasAccess else { return }
+        let changes = ChangeObserver()
+        PHPhotoLibrary.shared().register(changes)
+        observer = changes
     }
 
     static func schedule() {

@@ -7,8 +7,9 @@ Contract: `router` is a plain APIRouter without a prefix; main.py mounts it with
 - GET rp needs no login: {rp_id, home_url}, where the passkeys belong (the RP ID and the server's own address, the
   first of ORIGIN's origins); the site shows a link there when it runs on a custom domain in a browser without
   WebAuthn related origins.
-- POST setup, login, passkeys/login/options, passkeys/login/verify need no session but do need
-  the CSRF header. Every other route needs require_user (which also checks CSRF on writes).
+- POST setup, login, device-login, passkeys/login/options, passkeys/login/verify need no session but do
+  need the CSRF header. Every other route needs require_user (which also checks CSRF on writes).
+- device-login answers like login but returns a device token (DeviceCreated) instead of setting a cookie.
 - Wrong credentials answer 401 `invalid_credentials`; too many failures 429 `too_many_attempts`;
   setup after the account exists 409 `already_set_up`; login before setup 409 `setup_required`.
 - setup, login and passkey login create a session and set the `pcc_session` cookie.
@@ -36,6 +37,7 @@ from app.schemas import (
     ChallengeOut,
     DeviceCreated,
     DeviceIn,
+    DeviceLoginIn,
     LoginIn,
     Ok,
     PasskeyLoginVerifyIn,
@@ -295,6 +297,25 @@ def create_device(body: DeviceIn, request: Request, session: SessionInfo = Depen
     name = " ".join(body.name.split())[:80] or "Device"
     token, info = sessions.create_session(conn, request, device_name=name)
     log.info("device token created for %r", name)
+    return DeviceCreated(id=info.id, name=name, token=token)
+
+
+@router.post("/device-login", response_model=DeviceCreated, dependencies=[Depends(check_csrf)])
+def device_login(body: DeviceLoginIn, request: Request, conn: sqlite3.Connection = Depends(get_db)):
+    """Sign a device (the iOS app) in with the account's password and give it a device token, shown once.
+
+    The same checks as /login, in the same order and against the same failure budget: 409 `setup_required`,
+    429 `too_many_attempts` (10 failures per 600 s per IP, shared with /login, the vault password and passkey
+    logins), 401 `invalid_credentials`. No cookie is set: the device sends the token as a bearer credential.
+    Entering the password here proves what the open vault proves for POST /devices."""
+    _require_account(conn)
+    ip = _claim(request)
+    if not accounts.check_credentials(conn, body.username, body.password):
+        raise HTTPException(status_code=401, detail="invalid_credentials")
+    passwords.reset_login_failures(ip)
+    name = " ".join(body.device_name.split())[:80] or "Device"
+    token, info = sessions.create_session(conn, request, device_name=name)
+    log.info("device signed in with the password: %r", name)
     return DeviceCreated(id=info.id, name=name, token=token)
 
 

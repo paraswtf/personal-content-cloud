@@ -1,12 +1,39 @@
 # Content Cloud for iPhone
 
-A small SwiftUI app that keeps your phone's new photos and videos flowing into your Personal Content
-Cloud, and that can clear the ones it has synced out of the phone's library when you ask.
+The Personal Content Cloud on the phone: the website's screens as native SwiftUI screens, and the sync that keeps
+your phone's new photos and videos flowing into your cloud and can clear the ones it has synced out of the phone's
+library when you ask. `ARCHITECTURE-ios.md` describes the structure and the conventions every screen follows.
 
-What it does:
+The tabs are Library, People, Albums, Review and More:
+
+- Library: the timeline by month with a year scrubber, search (best match, looks like, text) with the matched words
+  marked, every filter of the website, Show on map with the same filters, and selection with every bulk action
+  (favourite, keep, forwards, category, tags, private, people, albums, share, delete), each with Undo.
+- The viewer: paging, zoom, videos with a chip for each person in them, Live Photos, document pages, notes and
+  files; the info panel (dates, place on a map, camera, tags, the text found, a document's fields with Add to Apple
+  Wallet, albums, related items); the item's actions (favourite, share, download, save to Photos, add to album,
+  private, analyse again, trash); and the boxes of faces, people and pets, where the smaller box is always on top
+  and gets the tap: naming ranked by likeness, guesses with their evidence, moving and drawing boxes.
+- People: named people only, merge suggestions, faces to name, and the person page with its items, related items,
+  faces, guesses, tattoos and nails, the 3D head and, for pets, crops.
+- Review: mis-clicks, forwards, duplicates and guesses.
+- Albums: albums, the album page, Add to album from anywhere, and share links with a password, an expiry and
+  downloads.
+- More: the map with clusters and places, documents, the vault, upload and sync, the trash, and Settings (account,
+  passkeys, sessions and devices, system, learning, undo history, share links, Wallet, appearance).
+
+Not in the app, on purpose: the public share page and the first account's setup (both are for the website); adding
+a passkey and opening the vault with one (a passkey needs the server's own address as an associated domain, which
+an app for any self-hosted server cannot have, so the app opens the website for them); sharing into the app from
+other apps (no share extension yet); and the website's keyboard shortcuts.
+
+What the sync does (More, Upload and sync):
 
 - Signs in with a device token (Settings > Sessions > Devices on the website creates one; it is shown
-  once). No password is stored on the phone.
+  once), or with the account's username and password, which create a device token for the phone
+  (`POST /api/auth/device-login`). No password is stored on the phone.
+- Asks for Photos access the first time you open Upload and sync or turn the automatic sync on, never
+  at launch or sign-in.
 - Watches the photo library and uploads what is new: photos, videos, and both halves of a Live Photo,
   as the original files, through the server's resumable upload protocol. Nothing is re-sent after a
   reinstall: the app asks the server what it already holds, by asset and by file hash.
@@ -48,10 +75,39 @@ What it does:
 - Stop on the Sync screen cancels the transfer in flight. The next sync continues it from the
   server's offset.
 
-## Building (needs a Mac)
+## Building
 
-The app cannot be built or run on the server; it needs Xcode 15 or later and an Apple developer
-account for a real device.
+The server this project is developed on has no Xcode. GitHub's macOS machines build the app instead
+(`.github/workflows/ios.yml`): every push that changes `ios/` generates the project with XcodeGen and
+builds it for the simulator, so a branch shows whether the app compiles before anyone opens Xcode.
+
+## TestFlight from GitHub
+
+`.github/workflows/ios-testflight.yml` signs the app and uploads it to TestFlight when a push to main
+changes `ios/`, and when it is started by hand (Actions > iOS TestFlight > Run workflow; with "upload"
+off it signs and exports only, which checks the signing without sending a build). Other branches never
+sign. It needs four repository secrets, added under Settings > Secrets and variables > Actions:
+
+| Secret | What it holds |
+|---|---|
+| `APPLE_TEAM_ID` | the Apple developer team's ID |
+| `ASC_KEY_ID` | the Key ID of an App Store Connect API key |
+| `ASC_ISSUER_ID` | the Issuer ID shown on the same page |
+| `ASC_KEY_P8` | the whole text of that key's `.p8` file |
+
+The key is made in App Store Connect under Users and Access > Integrations > App Store Connect API >
+Team Keys, with the Admin role: the export signs with the team's cloud-managed distribution
+certificate, which a key with a lower role may not be allowed to create. Apple offers the `.p8` for
+download once. Without the four secrets the workflow says so and stops without failing.
+
+The archive itself is not signed; the export signs it and creates the App Store profile, so no
+certificate or profile is kept in the repository or in GitHub. Build numbers are the date and time of
+the build (`20261117.1530`), so each one is higher than the last whoever uploaded it; an upload made
+from a Mac afterwards needs a higher number than the last one from GitHub.
+
+## Building on a Mac
+
+Xcode 15 or later and an Apple developer account for a real device.
 
 ```bash
 brew install xcodegen
@@ -63,6 +119,77 @@ open PersonalContentCloud.xcodeproj
 In Xcode: pick your team under Signing and Capabilities (the bundle id `in.rivant.pcc` can be changed in
 `project.yml`), make sure Background Modes lists "Background fetch" and "Background processing", then run
 on your iPhone. A simulator has no real photo library to speak of, so test on a device.
+
+## Tests on GitHub
+
+The server this project is developed on has no Mac, so the app is compiled and tested by the iOS workflow
+(`.github/workflows/ios.yml`) on GitHub's macOS machines, on every push that touches `ios/`. One run:
+
+1. Generates the project with XcodeGen and builds the app and both test targets for the simulator, while an
+   iPhone simulator boots in the background (`ci/pick_simulator.py` takes the runtime of the SDK the app is
+   built with when the machine has it, else the newest one).
+2. Installs the backend into a virtual environment (`ci/install_backend.sh`: the versions of
+   `backend/uv.lock`, with the CPU onnxruntime in place of the GPU one) and starts it on 127.0.0.1:8765 with
+   the models off (`PCC_NO_MODELS=1`) and a fresh data folder.
+3. Seeds it (`ci/seed_server.py`), first with rows and files written by the backend's own test helpers,
+   then over HTTP like a client: 36 drawn landscape photos over six months (24 with a place, one in the
+   vault, one in the trash, two favourites), two named people ("Test Person", "Test Visitor") with 21 face
+   boxes and three faces nobody named, the owner account (set up through `/api/auth/setup`), a device
+   token from `POST /api/auth/devices` (the route behind Settings > Sessions > Devices), three photos
+   uploaded with the app's resumable protocol (date and place in their EXIF), a text note, two albums
+   and a share link of one. Everything is generated; no real people or photos.
+4. Runs the unit tests (`UnitTests/`, hosted by the app) and the screen tests (`UITests/`) against that
+   server. The seeded address and token reach the tests as `TEST_RUNNER_PCC_TEST_SERVER` and
+   `TEST_RUNNER_PCC_TEST_TOKEN` (xcodebuild hands them to the test runner without the prefix); the tests pass
+   them to the app as the launch variables `PCC_TEST_SERVER` and `PCC_TEST_TOKEN`, and a Debug build signs
+   in with them (`Sources/TestLaunch.swift`, not compiled into Release builds). `PCC_TEST_SIGNED_OUT=1`
+   starts on the sign-in screen instead. With a test server the automatic sync is off.
+5. Keeps the screenshots as the `screenshots` artifact, the build, test and backend logs as `logs`, and
+   on a failure the whole `xcresult` bundle.
+
+A failing test fails the run.
+
+### Adding a screen test
+
+Subclass `ScreenTestCase` in a new file under `UITests/`. `launchSignedIn()` starts the app signed in to
+the seeded server, `tab("Name")` taps a tab, and `snap("name")` keeps a screenshot as `name.png` (keep the
+names unique across tests):
+
+```swift
+final class AlbumsScreens: ScreenTestCase {
+    func testAlbums() throws {
+        try launchSignedIn()
+        tab("Albums")
+        XCTAssertTrue(app.staticTexts["Weekend trip"].waitForExistence(timeout: 15))
+        snap("albums")
+    }
+}
+```
+
+A screen that needs more in the library gets it in `ci/seed_server.py`: rows and files in `library()`,
+anything a client would do in `api()`.
+
+### Reading a run
+
+```bash
+gh run list --workflow iOS --branch <branch>
+gh run watch <run id> --exit-status
+gh run view <run id> --log-failed
+gh run download <run id> -n screenshots -D screenshots/
+```
+
+`screenshots/tests.txt` lists every test with its result.
+
+### Running the tests on a Mac
+
+Start the backend with the same seed (the commands are in the workflow's "Seed and start the backend"
+step), then:
+
+```bash
+TEST_RUNNER_PCC_TEST_SERVER=http://127.0.0.1:8765 TEST_RUNNER_PCC_TEST_TOKEN=<token from seed.json> \
+  xcodebuild test -project PersonalContentCloud.xcodeproj -scheme PersonalContentCloud \
+  -destination 'platform=iOS Simulator,name=iPhone 16 Pro'
+```
 
 ## First run
 

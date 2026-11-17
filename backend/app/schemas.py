@@ -68,6 +68,14 @@ class DeviceCreated(BaseModel):
     token: str  # shown once
 
 
+class DeviceLoginIn(BaseModel):
+    """The iOS app signs in with the account's password and gets a device token (section 21)."""
+
+    username: str = Field(max_length=200)
+    password: str = Field(max_length=200)
+    device_name: str = Field(min_length=1, max_length=80)
+
+
 class SyncCheckIn(BaseModel):
     sha256: list[str] = Field(default=[], max_length=2000)
     asset_ids: list[str] = Field(default=[], max_length=2000)

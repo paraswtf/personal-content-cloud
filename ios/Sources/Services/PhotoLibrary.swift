@@ -9,6 +9,26 @@ enum PhotoLibrary {
         await PHPhotoLibrary.requestAuthorization(for: .readWrite)
     }
 
+    /// Asks for Photos access when it was never asked (iOS shows its prompt once), then starts watching the library
+    /// for the sync. Called when the owner opens the upload and sync screens or turns the automatic sync on, never at
+    /// launch or sign-in. True when the app may read the library.
+    @MainActor
+    @discardableResult
+    static func requestAccessIfNeeded() async -> Bool {
+        if PHPhotoLibrary.authorizationStatus(for: .readWrite) == .notDetermined {
+            _ = await requestAccess()
+        }
+        guard hasAccess else { return false }
+        BackgroundSync.observeLibraryIfAllowed()
+        return true
+    }
+
+    /// Asked and refused (or restricted): only the Settings app can change it.
+    static var refused: Bool {
+        let s = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+        return s == .denied || s == .restricted
+    }
+
     static var hasAccess: Bool {
         let s = PHPhotoLibrary.authorizationStatus(for: .readWrite)
         return s == .authorized || s == .limited
@@ -83,6 +103,14 @@ enum PhotoLibrary {
     }
 
     static func sha256(of url: URL) throws -> String {
+        try sha256(of: url, progress: { _ in })
+    }
+
+    /// The same, telling `progress` the share read so far (0...1) after each chunk (the Upload screen's
+    /// "Checking 40%").
+    static func sha256(of url: URL, progress: (Double) -> Void) throws -> String {
+        let total = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int64) ?? 0
+        var read: Int64 = 0
         let handle = try FileHandle(forReadingFrom: url)
         defer { try? handle.close() }
         var hasher = SHA256()
@@ -92,6 +120,8 @@ enum PhotoLibrary {
             let more: Bool = try autoreleasepool {
                 guard let chunk = try handle.read(upToCount: 4 * 1024 * 1024), !chunk.isEmpty else { return false }
                 hasher.update(data: chunk)
+                read += Int64(chunk.count)
+                if total > 0 { progress(min(1, Double(read) / Double(total))) }
                 return true
             }
             if !more { break }

@@ -231,6 +231,52 @@ def test_vault_window_expires(owner, monkeypatch, conn):
     assert owner.get("/api/auth/state").json()["vault_until"] is None
 
 
+def test_device_login_gives_a_bearer_token(owner, auth_app):
+    with TestClient(auth_app) as phone:
+        r = phone.post("/api/auth/device-login", json={**ACCOUNT, "device_name": "  Test   phone "}, headers=CSRF)
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["name"] == "Test phone" and len(body["token"]) > 20 and body["id"]
+        assert "pcc_session" not in r.cookies and not phone.cookies.get("pcc_session")  # a device keeps no cookie
+        assert phone.get("/api/auth/state").json()["authenticated"] is False
+        bearer = {"Authorization": f"Bearer {body['token']}"}
+        state = phone.get("/api/auth/state", headers=bearer).json()
+        assert state["authenticated"] is True and state["session_id"] == body["id"]
+        assert state["vault_until"] is None  # a device starts with the vault locked
+    devices = owner.get("/api/auth/devices").json()
+    assert [(d["id"], d["device_name"]) for d in devices] == [(body["id"], "Test phone")]
+
+
+def test_device_login_refusals(anon, auth_app):
+    good = {**ACCOUNT, "device_name": "Test phone"}
+    r = anon.post("/api/auth/device-login", json=good, headers=CSRF)
+    assert r.status_code == 409 and r.json()["detail"] == "setup_required"
+    assert anon.post("/api/auth/setup", json=ACCOUNT, headers=CSRF).status_code == 200
+    with TestClient(auth_app) as phone:
+        assert phone.post("/api/auth/device-login", json=good).status_code == 403  # no CSRF header
+        r = phone.post("/api/auth/device-login", json={**good, "password": "bad password"}, headers=CSRF)
+        assert r.status_code == 401 and r.json()["detail"] == "invalid_credentials"
+        r = phone.post("/api/auth/device-login", json={**good, "username": "someone"}, headers=CSRF)
+        assert r.status_code == 401
+        assert phone.post("/api/auth/device-login", json={**good, "device_name": ""}, headers=CSRF).status_code == 422
+
+
+def test_device_login_shares_the_login_failure_budget(owner, auth_app):
+    with TestClient(auth_app) as c:
+        bad = {**ACCOUNT, "password": "bad password"}
+        # Nine failures, then a success resets the budget for this address.
+        for _ in range(9):
+            assert c.post("/api/auth/device-login", json={**bad, "device_name": "p"}, headers=CSRF).status_code == 401
+        assert c.post("/api/auth/device-login", json={**ACCOUNT, "device_name": "p"}, headers=CSRF).status_code == 200
+        # Failures through /login and through device-login count together.
+        for i in range(10):
+            path = "/api/auth/login" if i % 2 else "/api/auth/device-login"
+            assert c.post(path, json={**bad, "device_name": "p"}, headers=CSRF).status_code == 401
+        r = c.post("/api/auth/device-login", json={**ACCOUNT, "device_name": "p"}, headers=CSRF)
+        assert r.status_code == 429 and r.json()["detail"] == "too_many_attempts"
+        assert c.post("/api/auth/login", json=ACCOUNT, headers=CSRF).status_code == 429
+
+
 def test_vault_unlock_needs_a_factor(owner):
     r = owner.post("/api/auth/vault/unlock", json={})
     assert r.status_code == 400
