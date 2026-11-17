@@ -3,8 +3,8 @@ import Charts
 
 /// Settings > System > Processing speed (the website's ThroughputCard, docs/ARCHITECTURE.md section 32): one small
 /// column chart per job type from GET /api/system/throughput, finished runs per minute (last hour), per hour (last
-/// 24 hours) or per six hours (last 7 days), with the failures stacked on top in red. Touching a chart shows that
-/// time's numbers; "Show as table" lists them. Asked again every 30 seconds while it is on screen.
+/// 24 hours) or per six hours (last 7 days), with the failures stacked on top in red. Tapping a chart shows that
+/// time's numbers (tap again to go back to the period's); "Show as table" lists them. Asked again every 30 seconds while it is on screen.
 struct SettingsThroughputSection: View {
     @State private var range: API.ThroughputRange = .hour
     @State private var data: API.ThroughputOut?
@@ -207,7 +207,13 @@ struct SettingsThroughputChart: View {
                 AxisValueLabel()
             }
         }
-        .chartXSelection(value: $selected)
+        // a tap, not a drag, picks a time: a drag on the chart must still scroll the screen
+        .chartGesture { proxy in
+            SpatialTapGesture().onEnded { value in
+                let bucket: String? = proxy.value(atX: value.location.x, as: String.self)
+                selected = bucket == selected ? nil : bucket
+            }
+        }
         .accessibilityLabel("\(type.label): \(SettingsSystemText.typeSummary(type, window: window)).")
     }
 

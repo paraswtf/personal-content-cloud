@@ -62,6 +62,13 @@ final class SettingsSystemScreens: ScreenTestCase {
         // the seed's uploads were stored minutes ago
         XCTAssertTrue(scroll(to: element(containing: "Files stored")), "no throughput for the stored files")
         snap("setsys-system-speed")
+        // a tap on a chart reads one time's numbers in place of the period's
+        let chart = app.descendants(matching: .any).matching(NSPredicate(format: "label BEGINSWITH %@", "Files stored:")).firstMatch
+        if chart.exists && chart.isHittable {
+            chart.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.5)).tap()
+            _ = element(containing: " finished, ").waitForExistence(timeout: 5)
+            snap("setsys-system-speed-tap")
+        }
         range.buttons["24 hours"].tap()
         XCTAssertTrue(element(containing: "in the last 24 hours").waitForExistence(timeout: 30), "the 24 hours view did not load")
         let table = app.buttons["system.throughput.table"]
