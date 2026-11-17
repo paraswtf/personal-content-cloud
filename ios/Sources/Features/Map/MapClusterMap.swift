@@ -1,13 +1,16 @@
 import SwiftUI
 import MapKit
 
-/// The map itself (docs/ARCHITECTURE.md section 25, the website's MapView): Apple's map with every point as an
-/// annotation that MapKit clusters, clusters drawn with their counts, dots for single points and their thumbnails
+/// The map itself (docs/ARCHITECTURE.md section 25, the website's MapView): the plain basemap drawn from the app's own
+/// copy of the website's basemap (MapBasemap) or, with `detailed`, Apple's map, with every point as an annotation that
+/// MapKit clusters, clusters drawn with their counts, dots for single points and their thumbnails
 /// once zoomed in, and the taps: a big cluster zooms in, a small cluster or a single point reports a box for the
 /// panel. No location permission: the map never shows where the phone is.
 struct MapClusterMap: UIViewRepresentable {
     let points: [API.MapPointsPointsTuple]
     let flyTo: MapFlyTarget?
+    /// Apple's map over the internet instead of the plain basemap.
+    var detailed = false
     let onPick: (MapPickedArea) -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
@@ -28,6 +31,7 @@ struct MapClusterMap: UIViewRepresentable {
 
     func updateUIView(_ map: MKMapView, context: Context) {
         context.coordinator.parent = self
+        context.coordinator.applyBasemap(detailed: detailed, dark: context.environment.colorScheme == .dark, to: map)
         context.coordinator.apply(points, to: map)
         context.coordinator.fly(flyTo, on: map)
     }
@@ -39,9 +43,64 @@ struct MapClusterMap: UIViewRepresentable {
         private var fitted = false
         private var lastNonce: Int?
         private var showThumbs = false
+        /// The basemap on the map now ("online", or the plain map in light or dark), so an update that changes
+        /// nothing leaves the overlays alone.
+        private var basemapKey: String?
+        private var basemapOverlays: [MKOverlay] = []
+        private var lakes: MKMultiPolygon?
+        private var colors = (water: UIColor.clear, land: UIColor.clear, line: UIColor.clear)
 
         init(_ parent: MapClusterMap) {
             self.parent = parent
+        }
+
+        /// The plain map: a base of water replacing Apple's map, then the land with its coast, the lakes and the
+        /// borders, in the website's colours for light or dark. Detailed: Apple's map, no overlays.
+        func applyBasemap(detailed: Bool, dark: Bool, to map: MKMapView) {
+            let key = detailed ? MapBasemap.detailed : "\(MapBasemap.plain)-\(dark ? "dark" : "light")"
+            guard key != basemapKey else { return }
+            basemapKey = key
+            map.removeOverlays(basemapOverlays)
+            basemapOverlays = []
+            lakes = nil
+            guard !detailed else { return }
+            let traits = UITraitCollection(userInterfaceStyle: dark ? .dark : .light)
+            colors = (water: MapBasemap.water.resolvedColor(with: traits),
+                      land: MapBasemap.land.resolvedColor(with: traits),
+                      line: MapBasemap.line.resolvedColor(with: traits))
+            var overlays: [MKOverlay] = [MapPlainTiles(color: colors.water)]
+            if let shapes = MapBasemap.shapes {
+                let lakeShape = MKMultiPolygon(shapes.lakes)
+                lakes = lakeShape
+                overlays += [MKMultiPolygon(shapes.land), lakeShape, MKMultiPolyline(shapes.borders)] as [MKOverlay]
+            }
+            // added in order at one level: the base first, the borders last, on top
+            map.addOverlays(overlays, level: .aboveLabels)
+            basemapOverlays = overlays
+        }
+
+        func mapView(_ mapView: MKMapView, rendererFor overlay: MKOverlay) -> MKOverlayRenderer {
+            if let tiles = overlay as? MKTileOverlay {
+                return MKTileOverlayRenderer(tileOverlay: tiles)
+            }
+            if let area = overlay as? MKMultiPolygon {
+                let renderer = MKMultiPolygonRenderer(multiPolygon: area)
+                if area === lakes {
+                    renderer.fillColor = colors.water
+                } else {
+                    renderer.fillColor = colors.land
+                    renderer.strokeColor = colors.line
+                    renderer.lineWidth = 0.8
+                }
+                return renderer
+            }
+            if let lines = overlay as? MKMultiPolyline {
+                let renderer = MKMultiPolylineRenderer(multiPolyline: lines)
+                renderer.strokeColor = colors.line
+                renderer.lineWidth = 1
+                return renderer
+            }
+            return MKOverlayRenderer(overlay: overlay)
         }
 
         /// New points replace the annotations; the same points again (a refresh) leave the clusters alone.
@@ -88,7 +147,7 @@ struct MapClusterMap: UIViewRepresentable {
             fitted = true
             let region = MKCoordinateRegion(
                 center: CLLocationCoordinate2D(latitude: target.latitude, longitude: target.longitude),
-                span: MKCoordinateSpan(latitudeDelta: MapRules.closestSpan, longitudeDelta: MapRules.closestSpan))
+                span: MKCoordinateSpan(latitudeDelta: target.span, longitudeDelta: target.span))
             if map.bounds.width > 0 {
                 map.setRegion(region, animated: true)
             } else {

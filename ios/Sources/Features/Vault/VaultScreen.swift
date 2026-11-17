@@ -6,13 +6,13 @@ import SwiftUI
 /// clock or because the server says so, it asks for the password again.
 struct VaultScreen: View {
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(AppRouter.self) private var router
     @State private var locking = false
 
     private var vault: VaultSession { VaultSession.shared }
 
     var body: some View {
         content
-            .navigationTitle("Vault")
             .task { await vault.refresh() }
             // Sleeps until the window ends, then asks the server again (the website's page does the same).
             .task(id: vault.until) {
@@ -26,18 +26,28 @@ struct VaultScreen: View {
             .onChange(of: scenePhase) { _, phase in
                 if phase == .active { Task { await vault.refresh() } }
             }
-            // a vault request answered 403 vault_locked elsewhere: the server's window ended first
+            // a vault change elsewhere (an undo, a lock in Settings); a vault list request answered 403 vault_locked
+            // locks the screen itself (LibraryModel.call, VaultSession.foundLocked)
             .onCloudChange { Task { await vault.refresh() } }
+            // Leaving the vault drops its pictures from memory (the website's VaultPage drops the vault data); opening
+            // an item in the viewer over it does not.
+            .onDisappear {
+                if router.viewer == nil { ImageLoader.shared.forgetVault() }
+            }
     }
 
     @ViewBuilder private var content: some View {
+        // the open vault's browser sets the title itself ("Search results" while searching)
         if !vault.loaded {
             LoadingState()
+                .navigationTitle("Vault")
         } else if let until = vault.until, vault.isOpen() {
             LibraryBrowser(scope: .vault,
-                           header: AnyView(VaultOpenBar(until: until, locking: locking, onLock: lock)))
+                           header: AnyView(VaultOpenBar(until: until, locking: locking, onLock: lock)),
+                           title: "Vault")
         } else if let error = vault.loadError {
             ErrorState(error: error) { Task { await vault.refresh() } }
+                .navigationTitle("Vault")
         } else {
             ScrollView {
                 VaultUnlockForm()
@@ -46,6 +56,7 @@ struct VaultScreen: View {
                     .frame(maxWidth: .infinity)
             }
             .refreshable { await vault.refresh() }
+            .navigationTitle("Vault")
         }
     }
 

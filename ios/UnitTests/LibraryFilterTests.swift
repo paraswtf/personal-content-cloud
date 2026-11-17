@@ -142,4 +142,20 @@ final class LibraryFilterTests: XCTestCase {
         XCTAssertTrue(label.hasPrefix("Photo, "), label)
         XCTAssertTrue(label.hasSuffix("favourite, possible mis-click, 2 similar"), label)
     }
+
+    // MARK: chosen people
+
+    func testChosenPersonStates() {
+        XCTAssertEqual(LibraryChosenPerson.failed(APIError(status: 404, detail: "Not found")), .gone)
+        XCTAssertEqual(LibraryChosenPerson.failed(APIError(status: 500, detail: "boom")), .unknown)
+        XCTAssertEqual(LibraryChosenPerson.failed(URLError(.timedOut)), .unknown)
+        XCTAssertEqual(LibraryChosenPerson.gone.name(id: 7), "Person not available")
+        XCTAssertEqual(LibraryChosenPerson.unknown.name(id: 7), "Person 7")
+        let pet = LibraryChosenPerson.known(name: "Biscuit", cover: "/files/face/3", pet: true)
+        XCTAssertEqual(pet.name(id: 7), "Biscuit")
+        XCTAssertTrue(pet.isPet)
+        XCTAssertEqual(pet.cover, "/files/face/3")
+        XCTAssertFalse(LibraryChosenPerson.gone.isPet)
+        XCTAssertTrue(LibraryChosenPerson.gone.isGone)
+    }
 }

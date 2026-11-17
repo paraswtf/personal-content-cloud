@@ -74,6 +74,21 @@ final class VaultSession {
         CloudEvents.post()
     }
 
+    /// The server answered a vault request with 403 vault_locked (the website's VaultPage subscribes to its query
+    /// cache for that answer).
+    nonisolated static func isLockedAnswer(_ error: Error) -> Bool {
+        guard let api = error as? APIError else { return false }
+        return api.status == 403 && api.detail == "vault_locked"
+    }
+
+    /// A vault request was refused because the vault is locked: the vault screen shows the unlock form at once, its
+    /// pictures leave memory, and the server is asked again for the state.
+    func foundLocked() {
+        guard until != nil else { return }
+        expire()
+        Task { await refresh() }
+    }
+
     /// The window ran out on this phone's clock and the server did not say otherwise: read it as locked.
     func expire() {
         until = nil

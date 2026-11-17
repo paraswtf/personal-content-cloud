@@ -31,11 +31,13 @@ struct MapPickedArea: Hashable {
     }
 }
 
-/// Where the map should fly: a place from the list. `nonce` makes a second pick of the same place fly again.
+/// Where the map should fly: a place from the list, or an item's spot. `nonce` makes a second pick of the same place
+/// fly again; `span` is how much of the map shows (degrees).
 struct MapFlyTarget: Equatable {
     let latitude: Double
     let longitude: Double
     let nonce: Int
+    var span: Double = MapRules.closestSpan
 }
 
 /// One photo, video or document with a location (`MapPoints.points`: latitude, longitude, uid, kind code
@@ -67,6 +69,8 @@ enum MapRules {
     static let thumbSpan = 0.35
     /// The narrowest view the first fit or a chosen place zooms to (about zoom 11 on a phone).
     static let closestSpan = 0.27
+    /// How close an item's spot opens (the viewer's Show on map, the website's z=14).
+    static let spotSpan = 0.03
     /// Padding of a selection around a cluster's photos and around a single point (degrees).
     static let clusterPad = 0.0002
     static let pointPad = 0.0001

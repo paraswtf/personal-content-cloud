@@ -31,6 +31,11 @@ struct LibraryBulkBar: View {
                     .accessibilityLabel("Select all")
                     .accessibilityIdentifier("library.bulk.all")
                 Spacer()
+                if model.bulkBusy {
+                    ProgressView()
+                        .controlSize(.small)
+                        .accessibilityLabel("Working")
+                }
                 Text(count == 0 ? "Select items" : Fmt.count(count, "selected", "selected"))
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
@@ -60,7 +65,7 @@ struct LibraryBulkBar: View {
                         }
                         .menuStyle(.button)
                         .buttonStyle(.bordered)
-                        .disabled(count == 0)
+                        .disabled(count == 0 || model.bulkBusy)
                         .accessibilityIdentifier("library.bulk.category")
                     }
                     action("People", "person.2", "library.bulk.people") { open(.people) }
@@ -100,7 +105,7 @@ struct LibraryBulkBar: View {
                 .font(.subheadline.weight(.semibold))
         }
         .buttonStyle(.bordered)
-        .disabled(model.selection.count == 0)
+        .disabled(model.selection.count == 0 || model.bulkBusy)
         .accessibilityIdentifier(identifier)
     }
 }

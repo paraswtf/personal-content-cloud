@@ -59,4 +59,26 @@ final class VaultTrashDecodingTests: XCTestCase {
         XCTAssertTrue(page.items.contains { $0.filename == "VAULTTRASH_KEEP.JPG" }, "the seeded trash photo is listed")
         XCTAssertFalse(page.items.contains { $0.nsfw }, "a private item is listed outside the vault")
     }
+
+    func testLockedAnswer() {
+        XCTAssertTrue(VaultSession.isLockedAnswer(APIError(status: 403, detail: "vault_locked")))
+        XCTAssertFalse(VaultSession.isLockedAnswer(APIError(status: 403, detail: "forbidden")))
+        XCTAssertFalse(VaultSession.isLockedAnswer(APIError(status: 401, detail: "vault_locked")))
+        XCTAssertFalse(VaultSession.isLockedAnswer(URLError(.notConnectedToInternet)))
+    }
+
+    func testVideoLengthLine() {
+        XCTAssertEqual(TrashText.videoLength(kind: "video", seconds: 75), "Video, \(Fmt.duration(75))")
+        XCTAssertNil(TrashText.videoLength(kind: "video", seconds: nil))
+        XCTAssertNil(TrashText.videoLength(kind: "video", seconds: 0))
+        XCTAssertNil(TrashText.videoLength(kind: "image", seconds: 12))
+    }
+
+    func testKindIcons() {
+        XCTAssertEqual(LibraryKindImage.symbol(.video), "film")
+        XCTAssertEqual(LibraryKindImage.symbol(.pdf), "doc.text")
+        XCTAssertEqual(LibraryKindImage.symbol(.document), "doc.text")
+        XCTAssertEqual(LibraryKindImage.symbol(.other), "doc")
+        XCTAssertEqual(LibraryKindImage.symbol(.image), "photo")
+    }
 }

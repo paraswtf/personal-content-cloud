@@ -105,7 +105,7 @@ struct LibraryFilterSheet: View {
     let searching: Bool
 
     @Environment(\.dismiss) private var dismiss
-    @State private var names: [Int: String] = [:]
+    @State private var chosen: [Int: LibraryChosenPerson] = [:]
     @State private var picking = false
     @State private var tags: [API.TagOut] = []
     @State private var showAllTags = false
@@ -189,7 +189,7 @@ struct LibraryFilterSheet: View {
                 PersonPickerSheet(title: "Add a person or pet", kind: .all, excluding: Set(filters.person ?? []),
                                   allowCreate: false) { pick in
                     if case .existing(let option) = pick {
-                        names[option.id] = option.name
+                        chosen[option.id] = .known(name: option.name, cover: option.coverRef, pet: option.kind == "pet")
                         var people = filters.person ?? []
                         if !people.contains(option.id) { people.append(option.id) }
                         filters.person = people
@@ -197,6 +197,7 @@ struct LibraryFilterSheet: View {
                 }
             }
             .task { await load() }
+            .task(id: filters.person ?? []) { await loadPeople() }
         }
     }
 
@@ -205,8 +206,25 @@ struct LibraryFilterSheet: View {
     private var peopleSection: some View {
         Section("People") {
             ForEach(filters.person ?? [], id: \.self) { id in
-                HStack {
-                    Text(names[id] ?? "Loading")
+                let person = chosen[id] ?? .loading
+                let name = person.name(id: id)
+                HStack(spacing: 10) {
+                    Avatar(name: person.avatarName, ref: person.cover, size: 30)
+                    if person.isPet {
+                        Image(systemName: "pawprint.fill")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .accessibilityLabel("Pet")
+                    }
+                    if case .loading = person {
+                        ProgressView()
+                            .accessibilityLabel("Loading")
+                    } else {
+                        Text(name)
+                            .lineLimit(1)
+                            .foregroundStyle(person.isGone ? .secondary : .primary)
+                            .accessibilityIdentifier("library.filter.person")
+                    }
                     Spacer()
                     Button {
                         filters.person = (filters.person ?? []).filter { $0 != id }
@@ -214,7 +232,7 @@ struct LibraryFilterSheet: View {
                         Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
                     }
                     .buttonStyle(.plain)
-                    .accessibilityLabel("Remove \(names[id] ?? "this person")")
+                    .accessibilityLabel("Remove \(name)")
                 }
             }
             Button((filters.person ?? []).isEmpty ? "Add a person or pet" : "Add another person or pet") {
@@ -333,10 +351,66 @@ struct LibraryFilterSheet: View {
         if let list = try? await Cloud.api().listTags() {
             tags = list.sorted { ($0.items + $0.autoItems) > ($1.items + $1.autoItems) }
         }
-        for id in filters.person ?? [] where names[id] == nil {
-            if let person = try? await Cloud.api().getPerson(personId: id) {
-                names[id] = Fmt.personName(person.name, kind: person.kind.rawValue, species: person.species)
+    }
+
+    /// The chosen people not known yet (the website's PeopleFilter chips): their name, picture and pet mark, or
+    /// "Person not available" for one that no longer exists.
+    private func loadPeople() async {
+        for id in filters.person ?? [] where chosen[id] == nil || chosen[id] == .loading {
+            chosen[id] = .loading
+            do {
+                let person = try await Cloud.api().getPerson(personId: id)
+                chosen[id] = .known(name: Fmt.personName(person.name, kind: person.kind.rawValue, species: person.species),
+                                    cover: person.coverUrl, pet: person.kind == .pet)
+            } catch {
+                if Task.isCancelled || error is CancellationError || (error as? URLError)?.code == .cancelled {
+                    chosen[id] = nil
+                    return
+                }
+                chosen[id] = LibraryChosenPerson.failed(error)
             }
         }
+    }
+}
+
+/// A person chosen in the filters, as the filter sheet shows them.
+enum LibraryChosenPerson: Equatable {
+    case loading
+    case known(name: String, cover: String?, pet: Bool)
+    /// The server answered 404: the person was merged away or deleted.
+    case gone
+    /// Asking failed another way: the row shows "Person 12", as the website does.
+    case unknown
+
+    /// What asking for a person that failed means for the row.
+    static func failed(_ error: Error) -> LibraryChosenPerson {
+        if let api = error as? APIError, api.status == 404 { return .gone }
+        return .unknown
+    }
+
+    func name(id: Int) -> String {
+        switch self {
+        case .known(let name, _, _): return name
+        case .gone: return "Person not available"
+        case .loading, .unknown: return "Person \(id)"
+        }
+    }
+
+    var cover: String? {
+        if case .known(_, let cover, _) = self { return cover }
+        return nil
+    }
+
+    var isPet: Bool {
+        if case .known(_, _, let pet) = self { return pet }
+        return false
+    }
+
+    var isGone: Bool { self == .gone }
+
+    /// The initials' source when there is no picture ("?" for one not known).
+    var avatarName: String? {
+        if case .known(let name, _, _) = self { return name }
+        return "?"
     }
 }

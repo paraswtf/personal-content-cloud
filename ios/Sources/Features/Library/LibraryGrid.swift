@@ -26,7 +26,8 @@ struct LibraryTimelineView: View {
         ScrollViewReader { proxy in
             ScrollView {
                 header
-                LazyVStack(alignment: .leading, spacing: 0) {
+                // the month's heading stays at the top while its tiles are on screen (the website's sticky header)
+                LazyVStack(alignment: .leading, spacing: 0, pinnedViews: [.sectionHeaders]) {
                     ForEach(model.buckets, id: \.key) { bucket in
                         LibraryMonthSection(model: model, bucket: bucket, columns: columns, vault: vault, onOpen: onOpen)
                     }
@@ -75,7 +76,9 @@ struct LibraryMonthSection: View {
         let cards = month?.cards ?? []
         let missing = month?.complete == true ? 0 : max(0, bucket.count - cards.count)
         let label = Fmt.monthHeading(bucket.key)
-        VStack(alignment: .leading, spacing: 0) {
+        Section {
+            tiles(cards: cards, missing: missing)
+        } header: {
             HStack(spacing: 8) {
                 (Text(label).font(.headline)
                     + Text("  \(Fmt.count(bucket.count, "item"))").font(.subheadline).foregroundColor(.secondary))
@@ -94,6 +97,13 @@ struct LibraryMonthSection: View {
             .padding(.horizontal, 12)
             .padding(.top, 14)
             .padding(.bottom, 8)
+            .background(Color(uiColor: .systemBackground))
+        }
+    }
+
+    private func tiles(cards: [API.ItemCard], missing: Int) -> some View {
+        let month = model.months[bucket.key]
+        return VStack(alignment: .leading, spacing: 0) {
             LazyVGrid(columns: gridColumns(columns), spacing: 2) {
                 ForEach(cards) { card in
                     LibraryTile(item: card, vault: vault, selection: model.selection, onOpen: onOpen)
@@ -184,7 +194,11 @@ struct LibraryTile<Item: LibraryTileItem>: View {
         Color.clear
             .aspectRatio(1, contentMode: .fit)
             .overlay {
-                RemoteImage(ref: item.thumbRef, maxPixel: 384, vault: vault)
+                if item.isDocumentTile {
+                    documentPage
+                } else {
+                    RemoteImage(ref: item.thumbRef, maxPixel: 384, vault: vault)
+                }
             }
             .clipped()
             .overlay(alignment: .topLeading) { flags }
@@ -251,6 +265,22 @@ struct LibraryTile<Item: LibraryTileItem>: View {
             .accessibilityLabel(snippet.map { "\(item.libraryLabel), \(LibrarySnippet.plain($0))" } ?? item.libraryLabel)
             .accessibilityAddTraits(picked ? [.isButton, .isSelected] : .isButton)
             .accessibilityIdentifier("media.cell")
+    }
+
+    /// A document's first page on a sheet of paper, fitted from the top (the website's inset white page), with the
+    /// document icon when it cannot be loaded.
+    private var documentPage: some View {
+        GeometryReader { geo in
+            let inset = min(geo.size.width, geo.size.height) * 0.1
+            LibraryKindImage(ref: item.thumbRef, maxPixel: 384, contentMode: .fit, vault: vault,
+                             kind: item.mediaKind == .image ? .document : item.mediaKind, alignment: .top)
+                .background(Color.white)
+                .clipShape(RoundedRectangle(cornerRadius: 3))
+                .shadow(color: .black.opacity(0.25), radius: 1.5, y: 1)
+                .scaleEffect(selection.contains(item.uid) ? 0.9 : 1)
+                .padding(inset)
+        }
+        .background(Color(uiColor: .secondarySystemFill))
     }
 
     private var documentLabel: String {

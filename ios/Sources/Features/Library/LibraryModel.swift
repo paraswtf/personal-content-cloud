@@ -58,6 +58,8 @@ final class LibraryModel {
     private(set) var loadedKey: LibraryLoadKey?
 
     let selection = SelectionModel<String>()
+    /// A bulk action is on its way: the bar's buttons wait for it (the website's bulk.isPending).
+    private(set) var bulkBusy = false
     @ObservationIgnored private var generation = 0
     /// The album's name, for "removed from Album" (asked for once, when needed).
     @ObservationIgnored private var albumName: String?
@@ -72,6 +74,15 @@ final class LibraryModel {
     var canSearch: Bool { scope.albumId == nil }
 
     var loadKey: LibraryLoadKey { LibraryLoadKey(filters: filters, query: query, mode: mode) }
+
+    /// The search results as the viewer's entries: a video's opens paused at its matching moment.
+    var hitEntries: [ViewerEntry] {
+        hits.map { hit in
+            var entry = hit.viewerEntry
+            entry.startAt = hit.matchSeconds
+            return entry
+        }
+    }
 
     /// Loaded cards in timeline order: what the viewer pages through and Select all picks.
     var timelineItems: [API.ItemCard] {
@@ -296,7 +307,7 @@ final class LibraryModel {
     func loadMoreForViewer() async -> [ViewerEntry] {
         if searching {
             await loadMoreHits()
-            return hits.map(\.viewerEntry)
+            return hitEntries
         }
         if let next = buckets.first(where: { months[$0.key]?.complete != true }) {
             await loadMonth(next.key, gen: generation)
@@ -327,10 +338,16 @@ final class LibraryModel {
         }
     }
 
-    /// Runs a request in the scope's mode: the vault's requests carry vault=1.
+    /// Runs a request in the scope's mode: the vault's requests carry vault=1. A vault request answered 403
+    /// vault_locked (the server's window ended first) locks the vault screen at once, as the website does.
     func call<T>(_ body: () async throws -> T) async throws -> T {
         if scope.isVault {
-            return try await APIContext.$vault.withValue(true) { try await body() }
+            do {
+                return try await APIContext.$vault.withValue(true) { try await body() }
+            } catch {
+                if VaultSession.isLockedAnswer(error) { VaultSession.shared.foundLocked() }
+                throw error
+            }
         }
         return try await body()
     }
@@ -367,7 +384,9 @@ final class LibraryModel {
     /// One bulk action on the selection (POST /api/items/bulk), with the website's message, undoable.
     func bulk(_ action: API.Action, value: String? = nil) async {
         let uids = Array(selection.selected)
-        guard !uids.isEmpty else { return }
+        guard !uids.isEmpty, !bulkBusy else { return }
+        bulkBusy = true
+        defer { bulkBusy = false }
         let what = await describe(action, value: value)
         let label = "\(Fmt.count(uids.count, "item")) \(what)."
         do {

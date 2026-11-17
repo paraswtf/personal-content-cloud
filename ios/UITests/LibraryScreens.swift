@@ -95,6 +95,8 @@ final class LibraryScreens: ScreenTestCase {
         let results = NSPredicate(format: "label ENDSWITH 'for \"lantern\"'")
         wait(for: [expectation(for: results, evaluatedWith: count)], timeout: 30)
         XCTAssertTrue(cells.firstMatch.waitForExistence(timeout: 10), "the search found nothing")
+        XCTAssertTrue(app.navigationBars["Search results"].waitForExistence(timeout: 10),
+                      "the title does not read Search results while searching")
         snap("library-search")
         // a word of the seeded text note: its tile shows the matched words
         field.buttons["Clear text"].firstMatch.tap()
@@ -106,6 +108,27 @@ final class LibraryScreens: ScreenTestCase {
         app.segmentedControls["library.mode"].buttons["Text"].tap()
         wait(for: [expectation(for: note, evaluatedWith: count)], timeout: 30)
         snap("library-search-snippet")
+    }
+
+    /// A person chosen in the filters shows as a row with their picture and name, and can be removed.
+    func testPeopleFilterShowsTheChosenPerson() throws {
+        try openLibrary()
+        app.buttons["library.filters"].tap()
+        let add = app.buttons["library.filter.addPerson"]
+        XCTAssertTrue(add.waitForExistence(timeout: 15), "no Add a person or pet in the filters")
+        add.tap()
+        let option = app.buttons.matching(identifier: "picker.option").firstMatch
+        XCTAssertTrue(option.waitForExistence(timeout: 20), "the picker lists no one")
+        option.tap()
+        let chosen = app.staticTexts["library.filter.person"]
+        XCTAssertTrue(chosen.waitForExistence(timeout: 15), "the chosen person is not listed in the filters")
+        XCTAssertNotEqual(chosen.label, "Person not available")
+        snap("library-filter-person")
+        let remove = app.buttons["Remove \(chosen.label)"]
+        XCTAssertTrue(remove.exists, "no Remove button for \(chosen.label)")
+        remove.tap()
+        XCTAssertTrue(chosen.waitForNonExistence(timeout: 10), "the person stayed after Remove")
+        app.buttons["library.filters.done"].tap()
     }
 
     func testSelectionFavouritesTheSeedsItems() throws {
