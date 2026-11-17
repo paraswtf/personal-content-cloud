@@ -353,12 +353,14 @@ struct ViewerInfoPanel: View {
     }
 }
 
-/// The place of an item: its name (or its coordinates), a small map, and Open in Maps (the website's LocationRow,
-/// which opens the website's own map).
+/// The place of an item: its name (or its coordinates), a small map, Show on map (the website's LocationRow: the
+/// app's own map at this spot, listing what is there) and Open in Maps (Apple Maps, for directions).
 struct ViewerLocationRow: View {
     let lat: Double
     let lon: Double
     let place: String?
+
+    @Environment(AppRouter.self) private var router
 
     private var coordinate: CLLocationCoordinate2D { CLLocationCoordinate2D(latitude: lat, longitude: lon) }
 
@@ -374,15 +376,26 @@ struct ViewerLocationRow: View {
             .clipShape(RoundedRectangle(cornerRadius: 10))
             .allowsHitTesting(false)
             .accessibilityHidden(true)
-            Button {
-                let item = MKMapItem(placemark: MKPlacemark(coordinate: coordinate))
-                item.name = place
-                item.openInMaps(launchOptions: [MKLaunchOptionsMapCenterKey: NSValue(mkCoordinate: coordinate)])
-            } label: {
-                Label("Open in Maps", systemImage: "map")
+            HStack(spacing: 20) {
+                Button {
+                    // The viewer closes and the map opens on the tab underneath, as the website's link leaves the item.
+                    router.viewer = nil
+                    router.open(.mapAt(MapStart(latitude: lat, longitude: lon)))
+                } label: {
+                    Label("Show on map", systemImage: "map")
+                }
+                .buttonStyle(.borderless)
+                .accessibilityIdentifier("viewer.info.showOnMap")
+                Button {
+                    let item = MKMapItem(placemark: MKPlacemark(coordinate: coordinate))
+                    item.name = place
+                    item.openInMaps(launchOptions: [MKLaunchOptionsMapCenterKey: NSValue(mkCoordinate: coordinate)])
+                } label: {
+                    Label("Open in Maps", systemImage: "arrow.up.forward.app")
+                }
+                .buttonStyle(.borderless)
+                .accessibilityIdentifier("viewer.info.openInMaps")
             }
-            .buttonStyle(.borderless)
-            .accessibilityIdentifier("viewer.info.openInMaps")
         }
     }
 }
