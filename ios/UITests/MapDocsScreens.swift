@@ -93,8 +93,13 @@ final class MapDocsScreens: ScreenTestCase {
         XCTAssertTrue(field.waitForExistence(timeout: 20), "no search field on the library")
         field.tap()
         field.typeText("MAPDOCS_1003\n")
-        let hit = app.buttons.matching(identifier: "media.cell").firstMatch
-        XCTAssertTrue(hit.waitForExistence(timeout: 30), "the search did not find the Shimla photo")
+        // the timeline's tiles stay until the results come: wait for the results' line first
+        let results = NSPredicate(format: "label ENDSWITH 'for \"MAPDOCS_1003\"'")
+        XCTAssertTrue(wait(app.staticTexts["library.count"], results, timeout: 30), "the search did not run")
+        let hit = app.buttons
+            .matching(NSPredicate(format: "identifier == 'media.cell' AND label BEGINSWITH 'Photo, Feb 2, 2026'"))
+            .firstMatch
+        XCTAssertTrue(hit.waitForExistence(timeout: 20), "the search did not find the Shimla photo")
         hit.tap()
         let info = app.buttons["viewer.info"]
         XCTAssertTrue(info.waitForExistence(timeout: 20), "the viewer did not open")
