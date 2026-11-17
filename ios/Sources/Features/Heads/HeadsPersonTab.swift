@@ -256,6 +256,7 @@ struct HeadsPersonTab: View {
     }
 
     private func generate() {
+        guard !starting else { return }
         starting = true
         let request = options.body
         Task {
@@ -280,6 +281,7 @@ struct HeadsPersonTab: View {
     }
 
     private func stop() {
+        guard !stopping else { return }
         stopping = true
         Task {
             defer { stopping = false }

@@ -187,6 +187,7 @@ struct PeopleSuggestionsPanel: View {
     }
 
     private func startMerge(_ s: API.Suggestion) {
+        guard busyPair == nil else { return }
         if Fmt.isNamed(s.a.name) && Fmt.isNamed(s.b.name) {
             choose = PeopleMergeRequest(people: [s.a, s.b])
             return
@@ -201,6 +202,7 @@ struct PeopleSuggestionsPanel: View {
     }
 
     private func dismissPair(_ s: API.Suggestion) async {
+        guard busyPair == nil else { return }
         busyPair = key(s)
         defer { busyPair = nil }
         await PeopleAction.run("Marked as different people", doing: "save that") {

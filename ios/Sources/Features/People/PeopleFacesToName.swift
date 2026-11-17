@@ -106,7 +106,7 @@ struct PeopleFacesToNameSheet: View {
 
     private func tag(_ choice: PeopleChoice) async {
         let ids = Array(selection.selected)
-        guard !ids.isEmpty else { return }
+        guard !ids.isEmpty, !busy else { return }
         busy = true
         defer { busy = false }
         let answer = await PeopleAction.run("Tagged \(Fmt.count(ids.count, "face"))", doing: "assign the faces") {
@@ -124,7 +124,7 @@ struct PeopleFacesToNameSheet: View {
 
     private func notFaces() async {
         let ids = Array(selection.selected)
-        guard !ids.isEmpty else { return }
+        guard !ids.isEmpty, !busy else { return }
         busy = true
         defer { busy = false }
         var failed = 0
@@ -154,6 +154,7 @@ struct PeopleFacesToNameSheet: View {
     }
 
     private func matchAgain() async {
+        guard !busy else { return }
         busy = true
         defer { busy = false }
         await PeopleAction.run("Matched faces again", doing: "start matching") {

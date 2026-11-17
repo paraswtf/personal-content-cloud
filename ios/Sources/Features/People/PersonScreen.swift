@@ -168,12 +168,14 @@ struct PersonScreen: View {
         case .traits:
             PeopleTraitsTab(person: p, header: head).id("traits-\(p.id)")
         case .threeD:
-            VStack(spacing: 0) {
-                tabBar(p)
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 8)
-                HeadsPersonTab(personId: p.id, name: PeopleText.name(p))
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            // The 3D tab has no scroll view of its own: the page's holds it, under the same header as the other
+            // tabs, so the controls under the head can be reached (a drag that starts on the head turns the head).
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
+                    head
+                    HeadsPersonTab(personId: p.id, name: PeopleText.name(p))
+                }
+                .padding(.bottom, 16)
             }
             .id("3d-\(p.id)")
         }
@@ -244,7 +246,16 @@ struct PersonScreen: View {
     private func tabBar(_ p: API.PersonOut) -> some View {
         let tabs = PeoplePersonTab.tabs(for: p)
         let current = tabs.contains(tab) ? tab : .items
-        return ScrollView(.horizontal, showsIndicators: false) {
+        // each tab draws its own row, which starts at its beginning: show the selected tab (3D is off the screen
+        // on a phone otherwise)
+        return ScrollViewReader { proxy in
+            tabRow(p, tabs: tabs, current: current)
+                .onAppear { proxy.scrollTo(current, anchor: .center) }
+        }
+    }
+
+    private func tabRow(_ p: API.PersonOut, tabs: [PeoplePersonTab], current: PeoplePersonTab) -> some View {
+        ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 6) {
                 ForEach(tabs) { t in
                     Button {
@@ -271,6 +282,7 @@ struct PersonScreen: View {
                     .accessibilityLabel(t.count(p).map { $0 > 0 ? "\(t.title), \($0)" : t.title } ?? t.title)
                     .accessibilityAddTraits(current == t ? .isSelected : [])
                     .accessibilityIdentifier(t.identifier)
+                    .id(t)
                 }
             }
         }

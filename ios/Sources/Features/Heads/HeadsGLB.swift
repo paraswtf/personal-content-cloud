@@ -57,6 +57,8 @@ enum HeadsGLB {
     static let maxElements = 16_000_000
 
     static func read(_ data: Data) throws -> HeadsGLBModel {
+        // refused before a copy of it is made
+        guard data.count <= maxBytes else { throw HeadsGLBError(message: "The head file is too large.") }
         var reader = HeadsGLBReader(bytes: [UInt8](data))
         return try reader.read()
     }
