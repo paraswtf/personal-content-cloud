@@ -159,8 +159,9 @@ extension APIClient {
     /// Methods that change something: they carry the undo id, and their answer may name an action.
     private static let writeMethods: Set<String> = ["POST", "PUT", "PATCH", "DELETE"]
 
-    /// The session of the generated endpoints: no cookies (the device token is the only credential), and a
-    /// request fails instead of waiting when there is no network, so a screen can say so.
+    /// The session of the generated endpoints: no cookies (the device token is the only credential), a request
+    /// fails instead of waiting when there is no network, so a screen can say so, and redirects stay on the
+    /// server's own host (`SameHostRedirects`).
     static let apiSession: URLSession = {
         let cfg = URLSessionConfiguration.default
         cfg.httpCookieStorage = nil
@@ -168,7 +169,7 @@ extension APIClient {
         cfg.waitsForConnectivity = false
         cfg.timeoutIntervalForRequest = 60
         cfg.timeoutIntervalForResource = 600
-        return URLSession(configuration: cfg)
+        return URLSession(configuration: cfg, delegate: SameHostRedirects.shared, delegateQueue: nil)
     }()
 
     /// The server and token the generated endpoints speak with: this client's own, so a client made for
