@@ -22,7 +22,10 @@ struct MapScreen: View {
         if let lat = start?.latitude, let lon = start?.longitude {
             let pad = 0.0005
             _flyCount = State(initialValue: 1)
-            _flyTo = State(initialValue: MapFlyTarget(latitude: lat, longitude: lon, nonce: 1))
+            // The spot's panel covers the lower half of the map: the map centres a little south of the spot, so the
+            // spot itself shows above the panel.
+            _flyTo = State(initialValue: MapFlyTarget(latitude: lat - MapRules.closestSpan * 0.28, longitude: lon,
+                                                      nonce: 1))
             _picked = State(initialValue: MapPickedArea(west: lon - pad, south: lat - pad, east: lon + pad,
                                                         north: lat + pad, count: 1))
         }
