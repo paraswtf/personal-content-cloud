@@ -263,10 +263,9 @@ extension APIClient {
         let connection = try connection()
         var path = address
         var query: String?
-        if let absolute = URL(string: address), let scheme = absolute.scheme {
-            guard scheme.lowercased() == connection.base.scheme?.lowercased(),
-                  absolute.host?.lowercased() == connection.base.host?.lowercased(),
-                  absolute.port == connection.base.port else {
+        if let absolute = URL(string: address), absolute.scheme != nil {
+            // The same check as the picture loader's (an explicit :443 is the server's own port too).
+            guard connection.sameOrigin(absolute) else {
                 throw APIError(status: 0, detail: "An address outside the server was refused")
             }
             let encodedPath = absolute.path(percentEncoded: true)
