@@ -264,8 +264,6 @@ struct BoxesEditorView: View {
                 .accessibilityIdentifier("boxes.guess.no")
             }
             .disabled(state.busy)
-        } header: {
-            Text("Our guess")
         }
     }
 

@@ -106,7 +106,8 @@ final class BoxesScreens: ScreenTestCase {
         openPhoto("Apr 27, 2026")
         let add = app.buttons["boxes.add"]
         XCTAssertTrue(add.waitForExistence(timeout: 15), "the add box button is missing")
-        add.tap()
+        // A menu's button is a wrapper the accessibility tap cannot scroll to: tap its place on the screen.
+        add.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
         let personItem = app.buttons["Add a person box"]
         XCTAssertTrue(personItem.waitForExistence(timeout: 5), "the add box menu did not open")
         snap("boxes-add-menu")
