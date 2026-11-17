@@ -1,9 +1,31 @@
 # Content Cloud for iPhone
 
-The Personal Content Cloud on the phone: the library, people, albums, review and the rest of the website as
-native SwiftUI screens (being built area by area; see `ARCHITECTURE-ios.md` for the structure and the conventions
-every screen follows), and the sync that keeps your phone's new photos and videos flowing into your cloud and can
-clear the ones it has synced out of the phone's library when you ask.
+The Personal Content Cloud on the phone: the website's screens as native SwiftUI screens, and the sync that keeps
+your phone's new photos and videos flowing into your cloud and can clear the ones it has synced out of the phone's
+library when you ask. `ARCHITECTURE-ios.md` describes the structure and the conventions every screen follows.
+
+The tabs are Library, People, Albums, Review and More:
+
+- Library: the timeline by month with a year scrubber, search (best match, looks like, text) with the matched words
+  marked, every filter of the website, Show on map with the same filters, and selection with every bulk action
+  (favourite, keep, forwards, category, tags, private, people, albums, share, delete), each with Undo.
+- The viewer: paging, zoom, videos with a chip for each person in them, Live Photos, document pages, notes and
+  files; the info panel (dates, place on a map, camera, tags, the text found, a document's fields with Add to Apple
+  Wallet, albums, related items); the item's actions (favourite, share, download, save to Photos, add to album,
+  private, analyse again, trash); and the boxes of faces, people and pets, where the smaller box is always on top
+  and gets the tap: naming ranked by likeness, guesses with their evidence, moving and drawing boxes.
+- People: named people only, merge suggestions, faces to name, and the person page with its items, related items,
+  faces, guesses, tattoos and nails, the 3D head and, for pets, crops.
+- Review: mis-clicks, forwards, duplicates and guesses.
+- Albums: albums, the album page, Add to album from anywhere, and share links with a password, an expiry and
+  downloads.
+- More: the map with clusters and places, documents, the vault, upload and sync, the trash, and Settings (account,
+  passkeys, sessions and devices, system, learning, undo history, share links, Wallet, appearance).
+
+Not in the app, on purpose: the public share page and the first account's setup (both are for the website); adding
+a passkey and opening the vault with one (a passkey needs the server's own address as an associated domain, which
+an app for any self-hosted server cannot have, so the app opens the website for them); sharing into the app from
+other apps (no share extension yet); and the website's keyboard shortcuts.
 
 What the sync does (More, Upload and sync):
 
