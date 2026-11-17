@@ -31,10 +31,24 @@ final class HeadsScreens: ScreenTestCase {
         }
     }
 
+    /// Scrolls the page down with drags up its right margin until the element can be touched. The controls sit
+    /// below the head, and a scroll that XCUITest makes by itself may start on the head (which turns it) or land a
+    /// slider's drag on another slider.
+    private func scrollTo(_ element: XCUIElement, file: StaticString = #filePath, line: UInt = #line) {
+        XCTAssertTrue(element.waitForExistence(timeout: 10), "no \(element)", file: file, line: line)
+        var drags = 0
+        while !element.isHittable && drags < 10 {
+            app.coordinate(withNormalizedOffset: CGVector(dx: 0.97, dy: 0.72))
+                .press(forDuration: 0.05, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.97, dy: 0.38)))
+            drags += 1
+        }
+        XCTAssertTrue(element.isHittable, "could not scroll to \(element)", file: file, line: line)
+    }
+
     /// Flips a switch by its knob (a tap on a switch's middle may land on its label).
     private func flip(_ identifier: String) {
         let toggle = app.switches[identifier]
-        XCTAssertTrue(toggle.waitForExistence(timeout: 10), "no switch \(identifier)")
+        scrollTo(toggle)
         toggle.coordinate(withNormalizedOffset: CGVector(dx: 0.93, dy: 0.5)).tap()
     }
 
@@ -65,7 +79,7 @@ final class HeadsScreens: ScreenTestCase {
 
         // turn the head and take its colours away: the sliders say what the head shows
         let turn = app.sliders["heads.turn"]
-        XCTAssertTrue(turn.waitForExistence(timeout: 10))
+        scrollTo(turn)
         turn.adjust(toNormalizedSliderPosition: 0.72)
         XCTAssertTrue((turn.value as? String ?? "").hasSuffix("to the right"), "\(turn.value ?? "")")
         let age = app.sliders["heads.axis.age"]
@@ -80,22 +94,28 @@ final class HeadsScreens: ScreenTestCase {
 
         // Reset view puts it all back
         let reset = app.buttons["heads.reset"]
+        scrollTo(reset)
         reset.tap()
         XCTAssertEqual(app.sliders["heads.turn"].value as? String, "facing you")
         XCTAssertEqual(app.switches["heads.colour"].value as? String, "1")
 
         // Generate again: the options, and why nothing can be made on this server
         let again = app.buttons["heads.again"]
+        scrollTo(again)
         again.tap()
         let blocked = element("heads.blocked")
         XCTAssertTrue(blocked.waitForExistence(timeout: 10))
         XCTAssertTrue(blocked.label.contains("not installed"), blocked.label)
         XCTAssertFalse(app.buttons["heads.generate"].isEnabled)
+        let cancel = app.buttons["heads.againCancel"]
+        scrollTo(cancel)
         snap("heads-again")
-        app.buttons["heads.againCancel"].tap()
+        cancel.tap()
 
         // Delete asks first; cancelled, the model stays
-        app.buttons["heads.delete"].tap()
+        let delete = app.buttons["heads.delete"]
+        scrollTo(delete)
+        delete.tap()
         XCTAssertTrue(app.staticTexts["Delete this 3D model?"].waitForExistence(timeout: 10))
         snap("heads-delete")
         app.buttons["Cancel"].firstMatch.tap()

@@ -257,12 +257,12 @@ struct HeadsPersonTab: View {
 
     private func generate() {
         starting = true
-        let body = options.body
+        let request = options.body
         Task {
             defer { starting = false }
             do {
                 _ = try await UndoCenter.shared.perform("Started making the 3D heads", toast: false) {
-                    try await Cloud.api().startModel3d(personId: personId, body: body)
+                    try await Cloud.api().startModel3d(personId: personId, body: request)
                 }
                 again = false
                 // show the job at once; the next read brings the real step

@@ -157,7 +157,7 @@ enum HeadsLooks {
 
     /// The three axes of a model's looks, each with its stops in order (low to high).
     static func axes(_ looks: [API.Look3dOut]) -> [HeadsLookAxis] {
-        HeadsLookAxis.Key.allCases.map { key in
+        HeadsLookAxis.Key.allCases.map { key -> HeadsLookAxis in
             var order: [String] = []
             var members: [String: [API.Look3dOut]] = [:]
             for look in looks {
