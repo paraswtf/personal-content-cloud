@@ -45,6 +45,19 @@ struct SettingsAccountScreen: View {
             }
 
             Section {
+                // The account's name beside the password fields (the website's username input in this form), so a
+                // password manager files the new password under this account. Read-only: shown, never typed in.
+                HStack {
+                    Text("Username")
+                    TextField("Username", text: .constant(username ?? ""))
+                        .textContentType(.username)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .multilineTextAlignment(.trailing)
+                        .foregroundStyle(.secondary)
+                        .allowsHitTesting(false)
+                        .accessibilityIdentifier("account.usernameField")
+                }
                 SettingsAccountPasswordField(title: "Current password", text: $current, identifier: "account.current")
                 if touched && current.isEmpty {
                     SettingsAccountFieldError(text: "Enter the current password.")

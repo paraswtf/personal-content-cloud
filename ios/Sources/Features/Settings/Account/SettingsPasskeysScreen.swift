@@ -81,10 +81,11 @@ struct SettingsPasskeysScreen: View {
             Text("\(key.name) will no longer sign in here. Also remove it from the device or password manager that holds it, so it is not offered again.")
         }
         .sheet(item: $pending, onDismiss: unlockSheetGone) { action in
-            VaultUnlockSheet(onUnlocked: {
-                resume = action
-                pending = nil
-            })
+            VaultUnlockSheet(title: SettingsAccountText.unlockTitle, reason: SettingsAccountText.unlockReason(action),
+                             onUnlocked: {
+                                 resume = action
+                                 pending = nil
+                             })
         }
     }
 

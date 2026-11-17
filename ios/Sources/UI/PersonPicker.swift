@@ -199,6 +199,20 @@ enum PickerOptions {
         return rows
     }
 
+    /// What the picker says when it has no rows: nothing matches the typed name, everyone listed is already chosen
+    /// (the website's PeopleFilter: "No more people to add."), or there is nobody yet.
+    static func emptyText(typed: String, kind: PickerKind, listed: [API.PersonOut], excluding: Set<Int>) -> String {
+        if !typed.trimmingCharacters(in: .whitespaces).isEmpty {
+            return kind == .pet ? "No pet matches that name." : "No one matches that name."
+        }
+        if listed.contains(where: { excluding.contains($0.id) }) { return "No more people to add." }
+        switch kind {
+        case .all: return "No people or pets yet. Type a name to add one."
+        case .pet: return "No pets yet. Type a name to add one."
+        case .person: return "No people yet. Type a name to create one."
+        }
+    }
+
     /// A listed person's row: an alike one says why (and how many items), the others their counts.
     static func option(_ p: API.PersonOut, alike: API.SimilarOption?) -> PersonOption? {
         let pet = p.kind.rawValue == "pet"
@@ -246,6 +260,8 @@ struct PersonPicker: View {
     @State private var rankingPending = false
     @State private var rankGeneration = 0
     @State private var failure: String?
+    /// Counts Try again after a failed load: part of the list task's id, so a retry runs like a new search.
+    @State private var attempt = 0
     /// When the last pick was taken: a second tap within a second is ignored (`pick(_:)`).
     @State private var pickedAt: Date?
 
@@ -277,9 +293,15 @@ struct PersonPicker: View {
         let current = rows
         List {
             if let failure {
-                Text(failure)
-                    .font(.footnote)
-                    .foregroundStyle(.red)
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(failure)
+                        .font(.footnote)
+                        .foregroundStyle(.red)
+                    Button("Try again", action: retry)
+                        .font(.footnote.weight(.semibold))
+                        .buttonStyle(.borderless)
+                        .accessibilityIdentifier("picker.retry")
+                }
             }
             ForEach(sections(current), id: \.key) { section in
                 Section {
@@ -302,20 +324,20 @@ struct PersonPicker: View {
                 ProgressView(waiting ? "Finding who looks alike" : "Searching")
             }
         }
-        .task(id: text) { await loadList() }
+        .task(id: "\(attempt)|\(text)") { await loadList() }
         .task(id: activeLike) { await loadRanking() }
         .accessibilityIdentifier("picker")
     }
 
     private var emptyText: String {
-        if !text.trimmingCharacters(in: .whitespaces).isEmpty {
-            return kind == .pet ? "No pet matches that name." : "No one matches that name."
-        }
-        switch kind {
-        case .all: return "No people or pets yet. Type a name to add one."
-        case .pet: return "No pets yet. Type a name to add one."
-        case .person: return "No people yet. Type a name to create one."
-        }
+        PickerOptions.emptyText(typed: text, kind: kind, listed: listed, excluding: excluding)
+    }
+
+    /// Loads the list again after it failed (the website's "Try again"): the spinner shows while it runs.
+    private func retry() {
+        failure = nil
+        listLoaded = false
+        attempt += 1
     }
 
     private struct RowSection {

@@ -103,6 +103,26 @@ final class PickerOptionsTests: XCTestCase {
         XCTAssertEqual(ids(only), ["p2"])
     }
 
+    /// With no rows: a typed name nobody has, everyone already chosen (the website's "No more people to add."),
+    /// or nobody yet.
+    func testTheEmptyTextSaysWhyNothingIsListed() throws {
+        let list = try listed()
+        XCTAssertEqual(PickerOptions.emptyText(typed: "Zed", kind: .person, listed: [], excluding: []),
+                       "No one matches that name.")
+        XCTAssertEqual(PickerOptions.emptyText(typed: "Zed", kind: .pet, listed: [], excluding: []),
+                       "No pet matches that name.")
+        XCTAssertEqual(PickerOptions.emptyText(typed: "", kind: .all, listed: list, excluding: [1, 2, 4, 5]),
+                       "No more people to add.")
+        XCTAssertEqual(PickerOptions.emptyText(typed: " ", kind: .person, listed: list, excluding: [1, 2, 4, 5]),
+                       "No more people to add.")
+        XCTAssertEqual(PickerOptions.emptyText(typed: "", kind: .all, listed: [], excluding: [1]),
+                       "No people or pets yet. Type a name to add one.")
+        XCTAssertEqual(PickerOptions.emptyText(typed: "", kind: .person, listed: [], excluding: []),
+                       "No people yet. Type a name to create one.")
+        XCTAssertEqual(PickerOptions.emptyText(typed: "", kind: .pet, listed: [], excluding: []),
+                       "No pets yet. Type a name to add one.")
+    }
+
     func testTheLikenessRequestIsTheSameForTheSameSource() {
         let a = LikenessSource(faceIds: [3, 1, 3], uids: ["b", "a"]).request(limit: 6)
         XCTAssertEqual(a.faceIds, [1, 3])
