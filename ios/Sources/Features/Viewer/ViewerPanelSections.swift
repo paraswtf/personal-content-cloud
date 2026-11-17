@@ -137,8 +137,10 @@ struct ViewerTagsSection: View {
     /// Everything with the tag: the viewer closes and the library opens filtered on the tab underneath, as Show on
     /// map does.
     private func showTagged(_ name: String) {
+        var filters = LibraryFilters()
+        filters.tag = [name]
         router.viewer = nil
-        router.open(.libraryFiltered(LibraryFilters(tag: [name])))
+        router.open(.libraryFiltered(filters))
     }
 
     private func same(_ a: String, _ b: String) -> Bool {

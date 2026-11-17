@@ -260,10 +260,17 @@ final class ViewerScreens: ScreenTestCase {
         let outcome = NSPredicate { _, _ in chip.exists || failed.exists }
         expectation(for: outcome, evaluatedWith: nil)
         waitForExpectations(timeout: 60)
-        if failed.exists && failed.label.contains("could not be opened") {
-            throw XCTSkip("the server here cannot read video frames (no ffmpeg): \(failed.label)")
+        if failed.exists {
+            // Without ffmpeg (the CI machine) the server cannot cut the frame and answers 409. It got the frame's
+            // time all the same: without it the answer is 400 frame_time_needed ("Pause the video on a frame...").
+            XCTAssertFalse(failed.label.hasPrefix("Pause the video"), "the box went without the frame's time")
+            XCTAssertTrue(failed.label.contains("could not be opened"), "the box was not added: \(failed.label)")
+            snap("viewer-video-box-no-ffmpeg")
+            app.buttons["boxes.draw.cancelBox"].tap()
+            XCTAssertTrue(app.buttons["viewer.close"].waitForExistence(timeout: 10), "the viewer's bars did not come back")
+            return
         }
-        XCTAssertTrue(chip.exists, "the drawn person box did not show as a chip: \(failed.exists ? failed.label : "")")
+        XCTAssertTrue(chip.exists, "the drawn person box did not show as a chip")
         snap("viewer-video-box-added")
     }
 }
