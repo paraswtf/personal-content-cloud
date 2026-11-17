@@ -13,6 +13,22 @@ final class ReviewScreens: ScreenTestCase {
         app.buttons.matching(identifier: identifier).firstMatch
     }
 
+    /// Scrolls the list until `element` can be tapped: down the list first, then back up.
+    @discardableResult
+    private func reveal(_ element: XCUIElement) -> XCUIElement {
+        var swipes = 0
+        while element.exists && !element.isHittable && swipes < 4 {
+            app.swipeUp()
+            swipes += 1
+        }
+        swipes = 0
+        while element.exists && !element.isHittable && swipes < 8 {
+            app.swipeDown()
+            swipes += 1
+        }
+        return element
+    }
+
     private func pickInPicker(_ name: String) {
         let search = app.searchFields.firstMatch
         if search.waitForExistence(timeout: 10) {
@@ -51,22 +67,22 @@ final class ReviewScreens: ScreenTestCase {
         snap("review-guesses-person")
 
         // the photo of the first card opens in the viewer
-        button("review.guess.open").tap()
+        reveal(button("review.guess.open")).tap()
         XCTAssertTrue(app.buttons["viewer.close"].waitForExistence(timeout: 20), "the viewer did not open")
         snap("review-guess-viewer")
         app.buttons["viewer.close"].tap()
 
         // Yes, No and Someone else on the first card each time
         XCTAssertTrue(yes.waitForExistence(timeout: 20))
-        yes.tap()
+        reveal(yes).tap()
         XCTAssertTrue(toast("Tagged as Review Person."), "no message after Yes")
         let no = button("review.guess.no")
         XCTAssertTrue(no.waitForExistence(timeout: 20))
-        no.tap()
+        reveal(no).tap()
         XCTAssertTrue(toast("Guess rejected."), "no message after No")
         let other = button("review.guess.other")
         XCTAssertTrue(other.waitForExistence(timeout: 20))
-        other.tap()
+        reveal(other).tap()
         XCTAssertTrue(app.navigationBars["Someone else"].waitForExistence(timeout: 20), "the picker did not open")
         snap("review-someone-else")
         pickInPicker("Review Other")
@@ -75,7 +91,7 @@ final class ReviewScreens: ScreenTestCase {
         // Confirm all shown, for the guesses of Review Person that are left
         let confirmAll = button("review.confirmAll")
         if confirmAll.waitForExistence(timeout: 10) {
-            confirmAll.tap()
+            reveal(confirmAll).tap()
             let confirm = app.buttons["Confirm all"]
             XCTAssertTrue(confirm.waitForExistence(timeout: 10))
             confirm.tap()
@@ -95,7 +111,7 @@ final class ReviewScreens: ScreenTestCase {
         XCTAssertTrue(pocket.waitForExistence(timeout: 30), "the seeded mis-click is not listed")
         snap("review-misclicks")
         button("review.select").tap()
-        pocket.tap()
+        reveal(pocket).tap()
         XCTAssertTrue(app.staticTexts["bulk.count"].waitForExistence(timeout: 10), "selecting did not start")
         XCTAssertEqual(app.staticTexts["bulk.count"].label, "1 selected")
         snap("review-misclicks-selected")
@@ -109,7 +125,7 @@ final class ReviewScreens: ScreenTestCase {
         XCTAssertTrue(forward.waitForExistence(timeout: 30), "the seeded forward is not listed")
         snap("review-forwards")
         button("review.select").tap()
-        forward.tap()
+        reveal(forward).tap()
         XCTAssertTrue(app.staticTexts["bulk.count"].waitForExistence(timeout: 10), "selecting did not start")
         app.buttons["Delete"].tap()
         let moveToTrash = app.buttons["Move to trash"]
@@ -123,7 +139,7 @@ final class ReviewScreens: ScreenTestCase {
             .firstMatch
         XCTAssertTrue(makeBest.waitForExistence(timeout: 30), "the seeded duplicates are not listed")
         snap("review-duplicates")
-        makeBest.tap()
+        reveal(makeBest).tap()
         XCTAssertTrue(toast("Best copy changed."), "no message after Make best")
         snap("review-duplicates-best")
     }
