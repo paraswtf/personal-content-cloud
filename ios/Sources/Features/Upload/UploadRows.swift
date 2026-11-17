@@ -84,10 +84,13 @@ struct UploadQueueRow: View {
                         .tint(Color.secondary)
                         .accessibilityLabel("\(name): \(UploadText.phase(info.phase, progress: checked, resumed: resumed) ?? "")")
                 }
+                // the file's own reason (why it waits) and the network notice, both when both apply
+                if info.phase == .waiting, let problem = rec.error, !problem.isEmpty {
+                    Label(problem, systemImage: "wifi.exclamationmark").font(.caption).foregroundStyle(.orange)
+                        .accessibilityIdentifier("upload.reason")
+                }
                 if info.phase.canCancel && (offline || retryAt != nil) {
                     networkNotice
-                } else if info.phase == .waiting, let problem = rec.error {
-                    Label(problem, systemImage: "wifi.exclamationmark").font(.caption).foregroundStyle(.orange)
                 }
                 if let badge = UploadText.badge(phase: info.phase, serverStatus: rec.serverStatus, skipped: info.skipped) {
                     VStack(alignment: .leading, spacing: 4) {

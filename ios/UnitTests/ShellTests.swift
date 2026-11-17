@@ -23,6 +23,14 @@ final class ShellTests: XCTestCase {
         XCTAssertEqual(Fmt.clock(-4), "0:00")
     }
 
+    func testVaultBarIsSpokenInWholeMinutes() {
+        XCTAssertEqual(ShellVaultBar.spoken(12 * 60), "Vault unlocked, 12 minutes left")
+        XCTAssertEqual(ShellVaultBar.spoken(11 * 60 + 1), "Vault unlocked, 12 minutes left")
+        XCTAssertEqual(ShellVaultBar.spoken(61), "Vault unlocked, 2 minutes left")
+        XCTAssertEqual(ShellVaultBar.spoken(60), "Vault unlocked, 1 minute left")
+        XCTAssertEqual(ShellVaultBar.spoken(5), "Vault unlocked, 1 minute left")
+    }
+
     func testToastDurationsFollowTheWebsite() {
         XCTAssertEqual(Toaster.seconds(tone: .ok, hasAction: false), 5)
         XCTAssertEqual(Toaster.seconds(tone: .info, hasAction: false), 5)

@@ -51,7 +51,8 @@ private struct CreateBody: Encodable {
 /// watches one asset's tasks while the engine waits, so a lost hand-off or a transfer iOS never starts
 /// cannot hold a run. Errors:
 /// - transport failures, 408, 429 and 5xx retry the same request after 1, 2, 4, 8, 16, 30 s
-///   (`earliestBeginDate`), at most eight attempts in a row;
+///   (`earliestBeginDate`), at most eight attempts in a row; time offline does not use up attempts (the
+///   website's uploader.ts does the same), and a request waiting for the connection is not cancelled as stuck;
 /// - 409 offset_mismatch continues from the server's offset; another 409 reads the upload's state;
 /// - 404 on a chunk or complete creates the upload again (create is idempotent per asset, half
 ///   and size, so the server answers with its own row while it has one);
@@ -81,6 +82,11 @@ final class BackgroundUploader: NSObject, ObservableObject {
     /// When a request that failed on the way is tried again, by asset id (the Upload screen's "Connection problem.
     /// Trying again in N s."). Cleared once bytes move again or the asset leaves the wire.
     @Published private(set) var retryAt: [String: Date] = [:]
+
+    /// Assets that stopped or failed for the network (gave up on transport errors, could not reach the server, or a
+    /// request never started), which the Upload screen starts again when the connection comes back. Cleared when the
+    /// asset starts again.
+    private(set) var networkFailures: Set<String> = []
 
     /// The files being sent, in a steady order for the Sync screen.
     var sendingList: [Sending] {
@@ -279,18 +285,25 @@ final class BackgroundUploader: NSObject, ObservableObject {
                 // The session is being replaced (the Wi-Fi or charging option changed) and waits for the
                 // other assets' requests: sessionInvalidated() sends this one's next request.
                 if invalidating || reconfigurePending { continue }
-                kicks += 1
+                if SyncEngine.shared.online { kicks += 1 }
                 if kicks > Self.maxKicks {
+                    networkFailures.insert(rec.assetId)
                     stall(rec, "The transfer did not start; it continues on the next sync")
                     return
                 }
                 SyncStore.shared.log("No request in flight for \(rec.filename); sending the next one")
                 scheduleNext(rec)
+            } else if !SyncEngine.shared.online {
+                // Offline the session holds the request until the connection is back: that is waiting, not
+                // stuck. The stall clock starts again from now, so the first look after the connection comes
+                // back does not cancel at once.
+                lastProgress[assetId] = Date()
+                for t in tasks where t.state == .suspended { t.resume() }
             } else if Date().timeIntervalSince(lastProgress[assetId] ?? Date()) > Self.stuckSeconds {
                 SyncStore.shared.log("No progress on \(rec.filename) for \(Int(Self.stuckSeconds)) s; trying again")
                 tasks.forEach { $0.cancel() }
                 lastProgress[assetId] = Date()
-                retry(rec, reason: "no progress for \(Int(Self.stuckSeconds)) s")
+                retry(rec, reason: "no progress for \(Int(Self.stuckSeconds)) s", network: true)
             } else {
                 for t in tasks where t.state == .suspended { t.resume() }
             }
@@ -359,6 +372,7 @@ final class BackgroundUploader: NSObject, ObservableObject {
     // MARK: the state machine
 
     private func begin(_ rec: SyncRecord) {
+        networkFailures.remove(rec.assetId)
         rec.status = "uploading"
         rec.error = nil
         rec.attempts = 0
@@ -497,7 +511,7 @@ final class BackgroundUploader: NSObject, ObservableObject {
         if rec.chunkPath == tag.body { rec.chunkPath = nil }
         if let error {
             if (error as? URLError)?.code == .cancelled { return }   // paused, or the app was force-quit
-            retry(rec, reason: error.localizedDescription)
+            retry(rec, reason: error.localizedDescription, error: error)
             return
         }
         switch status {
@@ -578,7 +592,9 @@ final class BackgroundUploader: NSObject, ObservableObject {
                 do { answer = .some(try await api.upload(id: id)) } catch { answer = .none }
                 guard rec.status == "uploading", rec.uploadId == id else { return }
                 switch answer {
-                case .none: self.stall(rec, "Cannot reach the server; the upload continues on the next sync")
+                case .none:
+                    self.networkFailures.insert(rec.assetId)
+                    self.stall(rec, "Cannot reach the server; the upload continues on the next sync")
                 case .some(.none): self.forgetUpload(rec); self.scheduleNext(rec)
                 case .some(.some(let up)): self.applyUpload(rec, up)
                 }
@@ -597,9 +613,21 @@ final class BackgroundUploader: NSObject, ObservableObject {
         }
     }
 
-    private func retry(_ rec: SyncRecord, reason: String) {
+    /// `network`: the request made no progress (the watchdog), which counts as a network failure like a transport
+    /// error does.
+    private func retry(_ rec: SyncRecord, reason: String, error: Error? = nil, network: Bool = false) {
+        guard Self.countsAttempt(online: SyncEngine.shared.online, error: error) else {
+            // Offline: tried again without counting. The Upload screen says the phone is offline; the background
+            // session holds the request until the connection is back.
+            retryAt[rec.assetId] = nil
+            scheduleNext(rec, after: Self.offlineDelay)
+            return
+        }
         rec.attempts += 1
         if rec.attempts >= Self.maxAttempts {
+            // A transport failure or a request that never moved: the Upload screen starts it again when the
+            // connection comes back (UploadQueue.backOnline).
+            if error is URLError || network { networkFailures.insert(rec.assetId) }
             fail(rec, "Gave up after \(Self.maxAttempts) attempts: \(reason)")
             return
         }
@@ -607,6 +635,20 @@ final class BackgroundUploader: NSObject, ObservableObject {
         retryAt[rec.assetId] = Date(timeIntervalSinceNow: delay)
         scheduleNext(rec, after: delay)
     }
+
+    /// Whether a failed request uses up one of the asset's attempts: not while the phone has no network path, and
+    /// not for the errors that mean there is none (the path monitor can report the change a moment after the
+    /// request failed). The website's uploader counts no attempt while the browser is offline.
+    nonisolated static func countsAttempt(online: Bool, error: Error?) -> Bool {
+        guard online else { return false }
+        switch (error as? URLError)?.code {
+        case .notConnectedToInternet?, .networkConnectionLost?, .dataNotAllowed?: return false
+        default: return true
+        }
+    }
+
+    /// How long a request that failed offline waits before it is handed to the session again.
+    static let offlineDelay: TimeInterval = 8
 
     /// The current file starts again with a new create (the server dropped or cancelled its upload).
     private func forgetUpload(_ rec: SyncRecord) {

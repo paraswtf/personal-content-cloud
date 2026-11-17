@@ -87,7 +87,9 @@ struct ShellVaultBar: View {
                 .frame(height: 32)
                 .contentShape(Rectangle())
             }
-            .accessibilityLabel("Vault unlocked, \(Fmt.clock(left)) left")
+            // In whole minutes, so the label changes once a minute rather than every second: VoiceOver does not
+            // read a ticking clock, and UI tests do not see the screen's elements change under them every second.
+            .accessibilityLabel(Self.spoken(left))
             .accessibilityHint("Opens the vault")
             .accessibilityIdentifier("shell.vault")
             Divider().frame(height: 18)
@@ -109,6 +111,12 @@ struct ShellVaultBar: View {
         .frame(maxWidth: .infinity)
         .padding(.vertical, 4)
         .background(.bar)
+    }
+
+    /// "Vault unlocked, 12 minutes left" (rounded up, so the last seconds read as 1 minute).
+    nonisolated static func spoken(_ secondsLeft: Int) -> String {
+        let minutes = max(1, (max(0, secondsLeft) + 59) / 60)
+        return "Vault unlocked, \(minutes) \(minutes == 1 ? "minute" : "minutes") left"
     }
 
     private func openVault() {
