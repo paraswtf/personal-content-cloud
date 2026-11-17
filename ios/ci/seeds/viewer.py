@@ -104,7 +104,7 @@ def library(kit) -> dict:
     out["pdf"] = pdf["uid"]
 
     # a photo received on WhatsApp, kept in the library
-    img = kit.scene(4100, [])
+    img = kit.scene(8100, [])
     received = kit.make_item(
         conn, data=kit.jpeg(img), width=kit.W, height=kit.H, filename="VIEWER_RECEIVED.JPG",
         taken_at="2026-04-18T17:05:00.000Z", camera="CI Camera", category="places", received_via="whatsapp",
@@ -117,7 +117,7 @@ def library(kit) -> dict:
 
     # a short playable video with a named face at one second (ffmpeg makes it when it is here, else OpenCV, which
     # the backend installs)
-    drawn = kit.scene(4300, [((0.40, 0.25, 0.16, 0.24), (210, 170, 140), (40, 30, 30))])   # kit.W x kit.H
+    drawn = kit.scene(8300, [((0.40, 0.25, 0.16, 0.24), (210, 170, 140), (40, 30, 30))])   # kit.W x kit.H
     frame = drawn.resize((640, 480))
     with tempfile.TemporaryDirectory() as tmp:
         made = _clip(frame, Path(tmp))
