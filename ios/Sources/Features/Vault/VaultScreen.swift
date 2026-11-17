@@ -12,6 +12,10 @@ struct VaultScreen: View {
     @Environment(AppRouter.self) private var router
     @State private var locking = false
 
+    init(filters: LibraryFilters? = nil) {
+        self.filters = filters
+    }
+
     private var vault: VaultSession { VaultSession.shared }
 
     var body: some View {
