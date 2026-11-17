@@ -71,6 +71,29 @@ final class MapDocsScreens: ScreenTestCase {
         XCTAssertTrue(waitUntilGone(title), "the panel did not close")
     }
 
+    /// The map starts plain (the app's own basemap, nothing asked of Apple), Detailed map switches to Apple's map,
+    /// and the choice is kept; the test leaves it plain.
+    func testDetailedMapToggle() throws {
+        try launchSignedIn()
+        openMore("more.map", title: "Map")
+        let toggle = app.buttons["map.detailed"]
+        let note = app.staticTexts["map.tilesNote"]
+        XCTAssertTrue(toggle.waitForExistence(timeout: 20), "no Detailed map button")
+        if toggle.isSelected { toggle.tap() }
+        XCTAssertTrue(wait(note, NSPredicate(format: "label BEGINSWITH 'The plain map works offline'"), timeout: 10),
+                      "the plain map's note reads \(note.label)")
+        XCTAssertTrue(markers.firstMatch.waitForExistence(timeout: 30), "no cluster or point on the plain map")
+        snap("mapdocs-map-plain")
+        toggle.tap()
+        XCTAssertTrue(wait(note, NSPredicate(format: "label BEGINSWITH 'The detailed map comes from Apple Maps'"),
+                           timeout: 10), "Detailed map did not switch: \(note.label)")
+        XCTAssertTrue(toggle.isSelected, "Detailed map does not read as on")
+        snap("mapdocs-map-detailed")
+        toggle.tap()
+        XCTAssertTrue(wait(note, NSPredicate(format: "label BEGINSWITH 'The plain map works offline'"), timeout: 10),
+                      "Detailed map did not switch back")
+    }
+
     /// The library's Show on map opens the map with the library's filters (the website's filter bar map link).
     func testLibraryShowOnMap() throws {
         try launchSignedIn()
@@ -198,9 +221,13 @@ final class MapDocsScreens: ScreenTestCase {
         snap("mapdocs-documents-search")
 
         bill.tap()
-        let close = app.buttons["viewer.close"]
-        XCTAssertTrue(close.waitForExistence(timeout: 20), "the viewer did not open from a card")
+        // document mode: the details open at once, the document's section first
+        let done = app.buttons["Done"]
+        XCTAssertTrue(done.waitForExistence(timeout: 20), "the viewer did not open its details in document mode")
         snap("mapdocs-documents-viewer")
+        done.tap()
+        let close = app.buttons["viewer.close"]
+        XCTAssertTrue(close.waitForExistence(timeout: 20), "the viewer is not under the details")
         close.tap()
         XCTAssertTrue(bill.waitForExistence(timeout: 10))
     }

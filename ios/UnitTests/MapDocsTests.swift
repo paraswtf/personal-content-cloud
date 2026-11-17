@@ -128,4 +128,26 @@ final class MapDocsTests: XCTestCase {
     private func decode<T: Decodable>(_ type: T.Type, _ json: String) throws -> T {
         try JSONDecoder().decode(type, from: Data(json.utf8))
     }
+
+    // MARK: the plain basemap
+
+    /// The bundled copy of the website's basemap is in the app and decodes into its three kinds (Natural Earth
+    /// 1:110m: 127 land polygons, 24 lakes, 331 border lines; backend/tests/test_ios_basemap.py keeps the file the
+    /// website's).
+    func testBundledBasemapDecodes() throws {
+        let url = try XCTUnwrap(Bundle.main.url(forResource: "basemap", withExtension: "json"),
+                                "basemap.json is not in the app")
+        let shapes = try XCTUnwrap(MapBasemap.load(from: url), "basemap.json did not decode")
+        XCTAssertEqual(shapes.land.count, 127)
+        XCTAssertEqual(shapes.lakes.count, 24)
+        XCTAssertGreaterThanOrEqual(shapes.borders.count, 331)
+        XCTAssertNotNil(MapBasemap.shapes)
+        XCTAssertEqual(MapBasemap.kindOf(Data(#"{"kind":"lake"}"#.utf8)), "lake")
+        XCTAssertNil(MapBasemap.kindOf(nil))
+    }
+
+    func testSpotOpensCloserThanAPlace() {
+        XCTAssertLessThan(MapRules.spotSpan, MapRules.closestSpan)
+        XCTAssertEqual(MapFlyTarget(latitude: 1, longitude: 2, nonce: 3).span, MapRules.closestSpan)
+    }
 }

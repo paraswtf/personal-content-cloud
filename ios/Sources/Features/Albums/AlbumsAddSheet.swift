@@ -46,6 +46,15 @@ struct AlbumsAddSheet: View {
                                 .buttonStyle(.borderedProminent)
                                 .disabled(trimmedNewName.isEmpty || busy)
                                 .accessibilityIdentifier("albums.add.create")
+                            // folds the field back to "Create a new album" (the website's Cancel); the sheet stays
+                            Button("Cancel") {
+                                creating = false
+                                newName = ""
+                                newNameFocused = false
+                            }
+                            .buttonStyle(.bordered)
+                            .disabled(busy)
+                            .accessibilityIdentifier("albums.add.cancelNew")
                         }
                     } else {
                         Button {

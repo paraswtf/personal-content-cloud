@@ -77,7 +77,7 @@ struct TrashScreen: View {
             TrashPreview(items: pager.items, index: $previewIndex, total: total,
                          busy: { working.contains($0) },
                          onRestore: { restore($0) },
-                         onPurge: { purge($0) },
+                         onPurge: { item, askAgain in purge(item, askAgain: askAgain) },
                          onNearEnd: { item in pager.loadMoreIfNeeded(item) })
         }
         .task {
@@ -127,7 +127,9 @@ struct TrashScreen: View {
         }
     }
 
-    private func purge(_ item: API.ItemCard) {
+    /// Deletes one item for good. When that fails, the error shows and the question comes back for another try (the
+    /// website's dialog stays open): `askAgain` asks it where the owner is (the larger look), else the grid asks.
+    private func purge(_ item: API.ItemCard, askAgain: (() -> Void)? = nil) {
         guard !working.contains(item.uid) else { return }
         working.insert(item.uid)
         Task {
@@ -142,6 +144,11 @@ struct TrashScreen: View {
                 CloudEvents.post(items: [item.uid])
             } catch {
                 Toaster.shared.error(error, doing: "delete \(item.filename)")
+                let cancelled = error is CancellationError || (error as? URLError)?.code == .cancelled
+                if !cancelled {
+                    working.remove(item.uid)
+                    if let askAgain { askAgain() } else { purging = item }
+                }
             }
         }
     }
@@ -247,10 +254,11 @@ struct TrashThumb: View {
                 .foregroundStyle(.secondary)
             } else if isDocument {
                 Color.white
-                RemoteImage(ref: ref, maxPixel: maxPixel, contentMode: .fit)
+                LibraryKindImage(ref: ref, maxPixel: maxPixel, contentMode: .fit, kind: kind)
                     .padding(4)
             } else {
-                RemoteImage(ref: ref, maxPixel: maxPixel, contentMode: fit ? .fit : .fill)
+                // a picture that cannot be loaded shows its kind's icon (the website's TrashPage)
+                LibraryKindImage(ref: ref, maxPixel: maxPixel, contentMode: fit ? .fit : .fill, kind: kind)
             }
         }
         .overlay(alignment: .bottomTrailing) {

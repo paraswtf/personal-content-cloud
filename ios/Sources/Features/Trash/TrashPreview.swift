@@ -1,5 +1,6 @@
 import SwiftUI
 import AVKit
+import Combine
 
 /// A larger look at one item in the trash (the website's TrashPreview): the preview picture, a video with its
 /// controls, or a document's first page, with Restore and Delete forever (after a question), and the previous and
@@ -11,7 +12,8 @@ struct TrashPreview: View {
     let total: Int
     let busy: (String) -> Bool
     let onRestore: (API.ItemCard) -> Void
-    let onPurge: (API.ItemCard) -> Void
+    /// Deletes for good; the second argument asks the question again when deleting failed.
+    let onPurge: (API.ItemCard, @escaping () -> Void) -> Void
     /// Shown: the list loads more when it nears the end.
     let onNearEnd: (API.ItemCard) -> Void
 
@@ -42,7 +44,7 @@ struct TrashPreview: View {
             }
             .confirmationDialog("Delete forever", isPresented: purgeAsked, titleVisibility: .visible,
                                 presenting: askPurge) { item in
-                Button("Delete forever", role: .destructive) { onPurge(item) }
+                Button("Delete forever", role: .destructive) { onPurge(item) { askPurge = item } }
                 Button("Cancel", role: .cancel) {}
             } message: { item in
                 Text(TrashText.purgeQuestion(item.filename))
@@ -81,6 +83,12 @@ struct TrashPreview: View {
                     Text(TrashText.position(at, of: max(total, items.count)))
                         .font(.footnote.monospacedDigit())
                         .foregroundStyle(.secondary)
+                    if let length = TrashText.videoLength(kind: item.kind.rawValue, seconds: item.durationS) {
+                        Text(length)
+                            .font(.footnote.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                            .accessibilityIdentifier("trash.preview.length")
+                    }
                 }
                 .frame(maxWidth: .infinity)
                 .accessibilityElement(children: .combine)
@@ -110,6 +118,14 @@ struct TrashPreview: View {
         }
         .padding(16)
         .onAppear { onNearEnd(item) }
+        // the next item's picture is fetched ahead, so moving on shows it at once
+        .task(id: item.uid) { await prefetch(after: at) }
+    }
+
+    private func prefetch(after at: Int) async {
+        let next = at + 1
+        guard items.indices.contains(next), let picture = TrashPreviewMedia.picture(of: items[next]) else { return }
+        _ = try? await ImageLoader.shared.image(picture.ref, maxPixel: picture.maxPixel)
     }
 
     private var purgeAsked: Binding<Bool> {
@@ -131,6 +147,17 @@ struct TrashPreviewMedia: View {
 
     private var kind: MediaKind { MediaKind(item.kind.rawValue) }
 
+    /// The picture the larger look loads for an item, and at what size (a video's poster, a document's first page,
+    /// a photo's preview); nil for a private item, which shows the locked tile. The look fetches the next one ahead
+    /// with the same address and size, so it is in memory when the owner moves on.
+    static func picture(of item: API.ItemCard) -> (ref: String, maxPixel: Int)? {
+        if item.nsfw { return nil }
+        let kind = MediaKind(item.kind.rawValue)
+        if kind == .video, item.urls.video != nil { return (item.urls.previewSmall, TrashVideo.posterPixels) }
+        if kind == .pdf || kind == .document { return (item.urls.pages.first ?? item.urls.preview, 1600) }
+        return (item.urls.preview, 1600)
+    }
+
     var body: some View {
         if item.nsfw {
             TrashThumb(item: item, ref: item.urls.thumb)
@@ -139,14 +166,16 @@ struct TrashPreviewMedia: View {
         } else if kind == .pdf || kind == .document {
             ZStack {
                 Color.white
-                RemoteImage(ref: item.urls.pages.first ?? item.urls.preview, maxPixel: 1600, contentMode: .fit)
+                LibraryKindImage(ref: item.urls.pages.first ?? item.urls.preview, maxPixel: 1600, contentMode: .fit,
+                                 kind: kind)
                     .padding(8)
             }
             .accessibilityHidden(true)
         } else {
             ZStack {
                 Color.black
-                RemoteImage(ref: item.urls.preview, maxPixel: 1600, contentMode: .fit)
+                // a picture that cannot be loaded shows its kind's icon (the website's TrashPreview)
+                LibraryKindImage(ref: item.urls.preview, maxPixel: 1600, contentMode: .fit, kind: kind)
             }
             .accessibilityHidden(true)
         }
@@ -158,21 +187,51 @@ struct TrashVideo: View {
     let ref: String
     let posterRef: String
 
+    /// The poster's size (the look's prefetch asks for the same).
+    static let posterPixels = 1280
+
     @State private var player: AVPlayer?
+    /// The video cannot be played: its kind's icon shows instead (the website's TrashPreview).
+    @State private var failed = false
 
     var body: some View {
         ZStack {
             Color.black
-            if let player {
+            if failed {
+                Image(systemName: LibraryKindImage.symbol(.video))
+                    .font(.largeTitle)
+                    .foregroundStyle(.secondary)
+                    .accessibilityLabel("This video cannot be played")
+                    .accessibilityIdentifier("trash.preview.videoFailed")
+            } else if let player {
                 VideoPlayer(player: player)
             } else {
-                RemoteImage(ref: posterRef, maxPixel: 1280, contentMode: .fit)
+                LibraryKindImage(ref: posterRef, maxPixel: Self.posterPixels, contentMode: .fit, kind: .video)
             }
         }
-        .onAppear { if player == nil { player = AuthorizedPlayer.player(for: ref) } }
+        .onAppear {
+            if player == nil && !failed {
+                player = AuthorizedPlayer.player(for: ref)
+                if player == nil { failed = true }
+            }
+        }
+        .task(id: player.map { ObjectIdentifier($0) }) { await watch() }
         .onDisappear {
             player?.pause()
             player = nil
+        }
+    }
+
+    /// Notices when the player gives up on the video.
+    private func watch() async {
+        guard let item = player?.currentItem else { return }
+        for await status in item.publisher(for: \.status).values {
+            if status == .failed {
+                player?.pause()
+                player = nil
+                failed = true
+                return
+            }
         }
     }
 }

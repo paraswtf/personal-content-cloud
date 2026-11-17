@@ -141,8 +141,10 @@ struct DocumentsScreen: View {
         if let answer = try? await Cloud.api().documentTypes() { types = answer }
     }
 
+    /// Opens the viewer in document mode (the website's mode="document"): the info panel opens at once with the
+    /// document's section first, and the owner pages through the list.
     private func open(_ entry: DocumentsEntry) {
-        router.show(pager.items.map(\.item), start: entry.item) {
+        router.show(pager.items.map(\.item), start: entry.item, mode: .document) {
             await pager.loadMore()
             return pager.items.map { $0.item.viewerEntry }
         }

@@ -141,6 +141,13 @@ final class AlbumsScreens: ScreenTestCase {
         XCTAssertTrue(shelf.waitForExistence(timeout: 15))
         XCTAssertTrue(app.buttons["albums.add.new"].exists)
         snap("albums-add")
+        // Create a new album opens the name field; its Cancel folds it back without closing the sheet
+        app.buttons["albums.add.new"].tap()
+        XCTAssertTrue(app.textFields["albums.add.newName"].waitForExistence(timeout: 10), "no field for the new name")
+        snap("albums-add-new-name")
+        app.buttons["albums.add.cancelNew"].tap()
+        XCTAssertTrue(app.buttons["albums.add.new"].waitForExistence(timeout: 10), "Cancel did not fold the field back")
+        XCTAssertTrue(app.navigationBars["Add 3 items to album"].exists, "Cancel closed the whole sheet")
         shelf.tap()
         let toast = app.descendants(matching: .any)["toast"]
         XCTAssertTrue(toast.waitForExistence(timeout: 15), "no message after adding")

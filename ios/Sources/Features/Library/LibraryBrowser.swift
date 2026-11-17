@@ -11,6 +11,9 @@ import SwiftUI
 struct LibraryBrowser: View {
     let scope: LibraryScope
     var header: AnyView?
+    /// The screen's title, which reads "Search results" while searching (the website's heading). Nil leaves the
+    /// title to the screen around the browser.
+    var title: String?
 
     @Environment(AppRouter.self) private var router
     @State private var model: LibraryModel
@@ -20,9 +23,10 @@ struct LibraryBrowser: View {
     @State private var showingFilters = false
 
     /// `filters`: filters set from the start (Route.libraryFiltered: a tag tapped in the viewer).
-    init(scope: LibraryScope, header: AnyView? = nil, filters: LibraryFilters? = nil) {
+    init(scope: LibraryScope, header: AnyView? = nil, filters: LibraryFilters? = nil, title: String? = nil) {
         self.scope = scope
         self.header = header
+        self.title = title
         let model = LibraryModel(scope: scope)
         if let filters { model.filters = filters }
         _model = State(initialValue: model)
@@ -30,6 +34,7 @@ struct LibraryBrowser: View {
 
     var body: some View {
         content
+            .modifier(LibraryTitle(title: title, searching: model.searching))
             .modifier(LibrarySearchField(model: model,
                                          prompt: scope.isVault ? "Search the vault" : "Search photos, videos and documents"))
             .toolbar {
@@ -118,7 +123,9 @@ struct LibraryBrowser: View {
             }
         } else if model.searching {
             LibrarySearchResults(model: model, vault: scope.isVault, header: AnyView(topBlock)) { hit in
-                router.show(model.hits, start: hit, vault: scope.isVault) { await model.loadMoreForViewer() }
+                // a video opens at its matching moment
+                router.show(entries: model.hitEntries, start: model.hits.firstIndex { $0.uid == hit.uid } ?? 0,
+                            vault: scope.isVault) { await model.loadMoreForViewer() }
             }
         } else {
             LibraryTimelineView(model: model, vault: scope.isVault, header: AnyView(topBlock)) { card in
@@ -260,6 +267,20 @@ struct LibraryBrowser: View {
 
     private var modeBinding: Binding<API.Mode> {
         Binding(get: { model.mode }, set: { model.mode = $0 })
+    }
+}
+
+/// The browser's title when it has one: "Search results" while searching.
+struct LibraryTitle: ViewModifier {
+    let title: String?
+    let searching: Bool
+
+    func body(content: Content) -> some View {
+        if let title {
+            content.navigationTitle(searching ? "Search results" : title)
+        } else {
+            content
+        }
     }
 }
 

@@ -41,6 +41,12 @@ enum TrashText {
         "All \(count(total)) in the trash and their files will be deleted for good. This cannot be undone."
     }
 
+    /// "Video, 1:15" under a video in the larger look (the website's TrashPreview); nil for anything else.
+    static func videoLength(kind: String, seconds: Double?) -> String? {
+        guard kind == "video", let seconds, seconds > 0 else { return nil }
+        return "Video, \(Fmt.duration(seconds))"
+    }
+
     /// "2 of 14" in the larger look.
     static func position(_ index: Int, of total: Int) -> String {
         "\((index + 1).formatted()) of \(total.formatted())"

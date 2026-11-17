@@ -21,22 +21,38 @@ struct LibraryTimelineView: View {
 
     @AppStorage(columnsKey) private var columns = 4
     @State private var scrubbing: String?
+    /// Where the list is scrolled to, for the scrubber's mark (only the mark reads it, so scrolling redraws nothing
+    /// else).
+    @State private var position = LibraryScrollPosition()
 
     var body: some View {
         ScrollViewReader { proxy in
             ScrollView {
                 header
-                LazyVStack(alignment: .leading, spacing: 0) {
+                // the month's heading stays at the top while its tiles are on screen (the website's sticky header)
+                LazyVStack(alignment: .leading, spacing: 0, pinnedViews: [.sectionHeaders]) {
                     ForEach(model.buckets, id: \.key) { bucket in
                         LibraryMonthSection(model: model, bucket: bucket, columns: columns, vault: vault, onOpen: onOpen)
                     }
                 }
+                // the months' frame in the scroll view: the scrubber's mark follows it (the website measures the grid)
+                .background(GeometryReader { geo in
+                    Color.clear.preference(key: LibraryScrollFrameKey.self,
+                                           value: geo.frame(in: .named(LibraryScrollPosition.space)))
+                })
                 .padding(.bottom, 24)
             }
+            .coordinateSpace(name: LibraryScrollPosition.space)
+            .background(GeometryReader { geo in
+                Color.clear
+                    .onAppear { position.viewport = geo.size.height }
+                    .onChange(of: geo.size.height) { _, height in position.viewport = height }
+            })
+            .onPreferenceChange(LibraryScrollFrameKey.self) { frame in position.update(frame) }
             .accessibilityIdentifier("library.timeline")
             .overlay(alignment: .trailing) {
                 if model.buckets.count > 3 {
-                    LibraryScrubber(buckets: model.buckets, scrubbing: $scrubbing) { key in
+                    LibraryScrubber(buckets: model.buckets, position: position, scrubbing: $scrubbing) { key in
                         proxy.scrollTo(key, anchor: .top)
                     }
                 }
@@ -75,7 +91,9 @@ struct LibraryMonthSection: View {
         let cards = month?.cards ?? []
         let missing = month?.complete == true ? 0 : max(0, bucket.count - cards.count)
         let label = Fmt.monthHeading(bucket.key)
-        VStack(alignment: .leading, spacing: 0) {
+        Section {
+            tiles(cards: cards, missing: missing)
+        } header: {
             HStack(spacing: 8) {
                 (Text(label).font(.headline)
                     + Text("  \(Fmt.count(bucket.count, "item"))").font(.subheadline).foregroundColor(.secondary))
@@ -94,6 +112,13 @@ struct LibraryMonthSection: View {
             .padding(.horizontal, 12)
             .padding(.top, 14)
             .padding(.bottom, 8)
+            .background(Color(uiColor: .systemBackground))
+        }
+    }
+
+    private func tiles(cards: [API.ItemCard], missing: Int) -> some View {
+        let month = model.months[bucket.key]
+        return VStack(alignment: .leading, spacing: 0) {
             LazyVGrid(columns: gridColumns(columns), spacing: 2) {
                 ForEach(cards) { card in
                     LibraryTile(item: card, vault: vault, selection: model.selection, onOpen: onOpen)
@@ -184,7 +209,11 @@ struct LibraryTile<Item: LibraryTileItem>: View {
         Color.clear
             .aspectRatio(1, contentMode: .fit)
             .overlay {
-                RemoteImage(ref: item.thumbRef, maxPixel: 384, vault: vault)
+                if item.isDocumentTile {
+                    documentPage
+                } else {
+                    RemoteImage(ref: item.thumbRef, maxPixel: 384, vault: vault)
+                }
             }
             .clipped()
             .overlay(alignment: .topLeading) { flags }
@@ -253,6 +282,22 @@ struct LibraryTile<Item: LibraryTileItem>: View {
             .accessibilityIdentifier("media.cell")
     }
 
+    /// A document's first page on a sheet of paper, fitted from the top (the website's inset white page), with the
+    /// document icon when it cannot be loaded.
+    private var documentPage: some View {
+        GeometryReader { geo in
+            let inset = min(geo.size.width, geo.size.height) * 0.1
+            LibraryKindImage(ref: item.thumbRef, maxPixel: 384, contentMode: .fit, vault: vault,
+                             kind: item.mediaKind == .image ? .document : item.mediaKind, alignment: .top)
+                .background(Color.white)
+                .clipShape(RoundedRectangle(cornerRadius: 3))
+                .shadow(color: .black.opacity(0.25), radius: 1.5, y: 1)
+                .scaleEffect(selection.contains(item.uid) ? 0.9 : 1)
+                .padding(inset)
+        }
+        .background(Color(uiColor: .secondarySystemFill))
+    }
+
     private var documentLabel: String {
         let base = item.docType != nil ? LibraryDocTypes.label(item.docType) : LibraryDocTypes.extensionLabel(item.filename)
         if let pages = item.pageCount, pages > 1 { return "\(base) (\(pages) p)" }
@@ -309,6 +354,7 @@ struct LibraryPlaceholderTile: View {
 /// timeline; dragging or tapping goes to the month under the finger and names it.
 struct LibraryScrubber: View {
     let buckets: [API.TimelineBucket]
+    let position: LibraryScrollPosition
     @Binding var scrubbing: String?
     let jump: (String) -> Void
 
@@ -331,6 +377,7 @@ struct LibraryScrubber: View {
                     .frame(width: 3)
                     .frame(maxHeight: .infinity)
                     .padding(.trailing, 4)
+                LibraryScrubberMark(position: position, width: geo.size.width, height: height)
                 ForEach(yearMarks(total: total)) { mark in
                     Text(mark.year)
                         .font(.system(size: 9, weight: .semibold))
@@ -401,5 +448,51 @@ struct LibraryScrubber: View {
             seen += bucket.count
         }
         return marks.count > 1 ? marks : []
+    }
+}
+
+/// How far down the timeline is scrolled (0 at the top, 1 at the end), for the scrubber's mark.
+@MainActor
+@Observable
+final class LibraryScrollPosition {
+    static let space = "library.timeline.scroll"
+
+    private(set) var fraction: Double = 0
+    /// The scroll view's height.
+    @ObservationIgnored var viewport: CGFloat = 0
+
+    /// The months' frame in the scroll view: its top moves up as the list scrolls.
+    func update(_ content: CGRect) {
+        let next = LibraryScrollPosition.fraction(contentTop: content.minY, contentHeight: content.height,
+                                                  viewport: viewport)
+        if abs(next - fraction) > 0.001 { fraction = next }
+    }
+
+    nonisolated static func fraction(contentTop: CGFloat, contentHeight: CGFloat, viewport: CGFloat) -> Double {
+        let room = contentHeight - viewport
+        guard room > 1 else { return 0 }
+        return min(1, max(0, Double(-contentTop / room)))
+    }
+}
+
+/// The timeline content's frame in its scroll view.
+struct LibraryScrollFrameKey: PreferenceKey {
+    static var defaultValue: CGRect = .zero
+    static func reduce(value: inout CGRect, nextValue: () -> CGRect) { value = nextValue() }
+}
+
+/// The accent line on the scrubber's rail at the scroll position (the website's Scrubber mark).
+struct LibraryScrubberMark: View {
+    let position: LibraryScrollPosition
+    let width: CGFloat
+    let height: CGFloat
+
+    var body: some View {
+        Capsule()
+            .fill(Color.accentColor)
+            .frame(width: 12, height: 2.5)
+            .position(x: width - 5.5, y: min(height - 1, max(1, CGFloat(position.fraction) * height)))
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
     }
 }
