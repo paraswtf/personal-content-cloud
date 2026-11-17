@@ -23,6 +23,7 @@ struct PeopleSelectionSheet: View {
     @State private var related = false
     @State private var nameText = ""
     @State private var working = false
+    @FocusState private var nameFocused: Bool
 
     var body: some View {
         NavigationStack {
@@ -77,6 +78,13 @@ struct PeopleSelectionSheet: View {
                         .textInputAutocapitalization(.words)
                         .submitLabel(.done)
                         .onSubmit { Task { await rename(who) } }
+                        .focused($nameFocused)
+                        .task {
+                            // the step opens with the keyboard up, ready to type (as the album name does); a moment
+                            // later, so the focus is not lost while the step comes in
+                            try? await Task.sleep(for: .milliseconds(300))
+                            nameFocused = true
+                        }
                         .accessibilityLabel("New name")
                         .accessibilityIdentifier("peopleSheet.name")
                 } footer: {

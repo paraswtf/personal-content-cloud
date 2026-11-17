@@ -50,6 +50,32 @@ final class PeopleScreens: ScreenTestCase {
         XCTAssertTrue(button.isSelected, "the tab \(id) did not open")
     }
 
+    /// Taps a toolbar menu. XCUITest has called the person page's menu not hittable though it shows in the bar
+    /// (its tap then fails trying to scroll to it), so a tap on its middle in that case, noted in the test's log.
+    private func tapMenu(_ menu: XCUIElement) {
+        XCTAssertTrue(menu.waitForExistence(timeout: 10), "no menu \(menu.identifier)")
+        expectation(for: NSPredicate(format: "enabled == true"), evaluatedWith: menu)
+        waitForExpectations(timeout: 10)
+        if menu.isHittable {
+            menu.tap()
+        } else {
+            XCTContext.runActivity(named: "\(menu.identifier) is not hittable at \(menu.frame); tapped at its middle") { _ in
+                menu.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+            }
+        }
+    }
+
+    /// Whether typing goes to `element` within `seconds` (the keyboard may be a hardware one, so not the keyboard's
+    /// view but the element's own focus).
+    private func hasFocus(_ element: XCUIElement, within seconds: TimeInterval) -> Bool {
+        let end = Date().addingTimeInterval(seconds)
+        repeat {
+            if (element.value(forKey: "hasKeyboardFocus") as? Bool) == true { return true }
+            Thread.sleep(forTimeInterval: 0.25)
+        } while Date() < end
+        return false
+    }
+
     func testPeopleListSuggestionsAndPets() throws {
         try launchSignedIn()
         tab("People")
@@ -169,7 +195,7 @@ final class PeopleScreens: ScreenTestCase {
         snap("people-pet-crops")
 
         // Merge into says what merging a pet does, and that only cats are listed
-        app.buttons["person.menu"].tap()
+        tapMenu(app.buttons["person.menu"])
         let merge = app.buttons["Merge into"]
         XCTAssertTrue(merge.waitForExistence(timeout: 10), "the menu has no Merge into")
         merge.tap()
@@ -198,8 +224,12 @@ final class PeopleScreens: ScreenTestCase {
         rename.tap()
         let field = app.textFields["peopleSheet.name"]
         XCTAssertTrue(field.waitForExistence(timeout: 10), "the rename step did not open")
-        // at the end of the name, which the box starts with
-        field.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.5)).tap()
+        // the step opens with the keyboard up and the cursor after the name; a tap at the end of the box if not
+        if !hasFocus(field, within: 5) {
+            field.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.5)).tap()
+            XCTAssertTrue(hasFocus(field, within: 5), "the name box takes no typing")
+        }
+        snap("people-sheet-rename-focused")
         field.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: 16) + "People Theta")
         app.buttons["peopleSheet.save"].tap()
         let followed = NSPredicate(format: "label == 'People Theta'")
