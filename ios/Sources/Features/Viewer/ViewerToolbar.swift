@@ -56,7 +56,7 @@ struct ViewerToolbar: View {
         .confirmAction("Move this \(ViewerFormat.trashNoun(MediaKind(context.item?.kind.rawValue))) to the trash?",
                        isPresented: $confirmTrash, actionTitle: "Move to trash",
                        message: "It leaves the library now and is deleted for good after \(trashDays) days. Until then you can restore it from Trash with its tags and document details.") {
-            Task { await ViewerActions.trash(context, router: router) }
+            Task { await ViewerActions.trash(context) }
         }
         .task { trashDays = await ViewerConfig.loadTrashDays() }
     }
@@ -110,7 +110,7 @@ struct ViewerToolbar: View {
                     Label("Add to album", systemImage: "rectangle.stack.badge.plus")
                 }
                 Button {
-                    Task { await ViewerActions.setPrivate(context, !item.nsfw, router: router) }
+                    Task { await ViewerActions.setPrivate(context, !item.nsfw) }
                 } label: {
                     Label(item.nsfw ? "Not private" : "Mark private", systemImage: item.nsfw ? "lock.open" : "lock")
                 }

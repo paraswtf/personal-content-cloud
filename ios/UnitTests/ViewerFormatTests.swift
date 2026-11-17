@@ -91,6 +91,14 @@ final class ViewerFormatTests: XCTestCase {
         XCTAssertEqual(ViewerDocumentStage.stripPages(current: 0, count: 0), [])
     }
 
+    func testThePageStripMarksThePagesLeftOut() {
+        let strip = ViewerDocumentStage.stripPages(current: 50, count: 100, span: 2)   // [0, 48, ..., 52, 99]
+        XCTAssertEqual(strip.indices.filter { ViewerDocumentStage.gapBefore(strip, at: $0) }, [1, 6])
+        let near = ViewerDocumentStage.stripPages(current: 2, count: 6, span: 1)       // [0, 1, 2, 3, 5]
+        XCTAssertEqual(near.indices.filter { ViewerDocumentStage.gapBefore(near, at: $0) }, [4],
+                       "no marker when the first page joins the window")
+    }
+
     /// A video's tracks gathered by person, only named people named, guesses with a question mark.
     func testVideoTracksAreGatheredAndNamedOnlyWhenNamed() throws {
         let json = """

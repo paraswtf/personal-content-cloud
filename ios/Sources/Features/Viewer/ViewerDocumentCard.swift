@@ -11,6 +11,7 @@ struct ViewerDocumentCard: View {
     let document: API.DocumentOut
 
     @Environment(\.openURL) private var openURL
+    @Environment(AppRouter.self) private var router
     @State private var types: [API.DocumentTypeOut] = []
     @State private var editing: String?
     @State private var draft = ""
@@ -93,9 +94,18 @@ struct ViewerDocumentCard: View {
                 walletButton
             }
             if !document.walletAvailable && document.docGroup == "pass" {
-                Text("Wallet signing is not set up yet. See Settings, Wallet.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                // The website links its hint to the wallet settings: here the viewer closes and Settings opens.
+                Button {
+                    router.viewer = nil
+                    router.open(.more(.settings))
+                } label: {
+                    (Text("Wallet signing is not set up yet. See ") + Text("Settings, Wallet").underline() + Text("."))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.leading)
+                }
+                .accessibilityLabel("Wallet signing is not set up yet. Open Settings")
+                .accessibilityIdentifier("viewer.document.walletSettings")
             }
         }
         .padding(.vertical, 4)

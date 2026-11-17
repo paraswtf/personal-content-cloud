@@ -74,9 +74,7 @@ struct ViewerDocumentStage: View {
     }
 
     private func pageImage(_ ref: String, label: String) -> some View {
-        RemoteImage(ref: ref, maxPixel: 2048, contentMode: .fit, vault: context.vault)
-            .background(Color.white)
-            .shadow(radius: 12)
+        ViewerPageImage(ref: ref, vault: context.vault)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .accessibilityElement()
             .accessibilityLabel(label)
@@ -97,7 +95,14 @@ struct ViewerDocumentStage: View {
             ScrollViewReader { proxy in
                 ScrollView(.horizontal, showsIndicators: false) {
                     LazyHStack(spacing: 6) {
-                        ForEach(strip, id: \.self) { index in
+                        ForEach(Array(strip.enumerated()), id: \.element) { pos, index in
+                            if Self.gapBefore(strip, at: pos) {
+                                Text("...")
+                                    .font(.footnote)
+                                    .foregroundStyle(.white.opacity(0.6))
+                                    .frame(width: 16)
+                                    .accessibilityHidden(true)
+                            }
                             Button {
                                 page = index
                             } label: {
@@ -167,6 +172,12 @@ struct ViewerDocumentStage: View {
         return pages
     }
 
+    /// Whether pages are left out of the strip just before its `pos`-th page (the website's "..." between the first
+    /// or last page and the window).
+    static func gapBefore(_ strip: [Int], at pos: Int) -> Bool {
+        pos > 0 && pos < strip.count && strip[pos] > strip[pos - 1] + 1
+    }
+
     private func open(_ original: String) async {
         opening = true
         defer { opening = false }
@@ -174,6 +185,55 @@ struct ViewerDocumentStage: View {
             file = try await ViewerFiles.fetch(context, address: original, filename: item.filename)
         } catch {
             Toaster.shared.error(error, doing: "open the PDF")
+        }
+    }
+}
+
+/// One page of a document: a spinner while it loads, and the website's words when it could not be loaded.
+struct ViewerPageImage: View {
+    let ref: String
+    var vault = false
+
+    @State private var image: UIImage?
+    @State private var failed = false
+
+    var body: some View {
+        ZStack {
+            if let image {
+                Image(uiImage: image)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .background(Color.white)
+                    .shadow(radius: 12)
+            } else if failed {
+                Text("This page could not be loaded.")
+                    .font(.subheadline)
+                    .multilineTextAlignment(.center)
+                    .foregroundStyle(.white.opacity(0.8))
+                    .padding(16)
+                    .background(.black.opacity(0.5), in: RoundedRectangle(cornerRadius: 12))
+            } else {
+                ProgressView()
+                    .tint(.white)
+                    .controlSize(.large)
+                    .accessibilityLabel("Loading page")
+            }
+        }
+        .task(id: ref) { await load() }
+    }
+
+    private func load() async {
+        failed = false
+        if let hit = ImageLoader.shared.cached(ref, maxPixel: 2048, vault: vault) {
+            image = hit
+            return
+        }
+        image = nil
+        do {
+            image = try await ImageLoader.shared.image(ref, maxPixel: 2048, vault: vault)
+        } catch {
+            if error is CancellationError || Task.isCancelled { return }
+            failed = true
         }
     }
 }
@@ -271,9 +331,9 @@ struct ViewerVideoPreparing: View {
             .padding(24)
         }
         .task(id: context.uid) {
-            // ask again every 20 seconds until the copy is there
+            // ask again every 5 seconds until the copy is there, as the website does
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 20_000_000_000)
+                try? await Task.sleep(nanoseconds: 5_000_000_000)
                 if Task.isCancelled { break }
                 context.reload()
             }
@@ -285,8 +345,10 @@ struct ViewerVideoPreparing: View {
 }
 
 /// A video with the people and pets in it: the player, and below it one chip per person or look-alike (the website's
-/// VideoChips). A chip shows its first moment: the player pauses there and the box is drawn over the frame until
-/// it plays again. Its pencil hands the box to the boxes area's editor.
+/// VideoChips). A chip shows its first moment: the player pauses there and the box is drawn over the frame, with the
+/// name and who put it there, until it plays again. Its pencil hands the box to the boxes area's editor. While a box
+/// is drawn or moved on this video, the paused frame shows as a picture the boxes area's stage edits (the website's
+/// VideoStage draw and adjust modes). The video opens paused at `context.startAt` (a search hit's moment).
 struct ViewerVideoStage: View {
     let context: ViewerPageContext
     let item: API.ItemDetail
@@ -297,44 +359,59 @@ struct ViewerVideoStage: View {
     @State private var player: AVPlayer?
     @State private var shown: ViewerFormat.VideoTrack?
     @State private var expanded: Set<String> = []
+    /// The paused frame being drawn on, and its time.
+    @State private var frameImage: UIImage?
+    @State private var frameImageTime: Double?
+    @State private var frameZoomed = false
 
-    private var groups: [ViewerFormat.VideoGroup] { ViewerFormat.groupTracks(ViewerFormat.videoTracks(item)) }
+    private var tracks: [ViewerFormat.VideoTrack] { ViewerFormat.videoTracks(item) }
+    private var groups: [ViewerFormat.VideoGroup] { ViewerFormat.groupTracks(tracks) }
+    /// A box is being drawn or moved on this video.
+    private var editingHere: Bool { boxes.stage.isEditing(context.uid) }
 
     var body: some View {
         VStack(spacing: 0) {
             Spacer(minLength: 56)
             ZStack {
-                if let player {
-                    VideoPlayer(player: player)
+                if editingHere {
+                    frameStage
                 } else {
-                    RemoteImage(ref: item.urls.previewSmall, maxPixel: 1600, contentMode: .fit, vault: context.vault)
-                }
-                if let shown {
-                    GeometryReader { geo in
-                        let rect = fitted(in: geo.size)
-                        let x = CGFloat(shown.box.x), y = CGFloat(shown.box.y)
-                        let w = CGFloat(shown.box.w), h = CGFloat(shown.box.h)
-                        RoundedRectangle(cornerRadius: 4)
-                            .stroke(Color.yellow, lineWidth: 2)
-                            .frame(width: w * rect.width, height: h * rect.height)
-                            .position(x: rect.minX + (x + w / 2) * rect.width, y: rect.minY + (y + h / 2) * rect.height)
+                    if let player {
+                        VideoPlayer(player: player)
+                    } else {
+                        RemoteImage(ref: item.urls.previewSmall, maxPixel: 1600, contentMode: .fit, vault: context.vault)
                     }
-                    .allowsHitTesting(false)
-                    .accessibilityHidden(true)
+                    if let shown, environment.showBoxes {
+                        shownBox(shown)
+                    }
                 }
             }
-            if !groups.isEmpty { chips }
+            if !groups.isEmpty && environment.showBoxes && !editingHere { chips }
             Spacer(minLength: 64)
         }
         .onChange(of: environment.isCurrent, initial: true) { _, current in
             if current {
-                if player == nil, let video = item.urls.video {
-                    player = AuthorizedPlayer.player(for: video, vault: context.vault)
-                }
-                state.players[context.uid] = player
+                state.players[context.uid] = makePlayer()
             } else {
                 player?.pause()
             }
+        }
+        .onChange(of: editingHere) { _, now in
+            if now {
+                // the frame under the box stays put while it is drawn or moved
+                player?.pause()
+                shown = nil
+            } else {
+                frameImage = nil
+                frameImageTime = nil
+                frameZoomed = false
+            }
+        }
+        .task(id: "\(context.uid)#\(editingHere)#\(boxes.stage.frameTime ?? -1)") { await loadFrame() }
+        .onChange(of: boxes.videoFocus) { _, focus in
+            guard let focus, focus.uid == context.uid else { return }
+            boxes.videoFocus = nil
+            seek(to: focus.time, showing: tracks.first(where: { $0.id == focus.boxKey }))
         }
         .onReceive(NotificationCenter.default.publisher(for: AVPlayerItem.timeJumpedNotification)) { note in
             // the owner moved the player elsewhere: the chip's box no longer matches the frame
@@ -352,6 +429,115 @@ struct ViewerVideoStage: View {
             player = nil
             state.players[context.uid] = nil
         }
+    }
+
+    /// The player, made once the page is on screen, paused at the entry's moment when it has one.
+    @discardableResult
+    private func makePlayer() -> AVPlayer? {
+        if let player { return player }
+        guard let video = item.urls.video else { return nil }
+        let made = AuthorizedPlayer.player(for: video, vault: context.vault)
+        if let startAt = context.startAt, startAt > 0 {
+            made?.seek(to: CMTime(seconds: startAt, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
+        }
+        player = made
+        state.players[context.uid] = made
+        return made
+    }
+
+    /// The paused frame as a picture, with the boxes area's drawing or moving layer over it.
+    private var frameStage: some View {
+        let size: CGSize? = {
+            guard let w = item.width, let h = item.height, w > 0, h > 0 else { return nil }
+            return CGSize(width: w, height: h)
+        }()
+        return ZStack {
+            ZoomableStage(image: frameImage,
+                          pixelSize: size,
+                          boxes: [],
+                          showBoxes: true,
+                          selectedBoxId: nil,
+                          zoomed: $frameZoomed,
+                          onBoxTap: { _ in },
+                          onTap: {},
+                          edit: boxes.stage,
+                          editRevision: boxes.stage.revision)
+            if frameImage == nil {
+                ProgressView().tint(.white).accessibilityLabel("Loading the frame")
+            }
+        }
+    }
+
+    /// Loads the frame being drawn on: the server's picture of it (the one it crops the new box from), else the
+    /// player's own, else the video's poster.
+    private func loadFrame() async {
+        guard editingHere, let t = boxes.stage.frameTime else { return }
+        if frameImage != nil && frameImageTime == t { return }
+        frameImage = nil
+        let rounded = (t * 1000).rounded() / 1000
+        let version = ViewerActions.fileVersion(item)
+        let uid = context.uid
+        var data: Data?
+        do {
+            data = try await APIContext.$vault.withValue(context.vault) {
+                try await Cloud.api().frame(uid: uid, t: rounded, v: version, size: "preview")
+            }
+        } catch {
+            data = nil
+        }
+        if let data, let image = UIImage(data: data) {
+            guard !Task.isCancelled else { return }
+            frameImage = image
+            frameImageTime = t
+            return
+        }
+        guard !Task.isCancelled else { return }
+        if let asset = player?.currentItem?.asset {
+            let generator = AVAssetImageGenerator(asset: asset)
+            generator.appliesPreferredTrackTransform = true
+            generator.requestedTimeToleranceBefore = .zero
+            generator.requestedTimeToleranceAfter = .zero
+            if let cg = try? await generator.image(at: CMTime(seconds: t, preferredTimescale: 600)).image {
+                guard !Task.isCancelled else { return }
+                frameImage = UIImage(cgImage: cg)
+                frameImageTime = t
+                return
+            }
+        }
+        guard !Task.isCancelled else { return }
+        frameImage = try? await ImageLoader.shared.image(item.urls.previewSmall, maxPixel: 1280, vault: context.vault)
+        frameImageTime = t
+    }
+
+    /// The chip's box over the paused frame, with its name and who put it there (the website's label).
+    private func shownBox(_ shown: ViewerFormat.VideoTrack) -> some View {
+        GeometryReader { geo in
+            let rect = fitted(in: geo.size)
+            let box = CGRect(x: rect.minX + CGFloat(shown.box.x) * rect.width,
+                             y: rect.minY + CGFloat(shown.box.y) * rect.height,
+                             width: CGFloat(shown.box.w) * rect.width, height: CGFloat(shown.box.h) * rect.height)
+            ZStack(alignment: .topLeading) {
+                RoundedRectangle(cornerRadius: 4)
+                    .stroke(Color.yellow, lineWidth: 2)
+                    .frame(width: box.width, height: box.height)
+                    .offset(x: box.minX, y: box.minY)
+                HStack(spacing: 4) {
+                    Text(shown.name).lineLimit(1)
+                    if let origin = shown.origin { OriginIcon(origin: origin, decorative: true) }
+                }
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.black)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(Color.yellow, in: RoundedRectangle(cornerRadius: 3))
+                .frame(maxWidth: 200, alignment: .leading)
+                .fixedSize()
+                .offset(x: box.minX - 1, y: box.minY >= 24 ? box.minY - 22 : box.maxY + 2)
+            }
+            .frame(width: geo.size.width, height: geo.size.height, alignment: .topLeading)
+        }
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
     }
 
     /// The player's playing or paused state, as it changes.
@@ -444,14 +630,15 @@ struct ViewerVideoStage: View {
     }
 
     private func seek(to track: ViewerFormat.VideoTrack) {
-        if player == nil, let video = item.urls.video {
-            player = AuthorizedPlayer.player(for: video, vault: context.vault)
-            state.players[context.uid] = player
-        }
-        guard let player else { return }
+        seek(to: track.time, showing: track)
+    }
+
+    /// Pauses the player at `time` and draws `track`'s box once it is there.
+    private func seek(to time: Double, showing track: ViewerFormat.VideoTrack?) {
+        guard let player = makePlayer() else { return }
         player.pause()
-        let time = CMTime(seconds: track.time, preferredTimescale: 600)
-        player.seek(to: time, toleranceBefore: .zero, toleranceAfter: .zero) { _ in
+        shown = nil
+        player.seek(to: CMTime(seconds: time, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero) { _ in
             Task { @MainActor in shown = track }
         }
     }
@@ -467,7 +654,13 @@ final class ViewerPageState {
 
     /// The time of the frame on screen in seconds (0 before the video played).
     func frameTime(_ uid: String) -> Double {
-        let t = players[uid]?.currentTime().seconds ?? 0
+        playerTime(uid) ?? 0
+    }
+
+    /// The time of the frame on screen in seconds, or nil when the item has no player yet.
+    func playerTime(_ uid: String) -> Double? {
+        guard let player = players[uid] else { return nil }
+        let t = player.currentTime().seconds
         return t.isFinite ? max(0, t) : 0
     }
 }

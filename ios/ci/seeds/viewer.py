@@ -7,6 +7,8 @@ after the area, so they sit at the end of the library and touch nothing the othe
   quality scores, labels, and the tag "Viewer trip" (added in `api`, as the owner would);
 - a short playable video ("VIEWER_CLIP.MP4", 12 Apr, made with ffmpeg when it is there, else with OpenCV) with a
   face of "Viewer Guest" at one second;
+- a second short video with nobody on it ("VIEWER_DRAW.MP4", 11 Apr), where the test draws a person box on the
+  paused frame;
 - a file the server keeps without a preview ("VIEWER_NOTES.BIN", 10 Apr).
 
 A video whose streaming copy is still being made is not seeded: the server queues the copy again when it starts,
@@ -135,6 +137,19 @@ def library(kit) -> dict:
             kit.crop(drawn, (0.40, 0.25, 0.16, 0.24)).save(kit.storage.face_crop_path(face_id), "WEBP", quality=85)
             out["clip"] = video["uid"]
             out["clip_codec"] = codec
+
+    # a second short video with nobody on it, to draw a person box on its paused frame
+    empty = kit.scene(8310, []).resize((640, 480))
+    with tempfile.TemporaryDirectory() as tmp:
+        made = _clip(empty, Path(tmp))
+        if made is not None:
+            data, codec = made
+            draw = kit.make_item(
+                conn, kind="video", data=data, ext=".mp4", mime="video/mp4", width=640, height=480,
+                filename="VIEWER_DRAW.MP4", taken_at="2026-04-11T11:00:00.000Z", category="misc",
+                duration_s=3.0, video_codec=codec, bitrate=300_000, preview_status="none", forward_checked=1)
+            _previews(kit, draw, empty)
+            out["draw_clip"] = draw["uid"]
 
     # a file without a preview
     other = kit.make_item(conn, kind="other", data=b"viewer notes, not a picture\n" * 8, ext=".bin",

@@ -183,6 +183,34 @@ final class BoxesEditTests: XCTestCase {
         XCTAssertEqual(BoxesLookup.tracks(of: BoxesTarget.face(i.faces[3]), in: i).map(\.boxId), [4])
     }
 
+    func testInTheFrameAreTheNamedPeopleWhoseFacesSpanTheTime() throws {
+        let sam = #"{"id": 7, "name": "Sam"}"#
+        let ann = #"{"id": 8, "name": "Ann"}"#
+        let unnamed = #"{"id": 9, "name": null}"#
+        func spanned(_ id: Int, _ person: String, _ spans: String) -> String {
+            face(id, person: person, t: "1.0").replacingOccurrences(of: "\"group\": null", with: "\"group\": null, \"spans\": \(spans)")
+        }
+        let i = try item(faces: "[\(spanned(1, sam, "[[0.0, 2.0]]")), \(spanned(2, sam, "[[1.5, 3.0]]")), \(spanned(3, ann, "[[2.5, 4.0]]")), \(spanned(4, unnamed, "[[0.0, 9.0]]"))]",
+                         kind: "video")
+        XCTAssertEqual(BoxesLookup.inFrame(i, at: 1.8).map(\.id), [7], "each person once, an unnamed one never")
+        XCTAssertEqual(BoxesLookup.inFrame(i, at: 2.7).map(\.id), [7, 8])
+        XCTAssertEqual(BoxesLookup.inFrame(i, at: 5.0).map(\.id), [])
+    }
+
+    @MainActor
+    func testAVideosEditKeepsItsFrameTimeUntilItStops() {
+        let state = StageEditState()
+        state.startDrawing(.person, on: "v1", frameTime: 1.5)
+        XCTAssertEqual(state.frameTime, 1.5)
+        state.stop()
+        XCTAssertNil(state.frameTime)
+        state.startDrawing(.face, on: "p1")
+        XCTAssertNil(state.frameTime, "a photo's drawing has no frame time")
+        let box = StageBox(kind: .face, boxId: 1, x: 0.1, y: 0.1, w: 0.2, h: 0.2)
+        state.startAdjusting(box, on: "v1", frameTime: 2.25)
+        XCTAssertEqual(state.frameTime, 2.25)
+    }
+
     func testOnAnItemTheOwnersTagOrBoxWinsOverTheSystems() throws {
         let sam = #"{"id": 7, "name": "Sam"}"#
         let ann = #"{"id": 8, "name": "Ann"}"#
