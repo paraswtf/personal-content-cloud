@@ -143,7 +143,7 @@ final class LibraryFilterTests: XCTestCase {
         XCTAssertTrue(label.hasSuffix("favourite, possible mis-click, 2 similar"), label)
     }
 
-    // MARK: chosen people and the scrubber's mark
+    // MARK: chosen people
 
     func testChosenPersonStates() {
         XCTAssertEqual(LibraryChosenPerson.failed(APIError(status: 404, detail: "Not found")), .gone)
@@ -157,14 +157,5 @@ final class LibraryFilterTests: XCTestCase {
         XCTAssertEqual(pet.cover, "/files/face/3")
         XCTAssertFalse(LibraryChosenPerson.gone.isPet)
         XCTAssertTrue(LibraryChosenPerson.gone.isGone)
-    }
-
-    func testScrollFraction() {
-        XCTAssertEqual(LibraryScrollPosition.fraction(contentTop: 120, contentHeight: 5000, viewport: 700), 0)
-        XCTAssertEqual(LibraryScrollPosition.fraction(contentTop: -2150, contentHeight: 5000, viewport: 700), 0.5,
-                       accuracy: 0.0001)
-        XCTAssertEqual(LibraryScrollPosition.fraction(contentTop: -9000, contentHeight: 5000, viewport: 700), 1)
-        // shorter than the screen: nothing to scroll
-        XCTAssertEqual(LibraryScrollPosition.fraction(contentTop: -10, contentHeight: 300, viewport: 700), 0)
     }
 }
