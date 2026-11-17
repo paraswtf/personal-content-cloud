@@ -26,8 +26,9 @@ final class VaultTrashScreens: ScreenTestCase {
         snap("vaulttrash-vault-open")
 
         lock.tap()
-        XCTAssertTrue(locked.waitForExistence(timeout: 20), "the vault did not lock")
+        // the message first: it stays 5 seconds, and waiting for the locked screen first could outlast it
         XCTAssertTrue(toastShows("Vault locked"), "no message after Lock now")
+        XCTAssertTrue(locked.waitForExistence(timeout: 20), "the vault did not lock")
         XCTAssertFalse(app.buttons.matching(identifier: "media.cell").firstMatch.exists, "vault items show while locked")
         XCTAssertTrue(app.secureTextFields["vault.password"].exists)
         snap("vaulttrash-vault-locked")

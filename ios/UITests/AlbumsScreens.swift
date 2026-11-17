@@ -25,6 +25,21 @@ final class AlbumsScreens: ScreenTestCase {
         wait(for: [done], timeout: timeout)
     }
 
+    /// Opens the album page's menu and taps `item` in it. The page draws its toolbar again when the album reloads
+    /// (the cloud change of a new or renamed album can arrive just then), which closes a menu that had just opened,
+    /// so the menu is opened again until the item shows.
+    private func tapInAlbumMenu(_ item: String) {
+        let entry = app.buttons[item]
+        for _ in 0..<3 {
+            app.buttons["albums.menu"].tap()
+            if entry.waitForExistence(timeout: 5) {
+                entry.tap()
+                return
+            }
+        }
+        XCTFail("the album's menu did not show \(item)")
+    }
+
     func testAlbumListSortAndSearch() throws {
         try launchSignedIn()
         tab("Albums")
@@ -107,8 +122,7 @@ final class AlbumsScreens: ScreenTestCase {
         XCTAssertTrue(app.navigationBars[made].waitForExistence(timeout: 15), "the new album did not open")
         snap("albums-new-page")
 
-        app.buttons["albums.menu"].tap()
-        app.buttons["Rename"].tap()
+        tapInAlbumMenu("Rename")
         let field = app.textFields["albums.edit.name"]
         XCTAssertTrue(field.waitForExistence(timeout: 10))
         field.tap()
@@ -124,8 +138,7 @@ final class AlbumsScreens: ScreenTestCase {
         app.buttons["albums.edit.save"].tap()
         XCTAssertTrue(app.navigationBars[renamed].waitForExistence(timeout: 15), "the album was not renamed")
 
-        app.buttons["albums.menu"].tap()
-        app.buttons["Delete album"].tap()
+        tapInAlbumMenu("Delete album")
         confirm("Delete album")
         XCTAssertTrue(app.navigationBars["Albums"].waitForExistence(timeout: 15), "deleting did not go back to Albums")
         waitUntil(card(renamed), "exists == false")
