@@ -344,7 +344,8 @@ final class UploadQueue {
     private func settle(_ id: String) {
         resumed.remove(id)
         guard let rec = record(id), rec.queuedAt != nil, rec.status == "pending" else { return }
-        if !SyncEngine.shared.online {
+        // A file the owner stopped stays stopped until Retry, offline or not.
+        if !SyncEngine.shared.online && rec.error != BackgroundUploader.stoppedReason {
             if rec.error == nil { rec.error = Self.connectionLost }
             heldOffline.insert(id)
             rec.updatedAt = Date()

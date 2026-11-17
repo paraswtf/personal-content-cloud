@@ -272,6 +272,10 @@ final class ViewerScreens: ScreenTestCase {
         XCTAssertTrue(app.buttons["viewer.close"].waitForExistence(timeout: 20))
         let add = app.buttons["boxes.add"]
         XCTAssertTrue(add.waitForExistence(timeout: 20), "the add box button is missing on a video")
+        // The neighbouring page (the Apr 12 video) may show the seed's own "Viewer Guest, 0:01" chip: count the chips
+        // before drawing, so only a new one counts as the drawn box.
+        let chips = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Viewer Guest, '"))
+        let chipsBefore = chips.count
         // A menu's button is a wrapper the accessibility tap cannot scroll to: tap its place on the screen.
         add.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
         let personItem = app.buttons["Add a person box"]
@@ -305,10 +309,9 @@ final class ViewerScreens: ScreenTestCase {
         XCTAssertTrue(guest.waitForExistence(timeout: 20), "the picker did not list Viewer Guest")
         guest.tap()
 
-        // The box is added with the frame's time and shows as a chip under the video.
-        let chip = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Viewer Guest, '")).firstMatch
+        // The box is added with the frame's time and shows as a new chip under the video.
         let failed = app.staticTexts["boxes.draw.error"]
-        let outcome = NSPredicate { _, _ in chip.exists || failed.exists }
+        let outcome = NSPredicate { _, _ in chips.count > chipsBefore || failed.exists }
         expectation(for: outcome, evaluatedWith: nil)
         waitForExpectations(timeout: 60)
         if failed.exists {
@@ -321,17 +324,20 @@ final class ViewerScreens: ScreenTestCase {
             XCTAssertTrue(app.buttons["viewer.close"].waitForExistence(timeout: 10), "the viewer's bars did not come back")
             return
         }
-        XCTAssertTrue(chip.exists, "the drawn person box did not show as a chip")
+        XCTAssertTrue(chips.count > chipsBefore, "the drawn person box did not show as a chip")
         snap("viewer-video-box-added")
 
-        // Taken back: the chip's pencil opens the box, and Not a person removes it.
-        let edit = app.buttons["Edit, tagged as Viewer Guest"]
-        XCTAssertTrue(edit.waitForExistence(timeout: 10), "the chip has no pencil")
-        edit.tap()
+        // Taken back: the chip's pencil opens the box, and Not a person removes it. Only when that pencil is the only
+        // one: with the seed's own Viewer Guest chip in view, a wrong pick would remove the face other tests use.
+        let pencils = app.buttons.matching(NSPredicate(format: "label == 'Edit, tagged as Viewer Guest'"))
+        guard pencils.count == 1 else { return }
+        pencils.firstMatch.tap()
         let remove = app.buttons["boxes.remove"]
         XCTAssertTrue(remove.waitForExistence(timeout: 10), "the person box's editor did not open")
         remove.tap()
-        XCTAssertTrue(chip.waitForNonExistence(timeout: 30), "the drawn box stayed")
+        let back = NSPredicate { _, _ in chips.count == chipsBefore }
+        expectation(for: back, evaluatedWith: nil)
+        waitForExpectations(timeout: 30)
     }
 
     func testAPrivateItemsTagShowsTheVaultWithIt() throws {

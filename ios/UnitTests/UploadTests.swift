@@ -147,12 +147,14 @@ final class UploadTests: XCTestCase {
         XCTAssertFalse(fm.fileExists(atPath: freshFolder.path))
     }
 
-    /// Time offline does not use up attempts (the website's uploader.ts: attempt-- while offline).
+    /// Time offline does not use up attempts (the website's uploader.ts: attempt-- while offline). Online, every
+    /// failure counts, so a server that keeps dropping the connection ends in a failed row instead of retrying forever.
     func testOfflineFailuresDoNotUseUpAttempts() {
         XCTAssertFalse(BackgroundUploader.countsAttempt(online: false, error: nil))
         XCTAssertFalse(BackgroundUploader.countsAttempt(online: false, error: URLError(.timedOut)))
-        XCTAssertFalse(BackgroundUploader.countsAttempt(online: true, error: URLError(.notConnectedToInternet)))
-        XCTAssertFalse(BackgroundUploader.countsAttempt(online: true, error: URLError(.networkConnectionLost)))
+        XCTAssertFalse(BackgroundUploader.countsAttempt(online: false, error: URLError(.notConnectedToInternet)))
+        XCTAssertTrue(BackgroundUploader.countsAttempt(online: true, error: URLError(.notConnectedToInternet)))
+        XCTAssertTrue(BackgroundUploader.countsAttempt(online: true, error: URLError(.networkConnectionLost)))
         XCTAssertTrue(BackgroundUploader.countsAttempt(online: true, error: URLError(.timedOut)))
         XCTAssertTrue(BackgroundUploader.countsAttempt(online: true, error: nil))
     }
