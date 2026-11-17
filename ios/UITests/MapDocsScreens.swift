@@ -71,6 +71,55 @@ final class MapDocsScreens: ScreenTestCase {
         XCTAssertTrue(waitUntilGone(title), "the panel did not close")
     }
 
+    /// The library's Show on map opens the map with the library's filters (the website's filter bar map link).
+    func testLibraryShowOnMap() throws {
+        try launchSignedIn()
+        let button = app.buttons["library.showOnMap"]
+        XCTAssertTrue(button.waitForExistence(timeout: 30), "the library has no Show on map button")
+        button.tap()
+        XCTAssertTrue(app.navigationBars["Map"].waitForExistence(timeout: 15), "the map did not open")
+        let count = app.staticTexts["map.count"]
+        XCTAssertTrue(wait(count, NSPredicate(format: "label CONTAINS 'location'"), timeout: 30),
+                      "the map opened from the library never said how many have a location")
+        XCTAssertTrue(markers.firstMatch.waitForExistence(timeout: 30), "no cluster or point on the map")
+        snap("mapdocs-library-map")
+    }
+
+    /// The viewer's Show on map closes the viewer and opens the map at the item's spot with what is there listed
+    /// (the website's /map?at=): Shimla, where only MAPDOCS_1003 was taken.
+    func testViewerShowOnMapOpensTheSpot() throws {
+        try launchSignedIn()
+        let field = app.searchFields.firstMatch
+        XCTAssertTrue(field.waitForExistence(timeout: 20), "no search field on the library")
+        field.tap()
+        field.typeText("MAPDOCS_1003\n")
+        let hit = app.buttons.matching(identifier: "media.cell").firstMatch
+        XCTAssertTrue(hit.waitForExistence(timeout: 30), "the search did not find the Shimla photo")
+        hit.tap()
+        let info = app.buttons["viewer.info"]
+        XCTAssertTrue(info.waitForExistence(timeout: 20), "the viewer did not open")
+        info.tap()
+        XCTAssertTrue(app.buttons["Done"].waitForExistence(timeout: 15), "the details did not open")
+        // the place's row comes after the camera; the list makes rows as they come into view
+        let list = app.collectionViews["viewer.info.list"].exists ? app.collectionViews["viewer.info.list"]
+                                                                  : app.collectionViews.firstMatch
+        let show = app.buttons["viewer.info.showOnMap"]
+        var swipes = 0
+        while !(show.exists && show.isHittable) && swipes < 12 {
+            list.swipeUp()
+            swipes += 1
+        }
+        XCTAssertTrue(show.exists, "the info panel has no Show on map")
+        show.tap()
+        XCTAssertTrue(app.navigationBars["Map"].waitForExistence(timeout: 15), "the map did not open from the viewer")
+        let title = app.staticTexts["map.panel.title"]
+        XCTAssertTrue(title.waitForExistence(timeout: 20), "the map did not list what is at the spot")
+        XCTAssertEqual(title.label, "1 item here")
+        XCTAssertTrue(app.buttons.matching(identifier: "media.cell").firstMatch.waitForExistence(timeout: 20),
+                      "the spot's panel shows no item")
+        snap("mapdocs-viewer-spot")
+    }
+
     func testPlacesFlyTheMap() throws {
         try launchSignedIn()
         openMore("more.map", title: "Map")

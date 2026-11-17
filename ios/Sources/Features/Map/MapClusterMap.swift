@@ -81,7 +81,7 @@ struct MapClusterMap: UIViewRepresentable {
             map.setRegion(map.regionThatFits(region), animated: false)
         }
 
-        /// Flies to a place from the list.
+        /// Flies to a place from the list, or to the spot the map was opened at (Show on map).
         func fly(_ target: MapFlyTarget?, on map: MKMapView) {
             guard let target, target.nonce != lastNonce else { return }
             lastNonce = target.nonce
@@ -89,7 +89,16 @@ struct MapClusterMap: UIViewRepresentable {
             let region = MKCoordinateRegion(
                 center: CLLocationCoordinate2D(latitude: target.latitude, longitude: target.longitude),
                 span: MKCoordinateSpan(latitudeDelta: MapRules.closestSpan, longitudeDelta: MapRules.closestSpan))
-            map.setRegion(region, animated: true)
+            if map.bounds.width > 0 {
+                map.setRegion(region, animated: true)
+            } else {
+                // Opened at a spot: the first update comes before the map has a size, and a region set on a map
+                // without one does not keep its zoom. Set it once the layout has given it one, as the first fit does.
+                DispatchQueue.main.async { [weak map] in
+                    guard let map else { return }
+                    map.setRegion(map.bounds.width > 0 ? map.regionThatFits(region) : region, animated: false)
+                }
+            }
         }
 
         func mapView(_ mapView: MKMapView, viewFor annotation: MKAnnotation) -> MKAnnotationView? {
