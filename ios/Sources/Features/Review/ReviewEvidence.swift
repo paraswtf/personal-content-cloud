@@ -118,14 +118,17 @@ enum ReviewEvidence {
 
     // MARK: Reading the JSON
 
+    /// A number of the evidence; one no measurement could be (not finite, or past a thousand million million) is none,
+    /// so the words built from it never turn an absurd value into a whole number that stops the app.
     static func num(_ v: API.JSONValue?) -> Double? {
-        guard let d = v?.doubleValue, d.isFinite else { return nil }
+        guard let d = v?.doubleValue, d.isFinite, abs(d) < 1e15 else { return nil }
         return d
     }
 
     static func int(_ v: API.JSONValue?) -> Int? {
         guard let d = num(v) else { return nil }
-        return Int(d.rounded())
+        // a number past what an Int holds is no answer (Int(_:) would stop the app)
+        return Int(exactly: d.rounded())
     }
 
     static func str(_ v: API.JSONValue?) -> String? {

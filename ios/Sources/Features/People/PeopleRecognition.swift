@@ -237,6 +237,7 @@ struct PeopleRecognitionCard: View {
     }
 
     private func start(_ kind: API.Running) async {
+        guard !starting else { return }
         starting = true
         defer { starting = false }
         do {
@@ -293,7 +294,7 @@ private func peopleSettle(face: Int, person: Int?, text: String) async {
     await PeopleAction.run(text, doing: "save the answer") {
         try await Cloud.api().assignFaces(body: API.AssignFacesIn(faceIds: [face], personId: person))
     } message: { r in
-        "\(text)\(Fmt.followedTail(r.followed))"
+        "\(text)\(Fmt.followedTail(r.followed))\(Fmt.guessedTail(r.guessed))"
     }
 }
 

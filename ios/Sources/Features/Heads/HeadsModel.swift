@@ -6,7 +6,8 @@ import Observation
 // (HeadsWords).
 
 /// The heads of one person's model that have been read: fetched through the signed-in client when first wanted,
-/// read off the main thread, and kept for the head on screen and four more (the website's KEEP_MESHES).
+/// read off the main thread, and kept for the head on screen and four more, at most two of those with a photo (the
+/// website's KEEP_MESHES and KEEP_PHOTOS: a photo is tens of megabytes of graphics memory, a head without one a few).
 @MainActor
 @Observable
 final class HeadsStore {
@@ -16,7 +17,9 @@ final class HeadsStore {
         case failed(String)
     }
 
-    static let keep = 5
+    /// Heads kept besides the one on screen, and how many of those may carry a photo.
+    static let keepOthers = 4
+    static let keepPhotos = 2
 
     let personId: Int
     /// By mesh address.
@@ -74,14 +77,27 @@ final class HeadsStore {
         }
     }
 
-    /// Lets go of the heads that were on screen longest ago.
+    /// Lets go of the heads that were on screen longest ago: the latest one wanted stays, and of the others the ones
+    /// used last, at most `keepOthers` and at most `keepPhotos` of them with a photo. Heads still on their way are
+    /// not counted and keep their place.
     private func tidy() {
-        let kept = Set(recent.suffix(Self.keep))
+        var kept = Set<String>()
+        if let latest = recent.last { kept.insert(latest) }
+        var others = 0
+        var photos = 0
+        for address in recent.dropLast().reversed() {
+            guard let head = heads[address] else { continue }
+            let hasPhoto = head.photo != nil
+            if others >= Self.keepOthers || (hasPhoto && photos >= Self.keepPhotos) { continue }
+            kept.insert(address)
+            others += 1
+            if hasPhoto { photos += 1 }
+        }
         for address in heads.keys where !kept.contains(address) {
             heads[address] = nil
             states[address] = nil
         }
-        recent = recent.filter { kept.contains($0) }
+        recent = recent.filter { kept.contains($0) || states[$0] == .loading }
     }
 
     static func describe(_ error: Error) -> String {

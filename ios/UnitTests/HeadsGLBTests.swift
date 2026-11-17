@@ -277,6 +277,34 @@ final class HeadsGLBTests: XCTestCase {
         assertRefused(data, saying: "sparse")
     }
 
+    /// A count no head has is refused from the description alone, before anything is made for it.
+    func testAHugeDeclaredCountIsRefused() {
+        for count in [16_000_001, 1_000_000_000_000] {
+            let data = Self.glb { doc in
+                var accessors = doc["accessors"] as? [[String: Any]] ?? []
+                accessors[0]["count"] = count
+                doc["accessors"] = accessors
+            }
+            assertRefused(data, saying: "more points")
+        }
+    }
+
+    func testAHugeOffsetIsRefusedWithoutOverflow() {
+        let data = Self.glb { doc in
+            var accessors = doc["accessors"] as? [[String: Any]] ?? []
+            accessors[0]["byteOffset"] = 4_503_599_627_370_496   // 2^52
+            doc["accessors"] = accessors
+        }
+        assertRefused(data, saying: "runs past")
+    }
+
+    func testAChunkLongerThanTheFileIsRefused() {
+        var data = Self.glb()
+        // the description chunk's length (bytes 12 to 15) claims more than the file holds
+        data.replaceSubrange(12..<16, with: Self.le32(UInt32(data.count)))
+        assertRefused(data, saying: "runs past its end")
+    }
+
     // MARK: - where a file is
 
     func testTheFileAddressIsReadNotMade() throws {

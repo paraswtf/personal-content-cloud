@@ -136,6 +136,15 @@ final class ReviewEvidenceTests: XCTestCase {
         XCTAssertEqual(ReviewEvidence.label(isFace: false, guess: g), "By clothes")
     }
 
+    /// A number no measurement could be is left out instead of stopping the app when it is made a whole number.
+    func testAbsurdNumbersAreLeftOut() throws {
+        XCTAssertNil(ReviewEvidence.num(.number(1e300)))
+        XCTAssertNil(ReviewEvidence.int(.number(-1e20)))
+        XCTAssertEqual(ReviewEvidence.int(.number(41.6)), 42)
+        let g = try guess("{\"minutes_apart\": 1e300, \"scene\": 0.86, \"clothes\": 0.91, \"gps_m\": 1e299}")
+        XCTAssertEqual(ReviewEvidence.clothesLine(g), "same scene 0.86, same clothes 0.91")
+    }
+
     func testItemReasons() {
         XCTAssertEqual(ReviewItemReasons.forward(["meme_p": .number(0.81), "text": .bool(true), "small": .bool(true),
                                                   "stripped": .bool(true), "jpeg_quality": .number(75),

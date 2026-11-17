@@ -302,6 +302,7 @@ struct PeopleSelectionSheet: View {
     }
 
     private func move(_ who: PeopleWho, _ choice: PeopleChoice) async {
+        guard !working else { return }
         working = true
         defer { working = false }
         let count = uids.count
@@ -318,6 +319,7 @@ struct PeopleSelectionSheet: View {
     }
 
     private func notThem(_ who: PeopleWho) async {
+        guard !working else { return }
         working = true
         defer { working = false }
         let count = uids.count
@@ -332,6 +334,7 @@ struct PeopleSelectionSheet: View {
     }
 
     private func tag(choice: PeopleChoice, species: String?) async {
+        guard !working else { return }
         working = true
         defer { working = false }
         let count = uids.count

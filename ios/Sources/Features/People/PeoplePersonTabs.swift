@@ -221,6 +221,7 @@ struct PeopleRelatedSuggestions: View {
     }
 
     private func add(_ uids: [String]) async {
+        guard !busy else { return }
         busy = true
         defer { busy = false }
         let who = self.who
@@ -233,6 +234,7 @@ struct PeopleRelatedSuggestions: View {
     }
 
     private func no(_ uids: [String]) async {
+        guard !busy else { return }
         busy = true
         defer { busy = false }
         let who = self.who
@@ -348,7 +350,7 @@ struct PeoplePersonFacesTab: View {
 
     private func assign(_ choice: PeopleChoice?) async {
         let ids = Array(selection.selected)
-        guard !ids.isEmpty else { return }
+        guard !ids.isEmpty, !busy else { return }
         busy = true
         defer { busy = false }
         let name = self.name
@@ -370,7 +372,7 @@ struct PeoplePersonFacesTab: View {
     }
 
     private func cover() async {
-        guard let faceId = selection.selected.first else { return }
+        guard let faceId = selection.selected.first, !busy else { return }
         busy = true
         defer { busy = false }
         let r = await PeopleAction.run("Changed the cover", doing: "change the cover") {
@@ -486,7 +488,7 @@ struct PeoplePersonCropsTab: View {
 
     private func assign(_ choice: PeopleChoice?) async {
         let ids = Array(selection.selected)
-        guard !ids.isEmpty else { return }
+        guard !ids.isEmpty, !busy else { return }
         busy = true
         defer { busy = false }
         let name = self.name
@@ -509,7 +511,7 @@ struct PeoplePersonCropsTab: View {
 
     private func removeBoxes() async {
         let ids = Array(selection.selected)
-        guard !ids.isEmpty else { return }
+        guard !ids.isEmpty, !busy else { return }
         busy = true
         defer { busy = false }
         let r = await PeopleAction.run("Removed \(Fmt.count(ids.count, "box", "boxes"))", doing: "remove the boxes") { () async throws -> Int in
@@ -592,6 +594,7 @@ struct PeoplePersonGuessesTab: View {
 
     private func confirmAll() async {
         let rows = mine
+        guard !busy, !rows.isEmpty else { return }
         let faces = rows.filter { $0.guess.kind == .face }.map(\.guess.id)
         let bodies = rows.filter { $0.guess.kind == .body }.map(\.guess.id)
         busy = true

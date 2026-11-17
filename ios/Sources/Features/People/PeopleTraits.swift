@@ -183,6 +183,7 @@ struct PeopleTraitsTab: View {
     }
 
     private func hide(_ t: API.TraitOut, verdict: API.Verdict?) async {
+        guard busy == nil else { return }
         busy = t.id
         defer { busy = nil }
         let owner = self.owner
