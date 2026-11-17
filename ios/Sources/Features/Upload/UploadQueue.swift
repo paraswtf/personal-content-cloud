@@ -236,6 +236,9 @@ final class UploadQueue {
     /// files it is storing.
     func pump() {
         guard APIClient.current() != nil else { return }
+        // Held files wait only while the phone is offline: online (the screen opened again after the connection came
+        // back elsewhere, say) they go on.
+        if SyncEngine.shared.online { heldOffline.removeAll() }
         let all = queued()
         for rec in all where rec.status == "pending" && !inFlight.contains(rec.assetId) && !heldOffline.contains(rec.assetId) {
             if inFlight.count >= Self.maxInFlight { break }
