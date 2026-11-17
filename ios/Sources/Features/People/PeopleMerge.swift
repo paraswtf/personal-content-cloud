@@ -90,27 +90,23 @@ enum PeopleMerging {
 /// Merge suggestions (the website's SuggestionsPanel): pairs of named people who look alike, with "Same person"
 /// and "Different". A childhood pair is two people whose childhood photos look alike: "Same child?".
 struct PeopleSuggestionsPanel: View {
-    @State private var items: [API.Suggestion] = []
+    /// The pairs to show (the People screen loads them, with the people, and again after any change).
+    let items: [API.Suggestion]
+
     @State private var choose: PeopleMergeRequest?
     @State private var busyPair: String?
 
     var body: some View {
-        Group {
-            if !items.isEmpty {
-                VStack(alignment: .leading, spacing: 8) {
-                    PeopleSectionHeader(title: "Could these be the same person?", systemImage: "person.2")
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(alignment: .top, spacing: 12) {
-                            ForEach(items, id: \.self) { s in card(s) }
-                        }
-                        .padding(.vertical, 2)
-                    }
-                    .accessibilityIdentifier("people.suggestions")
+        VStack(alignment: .leading, spacing: 8) {
+            PeopleSectionHeader(title: "Could these be the same person?", systemImage: "person.2")
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(alignment: .top, spacing: 12) {
+                    ForEach(items, id: \.self) { s in card(s) }
                 }
+                .padding(.vertical, 2)
             }
+            .accessibilityIdentifier("people.suggestions")
         }
-        .task { await load() }
-        .onCloudChange { Task { await load() } }
         .sheet(item: $choose) { request in
             PeopleMergeSheet(people: request.people) { target, sources in
                 Task { await PeopleMerging.merge(target: target, sources: sources, withTail: false) }
@@ -188,14 +184,6 @@ struct PeopleSuggestionsPanel: View {
             .accessibilityHidden(true)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    private func load() async {
-        do {
-            items = try await Cloud.api().suggestions(limit: 12).items
-        } catch {
-            // the panel only shows when there is something to suggest
-        }
     }
 
     private func startMerge(_ s: API.Suggestion) {

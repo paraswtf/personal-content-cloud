@@ -27,6 +27,9 @@ struct PeoplePersonItemsTab: View {
     @State private var pager: Pager<API.ItemCard>
     @State private var selection = SelectionModel<String>()
     @State private var sheet: PeopleItemsSheet?
+    /// Related tab: items that may be related too (loaded here: a view that shows nothing until it has them
+    /// would never start loading them).
+    @State private var suggested: [API.RelatedSuggestionOut] = []
 
     init(person: API.PersonOut, related: Bool, header: AnyView) {
         self.person = person
@@ -45,7 +48,7 @@ struct PeoplePersonItemsTab: View {
                   onAppear: { pager.loadMoreIfNeeded($0) }) {
             VStack(alignment: .leading, spacing: 12) {
                 header
-                if related { PeopleRelatedSuggestions(person: person) }
+                if related && !suggested.isEmpty { PeopleRelatedSuggestions(person: person, items: $suggested) }
                 if !pager.items.isEmpty && !selection.active {
                     HStack(spacing: 10) {
                         Button {
@@ -86,16 +89,32 @@ struct PeoplePersonItemsTab: View {
                 SharingCreateSheet(target: .items(uids: uids))
             }
         }
-        .task { if !pager.loaded { await pager.refresh() } }
-        .refreshable { await pager.refresh() }
-        .onCloudChange { Task { await pager.refresh() } }
+        .task {
+            if !pager.loaded { await pager.refresh() }
+            await loadSuggested()
+        }
+        .refreshable {
+            await pager.refresh()
+            await loadSuggested()
+        }
+        .onCloudChange {
+            Task {
+                await pager.refresh()
+                await loadSuggested()
+            }
+        }
+    }
+
+    private func loadSuggested() async {
+        guard related else { return }
+        if let items = try? await Cloud.api().relatedSuggestions(personId: person.id).items { suggested = items }
     }
 
     private var chosen: [String] { pager.items.map(\.uid).filter { selection.contains($0) } }
 
     private var actions: [BulkAction] {
         [
-            BulkAction("People", systemImage: "person.2") { sheet = .people(chosen) },
+            BulkAction("People in these items", systemImage: "person.2") { sheet = .people(chosen) },
             BulkAction("Add to album", systemImage: "rectangle.stack.badge.plus") { sheet = .album(chosen) },
             BulkAction("Share", systemImage: "square.and.arrow.up") { sheet = .share(chosen) },
         ]
@@ -128,9 +147,9 @@ struct PeoplePersonItemsTab: View {
 /// alike, or were taken at the same moment or place. "Add" marks one related, "Not related" is remembered.
 struct PeopleRelatedSuggestions: View {
     let person: API.PersonOut
+    @Binding var items: [API.RelatedSuggestionOut]
 
     @Environment(AppRouter.self) private var router
-    @State private var items: [API.RelatedSuggestionOut] = []
     @State private var busy = false
 
     private var who: String {
@@ -163,8 +182,6 @@ struct PeopleRelatedSuggestions: View {
                 .padding(.horizontal, 16)
             }
         }
-        .task { await load() }
-        .onCloudChange { Task { await load() } }
     }
 
     private func reason(_ r: API.Reason) -> String {
@@ -201,14 +218,6 @@ struct PeopleRelatedSuggestions: View {
             .disabled(busy)
         }
         .frame(width: 150)
-    }
-
-    private func load() async {
-        do {
-            items = try await Cloud.api().relatedSuggestions(personId: person.id).items
-        } catch {
-            // nothing to suggest
-        }
     }
 
     private func add(_ uids: [String]) async {

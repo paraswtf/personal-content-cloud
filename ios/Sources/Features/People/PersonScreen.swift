@@ -51,6 +51,7 @@ struct PersonScreen: View {
 
     @State private var shownId: Int
     @State private var person: API.PersonOut?
+    @State private var recognition: API.RecognitionOut?
     @State private var loadError: Error?
     @State private var tab: PeoplePersonTab = .items
     @State private var renaming = false
@@ -204,8 +205,9 @@ struct PersonScreen: View {
                     if PeopleText.isPet(p) { speciesMenu(p) }
                 }
             }
-            if !PeopleText.isPet(p) && Fmt.isNamed(p.name) {
-                PeopleRecognitionCard(person: p)
+            if !PeopleText.isPet(p) && Fmt.isNamed(p.name), let status = recognition,
+               PeopleRecognitionCard.shows(status) {
+                PeopleRecognitionCard(person: p, status: status, onStatus: { recognition = $0 })
             }
             tabBar(p)
         }
@@ -272,6 +274,7 @@ struct PersonScreen: View {
                 }
             }
         }
+        .accessibilityIdentifier("people.tabs")
     }
 
     @ViewBuilder private func failed(_ error: Error) -> some View {
@@ -293,6 +296,11 @@ struct PersonScreen: View {
             let p = try await Cloud.api().getPerson(personId: shownId)
             person = p
             loadError = nil
+            if !PeopleText.isPet(p) && Fmt.isNamed(p.name) {
+                recognition = try? await Cloud.api().personRecognition(personId: p.id)
+            } else {
+                recognition = nil
+            }
         } catch {
             if error is CancellationError { return }
             if person == nil || (error as? APIError)?.status == 404 {

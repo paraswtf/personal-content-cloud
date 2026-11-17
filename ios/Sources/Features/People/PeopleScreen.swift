@@ -12,6 +12,7 @@ struct PeopleScreen: View {
         let page = try await Cloud.api().listPeople(sort: .items, kind: .pet, cursor: cursor, limit: 60)
         return .init(items: page.items.map { PeopleRow(person: $0) }, next: page.nextCursor, total: page.total)
     }
+    @State private var suggestions: [API.Suggestion] = []
     @State private var picking = SelectionModel<Int>()
     @State private var merging: PeopleMergeRequest?
     @State private var facesToName = false
@@ -33,7 +34,9 @@ struct PeopleScreen: View {
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                     .accessibilityIdentifier("people.count")
-                if !picking.active && query.isEmpty { PeopleSuggestionsPanel() }
+                if !picking.active && query.isEmpty && !suggestions.isEmpty {
+                    PeopleSuggestionsPanel(items: suggestions)
+                }
                 if picking.active {
                     Text("Pick two or more people who are the same person.")
                         .font(.subheadline)
@@ -167,6 +170,7 @@ struct PeopleScreen: View {
             await pager.refresh()
         }
         if !pets.loaded { await pets.refresh() }
+        if suggestions.isEmpty { await loadSuggestions() }
     }
 
     @State private var pagerSort: API.ListPeopleSort = .items
@@ -174,5 +178,11 @@ struct PeopleScreen: View {
     private func refreshAll() async {
         await pager.refresh()
         await pets.refresh()
+        await loadSuggestions()
+    }
+
+    /// Merge suggestions between named people; the panel shows only when there are some.
+    private func loadSuggestions() async {
+        if let items = try? await Cloud.api().suggestions(limit: 12).items { suggestions = items }
     }
 }

@@ -171,17 +171,15 @@ struct PeopleSectionHeader: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
-            if let systemImage {
-                Label(title, systemImage: systemImage).font(.headline)
-            } else {
-                Text(title).font(.headline)
+            HStack(spacing: 6) {
+                if let systemImage { Image(systemName: systemImage).accessibilityHidden(true) }
+                Text(title).accessibilityAddTraits(.isHeader)
             }
+            .font(.headline)
             if let note {
                 Text(note).font(.caption).foregroundStyle(.secondary)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .accessibilityElement(children: .combine)
-        .accessibilityAddTraits(.isHeader)
     }
 }

@@ -5,6 +5,11 @@ import XCTest
 /// Epsilon to merge, People Zeta to rename, the cat People Pet, and two faces nobody named, 333 px wide). The tests
 /// change only those.
 final class PeopleScreens: ScreenTestCase {
+    /// A text on screen, whatever kind of element shows it.
+    private func text(_ label: String) -> XCUIElement {
+        app.descendants(matching: .any).matching(NSPredicate(format: "label == %@", label)).firstMatch
+    }
+
     private func card(_ name: String) -> XCUIElement {
         app.buttons.matching(NSPredicate(format: "identifier == 'people.card' AND label BEGINSWITH %@", name)).firstMatch
     }
@@ -28,18 +33,28 @@ final class PeopleScreens: ScreenTestCase {
         XCTAssertTrue(app.staticTexts["person.name"].waitForExistence(timeout: 20), "the page of \(name) did not open")
     }
 
+    /// Taps a tab of the person page, scrolling the row of tabs until the whole button is on screen.
     private func openTab(_ id: String) {
         let button = app.buttons[id]
         XCTAssertTrue(button.waitForExistence(timeout: 10), "no tab \(id)")
-        if !button.isHittable { app.buttons["people.tab.items"].swipeLeft() }
+        let window = app.windows.firstMatch
+        let right = window.frame.maxX
+        let origin = window.coordinate(withNormalizedOffset: .zero)
+        for _ in 0..<3 where button.frame.maxX > right - 2 {
+            // drag the row of tabs to the left, along its own line
+            let y = button.frame.midY
+            origin.withOffset(CGVector(dx: right * 0.8, dy: y))
+                .press(forDuration: 0.05, thenDragTo: origin.withOffset(CGVector(dx: right * 0.2, dy: y)))
+        }
         button.tap()
+        XCTAssertTrue(button.isSelected, "the tab \(id) did not open")
     }
 
     func testPeopleListSuggestionsAndPets() throws {
         try launchSignedIn()
         tab("People")
         XCTAssertTrue(card("People Alpha").waitForExistence(timeout: 20), "the seeded people are not listed")
-        XCTAssertTrue(app.staticTexts["Could these be the same person?"].waitForExistence(timeout: 10),
+        XCTAssertTrue(text("Could these be the same person?").waitForExistence(timeout: 15),
                       "People Beta and People Gamma look alike but are not suggested")
         XCTAssertTrue(app.buttons["people.facesToName"].exists)
         snap("people-list")
@@ -68,11 +83,11 @@ final class PeopleScreens: ScreenTestCase {
         snap("people-person-guesses")
 
         openTab("people.tab.traits")
-        XCTAssertTrue(app.staticTexts["Tattoos"].waitForExistence(timeout: 20), "the tattoo is not listed")
+        XCTAssertTrue(text("Tattoos").waitForExistence(timeout: 20), "the tattoo is not listed")
         snap("people-person-traits")
 
         openTab("people.tab.related")
-        XCTAssertTrue(app.staticTexts["Nothing related yet"].waitForExistence(timeout: 20))
+        XCTAssertTrue(text("Nothing related yet").waitForExistence(timeout: 20))
         snap("people-person-related")
 
         openTab("people.tab.3d")
@@ -154,8 +169,8 @@ final class PeopleScreens: ScreenTestCase {
         select.tap()
         app.buttons.matching(identifier: "media.cell").firstMatch.tap()
         XCTAssertEqual(app.staticTexts["bulk.count"].label, "1 selected")
-        app.buttons["People"].tap()
-        XCTAssertTrue(app.staticTexts["Not People Alpha?"].waitForExistence(timeout: 20),
+        app.buttons["People in these items"].tap()
+        XCTAssertTrue(text("Not People Alpha?").waitForExistence(timeout: 20),
                       "the sheet does not offer to fix People Alpha on the selection")
         XCTAssertTrue(app.buttons["peopleSheet.tag"].exists)
         snap("people-selection-sheet")

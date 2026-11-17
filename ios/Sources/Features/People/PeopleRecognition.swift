@@ -7,6 +7,16 @@ import SwiftUI
 /// faces on NAME that look like faces taken off NAME, and faces on other people that look like NAME.
 struct PeopleRecognitionCard: View {
     let person: API.PersonOut
+    /// The person page loads the status with the person (a view that shows nothing until it has loaded would never
+    /// start loading); the card follows a run from there and hands every newer status back with `onStatus`.
+    let status: API.RecognitionOut
+    let onStatus: (API.RecognitionOut) -> Void
+
+    /// Whether the card shows at all: nothing when it cannot be trained yet and never was (too few faces, learning
+    /// off), as on the website.
+    static func shows(_ s: API.RecognitionOut) -> Bool {
+        s.trained || s.available || s.running != nil || s.error != nil
+    }
 
     private enum Shown { case conflicts, elsewhere }
     private enum Asking: Identifiable {
@@ -14,7 +24,6 @@ struct PeopleRecognitionCard: View {
         var id: Int { self == .withdraw ? 0 : 1 }
     }
 
-    @State private var status: API.RecognitionOut?
     @State private var shown: Shown?
     @State private var asking: Asking?
     @State private var starting = false
@@ -24,13 +33,8 @@ struct PeopleRecognitionCard: View {
     private var name: String { PeopleText.name(person) }
 
     var body: some View {
-        Group {
-            if let s = status, s.trained || s.available || s.running != nil || s.error != nil {
-                card(s)
-            }
-        }
+        card(status)
         .task(id: "\(person.id)-\(pollToken)") { await poll() }
-        .onCloudChange { Task { await load() } }
         .confirmationDialog(askTitle, isPresented: Binding(get: { asking != nil }, set: { if !$0 { asking = nil } }),
                             titleVisibility: .visible, presenting: asking) { kind in
             switch kind {
@@ -43,7 +47,7 @@ struct PeopleRecognitionCard: View {
         } message: { kind in
             switch kind {
             case .withdraw:
-                Text("The \(Fmt.count(status?.guesses ?? 0, "guess", "guesses")) this recognition made go away, and it makes no new ones until you look again. Faces you already confirmed stay.")
+                Text("The \(Fmt.count(status.guesses, "guess", "guesses")) this recognition made go away, and it makes no new ones until you look again. Faces you already confirmed stay.")
             case .forget:
                 Text("Its open guesses go away and faces are matched as before the training. The faces and your answers stay, so you can train again at any time.")
             }
@@ -187,18 +191,21 @@ struct PeopleRecognitionCard: View {
 
     // MARK: loading and actions
 
+    /// Follows a run (every 2 s) or another person's run (every 6 s) until it ends.
     private func poll() async {
-        await load()
-        while !Task.isCancelled {
-            guard let s = status, s.running != nil || s.busy else { return }
-            try? await Task.sleep(nanoseconds: s.running != nil ? 2_000_000_000 : 6_000_000_000)
+        var current = status
+        if let running = current.running, wasRunning == nil { wasRunning = running }
+        if pollToken > 0, let fresh = await load() { current = fresh }
+        while !Task.isCancelled, current.running != nil || current.busy {
+            try? await Task.sleep(nanoseconds: current.running != nil ? 2_000_000_000 : 6_000_000_000)
             if Task.isCancelled { return }
-            await load()
+            if let fresh = await load() { current = fresh }
         }
     }
 
-    private func load() async {
-        guard let s = try? await Cloud.api().personRecognition(personId: person.id) else { return }
+    @discardableResult
+    private func load() async -> API.RecognitionOut? {
+        guard let s = try? await Cloud.api().personRecognition(personId: person.id) else { return nil }
         // a run that ends: say what it did, and let the Guesses tab and the counts catch up
         if let was = wasRunning, s.running == nil {
             let waiting = Fmt.count(s.guesses, "guess", "guesses")
@@ -210,12 +217,13 @@ struct PeopleRecognitionCard: View {
                 Toaster.shared.ok("Looked again for \(name): \(waiting) to review.")
             }
             wasRunning = nil
-            status = s
+            onStatus(s)
             CloudEvents.post()
-            return
+            return s
         }
         if let running = s.running, wasRunning == nil { wasRunning = running }
-        status = s
+        onStatus(s)
+        return s
     }
 
     private func startMessage(_ error: Error) -> String? {
