@@ -147,6 +147,37 @@ final class UploadTests: XCTestCase {
         XCTAssertFalse(fm.fileExists(atPath: freshFolder.path))
     }
 
+    /// Time offline does not use up attempts (the website's uploader.ts: attempt-- while offline).
+    func testOfflineFailuresDoNotUseUpAttempts() {
+        XCTAssertFalse(BackgroundUploader.countsAttempt(online: false, error: nil))
+        XCTAssertFalse(BackgroundUploader.countsAttempt(online: false, error: URLError(.timedOut)))
+        XCTAssertFalse(BackgroundUploader.countsAttempt(online: true, error: URLError(.notConnectedToInternet)))
+        XCTAssertFalse(BackgroundUploader.countsAttempt(online: true, error: URLError(.networkConnectionLost)))
+        XCTAssertTrue(BackgroundUploader.countsAttempt(online: true, error: URLError(.timedOut)))
+        XCTAssertTrue(BackgroundUploader.countsAttempt(online: true, error: nil))
+    }
+
+    /// Back online, the queue starts again the files that failed on the way for the network, never one the server
+    /// answered or one that failed for another reason.
+    func testFilesThatFailedForTheNetworkStartAgain() {
+        XCTAssertTrue(UploadQueue.failedForNetwork(status: "failed", serverStatus: nil,
+                                                   error: UploadQueue.connectionLost, known: false))
+        XCTAssertTrue(UploadQueue.failedForNetwork(status: "failed", serverStatus: nil,
+                                                   error: "Cannot reach the server; the upload continues on the next sync",
+                                                   known: false))
+        XCTAssertTrue(UploadQueue.failedForNetwork(status: "failed", serverStatus: nil,
+                                                   error: "Gave up after 8 attempts: The request timed out.", known: true))
+        XCTAssertFalse(UploadQueue.failedForNetwork(status: "failed", serverStatus: nil,
+                                                    error: "Gave up after 8 attempts: The request timed out.", known: false))
+        XCTAssertFalse(UploadQueue.failedForNetwork(status: "failed", serverStatus: nil,
+                                                    error: "This file could not be read. It may have been moved or deleted.",
+                                                    known: false))
+        XCTAssertFalse(UploadQueue.failedForNetwork(status: "failed", serverStatus: "error",
+                                                    error: UploadQueue.connectionLost, known: true))
+        XCTAssertFalse(UploadQueue.failedForNetwork(status: "pending", serverStatus: nil,
+                                                    error: UploadQueue.connectionLost, known: true))
+    }
+
     func testNetworkNoticeSaysOfflineOrCountsDown() {
         XCTAssertEqual(UploadText.network(offline: true, retryIn: 4),
                        "You are offline. The upload continues when the connection is back.")

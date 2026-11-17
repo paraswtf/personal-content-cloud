@@ -37,6 +37,49 @@ final class SettingsSystemScreens: ScreenTestCase {
         return element.exists && element.isHittable
     }
 
+    /// Moves the list down by about a third of its height (the opposite of dragUp).
+    private func dragDown() {
+        let window = app.windows.firstMatch
+        let start = window.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.38))
+        let end = window.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.72))
+        start.press(forDuration: 0.05, thenDragTo: end, withVelocity: .slow, thenHoldForDuration: 0.2)
+    }
+
+    /// The top and bottom of the part of the screen a list row can be tapped in: below the navigation bar, above
+    /// the tab bar.
+    private var openArea: (top: CGFloat, bottom: CGFloat) {
+        let nav = app.navigationBars.firstMatch
+        let tabs = app.tabBars.firstMatch
+        let top = nav.exists ? nav.frame.maxY : 0
+        let bottom = tabs.exists ? tabs.frame.minY : app.windows.firstMatch.frame.maxY
+        return (top, bottom)
+    }
+
+    /// Scrolls until `element` is wholly between the navigation bar and the tab bar (isHittable alone is true for a
+    /// chart whose middle is under the tab bar).
+    private func scroll(toAboveTabBar element: XCUIElement, drags: Int = 10) -> Bool {
+        for _ in 0...drags {
+            if element.exists {
+                let frame = element.frame
+                let area = openArea
+                if frame.minY >= area.top && frame.maxY <= area.bottom { return true }
+                if frame.minY < area.top { dragDown() } else { dragUp() }
+            } else {
+                dragUp()
+            }
+        }
+        return false
+    }
+
+    /// Scrolls back up until `element` is on screen and clear of the navigation bar, at most `drags` times.
+    private func scrollBack(to element: XCUIElement, drags: Int = 10) -> Bool {
+        for _ in 0..<drags {
+            if element.exists && element.isHittable && element.frame.minY >= openArea.top { return true }
+            dragDown()
+        }
+        return element.exists && element.isHittable
+    }
+
     func testSystem() throws {
         try launchSignedIn()
         openSettings("settings.system")
@@ -62,13 +105,16 @@ final class SettingsSystemScreens: ScreenTestCase {
         // the seed's uploads were stored minutes ago
         XCTAssertTrue(scroll(to: element(containing: "Files stored")), "no throughput for the stored files")
         snap("setsys-system-speed")
-        // a tap on a chart reads one time's numbers in place of the period's
+        // a tap on a chart reads one time's numbers in place of the period's. The chart is brought wholly above
+        // the tab bar first: a tap that lands on the tab bar's More (the selected tab) goes back to the More list.
         let chart = app.descendants(matching: .any).matching(NSPredicate(format: "label BEGINSWITH %@", "Files stored:")).firstMatch
-        if chart.exists && chart.isHittable {
+        if scroll(toAboveTabBar: chart) {
             chart.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.5)).tap()
             _ = element(containing: " finished, ").waitForExistence(timeout: 5)
             snap("setsys-system-speed-tap")
         }
+        XCTAssertTrue(app.navigationBars["System"].exists, "the chart tap left the System screen")
+        XCTAssertTrue(scrollBack(to: range), "the range control went off the screen")
         range.buttons["24 hours"].tap()
         XCTAssertTrue(element(containing: "in the last 24 hours").waitForExistence(timeout: 30), "the 24 hours view did not load")
         let table = app.buttons["system.throughput.table"]

@@ -72,9 +72,9 @@ struct UploadScreen: View {
             await loadConfig()
             await queue.resume()
         }
-        // back online: files left waiting go on
+        // back online: files left waiting go on, and files that failed for the network start again
         .onChange(of: sync.online) { _, online in
-            if online { queue.pump() }
+            if online { queue.backOnline() }
         }
         .onDisappear { queue.stopPolling() }
     }

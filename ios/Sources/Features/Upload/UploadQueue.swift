@@ -42,6 +42,23 @@ final class UploadQueue {
     @ObservationIgnored private var poller: Task<Void, Never>?
     @ObservationIgnored private var pollRound = 0
     @ObservationIgnored private var noticeTimer: Task<Void, Never>?
+    /// Files the uploader stopped while the phone was offline: they wait with their reason and are not started again
+    /// until the connection is back (backOnline).
+    @ObservationIgnored private var heldOffline: Set<String> = []
+
+    /// The reason a file gets when its upload stopped for the connection and gave none of its own.
+    nonisolated static let connectionLost = "Connection lost. Check your internet and try again."
+    /// The starts of the reasons that mean the network stopped the upload (the queue's own and the uploader's stalls).
+    nonisolated static let networkReasons = [connectionLost, "Cannot reach the server", "The transfer did not start"]
+
+    /// A failed file the queue starts again when the connection comes back: it failed on the way (the server never
+    /// gave it a final answer) and for the network, as the uploader recorded (`known`) or as its reason says.
+    nonisolated static func failedForNetwork(status: String, serverStatus: String?, error: String?, known: Bool) -> Bool {
+        guard status == "failed", serverStatus == nil else { return false }
+        if known { return true }
+        guard let error else { return false }
+        return networkReasons.contains { error.hasPrefix($0) }
+    }
 
     private var ctx: ModelContext { SyncStore.shared.container.mainContext }
 
@@ -219,12 +236,27 @@ final class UploadQueue {
     /// files it is storing.
     func pump() {
         guard APIClient.current() != nil else { return }
+        // Held files wait only while the phone is offline: online (the screen opened again after the connection came
+        // back elsewhere, say) they go on.
+        if SyncEngine.shared.online { heldOffline.removeAll() }
         let all = queued()
-        for rec in all where rec.status == "pending" && !inFlight.contains(rec.assetId) {
+        for rec in all where rec.status == "pending" && !inFlight.contains(rec.assetId) && !heldOffline.contains(rec.assetId) {
             if inFlight.count >= Self.maxInFlight { break }
             begin(rec)
         }
         if all.contains(where: waitsForServer) { startPolling() }
+    }
+
+    /// The connection is back: files held while offline go on, and files that failed for the network start again (the
+    /// website's uploader waits for the connection instead of failing them).
+    func backOnline() {
+        heldOffline.removeAll()
+        let known = BackgroundUploader.shared.networkFailures
+        for rec in queued() where Self.failedForNetwork(status: rec.status, serverStatus: rec.serverStatus,
+                                                         error: rec.error, known: known.contains(rec.assetId)) {
+            retry(rec)
+        }
+        pump()
     }
 
     /// Opening the screen: continues what the queue left when the app was closed. A file whose request is still in
@@ -307,12 +339,20 @@ final class UploadQueue {
 
     /// The upload left the wire. One the uploader only paused (it could not reach the server, or a request never
     /// started) fails here with its reason, so the list says what happened and Retry continues it; the queue does
-    /// not start it again by itself.
+    /// not start it again by itself. While the phone is offline it waits instead, with its reason, and goes on when
+    /// the connection is back (backOnline).
     private func settle(_ id: String) {
         resumed.remove(id)
         guard let rec = record(id), rec.queuedAt != nil, rec.status == "pending" else { return }
+        if !SyncEngine.shared.online {
+            if rec.error == nil { rec.error = Self.connectionLost }
+            heldOffline.insert(id)
+            rec.updatedAt = Date()
+            save()
+            return
+        }
         rec.status = "failed"
-        if rec.error == nil { rec.error = "Connection lost. Check your internet and try again." }
+        if rec.error == nil { rec.error = Self.connectionLost }
         rec.updatedAt = Date()
         save()
     }
