@@ -30,7 +30,7 @@ struct ReviewGuessCard: View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .center, spacing: 12) {
                 RemoteImage(ref: box.url, maxPixel: 240)
-                    .frame(width: 72, height: 72)
+                    .frame(width: 64, height: 64)
                     .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                     .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous)
                         .stroke(Color(uiColor: .separator), lineWidth: 0.5))
@@ -43,7 +43,8 @@ struct ReviewGuessCard: View {
                             Avatar(name: name, ref: guess.guess.person.coverUrl, size: 28)
                             Text("\(name)?")
                                 .font(.subheadline.weight(.semibold))
-                                .lineLimit(1)
+                                .lineLimit(2)
+                                .fixedSize(horizontal: false, vertical: true)
                             OriginIcon(origin: .guess)
                                 .foregroundStyle(.secondary)
                         }
@@ -117,19 +118,19 @@ struct ReviewGuessCard: View {
     private var sceneThumb: some View {
         if let t = frameTime {
             let aspect = ReviewBox.aspect(guess.item)
-            let width = min(144, 72 * aspect)
+            let width = min(128, 64 * aspect)
             RemoteImage(ref: ReviewBox.frameRef(guess.item, t: t), maxPixel: 480)
-                .frame(width: width, height: 72)
+                .frame(width: width, height: 64)
                 .overlay(alignment: .topLeading) {
                     Rectangle()
                         .stroke(Color.accentColor, lineWidth: 2)
-                        .frame(width: width * box.w, height: 72 * box.h)
-                        .offset(x: width * box.x, y: 72 * box.y)
+                        .frame(width: width * box.w, height: 64 * box.h)
+                        .offset(x: width * box.x, y: 64 * box.y)
                         .allowsHitTesting(false)
                 }
         } else {
             RemoteImage(ref: guess.item.urls.thumb, maxPixel: 240)
-                .frame(width: 72, height: 72)
+                .frame(width: 64, height: 64)
         }
     }
 
@@ -154,7 +155,7 @@ struct ReviewGuessCard: View {
             Button {
                 picking = true
             } label: {
-                buttonLabel("Someone else", systemImage: "person.fill.questionmark", action: .correct)
+                buttonLabel("Someone else", systemImage: "person.fill.questionmark", action: .correct, flexible: false)
             }
             .buttonStyle(.bordered)
             .accessibilityIdentifier("review.guess.other")
@@ -163,16 +164,18 @@ struct ReviewGuessCard: View {
         .disabled(busy != nil)
     }
 
-    private func buttonLabel(_ title: String, systemImage: String, action: ReviewDecisions.Action) -> some View {
+    /// Yes and No share the room Someone else leaves (it keeps its whole words).
+    private func buttonLabel(_ title: String, systemImage: String, action: ReviewDecisions.Action,
+                             flexible: Bool = true) -> some View {
         HStack(spacing: 4) {
             if busy == action {
                 ProgressView().controlSize(.small)
             } else {
                 Image(systemName: systemImage).imageScale(.small)
             }
-            Text(title).lineLimit(1).minimumScaleFactor(0.8)
+            Text(title).lineLimit(1).fixedSize(horizontal: !flexible, vertical: false)
         }
-        .frame(maxWidth: .infinity)
+        .frame(maxWidth: flexible ? CGFloat.infinity : nil)
     }
 
     private func decide(_ action: ReviewDecisions.Action, pick: PersonPick? = nil) async {
