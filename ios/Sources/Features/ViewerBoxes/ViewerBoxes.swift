@@ -223,21 +223,26 @@ struct BoxesEditTopBar: View {
     var body: some View {
         let stage = model.stage
         if let kind = stage.drawingKind, stage.rect == nil || stage.dragging {
-            HStack(spacing: 8) {
+            VStack(spacing: 8) {
                 Text("Drag over the \(kind.noun)")
                     .font(.subheadline.weight(.semibold))
+                    .lineLimit(1)
                     .padding(.horizontal, 12)
                     .padding(.vertical, 8)
                     .background(.black.opacity(0.7), in: Capsule())
                     .accessibilityIdentifier("boxes.draw.hint")
-                if kind != .face {
-                    Button("Whole photo") { stage.setRect(StageEditGeometry.wholePhoto) }
+                HStack(spacing: 8) {
+                    if kind != .face {
+                        Button("Whole photo") { stage.setRect(StageEditGeometry.wholePhoto) }
+                            .buttonStyle(.bordered)
+                            .fixedSize()
+                            .accessibilityIdentifier("boxes.draw.whole")
+                    }
+                    Button("Cancel") { model.cancelEdit() }
                         .buttonStyle(.bordered)
-                        .accessibilityIdentifier("boxes.draw.whole")
+                        .fixedSize()
+                        .accessibilityIdentifier("boxes.draw.cancel")
                 }
-                Button("Cancel") { model.cancelEdit() }
-                    .buttonStyle(.bordered)
-                    .accessibilityIdentifier("boxes.draw.cancel")
             }
             .foregroundStyle(.white)
             .tint(.white)
