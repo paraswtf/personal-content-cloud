@@ -147,13 +147,21 @@ struct SettingsThroughputChart: View {
 
     private var range: API.ThroughputRange { API.ThroughputRange(rawValue: data.range) }
 
-    /// The first, middle and last buckets carry a label; the last one says "now".
-    private var axisBuckets: [String] {
+    /// The time axis under the chart: the first bucket, the middle one and "now" (drawn here rather than by the
+    /// chart, which cuts a label down to its column's width).
+    private var axisLabels: some View {
         let n = data.buckets.count
-        guard n > 0 else { return [] }
-        let picks = [0, (n - 1) / 2, n - 1]
-        var seen = Set<Int>()
-        return picks.filter { seen.insert($0).inserted }.map { data.buckets[$0] }
+        return HStack(spacing: 4) {
+            if n > 0 { Text(SettingsSystemText.axisLabel(data.buckets[0], range: range)) }
+            Spacer(minLength: 4)
+            if n > 2 { Text(SettingsSystemText.axisLabel(data.buckets[(n - 1) / 2], range: range)) }
+            Spacer(minLength: 4)
+            Text("now")
+        }
+        .font(.caption2.monospacedDigit())
+        .foregroundStyle(.secondary)
+        .padding(.leading, 24)
+        .accessibilityHidden(true)
     }
 
     var body: some View {
@@ -171,6 +179,7 @@ struct SettingsThroughputChart: View {
                 .foregroundStyle(.secondary)
             chart
                 .frame(height: 120)
+            axisLabels
         }
         .padding(.vertical, 4)
         .accessibilityElement(children: .contain)
@@ -192,15 +201,7 @@ struct SettingsThroughputChart: View {
         .chartLegend(.hidden)
         .chartXScale(domain: data.buckets)
         .chartYScale(domain: 0...top)
-        .chartXAxis {
-            AxisMarks(values: axisBuckets) { value in
-                AxisValueLabel {
-                    if let bucket = value.as(String.self) {
-                        Text(bucket == data.buckets.last ? "now" : SettingsSystemText.axisLabel(bucket, range: range))
-                    }
-                }
-            }
-        }
+        .chartXAxis(.hidden)
         .chartYAxis {
             AxisMarks(position: .leading, values: top > 1 && top % 2 == 0 ? [0, top / 2, top] : [0, top]) { _ in
                 AxisGridLine()

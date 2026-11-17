@@ -39,7 +39,8 @@ struct SettingsUndoHistoryView: View {
                 }
             }
         }
-        .confirmAction("Forget all \(entries.count) on this phone?", isPresented: $confirmClear, actionTitle: "Clear",
+        .confirmAction(entries.count == 1 ? "Forget the 1 change on this phone?" : "Forget all \(entries.count) changes on this phone?",
+                       isPresented: $confirmClear, actionTitle: "Clear",
                        message: "The changes stay on the server; only this list is cleared.") {
             UndoCenter.shared.clear()
         }
