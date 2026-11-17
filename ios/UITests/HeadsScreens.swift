@@ -6,25 +6,34 @@ import XCTest
 final class HeadsScreens: ScreenTestCase {
     private func openPerson(_ name: String) {
         tab("People")
-        let card = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", name)).firstMatch
-        XCTAssertTrue(card.waitForExistence(timeout: 20), "no card for \(name) on People")
+        // the person's card on People (not a merge suggestion's link, whose label starts with the name too); the
+        // grid makes its cards as they come into view
+        let card = app.buttons.matching(NSPredicate(format: "identifier == 'people.card' AND label BEGINSWITH %@", name))
+            .firstMatch
+        var swipes = 0
+        while !card.waitForExistence(timeout: swipes == 0 ? 20 : 2) && swipes < 6 {
+            app.swipeUp()
+            swipes += 1
+        }
+        XCTAssertTrue(card.exists, "no card for \(name) on People")
         card.tap()
         let tab3d = app.buttons["people.tab.3d"]
-        if tab3d.waitForExistence(timeout: 5) {
-            // The person page's tabs scroll sideways and 3D, the last one, starts off the screen on a phone: drag the
-            // row of tabs to the left, at its own height, until 3D can be touched. (A query for the row's scroll view
-            // found nothing to swipe, and a swipe on a tab button could scroll that button back into view.)
+        if tab3d.waitForExistence(timeout: 10) {
+            // The person page's tabs scroll sideways and 3D, the last one, starts off the screen on a phone with a
+            // sliver showing (enough for isHittable): drag the row to the left, along its own line, until the whole
+            // button is on screen, as the people area's own test does.
+            let window = app.windows.firstMatch
+            let right = window.frame.maxX
+            let origin = window.coordinate(withNormalizedOffset: .zero)
             var drags = 0
-            while !tab3d.isHittable && drags < 5 {
+            while tab3d.frame.maxX > right - 2 && drags < 4 {
                 let y = tab3d.frame.midY
-                let width = app.frame.width
-                let origin = app.coordinate(withNormalizedOffset: .zero)
-                origin.withOffset(CGVector(dx: width * 0.85, dy: y))
-                    .press(forDuration: 0.05, thenDragTo: origin.withOffset(CGVector(dx: width * 0.15, dy: y)))
+                origin.withOffset(CGVector(dx: right * 0.8, dy: y))
+                    .press(forDuration: 0.05, thenDragTo: origin.withOffset(CGVector(dx: right * 0.2, dy: y)))
                 drags += 1
             }
-            XCTAssertTrue(tab3d.isHittable, "could not reach the 3D tab")
             tab3d.tap()
+            XCTAssertTrue(tab3d.isSelected, "the 3D tab did not open")
         }
     }
 
