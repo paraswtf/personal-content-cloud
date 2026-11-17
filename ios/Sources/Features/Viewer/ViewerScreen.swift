@@ -7,6 +7,8 @@ import SwiftUI
 struct ViewerScreen: View {
     let request: ViewerRequest
 
+    @Environment(AppRouter.self) private var router
+    @Environment(\.dismiss) private var dismiss
     @State private var boxes = ViewerBoxesModel()
     @State private var pages = ViewerPageState()
 
@@ -20,5 +22,23 @@ struct ViewerScreen: View {
                                       },
                                       selectedBoxId: boxes.selectedBoxId))
             .viewerBoxEditors(boxes)
+            .task(id: request.id) { await closeWhenTheVaultLocks() }
+    }
+
+    /// Vault items never stay on screen once the vault is locked (the website hides a private item when the vault's
+    /// window ends): the viewer opened from the vault closes when the app's vault window runs out.
+    private func closeWhenTheVaultLocks() async {
+        guard request.vault else { return }
+        while !Task.isCancelled {
+            let session = VaultSession.shared
+            if session.loaded && !session.isOpen() {
+                // Read as locked: the vault's pictures leave memory too.
+                session.expire()
+                Toaster.shared.error("The vault is locked. Unlock the vault again to see private items.")
+                if router.viewer?.id == request.id { router.viewer = nil } else { dismiss() }
+                return
+            }
+            try? await Task.sleep(nanoseconds: 1_000_000_000)
+        }
     }
 }

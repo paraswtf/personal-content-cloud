@@ -63,9 +63,17 @@ struct ViewerFile: Identifiable {
 
 @MainActor
 enum ViewerFiles {
-    /// Downloads a media address of the item (or a prepared request) into a temporary file named `filename`.
+    /// The folders downloads go to, one per file: `tmp/viewer-<uuid>/<name>`.
+    private static let folderPrefix = "viewer-"
+    /// A download folder older than this is left over (its sheet never showed, the viewer closed mid-download).
+    private static let staleAfter: TimeInterval = 30 * 60
+
+    /// Downloads a media address of the item (or a prepared request) into a temporary file named `filename`. The
+    /// caller removes it with `discard` once the share sheet, Quick Look or Photos are done with it; folders left
+    /// over from earlier downloads are removed here.
     static func fetch(_ context: ViewerPageContext, address: String? = nil, request: URLRequest? = nil,
                       filename: String) async throws -> ViewerFile {
+        sweepStale()
         let req: URLRequest
         if let request {
             req = request
@@ -77,7 +85,7 @@ enum ViewerFiles {
         if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
             throw APIError(status: http.statusCode, detail: "The server answered \(http.statusCode)")
         }
-        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("viewer-\(UUID().uuidString)",
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(folderPrefix + UUID().uuidString,
                                                                                      isDirectory: true)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         let safe = filename.replacingOccurrences(of: "/", with: "-")
@@ -87,6 +95,28 @@ enum ViewerFiles {
         let videoExts: Set<String> = ["mov", "mp4", "m4v", "avi", "mkv", "webm", "3gp"]
         let imageExts: Set<String> = ["jpg", "jpeg", "png", "heic", "heif", "webp", "gif", "tif", "tiff", "dng", "bmp"]
         return ViewerFile(url: target, isVideo: videoExts.contains(ext), isImage: imageExts.contains(ext))
+    }
+
+    /// Removes a downloaded file and its folder: an original (a vault item's too) does not stay on the phone once the
+    /// sheet that used it has gone.
+    static func discard(_ file: ViewerFile) {
+        let folder = file.url.deletingLastPathComponent()
+        guard folder.lastPathComponent.hasPrefix(folderPrefix) else { return }
+        try? FileManager.default.removeItem(at: folder)
+    }
+
+    /// Removes download folders left over for longer than `staleAfter`.
+    private static func sweepStale(now: Date = Date()) {
+        let tmp = FileManager.default.temporaryDirectory
+        guard let folders = try? FileManager.default.contentsOfDirectory(
+            at: tmp, includingPropertiesForKeys: [.contentModificationDateKey], options: [.skipsHiddenFiles])
+        else { return }
+        for folder in folders where folder.lastPathComponent.hasPrefix(folderPrefix) {
+            let modified = (try? folder.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+            if let modified, now.timeIntervalSince(modified) > staleAfter {
+                try? FileManager.default.removeItem(at: folder)
+            }
+        }
     }
 
     /// Saves a photo or video file to the phone's library (add-only access, asked for here when needed).

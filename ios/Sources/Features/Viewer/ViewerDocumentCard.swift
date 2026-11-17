@@ -271,8 +271,11 @@ struct ViewerDocumentCard: View {
                         UIPasteboard.general.string = challanNumber
                         Toaster.shared.ok("Challan number copied; the portal opens next")
                     }
+                    // The address was read from the document: only a web address opens, never another app's scheme.
                     let address = document.fields["pay_url"]?.value.trimmingCharacters(in: .whitespaces) ?? ""
-                    if let url = URL(string: address.isEmpty ? ViewerFormat.challanPortal : address) { openURL(url) }
+                    let parsed: URL? = URL(string: address)
+                    let isWeb: Bool = parsed?.scheme.map { ["https", "http"].contains($0.lowercased()) } ?? false
+                    if let url = isWeb ? parsed : URL(string: ViewerFormat.challanPortal) { openURL(url) }
                 } label: {
                     Label("Pay or check status", systemImage: "arrow.up.right.square")
                 }
