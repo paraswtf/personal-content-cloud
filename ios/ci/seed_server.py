@@ -22,7 +22,10 @@ changing this one. Each such file may define `library(kit)`, run at the end of s
 connection and the drawing helpers in `kit` (see `area_kit` below), and `api(kit)`, run at the end of step 2
 with a signed-in client. What they return lands under "areas" in the output. Files run in name order; their
 items are dated before 1 May 2026 (older than the core's, so the core's tests find theirs on the first screen),
-and their names start with the area's, so no two areas' data collide.
+and their names start with the area's, so no two areas' data collide. A drawn picture is known by its bytes
+(items.sha256 is unique), so each area draws with scene numbers no other area uses: the core 1000-3999,
+boxes 4100s, mapdocs 4100s without faces, albums, people and heads 5100s, library 7000s, vaulttrash and
+review 7100s to 7300s, viewer 8100s and 8300s.
 
 Everything is generated: no real people, no real photos, nothing from any owner's library.
 """
