@@ -82,7 +82,8 @@ actor APIClient {
         cfg.timeoutIntervalForRequest = 60
         cfg.timeoutIntervalForResource = 3600
         cfg.httpCookieStorage = nil
-        session = URLSession(configuration: cfg)
+        // Redirects only on the server's own host, so the device token never reaches another one.
+        session = URLSession(configuration: cfg, delegate: SameHostRedirects.shared, delegateQueue: nil)
     }
 
     static func current() -> APIClient? {

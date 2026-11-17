@@ -68,6 +68,14 @@ enum ViewerFiles {
     /// A download folder older than this is left over (its sheet never showed, the viewer closed mid-download).
     private static let staleAfter: TimeInterval = 30 * 60
 
+    /// The downloads' session: the request carries the device token, so redirects stay on the server's own host.
+    private static let downloads: URLSession = {
+        let cfg = URLSessionConfiguration.default
+        cfg.httpCookieStorage = nil
+        cfg.urlCache = nil
+        return URLSession(configuration: cfg, delegate: SameHostRedirects.shared, delegateQueue: nil)
+    }()
+
     /// Downloads a media address of the item (or a prepared request) into a temporary file named `filename`. The
     /// caller removes it with `discard` once the share sheet, Quick Look or Photos are done with it; folders left
     /// over from earlier downloads are removed here.
@@ -81,7 +89,7 @@ enum ViewerFiles {
             guard let address else { throw APIError(status: 0, detail: "Nothing to download") }
             req = try APIContext.$vault.withValue(context.vault) { try Cloud.api().mediaRequest(address, vault: context.vault) }
         }
-        let (tmp, response) = try await URLSession.shared.download(for: req)
+        let (tmp, response) = try await downloads.download(for: req)
         if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
             throw APIError(status: http.statusCode, detail: "The server answered \(http.statusCode)")
         }
