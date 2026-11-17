@@ -5,15 +5,22 @@ import XCTest
 /// could make one, a file without a preview), which sit at the end of the library (April 2026). Every change a test
 /// makes it takes back.
 final class ViewerScreens: ScreenTestCase {
-    private func cell(_ prefix: String) -> XCUIElement {
-        app.buttons.matching(NSPredicate(format: "identifier == 'media.cell' AND label BEGINSWITH %@", prefix)).firstMatch
+    /// The library tile whose label starts with one of `prefixes` (the library names a parsed document by its type,
+    /// "Boarding pass, Apr 20, 2026", where the core's grid says "PDF, Apr 20, 2026").
+    private func cell(_ prefixes: String...) -> XCUIElement {
+        let any = prefixes.map { _ in "label BEGINSWITH %@" }.joined(separator: " OR ")
+        return app.buttons.matching(NSPredicate(format: "identifier == 'media.cell' AND (\(any))", argumentArray: prefixes))
+            .firstMatch
     }
 
-    /// Scrolls the library down to the item whose label starts with `prefix` and opens it in the viewer.
-    private func open(_ prefix: String, file: StaticString = #filePath, line: UInt = #line) {
+    /// Scrolls the library down to the item whose label starts with one of `prefixes` and opens it in the viewer.
+    private func open(_ prefixes: String..., file: StaticString = #filePath, line: UInt = #line) {
         XCTAssertTrue(app.buttons.matching(identifier: "media.cell").firstMatch.waitForExistence(timeout: 30),
                       "the library is empty", file: file, line: line)
-        let target = cell(prefix)
+        let prefix = prefixes.first ?? ""
+        let any = prefixes.map { _ in "label BEGINSWITH %@" }.joined(separator: " OR ")
+        let target = app.buttons.matching(NSPredicate(format: "identifier == 'media.cell' AND (\(any))",
+                                                      argumentArray: prefixes)).firstMatch
         var swipes = 0
         while !(target.exists && target.isHittable) && swipes < 40 {
             app.swipeUp()
@@ -126,7 +133,7 @@ final class ViewerScreens: ScreenTestCase {
 
     func testADocumentsPagesAndItsCard() throws {
         try launchSignedIn()
-        open("PDF, Apr 20, 2026")
+        open("Boarding pass, Apr 20, 2026", "PDF, Apr 20, 2026")
         let position = app.staticTexts["viewer.document.position"]
         XCTAssertTrue(position.waitForExistence(timeout: 20), "the document's pages did not show")
         XCTAssertEqual(position.label, "Page 1 of 2")
