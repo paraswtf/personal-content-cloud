@@ -63,7 +63,10 @@ final class ViewerScreens: ScreenTestCase {
         XCTAssertTrue(text("Viewer trip").waitForExistence(timeout: 10), "the seeded tag is missing")
         snap("viewer-info-top")
         scrollDetails(to: anything("CI Camera"))
-        XCTAssertTrue(app.buttons["viewer.info.openInMaps"].exists, "the place has no map")
+        // the place's row with its map comes after the camera; the list loads rows as they come into view
+        let maps = app.buttons["viewer.info.openInMaps"]
+        scrollDetails(to: maps)
+        XCTAssertTrue(maps.exists, "the place has no map")
         snap("viewer-info-details")
         scrollDetails(to: app.buttons["viewer.info.trash"])
         XCTAssertTrue(app.buttons["viewer.info.favourite"].exists)
