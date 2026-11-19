@@ -66,6 +66,8 @@ MIGRATED_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("faces", "moved", "INTEGER NOT NULL DEFAULT 0"),
     ("bodies", "moved", "INTEGER NOT NULL DEFAULT 0"),
     ("animals", "moved", "INTEGER NOT NULL DEFAULT 0"),
+    ("animals", "ident", "BLOB"),
+    ("guess_rejections", "followed", "INTEGER NOT NULL DEFAULT 0"),
     ("faces", "age_groups", "BLOB"),
     ("persons", "recognition_paused_at", "TEXT"),
 )
@@ -116,8 +118,15 @@ def init_db() -> None:
         # Missing columns first: schema.sql has indexes on some of them (items_content on content_id,
         # for one), and CREATE INDEX on a column the table lacks fails the start.
         with tx(conn):
-            _add_missing_columns(conn)
+            added = _add_missing_columns(conn)
         conn.executescript(schema)
+        if ("guess_rejections", "followed") in added:
+            # section 22: before the column, an automatic crop's pet rejection came from following the owner's
+            # crops (leave_pets); the owner's own crops were theirs ('user'). After the schema: an old database
+            # may not have the animals table before it.
+            with tx(conn):
+                conn.execute("UPDATE guess_rejections SET followed = 1 WHERE kind = 'animal' AND ref_id IN "
+                             "(SELECT id FROM animals WHERE assigned_by = 'auto')")
         from app.undo import install_triggers  # section 33: the journal follows the current columns
 
         with tx(conn):

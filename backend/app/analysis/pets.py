@@ -16,6 +16,10 @@ CONTRACT.
   and are remembered too. assign_new_animals never puts a box on a pet when it is >= PET_FOLLOW_SIM to one
   of that pet's rejected crops; the learner raises the pet's threshold above its closest rejected crop
   (learning.people). carry_over moves a re-detected box's rejections to its successor. Call inside a tx.
+- rename_crops(conn, animal_ids=None) -> (moved, items): the trained pet model (app.learning.pets) names the
+  automatic crops again: to its pet from no pet or an unnamed one at CLAIM_P, from another named pet at SWITCH_P;
+  never a crop within IDENT_VETO_SIM (identity vector) of one the owner took away from that pet. assign_new_animals
+  names new crops the same way first, and its centroid matching skips the pets the model knows. Call inside a tx.
 - new_pet(conn, species, name=None) -> person id (persons.kind 'pet').
 - set_species(conn, animal_ids, species) -> SpeciesChange: the owner's species for these boxes (section 22,
   species corrections): species_source 'user', a 'species' learning event per box, a box in a pet of
@@ -34,6 +38,7 @@ import numpy as np
 from dataclasses import dataclass, field
 
 from app.analysis import cluster
+from app.learning import pets as learned_pets
 from app.config import settings
 from app.db import bump_faces_version
 from app.util import now_iso
@@ -46,6 +51,11 @@ SPECIES_FOLLOW_SIM = 0.85  # an automatic crop this close to a corrected one tak
 # Not this pet: a crop this close to one the owner took away from a pet is the same wrong animal (the
 # similarity two unassigned crops need to start a new pet, settings.pet_new_threshold's default).
 PET_FOLLOW_SIM = 0.86
+# The trained model's veto (section 22): a crop this close in the identity vector (DINOv2) to one the owner took away
+# from a pet does not get that pet's name. The look embedding's PET_FOLLOW_SIM would also stop 40% of the owner's own
+# crops of a white cat (every white cat looks alike to SigLIP); at this identity cut none of them, while frames of
+# the animal taken away still match one another (median 0.90 on the owner's library).
+IDENT_VETO_SIM = 0.85
 FOLLOW_POOL = 5000  # automatic crops of the old species compared with the corrected ones
 
 
@@ -92,19 +102,32 @@ def match_threshold(person_id: int) -> float:
     return cluster.learned_threshold(person_id, float(settings.pet_match_threshold))
 
 
-def assign_new_animals(conn: sqlite3.Connection, item_id: int) -> int:
-    rows = conn.execute(
-        "SELECT id, species, embedding FROM animals WHERE item_id = ? AND person_id IS NULL "
-        "AND assigned_by = 'auto' AND embedding IS NOT NULL ORDER BY det_score DESC, id", (item_id,)
-    ).fetchall()
+def assign_new_animals(conn: sqlite3.Connection, item_id: int, *, fill_ident: bool = True) -> int:
+    sql = ("SELECT id, species, embedding, ident FROM animals WHERE item_id = ? AND person_id IS NULL "
+           "AND assigned_by = 'auto' AND embedding IS NOT NULL ORDER BY det_score DESC, id")
+    rows = conn.execute(sql, (item_id,)).fetchall()
     if not rows:
         return 0
+    # fill_ident=False: an owner request that re-matches many old crops (species corrections, regrouping) leaves
+    # their vectors to the background fill (app.analysis.pet_ident) rather than run DINOv2 inside its transaction.
+    if fill_ident and any(learned_pets.pets_of(str(r["species"])) and r["ident"] is None for r in rows):
+        from app.analysis import pet_ident
+
+        if pet_ident.ensure(conn, [int(r["id"]) for r in rows if r["ident"] is None]):
+            rows = conn.execute(sql, (item_id,)).fetchall()
     assigned = 0
     now = now_iso()
     by_species: dict[str, list[sqlite3.Row]] = {}
     for r in rows:
         by_species.setdefault(str(r["species"]), []).append(r)
     for species, boxes in by_species.items():
+        # The trained model (app.learning.pets) names the species' named pets; the centroid matching below
+        # never puts a crop on one of them then, so a look-alike that the model turned down does not reach the
+        # pet through its centroid. A crop without its identity vector goes the old way.
+        modelled = set(learned_pets.pets_of(species))
+        if modelled:
+            modelled &= _alive_pets(conn, species)  # the pets the model can still name (as _model_names)
+        named_by_model = _model_names(conn, species, boxes) if modelled else {}
         centroids = pet_centroids(conn, species)
         pids = list(centroids)
         matrix = np.stack([centroids[p] for p in pids]) if pids else None
@@ -114,10 +137,17 @@ def assign_new_animals(conn: sqlite3.Connection, item_id: int) -> int:
             v = _vec(r["embedding"])
             if v is None:
                 continue
+            pet = named_by_model.get(int(r["id"]))
+            if pet is not None:
+                conn.execute("UPDATE animals SET person_id = ?, assigned_by = 'auto' WHERE id = ?", (pet, int(r["id"])))
+                conn.execute("UPDATE persons SET updated_at = ? WHERE id = ?", (now, pet))
+                assigned += 1
+                continue
+            skip = modelled if r["ident"] is not None else set()
             if matrix is not None:
                 sims = matrix @ v
                 order = np.argsort(-sims)
-                hit = next((pids[i] for i in order if float(sims[i]) >= match_threshold(pids[i])
+                hit = next((pids[i] for i in order if pids[i] not in skip and float(sims[i]) >= match_threshold(pids[i])
                             and not _looks_rejected(rejected.get(pids[i]), v)), None)
                 if hit is not None:
                     conn.execute("UPDATE animals SET person_id = ?, assigned_by = 'auto' WHERE id = ?", (hit, int(r["id"])))
@@ -134,6 +164,125 @@ def assign_new_animals(conn: sqlite3.Connection, item_id: int) -> int:
         if leftovers:
             assigned += _group_new(conn, species, leftovers, now)
     return assigned
+
+
+def _model_names(conn: sqlite3.Connection, species: str, rows: list[sqlite3.Row],
+                 current: dict[int, int | None] | None = None) -> dict[int, int]:
+    """{animal id: pet} that the trained model (app.learning.pets) names among the rows (each with id, embedding
+    and ident): the pet at p >= CLAIM_P that the owner did not take a crop like this one away from. With
+    `current` ({animal id: its pet now}) a crop the app put on another named pet moves only at SWITCH_P."""
+    xs, ids = [], []
+    for r in rows:
+        f = learned_pets.features(r["embedding"], r["ident"])
+        if f is not None:
+            xs.append(f)
+            ids.append(int(r["id"]))
+    got = learned_pets.probabilities(species, np.stack(xs)) if xs else None
+    if got is None:
+        return {}
+    pets_, probs = got
+    rejected = rejected_idents(conn, pets_)
+    # the model's pets that are still named pets of this species (a pet deleted or merged since the training is
+    # nobody's name until the next one) and that passed their own check (learned_pets.pets_of)
+    trusted = set(learned_pets.pets_of(species))
+    alive = _alive_pets(conn, species)
+    named = _named_pets(conn) if current else set()
+    out: dict[int, int] = {}
+    for aid, f, p in zip(ids, xs, probs):
+        k = int(np.argmax(p))
+        if k >= len(pets_) or float(p[k]) < learned_pets.CLAIM_P:
+            continue
+        pet = pets_[k]
+        if pet not in trusted or pet not in alive:
+            continue
+        now_on = (current or {}).get(aid)
+        if now_on == pet:
+            continue
+        if now_on is not None and now_on in named and float(p[k]) < learned_pets.SWITCH_P:
+            continue
+        d = f[learned_pets.SIG_DIM:]
+        near = rejected.get(pet)
+        if near is not None and float(np.max(near @ d)) >= IDENT_VETO_SIM:
+            continue
+        out[aid] = pet
+    return out
+
+
+def rejected_idents(conn: sqlite3.Connection, pet_ids: list[int]) -> dict[int, np.ndarray]:
+    """{pet_id: (n, 384) identity vectors of the crops the owner took away from that pet}, as rejected_crops, but only
+    the owner's own (guess_rejections.followed 0, which a re-analysis carries to the new box): the automatic
+    look-alikes that followed them (leave_pets, followed 1) were chosen by the look embedding, which takes one white
+    cat for another, so they may be the pet itself."""
+    ids = sorted({int(p) for p in pet_ids})
+    out: dict[int, list[np.ndarray]] = {}
+    if not ids:
+        return {}
+    marks = ",".join("?" * len(ids))
+    for r in conn.execute(
+        f"SELECT g.person_id, a.ident FROM guess_rejections g JOIN animals a ON a.id = g.ref_id "
+        f"WHERE g.kind = 'animal' AND g.person_id IN ({marks}) AND a.person_id IS NOT g.person_id "
+        f"AND g.followed = 0 AND a.ident IS NOT NULL", ids,
+    ):
+        v = _vec(r["ident"])
+        if v is not None and v.shape[0] == learned_pets.IDENT_DIM:
+            out.setdefault(int(r["person_id"]), []).append(v.astype(np.float64))
+    return {pid: np.stack(vs) for pid, vs in out.items()}
+
+
+def _alive_pets(conn: sqlite3.Connection, species: str) -> set[int]:
+    """The named pets of this species (or of none recorded) that still exist."""
+    return {int(r[0]) for r in conn.execute(
+        "SELECT id FROM persons WHERE kind = 'pet' AND (species = ? OR species IS NULL) AND name IS NOT NULL",
+        (species,))}
+
+
+def _named_pets(conn: sqlite3.Connection) -> set[int]:
+    return {int(r[0]) for r in conn.execute("SELECT id FROM persons WHERE kind = 'pet' AND name IS NOT NULL")}
+
+
+def rename_crops(conn: sqlite3.Connection, animal_ids: list[int] | None = None) -> tuple[int, set[int]]:
+    """The trained model names the automatic crops again (all of them, or those of `animal_ids`) after a
+    training or once crops have their identity vector: a crop it names moves to that pet from no pet or an
+    unnamed one, and from another named pet only at SWITCH_P. The owner's crops never move, and a crop the
+    model does not name stays where it is. Unnamed pets left empty go. Returns (crops moved, their items).
+    Call inside a tx."""
+    models = learned_pets.current() or {}
+    moved = 0
+    items: set[int] = set()
+    left: set[int] = set()
+    touched: set[int] = set()
+    for species in models:
+        sql = ("SELECT id, item_id, person_id, embedding, ident FROM animals WHERE species = ? AND assigned_by = 'auto' "
+               "AND embedding IS NOT NULL AND ident IS NOT NULL")
+        params: list = [species]
+        if animal_ids is not None:
+            ids = sorted({int(a) for a in animal_ids})
+            if not ids:
+                return 0, set()
+            sql += f" AND id IN ({','.join('?' * len(ids))})"
+            params += ids
+        rows = conn.execute(sql + " ORDER BY id", params).fetchall()
+        if not rows:
+            continue
+        current = {int(r["id"]): (int(r["person_id"]) if r["person_id"] is not None else None) for r in rows}
+        item_of = {int(r["id"]): int(r["item_id"]) for r in rows}
+        for aid, pet in _model_names(conn, species, rows, current).items():
+            conn.execute("UPDATE animals SET person_id = ?, assigned_by = 'auto' WHERE id = ?", (pet, aid))
+            if current[aid] is not None:
+                left.add(current[aid])
+            touched.add(pet)
+            items.add(item_of[aid])
+            moved += 1
+    if moved:
+        now = now_iso()
+        for pet in touched:
+            conn.execute("UPDATE persons SET updated_at = ? WHERE id = ?", (now, pet))
+        cluster.prune_empty_persons(conn, left)
+        bump_faces_version(conn)
+        from app.analysis.guess import refresh_fts
+
+        refresh_fts(conn, items)
+    return moved, items
 
 
 # ------------------------------------------------------------------ not this pet (section 22)
@@ -228,7 +377,7 @@ def leave_pets(conn: sqlite3.Connection, leaving: dict[int, list[int]],
             more = [m for m in more if m not in not_target]
         if not more:
             continue
-        cluster.record_box_rejections(conn, "animal", more, pid)
+        cluster.record_box_rejections(conn, "animal", more, pid, followed=True)
         marks = ",".join("?" * len(more))
         items |= {int(r[0]) for r in conn.execute(f"SELECT item_id FROM animals WHERE id IN ({marks})", more)}
         conn.execute(f"UPDATE animals SET person_id = ?, assigned_by = 'auto' WHERE id IN ({marks})", [target, *more])
@@ -416,7 +565,7 @@ def set_species(conn: sqlite3.Connection, animal_ids: list[int], species: str) -
         change.items.add(int(r["item_id"]))
     now = now_iso()
     for item_id in sorted(change.items):
-        assign_new_animals(conn, item_id)
+        assign_new_animals(conn, item_id, fill_ident=False)
     if left:
         conn.execute(f"UPDATE persons SET updated_at = ? WHERE id IN ({','.join('?' * len(left))})", [now, *sorted(left)])
         cluster.prune_empty_persons(conn, left)
@@ -462,7 +611,7 @@ def set_pet_species(conn: sqlite3.Connection, person_id: int, species: str) -> S
         _leave_other_species(conn, r, species, left)
         if left:
             cluster.prune_empty_persons(conn, left)
-        assign_new_animals(conn, int(r["item_id"]))
+        assign_new_animals(conn, int(r["item_id"]), fill_ident=False)
     now = now_iso()
     conn.execute("UPDATE persons SET species = ?, updated_at = ? WHERE id = ?", (species, now, int(person_id)))
     if pet["name"]:

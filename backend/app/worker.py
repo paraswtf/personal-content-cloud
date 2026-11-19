@@ -353,6 +353,12 @@ def _housekeeping(conn: sqlite3.Connection) -> dict[str, int]:
     except Exception:  # noqa: BLE001 - the species backfill never blocks housekeeping
         log.exception("housekeeping: species backfill failed")
     try:
+        from app.analysis import pet_ident
+
+        out.update(pet_ident.housekeeping(conn))
+    except Exception:  # noqa: BLE001 - the pet identity vectors and naming never block housekeeping
+        log.exception("housekeeping: pet identities failed")
+    try:
         out["job_runs"] = throughput.prune(conn)
     except Exception:  # noqa: BLE001 - the speed records never block housekeeping
         log.exception("housekeeping: pruning the job runs failed")

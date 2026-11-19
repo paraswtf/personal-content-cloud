@@ -573,13 +573,15 @@ def record_rejections(conn: sqlite3.Connection, face_ids: list[int], person_id: 
     record_box_rejections(conn, "face", face_ids, person_id)
 
 
-def record_box_rejections(conn: sqlite3.Connection, kind: str, box_ids: list[int], person_id: int) -> None:
+def record_box_rejections(conn: sqlite3.Connection, kind: str, box_ids: list[int], person_id: int, *,
+                          followed: bool = False) -> None:
     """Remember that these boxes (kind 'face', 'body' or 'animal') are not `person_id`: the owner took
-    them away from that person or pet (section 10, section 22). Call inside a tx."""
+    them away from that person or pet (section 10, section 22), or, with followed, they are look-alikes that
+    went with the owner's boxes (guess_rejections.followed). Call inside a tx."""
     now = now_iso()
     for bid in sorted({int(b) for b in box_ids}):
-        conn.execute("INSERT OR IGNORE INTO guess_rejections(kind, ref_id, person_id, created_at) VALUES (?, ?, ?, ?)",
-                     (kind, bid, int(person_id), now))
+        conn.execute("INSERT OR IGNORE INTO guess_rejections(kind, ref_id, person_id, created_at, followed) "
+                     "VALUES (?, ?, ?, ?, ?)", (kind, bid, int(person_id), now, 1 if followed else 0))
 
 
 FOLLOW_SIM = 0.55  # a face this close to a face the owner took away looks like the same wrong person

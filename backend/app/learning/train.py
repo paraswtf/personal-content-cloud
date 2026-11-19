@@ -12,6 +12,7 @@ import threading
 from typing import Any
 
 from app.learning import doc_type, events, forwards, images, misclick, not_faces, people, store, tags
+from app.learning import pets as lpets
 from app.learning import traits as ltraits
 from app.util import now_iso
 
@@ -20,7 +21,7 @@ log = logging.getLogger(__name__)
 STATUS = "status"
 _lock = threading.Lock()
 LEARNERS = (("doc_type", doc_type), ("images", images), ("misclick", misclick), ("people", people), ("tags", tags),
-            ("forwards", forwards), ("not_faces", not_faces), ("traits", ltraits))
+            ("forwards", forwards), ("not_faces", not_faces), ("traits", ltraits), ("pets", lpets))
 
 
 def signature(conn: sqlite3.Connection) -> list[Any]:
@@ -40,6 +41,12 @@ def signature(conn: sqlite3.Connection) -> list[Any]:
         one("SELECT COUNT(*) FROM faces WHERE assigned_by = 'user'"),
         one("SELECT COUNT(*) FROM bodies WHERE assigned_by = 'user'"),
         one("SELECT COUNT(*) FROM animals WHERE species_source = 'user'"),
+        # the pet naming learner (section 22): the owner's crops, where they are, which have their vector, the names
+        one("SELECT COUNT(*) || ':' || TOTAL(person_id) || ':' || TOTAL(ident IS NOT NULL) || ':' || "
+            "TOTAL(x + y + w + h) FROM animals WHERE assigned_by = 'user'"),
+        one("SELECT COUNT(*) || ':' || TOTAL(id) FROM persons WHERE kind = 'pet' AND name IS NOT NULL"),
+        lpets.RULES_REV,
+        one("SELECT value FROM kv WHERE key = 'pets_ident_filled'"),
         one("SELECT COUNT(*) FROM guess_rejections"),
         one("SELECT MAX(id) FROM learning_events"),
         one("SELECT COUNT(*) FROM item_user_tags WHERE source = 'user'"),
@@ -119,6 +126,7 @@ def status(conn: sqlite3.Connection) -> dict[str, Any]:
             "tags": tags.status(),
             "forwards": forwards.status(),
             "not_faces": not_faces.status(),
+            "pets": lpets.status(),
             "traits": _traits_status(conn),
             "place": _place_status(conn),
         },

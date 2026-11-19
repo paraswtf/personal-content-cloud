@@ -2270,6 +2270,12 @@ Learners (one module each, all pure numpy, all with a `status()` and a `train(co
 - `forwards.py` (section 29): `probability(signals) -> float | None`, a logistic regression over the forward
   signals fitted on the owner's choices (`forward_source='user'` rows and `forward` events), used once 10
   examples with both labels exist; `forwards.decide` takes it in place of its rule for the second step.
+- `pets.py` (section 22, the pet naming learner): per species, a softmax regression on [SigLIP, DINOv2] over the
+  named pets with at least 8 owner-assigned crops and another animal; `status()` gives `{trained_at,
+  min_confirmed, species{<species>{pets, named_by_model, check{per_pet, per_pet_taken, examples, right, wrong,
+  trusted_negatives, negatives_named, folds}}}}`. `signature` holds the owner's crops (count, where they are,
+  their boxes, which have their vector), the named pets, `learning.pets.RULES_REV` and kv `pets_ident_filled` (set
+  when a background fill gave vectors to crops the model trains on).
 - `train.py`: `train_all(conn) -> dict` (every learner, writes `learned/status.json` with `trained_at`,
   per-learner example counts and what was learned), `maybe_train(conn)` (trains when a choice is newer
   than `trained_at`; called by worker housekeeping every 10 minutes), `pending(conn) -> int` (choices
@@ -2447,6 +2453,32 @@ item never pair, two dogs in one photo are two dogs). Names: `cluster.find_perso
 people and pets apart, so a dog and a person may both be called Bruno; a renamed pet merges only into a pet
 of the same species. `cluster.merge_persons` refuses a pet and a person, or two species. Deleting a pet
 unassigns its boxes; pruning removes unnamed pets without boxes.
+
+Pet naming learner (`app/learning/pets.py`, `app/analysis/pet_ident.py`, learner `pets` in section 18): the
+look embedding alone does not tell two cats of one home apart, or a pet from the street cats that look like it
+(on the owner's library the centroid matching named 24% of the owner's confirmed crops right, each photo held
+out). Every crop also gets `animals.ident` (float32[384], the DINOv2-small CLS of the stored crop, `app.ml.dino`),
+filled when a box is matched and, for older crops, on a background thread started from worker housekeeping
+(`pet_ident.backfill`, nice 19, newest first). For each species with a named pet of at least 8 owner-assigned
+crops, training fits a softmax regression on [SigLIP, DINOv2] with one class per such pet and one for another
+animal (the crops the owner took away from those pets, weighted 5, when taken from every modelled pet or unlike
+the others at top-3 identity similarity 0.6; the crops the owner assigned to other pets; and automatic crops whose
+top-3 DINOv2 similarity to the pets' crops is under 0.5). Only the owner's own rejections count:
+`guess_rejections.followed` is 1 for the automatic look-alikes `leave_pets` sent along with the owner's crops
+(they may be the pet itself), and a re-analysis carries the row, flag included, to the new box; a database from
+before the column marks the rejections of automatic crops as followed. 8 folds by photo check the model; one
+naming under 60% of the owner's crops right or over 5% wrongly is not kept, and in a kept model a pet whose own
+crops are named right under 60%, or that takes over 5% of the other pets' crops, keeps its class but gets no
+names from it (the centroid matching goes on for that pet). A moved or resized box gets the identity vector of its
+new crop (`box_edit.prepare`). Then
+`assign_new_animals` names a crop with the model (p >= 0.85) and its centroid matching skips the modelled pets,
+and after each training `pets.rename_crops` names the automatic crops again: a crop moves to the model's pet
+from no pet or an unnamed one, and from another named pet only at p >= 0.95; the owner's crops never move and
+a crop the model does not name stays. A crop whose identity vector is within 0.85 of one the owner took away
+from the pet never gets that pet (the look embedding's 0.86 would also stop 40% of a white cat's own crops).
+With learning off, before a model exists, or without the DINOv2 model, the centroid matching runs as before.
+On the owner's library (2026-11-19, two named cats): 94% of their confirmed crops right in the check, none as
+the other cat, 1 of 31 crops the owner had taken away named; the first pass named 91 automatic crops.
 
 Routes: `GET /api/people?kind=person|pet|all` (default `all`); `PersonOut.kind`, `species`, `animal_count`
 (for a pet `face_count` is 0, `cover_face_id` null and `cover_url` its best crop, user-assigned first);

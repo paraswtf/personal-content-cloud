@@ -1048,7 +1048,7 @@ def _regroup_pets(conn: sqlite3.Connection, crops: list[int], items: set[int]) -
             marks = _ids_sql(crops)
             for item_id in sorted({int(r[0]) for r in conn.execute(
                     f"SELECT DISTINCT item_id FROM animals WHERE id IN ({marks})", crops)}):
-                pets_mod.assign_new_animals(conn, item_id)
+                pets_mod.assign_new_animals(conn, item_id, fill_ident=False)
             bump_faces_version(conn)
     except Exception:  # noqa: BLE001 - the owner's correction already happened
         log.exception("could not regroup %d look-alike pet crops", len(crops))

@@ -279,6 +279,7 @@ CREATE TABLE IF NOT EXISTS animals (
   moved           INTEGER NOT NULL DEFAULT 0,   -- 1: the owner moved or resized the box (a re-analysis keeps it)
   frame_time_s    REAL,                         -- videos: the sampled frame
   embedding       BLOB,                         -- float32[768], L2-normalised (SigLIP of the padded crop)
+  ident           BLOB,                         -- float32[384], L2-normalised (DINOv2 CLS of the stored crop; pet naming)
   created_at      TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS animals_item    ON animals(item_id);
@@ -306,6 +307,7 @@ CREATE TABLE IF NOT EXISTS guess_rejections (
   ref_id     INTEGER NOT NULL,
   person_id  INTEGER NOT NULL REFERENCES persons(id) ON DELETE CASCADE,
   created_at TEXT NOT NULL,
+  followed   INTEGER NOT NULL DEFAULT 0,  -- 1: a look-alike that went with the owner's boxes, not the owner's own
   PRIMARY KEY (kind, ref_id, person_id)
 );
 

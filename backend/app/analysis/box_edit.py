@@ -165,7 +165,13 @@ def prepare(conn: sqlite3.Connection, table: str, box_id: int, box: tuple[float,
         emb = animals_mod.embed_look(animals_mod.look_engine(), look)
         if emb is not None:
             updates["embedding"] = np.asarray(emb, dtype=np.float32).tobytes()
-        crop = animals_mod.encode_crop(bodies_mod._crop_rgb(img, px))
+        rgb = bodies_mod._crop_rgb(img, px)
+        crop = animals_mod.encode_crop(rgb)
+        # section 22: the identity vector of the new crop, never the old crop's (none without the model: the
+        # background fill takes it from the new crop file once it is written)
+        from app.analysis import pet_ident
+
+        updates["ident"] = pet_ident.vector_of_rgb(np.asarray(rgb)) if pet_ident.available() else None
     return Prepared(table=table, box_id=int(box_id), item_id=int(item["id"]), box=(x, y, w, h), crop=crop,
                     updates=updates)
 

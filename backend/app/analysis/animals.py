@@ -319,7 +319,7 @@ def recheck_crop(conn: sqlite3.Connection, row: sqlite3.Row, *, engine: Any = No
             conn.execute("UPDATE animals SET person_id = NULL, assigned_by = 'auto' WHERE id = ?", (int(row["id"]),))
             cluster.prune_empty_persons(conn, {int(pid)})
     if row["assigned_by"] != "user" or pid is None:
-        pets.assign_new_animals(conn, int(row["item_id"]))
+        pets.assign_new_animals(conn, int(row["item_id"]), fill_ident=False)
     return True
 
 
